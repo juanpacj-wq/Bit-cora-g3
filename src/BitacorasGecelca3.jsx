@@ -58,8 +58,8 @@ const COLORS = {
 
 // Catálogo de las 9 bitácoras con iconos asociados
 const BITACORAS = [
-  { id: "b1", nombre: "Operación G3", codigo: "OPG3", icon: "Activity" },
-  { id: "b2", nombre: "Operación G3.2", codigo: "OPG32", icon: "Settings" },
+  { id: "b1", nombre: "Disponibilidad", codigo: "DISP", icon: "Activity" },
+  { id: "b2", nombre: "Sincronización", codigo: "SINC", icon: "Settings" },
   { id: "b3", nombre: "Caldera", codigo: "CAL", icon: "Flame" },
   { id: "b4", nombre: "Planta de Agua", codigo: "AGUA", icon: "Droplets" },
   { id: "b5", nombre: "Turbina", codigo: "TURB", icon: "Gauge" },
@@ -321,52 +321,98 @@ function EstadoBadge({ estado }) {
 // 3. PANTALLA DE LOGIN SIMULADO
 // ============================================================
 
+const PLANTAS = [
+  { id: "Gecelca3", label: "Gecelca 3", descripcion: "Unidad de generación G3" },
+  { id: "Gecelca3.2", label: "Gecelca 3.2", descripcion: "Unidad de generación G3.2" },
+];
+
 function LoginScreen({ onLogin }) {
+  const [plantaSeleccionada, setPlantaSeleccionada] = useState(null);
+
   return (
     <div className="min-h-screen flex items-center justify-center" style={{ background: `linear-gradient(135deg, ${COLORS.blueDeepest} 0%, ${COLORS.blueDeep} 40%, ${COLORS.blueDark} 100%)` }}>
       <div className="bg-white rounded-3xl shadow-2xl p-10 max-w-md w-full mx-4">
         {/* Logo y título */}
         <div className="text-center mb-8">
-          <img src="/logo-gecelca3.png" alt="Gecelca3" className="h-16 mx-auto mb-4" onError={(e) => { e.target.style.display = "none"; }} />
+          <img src="/G3 blanco.png" alt="Gecelca3" className="h-16 mx-auto mb-4" onError={(e) => { e.target.style.display = "none"; }} />
           <h1 className="text-2xl font-bold" style={{ color: COLORS.blueDeep }}>
             Bitácoras de Planta
           </h1>
           <p className="text-gray-500 text-sm mt-1">Sistema de Registro Operativo — Gecelca3</p>
         </div>
 
-        {/* Selector de usuario/rol */}
-        <div className="space-y-3">
-          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-            Selecciona tu perfil para ingresar
-          </p>
-          {USUARIOS.map((u) => (
-            <button
-              key={u.id}
-              onClick={() => onLogin(u)}
-              className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left"
-            >
-              {/* Avatar */}
-              <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0"
-                style={{ backgroundColor: u.rol === "Jefe de Turno" ? COLORS.greenDark : COLORS.blueDark }}>
-                {u.nombre.split(" ").slice(1, 3).map((n) => n[0]).join("")}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="font-semibold text-gray-900 group-hover:text-emerald-700 transition-colors">
-                  {u.nombre}
+        {!plantaSeleccionada ? (
+          /* Paso 1: Selección de planta */
+          <div className="space-y-3">
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+              Selecciona tu planta
+            </p>
+            {PLANTAS.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setPlantaSeleccionada(p.id)}
+                className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left"
+              >
+                <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-sm flex-shrink-0"
+                  style={{ backgroundColor: COLORS.greenDark }}>
+                  {p.label.split(" ").pop()}
                 </div>
-                <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-medium"
-                    style={{ backgroundColor: u.rol === "Jefe de Turno" ? "#e6f4ea" : "#e8f0fe", color: u.rol === "Jefe de Turno" ? COLORS.greenDark : COLORS.blueDark }}>
-                    {u.rol}
-                  </span>
-                  <span>•</span>
-                  <span>{u.turno}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="font-semibold text-gray-900 group-hover:text-emerald-700 transition-colors">
+                    {p.label}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-0.5">{p.descripcion}</div>
                 </div>
-              </div>
-              <LogIn size={20} className="text-gray-300 group-hover:text-emerald-500 transition-colors flex-shrink-0" />
-            </button>
-          ))}
-        </div>
+                <LogIn size={20} className="text-gray-300 group-hover:text-emerald-500 transition-colors flex-shrink-0" />
+              </button>
+            ))}
+          </div>
+        ) : (
+          /* Paso 2: Selección de perfil */
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 mb-4">
+              <button
+                onClick={() => setPlantaSeleccionada(null)}
+                className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 transition-colors"
+              >
+                ← Cambiar planta
+              </button>
+              <span className="text-xs font-semibold px-2 py-0.5 rounded-md text-white"
+                style={{ backgroundColor: COLORS.greenDark }}>
+                {PLANTAS.find((p) => p.id === plantaSeleccionada)?.label}
+              </span>
+            </div>
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+              Selecciona tu perfil para ingresar
+            </p>
+            {USUARIOS.map((u) => (
+              <button
+                key={u.id}
+                onClick={() => onLogin({ ...u, planta: plantaSeleccionada })}
+                className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left"
+              >
+                <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0"
+                  style={{ backgroundColor: u.rol === "Jefe de Turno" ? COLORS.greenDark : COLORS.blueDark }}>
+                  {u.nombre.split(" ").slice(1, 3).map((n) => n[0]).join("")}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-semibold text-gray-900 group-hover:text-emerald-700 transition-colors">
+                    {u.nombre}
+                  </div>
+                  <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-medium"
+                      style={{ backgroundColor: u.rol === "Jefe de Turno" ? "#e6f4ea" : "#e8f0fe", color: u.rol === "Jefe de Turno" ? COLORS.greenDark : COLORS.blueDark }}>
+                      {u.rol}
+                    </span>
+                    <span>•</span>
+                    <span>{u.turno}</span>
+                  </div>
+                </div>
+                <LogIn size={20} className="text-gray-300 group-hover:text-emerald-500 transition-colors flex-shrink-0" />
+              </button>
+            ))}
+          </div>
+        )}
 
         <p className="text-center text-xs text-gray-400 mt-8">
           Prototipo de validación — Los datos no se persisten
@@ -398,7 +444,7 @@ function Header({ user, onLogout }) {
       style={{ background: `linear-gradient(90deg, ${COLORS.blueDeepest} 0%, ${COLORS.blueDark} 100%)` }}>
       {/* Logo y título */}
       <div className="flex items-center gap-4">
-        <img src="/logo-gecelca3.png" alt="Gecelca3" className="h-10" onError={(e) => { e.target.style.display = "none"; }} />
+        <img src="/G3 blanco.png" alt="Gecelca3" className="h-10" onError={(e) => { e.target.style.display = "none"; }} />
         <div>
           <h1 className="text-lg font-bold tracking-tight">Bitácoras de Planta</h1>
           <p className="text-xs text-blue-300 opacity-80">Sistema de Registro Operativo</p>
