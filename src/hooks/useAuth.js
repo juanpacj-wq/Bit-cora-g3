@@ -12,7 +12,7 @@ export function useAuth() {
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = sessionStorage.getItem(STORAGE_KEY);
       if (raw) {
         const { user: u, sesion: s } = JSON.parse(raw);
         if (u) setUser(u);
@@ -23,8 +23,8 @@ export function useAuth() {
 
   useEffect(() => {
     const payload = JSON.stringify({ user, sesion });
-    if (user || sesion) localStorage.setItem(STORAGE_KEY, payload);
-    else localStorage.removeItem(STORAGE_KEY);
+    if (user || sesion) sessionStorage.setItem(STORAGE_KEY, payload);
+    else sessionStorage.removeItem(STORAGE_KEY);
   }, [user, sesion]);
 
   useEffect(() => {
@@ -40,7 +40,7 @@ export function useAuth() {
       try { await api.post('/api/auth/logout', { sesion_id: sesion.sesion_id }, { skipAuth: true }); } catch {}
     }
     setUser(null); setSesion(null);
-    localStorage.removeItem(STORAGE_KEY);
+    sessionStorage.removeItem(STORAGE_KEY);
   }, [sesion?.sesion_id]);
 
   useEffect(() => {
