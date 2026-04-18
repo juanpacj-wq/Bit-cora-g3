@@ -295,8 +295,19 @@ const server = http.createServer(async (req, res) => {
       if (!(await hasPermisoBitacora(sesion, bitacora_id, 'puede_crear'))) {
         return sendJSON(res, 403, { error: 'Sin permiso para crear en esta bitácora' });
       }
+      if (new Date(fecha_evento).getTime() - Date.now() > 5 * 60 * 1000) {
+        return sendJSON(res, 400, { error: 'fecha_evento no puede estar más de 5 min en el futuro' });
+      }
       const ingeniero_id = sesion.usuario_id;
       const db = await getDB();
+
+      const teCheck = await db.request()
+        .input('te', sql.Int, tipo_evento_id)
+        .input('b', sql.Int, bitacora_id)
+        .query(`SELECT 1 AS ok FROM lov_bit.tipo_evento WHERE tipo_evento_id = @te AND bitacora_id = @b`);
+      if (teCheck.recordset.length === 0) {
+        return sendJSON(res, 400, { error: 'tipo_evento_id no pertenece a la bitácora' });
+      }
 
       // Resolver JdT
       const jdtSesion = await db.request()
@@ -398,6 +409,18 @@ const server = http.createServer(async (req, res) => {
       }
       if (!(await canEditarRegistro(sesion, reg))) {
         return sendJSON(res, 403, { error: 'Sin permiso para editar este registro' });
+      }
+      if (fecha_evento && new Date(fecha_evento).getTime() - Date.now() > 5 * 60 * 1000) {
+        return sendJSON(res, 400, { error: 'fecha_evento no puede estar más de 5 min en el futuro' });
+      }
+      if (tipo_evento_id) {
+        const teCheck = await db.request()
+          .input('te', sql.Int, tipo_evento_id)
+          .input('b', sql.Int, reg.bitacora_id)
+          .query(`SELECT 1 AS ok FROM lov_bit.tipo_evento WHERE tipo_evento_id = @te AND bitacora_id = @b`);
+        if (teCheck.recordset.length === 0) {
+          return sendJSON(res, 400, { error: 'tipo_evento_id no pertenece a la bitácora' });
+        }
       }
       const modificado_por = sesion.usuario_id;
 
