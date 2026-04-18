@@ -6,6 +6,7 @@ import { getTurnoColombia } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
 import { hasPermisoBitacora, isJdT, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
+import { findAutorizacion, upsertAutorizacion } from './utils/notificador.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
 
@@ -349,54 +350,72 @@ const server = http.createServer(async (req, res) => {
       if (!jefe_id) return sendJSON(res, 500, { error: 'No hay jefe de planta configurado' });
 
       const camposStr = camposStrValidated;
+      const esAuth = bit.codigo === 'AUTH';
+      const fechaEventoDate = new Date(fecha_evento);
 
-      const ins = await db.request()
-        .input('bitacora_id', sql.Int, bitacora_id)
-        .input('planta_id', sql.VarChar(10), planta_id)
-        .input('fecha_evento', sql.DateTime2, new Date(fecha_evento))
-        .input('turno', sql.TinyInt, turno)
-        .input('detalle', sql.NVarChar(sql.MAX), detalle)
-        .input('campos_extra', sql.NVarChar(sql.MAX), camposStr)
-        .input('tipo_evento_id', sql.Int, tipo_evento_id)
-        .input('ingeniero_id', sql.Int, ingeniero_id)
-        .input('jdt_turno_id', sql.Int, jdt_turno_id)
-        .input('jefe_id', sql.Int, jefe_id)
-        .query(`
-          INSERT INTO bitacora.registro_activo
-            (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-             estado, ingeniero_id, jdt_turno_id, jefe_id, creado_por)
-          OUTPUT INSERTED.*
-          VALUES (@bitacora_id, @planta_id, @fecha_evento, @turno, @detalle, @campos_extra, @tipo_evento_id,
-                  'borrador', @ingeniero_id, @jdt_turno_id, @jefe_id, @ingeniero_id)
-        `);
-      const registro = ins.recordset[0];
-
-      // Lógica especial AUTH
-      if (bit.codigo === 'AUTH' && camposFinal) {
-        try {
+      const transaction = new sql.Transaction(db);
+      await transaction.begin();
+      try {
+        if (esAuth && camposFinal) {
           const periodo = camposFinal.periodo;
           const valor = camposFinal.valor_autorizado_mw;
           if (periodo && valor != null) {
-            await db.request()
-              .input('registro_origen_id', sql.Int, registro.registro_id)
-              .input('planta_id', sql.VarChar(10), planta_id)
-              .input('fecha', sql.Date, new Date(fecha_evento))
-              .input('periodo', sql.TinyInt, periodo)
-              .input('valor', sql.Float, valor)
-              .input('jdt_id', sql.Int, jdt_turno_id)
-              .input('jefe_id', sql.Int, jefe_id)
-              .query(`
-                INSERT INTO bitacora.autorizacion_dashboard
-                  (registro_origen_id, planta_id, fecha, periodo, valor_autorizado_mw, jdt_id, jefe_id)
-                VALUES (@registro_origen_id, @planta_id, @fecha, @periodo, @valor, @jdt_id, @jefe_id)
-              `);
+            const existente = await findAutorizacion(transaction, {
+              planta_id, fecha: fechaEventoDate, periodo,
+            });
+            if (existente && existente.activa) {
+              await transaction.rollback();
+              return sendJSON(res, 409, {
+                error: 'Ya existe autorización vigente para este periodo',
+                autorizacion_id: existente.autorizacion_id,
+              });
+            }
           }
-        } catch (e) {
-          console.error('[AUTH] Error parseando campos_extra:', e);
         }
-      }
 
-      return sendJSON(res, 201, { registro });
+        const ins = await new sql.Request(transaction)
+          .input('bitacora_id', sql.Int, bitacora_id)
+          .input('planta_id', sql.VarChar(10), planta_id)
+          .input('fecha_evento', sql.DateTime2, fechaEventoDate)
+          .input('turno', sql.TinyInt, turno)
+          .input('detalle', sql.NVarChar(sql.MAX), detalle)
+          .input('campos_extra', sql.NVarChar(sql.MAX), camposStr)
+          .input('tipo_evento_id', sql.Int, tipo_evento_id)
+          .input('ingeniero_id', sql.Int, ingeniero_id)
+          .input('jdt_turno_id', sql.Int, jdt_turno_id)
+          .input('jefe_id', sql.Int, jefe_id)
+          .query(`
+            INSERT INTO bitacora.registro_activo
+              (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+               estado, ingeniero_id, jdt_turno_id, jefe_id, creado_por)
+            OUTPUT INSERTED.*
+            VALUES (@bitacora_id, @planta_id, @fecha_evento, @turno, @detalle, @campos_extra, @tipo_evento_id,
+                    'borrador', @ingeniero_id, @jdt_turno_id, @jefe_id, @ingeniero_id)
+          `);
+        const registro = ins.recordset[0];
+
+        if (esAuth && camposFinal) {
+          const periodo = camposFinal.periodo;
+          const valor = camposFinal.valor_autorizado_mw;
+          if (periodo && valor != null) {
+            await upsertAutorizacion(transaction, {
+              planta_id,
+              fecha: fechaEventoDate,
+              periodo,
+              valor,
+              jdt_id: jdt_turno_id,
+              jefe_id,
+              registro_origen_id: registro.registro_id,
+            });
+          }
+        }
+
+        await transaction.commit();
+        return sendJSON(res, 201, { registro });
+      } catch (err) {
+        try { await transaction.rollback(); } catch {}
+        throw err;
+      }
     }
 
     // PUT /api/registros/:id
