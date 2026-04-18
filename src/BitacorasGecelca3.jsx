@@ -48,6 +48,37 @@ const getTurnoActualNum = () => (new Date().getHours() < 12 ? 1 : 2);
 const iniciales = (nombre = "") =>
   nombre.trim().split(/\s+/).slice(0, 2).map((n) => n[0]).join("").toUpperCase() || "?";
 
+const parseSnapshot = (raw) => {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  try { return JSON.parse(raw) || []; } catch { return []; }
+};
+
+const joinNombres = (arr) => arr.map((u) => u.nombre_completo).join(", ");
+
+const parseDefinicionCampos = (def) => {
+  if (!def) return [];
+  if (Array.isArray(def)) return def;
+  try { return JSON.parse(def) || []; } catch { return []; }
+};
+
+const getCamposExtraEditables = (def) =>
+  parseDefinicionCampos(def).filter((c) => c && c.tipo && c.tipo !== "auto");
+
+const parseCamposExtra = (ce) => {
+  if (!ce) return {};
+  if (typeof ce === "object") return ce;
+  try { return JSON.parse(ce) || {}; } catch { return {}; }
+};
+
+const labelCampo = (c) => c.label || c.campo;
+
+const formatValorCampo = (v, tipo) => {
+  if (v === null || v === undefined || v === "") return "";
+  if (tipo === "float" || tipo === "int") return String(v);
+  return String(v);
+};
+
 // ============================================================
 // UI helpers
 // ============================================================
@@ -444,13 +475,20 @@ function GrillaRegistros({
 }) {
   const [editingId, setEditingId] = useState(null);
 
+  const camposExtraDef = useMemo(
+    () => getCamposExtraEditables(bitacora?.definicion_campos),
+    [bitacora?.definicion_campos],
+  );
+  const hasExtras = camposExtraDef.length > 0;
+
   const regs = useMemo(() => {
     return registros
       .filter((r) => {
         if (filtroTexto) {
           const t = filtroTexto.toLowerCase();
           return (r.detalle || "").toLowerCase().includes(t)
-            || (r.ingeniero_nombre || "").toLowerCase().includes(t)
+            || (r.creado_por_nombre || "").toLowerCase().includes(t)
+            || joinNombres(parseSnapshot(r.ingenieros_snapshot)).toLowerCase().includes(t)
             || (r.tipo_evento_nombre || "").toLowerCase().includes(t);
         }
         return true;
@@ -475,9 +513,11 @@ function GrillaRegistros({
             <div className="hidden lg:grid grid-cols-12 gap-3 px-4 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
               <div className="col-span-1">#</div>
               <div className="col-span-2">Fecha / Turno</div>
-              <div className="col-span-2">Ingeniero</div>
               <div className="col-span-1">Tipo</div>
-              <div className="col-span-3">Descripción</div>
+              <div className={hasExtras ? "col-span-3" : "col-span-5"}>Descripción</div>
+              {hasExtras && (
+                <div className="col-span-2">{camposExtraDef.map(labelCampo).join(" / ")}</div>
+              )}
               <div className="col-span-1">Estado</div>
               <div className="col-span-2 text-right">Acciones</div>
             </div>
@@ -489,6 +529,7 @@ function GrillaRegistros({
                 tiposEvento={tiposEvento}
                 jefeNombre={jefeNombre}
                 jdtNombre={jdtNombre}
+                camposExtraDef={camposExtraDef}
                 isEditing={editingId === (reg.registro_id || reg._localId) || (reg._dirty && !reg.registro_id)}
                 onStartEdit={() => setEditingId(reg.registro_id || reg._localId)}
                 onCancelEdit={() => setEditingId(null)}
@@ -508,7 +549,7 @@ function GrillaRegistros({
   );
 }
 
-function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre, isEditing, onStartEdit, onCancelEdit, onUpdate, onSave, onDelete, puedeEditar }) {
+function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre, camposExtraDef = [], isEditing, onStartEdit, onCancelEdit, onUpdate, onSave, onDelete, puedeEditar }) {
   const tipoNombre = reg.tipo_evento_nombre
     || tiposEvento.find((t) => t.tipo_evento_id === reg.tipo_evento_id)?.nombre
     || "";
@@ -520,6 +561,22 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
   };
   const borderColor = tipoBorderColor[tipoNombre] || COLORS.grayBorder;
   const estadoDisplay = reg.estado === "borrador" ? "Borrador" : reg.estado === "cerrado" ? "Cerrado" : "Borrador";
+  const hasExtras = camposExtraDef.length > 0;
+  const camposExtraValores = parseCamposExtra(reg.campos_extra);
+  const updateCampoExtra = (campo, valorRaw, tipo) => {
+    let v = valorRaw;
+    if (valorRaw === "" || valorRaw === null || valorRaw === undefined) {
+      v = "";
+    } else if (tipo === "float") {
+      const f = parseFloat(valorRaw);
+      v = Number.isFinite(f) ? f : valorRaw;
+    } else if (tipo === "int") {
+      const n = parseInt(valorRaw, 10);
+      v = Number.isFinite(n) ? n : valorRaw;
+    }
+    const next = { ...camposExtraValores, [campo]: v };
+    onUpdate("campos_extra", next);
+  };
 
   return (
     <div className={`bg-white rounded-xl border transition-all ${
@@ -559,20 +616,6 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
           )}
         </div>
 
-        <div className="lg:col-span-2">
-          <label className="text-xs text-gray-400 lg:hidden">Ingeniero</label>
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold text-white flex-shrink-0"
-              style={{ backgroundColor: COLORS.blueDark }}>
-              {iniciales(reg.ingeniero_nombre || "")}
-            </div>
-            <div className="min-w-0">
-              <div className="text-sm text-gray-900 truncate">{reg.ingeniero_nombre || "—"}</div>
-              <div className="text-xs text-gray-400">Ingeniero</div>
-            </div>
-          </div>
-        </div>
-
         <div className="lg:col-span-1">
           <label className="text-xs text-gray-400 lg:hidden">Tipo</label>
           {isEditing ? (
@@ -594,7 +637,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
           )}
         </div>
 
-        <div className="lg:col-span-3">
+        <div className={hasExtras ? "lg:col-span-3" : "lg:col-span-5"}>
           <label className="text-xs text-gray-400 lg:hidden">Descripción</label>
           {isEditing ? (
             <textarea
@@ -610,6 +653,44 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
             </p>
           )}
         </div>
+
+        {hasExtras && (
+          <div className="lg:col-span-2">
+            <label className="text-xs text-gray-400 lg:hidden">{camposExtraDef.map(labelCampo).join(" / ")}</label>
+            {isEditing ? (
+              <div className="space-y-1.5">
+                {camposExtraDef.map((c) => (
+                  <input
+                    key={c.campo}
+                    type={c.tipo === "int" || c.tipo === "float" ? "number" : "text"}
+                    step={c.tipo === "float" ? "0.01" : c.tipo === "int" ? "1" : undefined}
+                    min={c.min}
+                    max={c.max}
+                    value={camposExtraValores[c.campo] ?? ""}
+                    onChange={(e) => updateCampoExtra(c.campo, e.target.value, c.tipo)}
+                    placeholder={labelCampo(c)}
+                    className="w-full px-3 py-1.5 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-gray-700 space-y-0.5">
+                {camposExtraDef.map((c) => {
+                  const v = camposExtraValores[c.campo];
+                  return (
+                    <div key={c.campo}>
+                      {v === undefined || v === null || v === "" ? (
+                        <span className="text-gray-400 italic">—</span>
+                      ) : (
+                        <span className="font-medium">{formatValorCampo(v, c.tipo)}</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="lg:col-span-1">
           <label className="text-xs text-gray-400 lg:hidden">Estado</label>
@@ -652,8 +733,19 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
           <span>Planta: {reg.planta_id}</span>
           <span>•</span>
           <span>Bitácora: {reg.bitacora_nombre}</span>
-          {reg.jdt_nombre && (<><span>•</span><span>JdT: {reg.jdt_nombre}</span></>)}
-          {reg.jefe_nombre && (<><span>•</span><span>Jefe: {reg.jefe_nombre}</span></>)}
+          {reg.creado_por_nombre && (<><span>•</span><span>Autor: {reg.creado_por_nombre}</span></>)}
+          {(() => {
+            const jdts = joinNombres(parseSnapshot(reg.jdts_snapshot));
+            return jdts ? (<><span>•</span><span>JdTs: {jdts}</span></>) : null;
+          })()}
+          {(() => {
+            const jefes = joinNombres(parseSnapshot(reg.jefes_snapshot));
+            return jefes ? (<><span>•</span><span>Jefes: {jefes}</span></>) : null;
+          })()}
+          {(() => {
+            const ings = joinNombres(parseSnapshot(reg.ingenieros_snapshot));
+            return ings ? (<><span>•</span><span>Ingenieros: {ings}</span></>) : null;
+          })()}
           {reg.creado_en && (<><span>•</span><span>Creado: {formatFechaHora(reg.creado_en)}</span></>)}
         </div>
       )}
@@ -751,8 +843,8 @@ export default function App() {
       tipo_evento_id: defTipo?.tipo_evento_id || null,
       tipo_evento_nombre: defTipo?.nombre,
       estado: "borrador",
-      ingeniero_id: user.usuario_id,
-      ingeniero_nombre: user.nombre_completo,
+      creado_por_id: user.usuario_id,
+      creado_por_nombre: user.nombre_completo,
       bitacora_nombre: bitacorasPermitidas.find((b) => b.bitacora_id === activeBitacora)?.nombre,
     });
   }, [draftLocal, tiposEvento, activeBitacora, sesion, user, bitacorasPermitidas, showToast]);
