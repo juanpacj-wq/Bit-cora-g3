@@ -27,7 +27,7 @@ export function plantaMatch(sesion, planta_id) {
 export async function canEditarRegistro(sesion, registro) {
   if (!sesion || !registro) return false;
   if (registro.planta_id && registro.planta_id !== sesion.planta_id) return false;
-  if (registro.ingeniero_id === sesion.usuario_id) return true;
+  if (registro.creado_por === sesion.usuario_id) return true;
   if (isJdT(sesion)) return true;
   return hasPermisoBitacora(sesion, registro.bitacora_id, 'puede_crear');
 }
