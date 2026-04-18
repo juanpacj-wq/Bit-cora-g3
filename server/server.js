@@ -489,6 +489,33 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { registro: upd.recordset[0] });
     }
 
+    // GET /api/cierre/preview?planta_id=&bitacora_id=
+    if (pathname === '/api/cierre/preview' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      const planta_id = url.searchParams.get('planta_id');
+      const bitacora_id = url.searchParams.get('bitacora_id');
+      if (!planta_id) return sendJSON(res, 400, { error: 'planta_id es requerido' });
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No puede consultar otra planta' });
+      }
+      const db = await getDB();
+      const reqQ = db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .input('bitacora_id', sql.Int, bitacora_id ? parseInt(bitacora_id, 10) : null);
+      const result = await reqQ.query(`
+        SELECT r.bitacora_id, b.nombre AS bitacora_nombre,
+               SUM(CASE WHEN LEN(LTRIM(RTRIM(ISNULL(r.detalle, '')))) = 0 THEN 1 ELSE 0 END) AS incompletos,
+               COUNT(*) AS total
+        FROM bitacora.registro_activo r
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
+        WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
+          AND (@bitacora_id IS NULL OR r.bitacora_id = @bitacora_id)
+        GROUP BY r.bitacora_id, b.nombre
+      `);
+      return sendJSON(res, 200, { preview: result.recordset });
+    }
+
     // POST /api/cierre/bitacora
     if (pathname === '/api/cierre/bitacora' && method === 'POST') {
       const sesion = await loadSession(req);
