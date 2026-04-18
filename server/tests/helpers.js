@@ -108,6 +108,11 @@ export async function cleanupTestRegistros() {
       );
       DELETE FROM bitacora.registro_activo WHERE detalle LIKE @tag;
     `);
+  const emails = TEST_USERS.map((u) => `'${u.email}'`).join(',');
+  await db.request().query(`
+    UPDATE bitacora.sesion_activa SET activa = 0
+    WHERE usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE email IN (${emails}))
+  `);
 }
 
 export function makeRegistroPayload({ bitacora_id, planta_id = PLANTA_ID, tipo_evento_id, extra = {} }) {
