@@ -1,11 +1,5 @@
 import { useState, useCallback } from 'react';
-
-async function getJSON(url) {
-  const res = await fetch(url);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
-}
+import { api } from './useApi';
 
 export function useHistoricos() {
   const [data, setData] = useState([]);
@@ -22,7 +16,7 @@ export function useHistoricos() {
       Object.entries(filtros).forEach(([k, v]) => {
         if (v !== undefined && v !== null && v !== '') qs.set(k, v);
       });
-      const result = await getJSON(`/api/historicos?${qs}`);
+      const result = await api.get(`/api/historicos?${qs}`);
       setData(result.data || []);
       setTotal(result.total || 0);
       setPage(result.page || 1);
@@ -35,12 +29,12 @@ export function useHistoricos() {
 
   const getResumen = useCallback(async (planta_id, fecha) => {
     const qs = new URLSearchParams({ planta_id, fecha });
-    const { resumen } = await getJSON(`/api/historicos/resumen?${qs}`);
+    const { resumen } = await api.get(`/api/historicos/resumen?${qs}`);
     return resumen || [];
   }, []);
 
   const getById = useCallback(async (id) => {
-    const { registro } = await getJSON(`/api/historicos/${id}`);
+    const { registro } = await api.get(`/api/historicos/${id}`);
     return registro;
   }, []);
 
