@@ -39,10 +39,64 @@ const DISP_JSON = JSON.stringify([
 ]);
 
 const AUTH_JSON = JSON.stringify([
-  { campo: 'periodo', tipo: 'int', min: 1, max: 24, requerido: true },
-  { campo: 'valor_autorizado_mw', tipo: 'float', requerido: true },
+  { campo: 'periodo', tipo: 'auto', fuente: 'periodo_bogota' },
+  { campo: 'valor_autorizado_mw', tipo: 'float', requerido: true, label: 'Valor autorizado (MW)' },
   { campo: 'notificar_dashboard', tipo: 'auto', valor: true },
 ]);
+
+async function migrateColumnToSnapshot(db, { table, oldCol, newCol, indexToDrop }) {
+  await db.request().batch(`
+    IF COL_LENGTH('${table}','${oldCol}') IS NOT NULL
+    BEGIN
+      ${indexToDrop ? `IF EXISTS (SELECT 1 FROM sys.indexes WHERE name='${indexToDrop}' AND object_id=OBJECT_ID('${table}'))
+        DROP INDEX ${indexToDrop} ON ${table};` : ''}
+      DECLARE @fk SYSNAME = (SELECT TOP 1 fk.name FROM sys.foreign_keys fk
+        JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+        WHERE fk.parent_object_id = OBJECT_ID('${table}')
+          AND COL_NAME(fkc.parent_object_id, fkc.parent_column_id) = '${oldCol}');
+      IF @fk IS NOT NULL EXEC('ALTER TABLE ${table} DROP CONSTRAINT ' + @fk);
+      IF COL_LENGTH('${table}','${newCol}') IS NULL
+        ALTER TABLE ${table} ADD ${newCol} NVARCHAR(MAX) NULL;
+    END
+  `);
+  await db.request().batch(`
+    IF COL_LENGTH('${table}','${oldCol}') IS NOT NULL
+       AND COL_LENGTH('${table}','${newCol}') IS NOT NULL
+    BEGIN
+      UPDATE r SET ${newCol} = (
+        SELECT u.usuario_id, u.nombre_completo
+        FROM lov_bit.usuario u WHERE u.usuario_id = r.${oldCol}
+        FOR JSON PATH
+      )
+      FROM ${table} r WHERE r.${newCol} IS NULL;
+      UPDATE ${table} SET ${newCol} = '[]' WHERE ${newCol} IS NULL;
+    END
+  `);
+  await db.request().batch(`
+    IF COL_LENGTH('${table}','${oldCol}') IS NOT NULL
+       AND COL_LENGTH('${table}','${newCol}') IS NOT NULL
+    BEGIN
+      ALTER TABLE ${table} ALTER COLUMN ${newCol} NVARCHAR(MAX) NOT NULL;
+      ALTER TABLE ${table} DROP COLUMN ${oldCol};
+    END
+  `);
+}
+
+async function migrateSnapshots(db) {
+  const migrations = [
+    { table: 'bitacora.registro_activo', oldCol: 'ingeniero_id', newCol: 'ingenieros_snapshot', indexToDrop: 'IX_ra_ing' },
+    { table: 'bitacora.registro_activo', oldCol: 'jdt_turno_id', newCol: 'jdts_snapshot' },
+    { table: 'bitacora.registro_activo', oldCol: 'jefe_id', newCol: 'jefes_snapshot' },
+    { table: 'bitacora.registro_historico', oldCol: 'ingeniero_id', newCol: 'ingenieros_snapshot', indexToDrop: 'IX_rh_ing' },
+    { table: 'bitacora.registro_historico', oldCol: 'jdt_turno_id', newCol: 'jdts_snapshot' },
+    { table: 'bitacora.registro_historico', oldCol: 'jefe_id', newCol: 'jefes_snapshot' },
+    { table: 'bitacora.autorizacion_dashboard', oldCol: 'jdt_id', newCol: 'jdts_snapshot' },
+    { table: 'bitacora.autorizacion_dashboard', oldCol: 'jefe_id', newCol: 'jefes_snapshot' },
+  ];
+  for (const m of migrations) {
+    await migrateColumnToSnapshot(db, m);
+  }
+}
 
 export async function initDB() {
   const db = await getDB();
@@ -56,6 +110,9 @@ export async function initDB() {
     IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'bitacora')
       EXEC('CREATE SCHEMA bitacora');
   `);
+
+  // Migra columnas INT FK a snapshots JSON si todavía existen (idempotente)
+  await migrateSnapshots(db);
 
   // ---------- 2. Catálogos (lov_bit) ----------
   await db.request().batch(`
@@ -154,30 +211,30 @@ export async function initDB() {
   await db.request().batch(`
     IF OBJECT_ID('bitacora.registro_activo', 'U') IS NULL
     CREATE TABLE bitacora.registro_activo (
-      registro_id    INT           IDENTITY(1,1) PRIMARY KEY,
-      bitacora_id    INT           NOT NULL REFERENCES lov_bit.bitacora(bitacora_id),
-      planta_id      VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
-      fecha_evento   DATETIME2     NOT NULL,
-      turno          TINYINT       NOT NULL CHECK (turno IN (1, 2)),
-      detalle        NVARCHAR(MAX) NOT NULL,
-      campos_extra   NVARCHAR(MAX) NULL,
-      tipo_evento_id INT           NOT NULL REFERENCES lov_bit.tipo_evento(tipo_evento_id),
-      estado         VARCHAR(20)   NOT NULL DEFAULT 'borrador'
-                     CHECK (estado IN ('borrador', 'cerrado')),
-      ingeniero_id   INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
-      jdt_turno_id   INT           NULL     REFERENCES lov_bit.usuario(usuario_id),
-      jefe_id        INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
-      creado_por     INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
-      creado_en      DATETIME2     NOT NULL DEFAULT GETDATE(),
-      modificado_por INT           NULL     REFERENCES lov_bit.usuario(usuario_id),
-      modificado_en  DATETIME2     NULL
+      registro_id         INT           IDENTITY(1,1) PRIMARY KEY,
+      bitacora_id         INT           NOT NULL REFERENCES lov_bit.bitacora(bitacora_id),
+      planta_id           VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+      fecha_evento        DATETIME2     NOT NULL,
+      turno               TINYINT       NOT NULL CHECK (turno IN (1, 2)),
+      detalle             NVARCHAR(MAX) NOT NULL,
+      campos_extra        NVARCHAR(MAX) NULL,
+      tipo_evento_id      INT           NOT NULL REFERENCES lov_bit.tipo_evento(tipo_evento_id),
+      estado              VARCHAR(20)   NOT NULL DEFAULT 'borrador'
+                          CHECK (estado IN ('borrador', 'cerrado')),
+      ingenieros_snapshot NVARCHAR(MAX) NOT NULL,
+      jdts_snapshot       NVARCHAR(MAX) NOT NULL,
+      jefes_snapshot      NVARCHAR(MAX) NOT NULL,
+      creado_por          INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+      creado_en           DATETIME2     NOT NULL DEFAULT GETDATE(),
+      modificado_por      INT           NULL     REFERENCES lov_bit.usuario(usuario_id),
+      modificado_en       DATETIME2     NULL
     );
   `);
   const raIndices = [
     ['IX_ra_bitacora', 'bitacora.registro_activo', '(bitacora_id, planta_id)'],
     ['IX_ra_estado', 'bitacora.registro_activo', '(estado)'],
     ['IX_ra_fecha', 'bitacora.registro_activo', '(fecha_evento)'],
-    ['IX_ra_ing', 'bitacora.registro_activo', '(ingeniero_id)'],
+    ['IX_ra_creado_por', 'bitacora.registro_activo', '(creado_por)'],
   ];
   for (const [name, table, cols] of raIndices) {
     await db.request().batch(`
@@ -198,9 +255,9 @@ export async function initDB() {
       campos_extra           NVARCHAR(MAX) NULL,
       tipo_evento_id         INT           NOT NULL,
       estado                 VARCHAR(20)   NOT NULL DEFAULT 'cerrado',
-      ingeniero_id           INT           NOT NULL,
-      jdt_turno_id           INT           NULL,
-      jefe_id                INT           NOT NULL,
+      ingenieros_snapshot    NVARCHAR(MAX) NOT NULL,
+      jdts_snapshot          NVARCHAR(MAX) NOT NULL,
+      jefes_snapshot         NVARCHAR(MAX) NOT NULL,
       creado_por             INT           NOT NULL,
       creado_en              DATETIME2     NOT NULL,
       modificado_por         INT           NULL,
@@ -213,7 +270,7 @@ export async function initDB() {
   const rhIndices = [
     ['IX_rh_fecha', 'bitacora.registro_historico', '(fecha_cierre_operativo, bitacora_id)'],
     ['IX_rh_planta', 'bitacora.registro_historico', '(planta_id, bitacora_id)'],
-    ['IX_rh_ing', 'bitacora.registro_historico', '(ingeniero_id)'],
+    ['IX_rh_creado_por', 'bitacora.registro_historico', '(creado_por)'],
     ['IX_rh_bit', 'bitacora.registro_historico', '(bitacora_id)'],
   ];
   for (const [name, table, cols] of rhIndices) {
@@ -227,16 +284,16 @@ export async function initDB() {
   await db.request().batch(`
     IF OBJECT_ID('bitacora.autorizacion_dashboard', 'U') IS NULL
     CREATE TABLE bitacora.autorizacion_dashboard (
-      autorizacion_id     INT         IDENTITY(1,1) PRIMARY KEY,
-      registro_origen_id  INT         NOT NULL,
-      planta_id           VARCHAR(10) NOT NULL REFERENCES lov_bit.planta(planta_id),
-      fecha               DATE        NOT NULL,
-      periodo             TINYINT     NOT NULL CHECK (periodo BETWEEN 1 AND 24),
-      valor_autorizado_mw FLOAT       NOT NULL,
-      jdt_id              INT         NOT NULL REFERENCES lov_bit.usuario(usuario_id),
-      jefe_id             INT         NOT NULL REFERENCES lov_bit.usuario(usuario_id),
-      activa              BIT         NOT NULL DEFAULT 1,
-      creado_en           DATETIME2   NOT NULL DEFAULT GETDATE(),
+      autorizacion_id     INT           IDENTITY(1,1) PRIMARY KEY,
+      registro_origen_id  INT           NOT NULL,
+      planta_id           VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+      fecha               DATE          NOT NULL,
+      periodo             TINYINT       NOT NULL CHECK (periodo BETWEEN 1 AND 24),
+      valor_autorizado_mw FLOAT         NOT NULL,
+      jdts_snapshot       NVARCHAR(MAX) NOT NULL,
+      jefes_snapshot      NVARCHAR(MAX) NOT NULL,
+      activa              BIT           NOT NULL DEFAULT 1,
+      creado_en           DATETIME2     NOT NULL DEFAULT GETDATE(),
       CONSTRAINT UQ_auth_planta_fecha_periodo UNIQUE (planta_id, fecha, periodo)
     );
   `);
@@ -294,6 +351,13 @@ export async function initDB() {
       ('Autorizaciones',            'AUTH', 'FileCheck',    1, @auth, 10)
     ) AS s(nombre, codigo, icono, formulario_especial, definicion_campos, orden)
       ON t.codigo = s.codigo
+    WHEN MATCHED THEN UPDATE SET
+      nombre = s.nombre,
+      icono = s.icono,
+      formulario_especial = s.formulario_especial,
+      definicion_campos = s.definicion_campos,
+      orden = s.orden,
+      activa = 1
     WHEN NOT MATCHED THEN INSERT (nombre, codigo, icono, formulario_especial, definicion_campos, orden, activa)
       VALUES (s.nombre, s.codigo, s.icono, s.formulario_especial, s.definicion_campos, s.orden, 1);
   `);
@@ -384,17 +448,16 @@ export async function initDB() {
            h.campos_extra, h.fecha_cierre_operativo,
            b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo,
            p.nombre AS planta_nombre, h.planta_id,
-           u.nombre_completo AS ingeniero,
            te.nombre AS tipo_evento,
-           jdt.nombre_completo AS jdt_nombre,
-           jefe.nombre_completo AS jefe_nombre
+           h.ingenieros_snapshot, h.jdts_snapshot, h.jefes_snapshot,
+           autor.nombre_completo AS creado_por_nombre,
+           h.creado_por AS creado_por_id,
+           h.creado_en
     FROM bitacora.registro_historico h
     JOIN lov_bit.bitacora b ON b.bitacora_id = h.bitacora_id
     JOIN lov_bit.planta p ON p.planta_id = h.planta_id
-    JOIN lov_bit.usuario u ON u.usuario_id = h.ingeniero_id
     JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = h.tipo_evento_id
-    LEFT JOIN lov_bit.usuario jdt ON jdt.usuario_id = h.jdt_turno_id
-    JOIN lov_bit.usuario jefe ON jefe.usuario_id = h.jefe_id;
+    LEFT JOIN lov_bit.usuario autor ON autor.usuario_id = h.creado_por;
   `);
 
   console.log('[DB] Conexión OK');
