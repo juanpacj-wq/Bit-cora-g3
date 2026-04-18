@@ -6,7 +6,7 @@ import { getTurnoColombia } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
 import { hasPermisoBitacora, isJdT, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
-import { findAutorizacion, upsertAutorizacion } from './utils/notificador.js';
+import { findAutorizacion, upsertAutorizacion, hasNotificarDashboard } from './utils/notificador.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
 
@@ -350,13 +350,13 @@ const server = http.createServer(async (req, res) => {
       if (!jefe_id) return sendJSON(res, 500, { error: 'No hay jefe de planta configurado' });
 
       const camposStr = camposStrValidated;
-      const esAuth = bit.codigo === 'AUTH';
+      const notificar = hasNotificarDashboard(bit.definicion_campos);
       const fechaEventoDate = new Date(fecha_evento);
 
       const transaction = new sql.Transaction(db);
       await transaction.begin();
       try {
-        if (esAuth && camposFinal) {
+        if (notificar && camposFinal) {
           const periodo = camposFinal.periodo;
           const valor = camposFinal.valor_autorizado_mw;
           if (periodo && valor != null) {
@@ -394,7 +394,7 @@ const server = http.createServer(async (req, res) => {
           `);
         const registro = ins.recordset[0];
 
-        if (esAuth && camposFinal) {
+        if (notificar && camposFinal) {
           const periodo = camposFinal.periodo;
           const valor = camposFinal.valor_autorizado_mw;
           if (periodo && valor != null) {
