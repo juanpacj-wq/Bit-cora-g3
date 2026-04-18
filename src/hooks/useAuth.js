@@ -11,14 +11,26 @@ export function useAuth() {
   const heartbeatRef = useRef(null);
 
   useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (raw) {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = sessionStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
         const { user: u, sesion: s } = JSON.parse(raw);
+        if (s?.sesion_id) {
+          try {
+            await api.post('/api/auth/resume', { sesion_id: s.sesion_id }, { skipAuth: true });
+          } catch {
+            if (!cancelled) { sessionStorage.removeItem(STORAGE_KEY); }
+            return;
+          }
+        }
+        if (cancelled) return;
         if (u) setUser(u);
         if (s) setSesion(s);
-      }
-    } catch {}
+      } catch {}
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
