@@ -5,6 +5,7 @@ import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
 import { getTurnoColombia } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
 import { hasPermisoBitacora, isJdT, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
+import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
 
@@ -309,6 +310,19 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 400, { error: 'tipo_evento_id no pertenece a la bitácora' });
       }
 
+      const bitRes = await db.request()
+        .input('bitacora_id', sql.Int, bitacora_id)
+        .query(`SELECT codigo, definicion_campos FROM lov_bit.bitacora WHERE bitacora_id = @bitacora_id`);
+      const bit = bitRes.recordset[0];
+      if (!bit) return sendJSON(res, 400, { error: 'bitácora no encontrada' });
+
+      const validation = validateCamposExtra(bit.definicion_campos, campos_extra);
+      if (!validation.ok) {
+        return sendJSON(res, 400, { error: 'campos_extra inválido', detalles: validation.errors });
+      }
+      const camposFinal = validation.definicion ? computeCamposAuto(validation.definicion, validation.data) : validation.data;
+      const camposStrValidated = camposFinal ? JSON.stringify(camposFinal) : null;
+
       // Resolver JdT
       const jdtSesion = await db.request()
         .input('planta_id', sql.VarChar(10), planta_id)
@@ -334,7 +348,7 @@ const server = http.createServer(async (req, res) => {
       const jefe_id = jefeRes.recordset[0]?.usuario_id;
       if (!jefe_id) return sendJSON(res, 500, { error: 'No hay jefe de planta configurado' });
 
-      const camposStr = campos_extra ? (typeof campos_extra === 'string' ? campos_extra : JSON.stringify(campos_extra)) : null;
+      const camposStr = camposStrValidated;
 
       const ins = await db.request()
         .input('bitacora_id', sql.Int, bitacora_id)
@@ -358,14 +372,10 @@ const server = http.createServer(async (req, res) => {
       const registro = ins.recordset[0];
 
       // Lógica especial AUTH
-      const bitRes = await db.request()
-        .input('bitacora_id', sql.Int, bitacora_id)
-        .query(`SELECT codigo FROM lov_bit.bitacora WHERE bitacora_id = @bitacora_id`);
-      if (bitRes.recordset[0]?.codigo === 'AUTH' && camposStr) {
+      if (bit.codigo === 'AUTH' && camposFinal) {
         try {
-          const parsed = JSON.parse(camposStr);
-          const periodo = parsed.periodo;
-          const valor = parsed.valor_autorizado_mw;
+          const periodo = camposFinal.periodo;
+          const valor = camposFinal.valor_autorizado_mw;
           if (periodo && valor != null) {
             await db.request()
               .input('registro_origen_id', sql.Int, registro.registro_id)
@@ -424,7 +434,18 @@ const server = http.createServer(async (req, res) => {
       }
       const modificado_por = sesion.usuario_id;
 
-      const camposStr = campos_extra ? (typeof campos_extra === 'string' ? campos_extra : JSON.stringify(campos_extra)) : null;
+      let camposStr = null;
+      if (campos_extra !== undefined && campos_extra !== null) {
+        const bitRes = await db.request()
+          .input('bitacora_id', sql.Int, reg.bitacora_id)
+          .query(`SELECT definicion_campos FROM lov_bit.bitacora WHERE bitacora_id = @bitacora_id`);
+        const validation = validateCamposExtra(bitRes.recordset[0]?.definicion_campos, campos_extra);
+        if (!validation.ok) {
+          return sendJSON(res, 400, { error: 'campos_extra inválido', detalles: validation.errors });
+        }
+        const camposFinal = validation.definicion ? computeCamposAuto(validation.definicion, validation.data) : validation.data;
+        camposStr = camposFinal ? JSON.stringify(camposFinal) : null;
+      }
 
       const upd = await db.request()
         .input('registro_id', sql.Int, registro_id)
