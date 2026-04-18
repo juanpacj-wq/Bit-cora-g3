@@ -332,11 +332,9 @@ const server = http.createServer(async (req, res) => {
       await transaction.begin();
       try {
         const reqFactory = () => new sql.Request(transaction);
-        const [jdts_snapshot, jefes_snapshot, ingenieros_snapshot] = await Promise.all([
-          snapshotJDTs(reqFactory, { planta_id }),
-          snapshotJefes(reqFactory),
-          snapshotIngenieros(reqFactory, { planta_id, bitacora_id }),
-        ]);
+        const jdts_snapshot = await snapshotJDTs(reqFactory, { planta_id });
+        const jefes_snapshot = await snapshotJefes(reqFactory);
+        const ingenieros_snapshot = await snapshotIngenieros(reqFactory, { planta_id, bitacora_id });
         if (jefes_snapshot === '[]') {
           await transaction.rollback();
           return sendJSON(res, 500, { error: 'No hay jefe de planta activo' });
