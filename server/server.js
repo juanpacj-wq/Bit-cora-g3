@@ -304,7 +304,7 @@ const server = http.createServer(async (req, res) => {
         LEFT JOIN lov_bit.usuario jdt ON jdt.usuario_id = r.jdt_turno_id
         INNER JOIN lov_bit.usuario jf ON jf.usuario_id = r.jefe_id
         WHERE ${where.join(' AND ')}
-        ORDER BY r.fecha_evento DESC
+        ORDER BY r.fecha_evento ASC
       `);
       return sendJSON(res, 200, { registros: result.recordset });
     }
@@ -494,9 +494,10 @@ const server = http.createServer(async (req, res) => {
       const listRes = await pool.request()
         .input('planta_id', sql.VarChar(10), planta_id)
         .query(`
-          SELECT DISTINCT bitacora_id
-          FROM bitacora.registro_activo
-          WHERE planta_id = @planta_id AND estado = 'borrador'
+          SELECT DISTINCT r.bitacora_id, b.nombre
+          FROM bitacora.registro_activo r
+          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
+          WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
         `);
 
       const resumen = [];
@@ -529,10 +530,10 @@ const server = http.createServer(async (req, res) => {
               WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
             `);
           await transaction.commit();
-          resumen.push({ bitacora_id: row.bitacora_id, registros_cerrados: insResult.rowsAffected[0] || 0 });
+          resumen.push({ bitacora_id: row.bitacora_id, nombre: row.nombre, registros_cerrados: insResult.rowsAffected[0] || 0 });
         } catch (err) {
           await transaction.rollback();
-          resumen.push({ bitacora_id: row.bitacora_id, error: err.message });
+          resumen.push({ bitacora_id: row.bitacora_id, nombre: row.nombre, error: err.message });
         }
       }
       return sendJSON(res, 200, { resumen });
