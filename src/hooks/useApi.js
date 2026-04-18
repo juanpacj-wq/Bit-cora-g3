@@ -2,7 +2,7 @@ const STORAGE_KEY = 'bitacoras_auth';
 
 function getSesionIdFromStorage() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = sessionStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const { sesion } = JSON.parse(raw);
     return sesion?.sesion_id ?? null;
