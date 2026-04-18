@@ -1,16 +1,5 @@
 import { useState, useCallback } from 'react';
-
-async function req(url, method = 'GET', body) {
-  const opts = { method, headers: {} };
-  if (body !== undefined) {
-    opts.headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
-  }
-  const res = await fetch(url, opts);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
-}
+import { api } from './useApi';
 
 export function useRegistros() {
   const [registros, setRegistros] = useState([]);
@@ -24,7 +13,7 @@ export function useRegistros() {
       if (planta_id) qs.set('planta_id', planta_id);
       if (bitacora_id) qs.set('bitacora_id', bitacora_id);
       if (estado) qs.set('estado', estado);
-      const { registros: r } = await req(`/api/registros/activos?${qs}`);
+      const { registros: r } = await api.get(`/api/registros/activos?${qs}`);
       setRegistros(r || []);
       return r || [];
     } catch (e) {
@@ -33,17 +22,17 @@ export function useRegistros() {
   }, []);
 
   const crear = useCallback(async (registro) => {
-    const { registro: r } = await req('/api/registros', 'POST', registro);
+    const { registro: r } = await api.post('/api/registros', registro);
     return r;
   }, []);
 
   const actualizar = useCallback(async (id, campos) => {
-    const { registro: r } = await req(`/api/registros/${id}`, 'PUT', campos);
+    const { registro: r } = await api.put(`/api/registros/${id}`, campos);
     return r;
   }, []);
 
   const eliminar = useCallback(async (id) => {
-    await req(`/api/registros/${id}`, 'DELETE');
+    await api.del(`/api/registros/${id}`);
   }, []);
 
   return { registros, loading, error, getActivos, crear, actualizar, eliminar, setRegistros };

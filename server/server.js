@@ -1,41 +1,12 @@
 import http from 'http';
 import sql from 'mssql';
 import { initDB, getDB } from './db.js';
+import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
+import { getTurnoColombia } from './utils/turno.js';
+import { loadSession } from './middleware/auth.js';
+import { hasPermisoBitacora, isJdT, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
-
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
-
-function parseBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (chunk) => { data += chunk; });
-    req.on('end', () => {
-      if (!data) return resolve({});
-      try {
-        resolve(JSON.parse(data));
-      } catch (err) {
-        reject(err);
-      }
-    });
-    req.on('error', reject);
-  });
-}
-
-function sendJSON(res, status, payload) {
-  res.writeHead(status, { 'Content-Type': 'application/json', ...CORS_HEADERS });
-  res.end(JSON.stringify(payload));
-}
-
-function getTurnoColombia() {
-  const nowUtc = new Date();
-  const colombiaHour = (nowUtc.getUTCHours() + 24 - 5) % 24;
-  return colombiaHour < 12 ? 1 : 2;
-}
 
 const server = http.createServer(async (req, res) => {
   const { method } = req;
@@ -311,11 +282,20 @@ const server = http.createServer(async (req, res) => {
 
     // POST /api/registros
     if (pathname === '/api/registros' && method === 'POST') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const body = await parseBody(req);
-      const { bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id, ingeniero_id } = body;
-      if (!bitacora_id || !planta_id || !fecha_evento || !turno || !tipo_evento_id || !ingeniero_id || !detalle) {
-        return sendJSON(res, 400, { error: 'Campos requeridos faltantes (detalle, fecha_evento, turno, bitacora_id, planta_id, tipo_evento_id, ingeniero_id)' });
+      const { bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id } = body;
+      if (!bitacora_id || !planta_id || !fecha_evento || !turno || !tipo_evento_id || !detalle) {
+        return sendJSON(res, 400, { error: 'Campos requeridos faltantes (detalle, fecha_evento, turno, bitacora_id, planta_id, tipo_evento_id)' });
       }
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No puede crear registros en otra planta' });
+      }
+      if (!(await hasPermisoBitacora(sesion, bitacora_id, 'puede_crear'))) {
+        return sendJSON(res, 403, { error: 'Sin permiso para crear en esta bitácora' });
+      }
+      const ingeniero_id = sesion.usuario_id;
       const db = await getDB();
 
       // Resolver JdT
@@ -401,19 +381,25 @@ const server = http.createServer(async (req, res) => {
     // PUT /api/registros/:id
     const putMatch = pathname.match(/^\/api\/registros\/(\d+)$/);
     if (putMatch && method === 'PUT') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const registro_id = parseInt(putMatch[1], 10);
       const body = await parseBody(req);
-      const { detalle, turno, fecha_evento, campos_extra, tipo_evento_id, modificado_por } = body;
-      if (!modificado_por) return sendJSON(res, 400, { error: 'modificado_por es requerido' });
+      const { detalle, turno, fecha_evento, campos_extra, tipo_evento_id } = body;
 
       const db = await getDB();
       const check = await db.request()
         .input('registro_id', sql.Int, registro_id)
-        .query(`SELECT estado FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
+        .query(`SELECT registro_id, estado, bitacora_id, planta_id, ingeniero_id FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
       if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
-      if (check.recordset[0].estado !== 'borrador') {
+      const reg = check.recordset[0];
+      if (reg.estado !== 'borrador') {
         return sendJSON(res, 409, { error: 'Solo se pueden editar registros en borrador' });
       }
+      if (!(await canEditarRegistro(sesion, reg))) {
+        return sendJSON(res, 403, { error: 'Sin permiso para editar este registro' });
+      }
+      const modificado_por = sesion.usuario_id;
 
       const camposStr = campos_extra ? (typeof campos_extra === 'string' ? campos_extra : JSON.stringify(campos_extra)) : null;
 
@@ -442,10 +428,17 @@ const server = http.createServer(async (req, res) => {
 
     // POST /api/cierre/bitacora
     if (pathname === '/api/cierre/bitacora' && method === 'POST') {
-      const { bitacora_id, planta_id, cerrado_por } = await parseBody(req);
-      if (!bitacora_id || !planta_id || !cerrado_por) {
-        return sendJSON(res, 400, { error: 'bitacora_id, planta_id y cerrado_por son requeridos' });
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      if (!isJdT(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno puede cerrar bitácoras' });
+      const { bitacora_id, planta_id } = await parseBody(req);
+      if (!bitacora_id || !planta_id) {
+        return sendJSON(res, 400, { error: 'bitacora_id y planta_id son requeridos' });
       }
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No puede cerrar bitácoras de otra planta' });
+      }
+      const cerrado_por = sesion.usuario_id;
       const pool = await getDB();
       const transaction = new sql.Transaction(pool);
       await transaction.begin();
@@ -486,10 +479,17 @@ const server = http.createServer(async (req, res) => {
 
     // POST /api/cierre/masivo
     if (pathname === '/api/cierre/masivo' && method === 'POST') {
-      const { planta_id, cerrado_por } = await parseBody(req);
-      if (!planta_id || !cerrado_por) {
-        return sendJSON(res, 400, { error: 'planta_id y cerrado_por son requeridos' });
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      if (!isJdT(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno puede cerrar bitácoras' });
+      const { planta_id } = await parseBody(req);
+      if (!planta_id) {
+        return sendJSON(res, 400, { error: 'planta_id es requerido' });
       }
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No puede cerrar bitácoras de otra planta' });
+      }
+      const cerrado_por = sesion.usuario_id;
       const pool = await getDB();
       const listRes = await pool.request()
         .input('planta_id', sql.VarChar(10), planta_id)
@@ -542,14 +542,20 @@ const server = http.createServer(async (req, res) => {
     // DELETE /api/registros/:id
     const delMatch = pathname.match(/^\/api\/registros\/(\d+)$/);
     if (delMatch && method === 'DELETE') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const registro_id = parseInt(delMatch[1], 10);
       const db = await getDB();
       const check = await db.request()
         .input('registro_id', sql.Int, registro_id)
-        .query(`SELECT estado FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
+        .query(`SELECT registro_id, estado, bitacora_id, planta_id, ingeniero_id FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
       if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
-      if (check.recordset[0].estado !== 'borrador') {
+      const reg = check.recordset[0];
+      if (reg.estado !== 'borrador') {
         return sendJSON(res, 409, { error: 'Solo se pueden eliminar registros en borrador' });
+      }
+      if (!(await canEditarRegistro(sesion, reg))) {
+        return sendJSON(res, 403, { error: 'Sin permiso para eliminar este registro' });
       }
 
       await db.request()
@@ -698,14 +704,18 @@ const server = http.createServer(async (req, res) => {
     // DELETE /api/autorizaciones/:id
     const authDel = pathname.match(/^\/api\/autorizaciones\/(\d+)$/);
     if (authDel && method === 'DELETE') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      if (!isJdT(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno puede anular autorizaciones' });
       const autorizacion_id = parseInt(authDel[1], 10);
       const db = await getDB();
       const result = await db.request()
         .input('autorizacion_id', sql.Int, autorizacion_id)
+        .input('planta_id', sql.VarChar(10), sesion.planta_id)
         .query(`
           UPDATE bitacora.autorizacion_dashboard
           SET activa = 0
-          WHERE autorizacion_id = @autorizacion_id
+          WHERE autorizacion_id = @autorizacion_id AND planta_id = @planta_id
         `);
       if (!result.rowsAffected[0]) {
         return sendJSON(res, 404, { error: 'Autorización no encontrada' });

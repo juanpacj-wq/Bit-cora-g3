@@ -1,17 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { api, setUnauthorizedHandler } from './useApi';
 
 const STORAGE_KEY = 'bitacoras_auth';
-
-async function postJSON(url, body) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
-}
 
 export function useAuth() {
   const [user, setUser] = useState(null);
@@ -40,15 +30,28 @@ export function useAuth() {
   useEffect(() => {
     if (!sesion?.sesion_id) return;
     heartbeatRef.current = setInterval(() => {
-      postJSON('/api/auth/heartbeat', { sesion_id: sesion.sesion_id }).catch(() => {});
+      api.post('/api/auth/heartbeat', { sesion_id: sesion.sesion_id }, { skipAuth: true }).catch(() => {});
     }, 60000);
     return () => clearInterval(heartbeatRef.current);
   }, [sesion?.sesion_id]);
 
+  const logout = useCallback(async () => {
+    if (sesion?.sesion_id) {
+      try { await api.post('/api/auth/logout', { sesion_id: sesion.sesion_id }, { skipAuth: true }); } catch {}
+    }
+    setUser(null); setSesion(null);
+    localStorage.removeItem(STORAGE_KEY);
+  }, [sesion?.sesion_id]);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => { logout(); });
+    return () => setUnauthorizedHandler(null);
+  }, [logout]);
+
   const login = useCallback(async (email, password) => {
     setLoading(true); setError(null);
     try {
-      const { usuario } = await postJSON('/api/auth/login', { email, password });
+      const { usuario } = await api.post('/api/auth/login', { email, password }, { skipAuth: true });
       setUser(usuario);
       return usuario;
     } catch (e) {
@@ -60,23 +63,15 @@ export function useAuth() {
     if (!user) throw new Error('No hay usuario autenticado');
     setLoading(true); setError(null);
     try {
-      const { sesion: s } = await postJSON('/api/auth/select-context', {
+      const { sesion: s } = await api.post('/api/auth/select-context', {
         usuario_id: user.usuario_id, planta_id, cargo_id,
-      });
+      }, { skipAuth: true });
       setSesion(s);
       return s;
     } catch (e) {
       setError(e.message); throw e;
     } finally { setLoading(false); }
   }, [user]);
-
-  const logout = useCallback(async () => {
-    if (sesion?.sesion_id) {
-      try { await postJSON('/api/auth/logout', { sesion_id: sesion.sesion_id }); } catch {}
-    }
-    setUser(null); setSesion(null);
-    localStorage.removeItem(STORAGE_KEY);
-  }, [sesion?.sesion_id]);
 
   return { user, sesion, loading, error, login, selectContext, logout };
 }
