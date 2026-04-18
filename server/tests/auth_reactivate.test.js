@@ -2,11 +2,13 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
+import { periodoFromFechaBogota } from '../utils/turno.js';
 import { setupSessions, cleanupTestRegistros, call, makeRegistroPayload, firstTipoEvento, PLANTA_ID, TEST_TAG } from './helpers.js';
 
 let ctx;
-const PERIODO = 23;
-const today = new Date().toISOString().slice(0, 10);
+const FECHA_EVENTO = new Date();
+const PERIODO = periodoFromFechaBogota(FECHA_EVENTO);
+const today = FECHA_EVENTO.toISOString().slice(0, 10);
 
 async function cleanAutorizacionSlot() {
   const db = await getDB();
@@ -36,7 +38,8 @@ async function postAuth({ valor }) {
     sesion_id: ctx.sesiones.jdt,
     body: {
       ...makeRegistroPayload({ bitacora_id: ctx.bitByCodigo.AUTH, tipo_evento_id }),
-      campos_extra: { periodo: PERIODO, valor_autorizado_mw: valor },
+      fecha_evento: FECHA_EVENTO.toISOString(),
+      campos_extra: { valor_autorizado_mw: valor },
     },
   });
 }
