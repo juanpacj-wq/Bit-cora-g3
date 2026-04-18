@@ -1,6 +1,7 @@
 import sql from 'mssql';
 
 const JSON_EMPTY = '[]';
+export const SESION_TTL_MIN = 5;
 
 const toJSON = (rows) =>
   rows?.length
@@ -18,6 +19,7 @@ export async function snapshotJDTs(reqFactory, { planta_id }) {
       INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
       INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
       WHERE s.planta_id = @planta_id AND s.activa = 1
+        AND s.ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
         AND c.nombre = 'Jefe de Turno' AND u.activo = 1
     `);
   if (r.recordset.length > 0) return toJSON(r.recordset);
@@ -48,7 +50,9 @@ export async function snapshotIngenieros(reqFactory, { planta_id, bitacora_id })
       INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
       INNER JOIN lov_bit.cargo_bitacora_permiso p
         ON p.cargo_id = c.cargo_id AND p.bitacora_id = @bitacora_id
-      WHERE s.planta_id = @planta_id AND s.activa = 1 AND u.activo = 1
+      WHERE s.planta_id = @planta_id AND s.activa = 1
+        AND s.ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
+        AND u.activo = 1
         AND p.puede_crear = 1
         AND c.nombre NOT IN ('Jefe de Turno', 'Gerente de Producción')
     `);
