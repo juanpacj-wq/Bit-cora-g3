@@ -1,0 +1,731 @@
+import http from 'http';
+import sql from 'mssql';
+import { initDB, getDB } from './db.js';
+
+const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (chunk) => { data += chunk; });
+    req.on('end', () => {
+      if (!data) return resolve({});
+      try {
+        resolve(JSON.parse(data));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function sendJSON(res, status, payload) {
+  res.writeHead(status, { 'Content-Type': 'application/json', ...CORS_HEADERS });
+  res.end(JSON.stringify(payload));
+}
+
+function getTurnoColombia() {
+  const nowUtc = new Date();
+  const colombiaHour = (nowUtc.getUTCHours() + 24 - 5) % 24;
+  return colombiaHour < 12 ? 1 : 2;
+}
+
+const server = http.createServer(async (req, res) => {
+  const { method } = req;
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const pathname = url.pathname;
+
+  if (method === 'OPTIONS') {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
+  }
+
+  try {
+    if (method === 'GET' && pathname === '/health') {
+      return sendJSON(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
+    }
+
+    // POST /api/auth/login
+    if (pathname === '/api/auth/login' && method === 'POST') {
+      const { email, password } = await parseBody(req);
+      if (!email || !password) {
+        return sendJSON(res, 400, { error: 'email y password son requeridos' });
+      }
+      const db = await getDB();
+      const result = await db.request()
+        .input('email', sql.NVarChar(200), email)
+        .input('password', sql.NVarChar(200), password)
+        .query(`
+          SELECT usuario_id, nombre_completo, email, es_jefe_planta, es_jdt_default, activo
+          FROM lov_bit.usuario
+          WHERE email = @email AND password_hash = @password AND activo = 1
+        `);
+      if (result.recordset.length === 0) {
+        return sendJSON(res, 401, { error: 'Credenciales inválidas' });
+      }
+      return sendJSON(res, 200, { usuario: result.recordset[0] });
+    }
+
+    // POST /api/auth/select-context
+    if (pathname === '/api/auth/select-context' && method === 'POST') {
+      const { usuario_id, planta_id, cargo_id } = await parseBody(req);
+      if (!usuario_id || !planta_id || !cargo_id) {
+        return sendJSON(res, 400, { error: 'usuario_id, planta_id y cargo_id son requeridos' });
+      }
+      const db = await getDB();
+
+      const valid = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .input('cargo_id', sql.Int, cargo_id)
+        .query(`
+          SELECT
+            (SELECT COUNT(*) FROM lov_bit.planta WHERE planta_id = @planta_id AND activa = 1) AS planta_ok,
+            (SELECT COUNT(*) FROM lov_bit.cargo WHERE cargo_id = @cargo_id) AS cargo_ok
+        `);
+      if (!valid.recordset[0].planta_ok || !valid.recordset[0].cargo_ok) {
+        return sendJSON(res, 400, { error: 'planta_id o cargo_id inválido' });
+      }
+
+      const turno = getTurnoColombia();
+      const insert = await db.request()
+        .input('usuario_id', sql.Int, usuario_id)
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .input('cargo_id', sql.Int, cargo_id)
+        .input('turno', sql.TinyInt, turno)
+        .query(`
+          INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno)
+          OUTPUT INSERTED.*
+          VALUES (@usuario_id, @planta_id, @cargo_id, @turno)
+        `);
+      return sendJSON(res, 200, { sesion: insert.recordset[0] });
+    }
+
+    // POST /api/auth/logout
+    if (pathname === '/api/auth/logout' && method === 'POST') {
+      const { sesion_id } = await parseBody(req);
+      if (!sesion_id) {
+        return sendJSON(res, 400, { error: 'sesion_id es requerido' });
+      }
+      const db = await getDB();
+      await db.request()
+        .input('sesion_id', sql.Int, sesion_id)
+        .query(`UPDATE bitacora.sesion_activa SET activa = 0 WHERE sesion_id = @sesion_id`);
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // POST /api/auth/heartbeat
+    if (pathname === '/api/auth/heartbeat' && method === 'POST') {
+      const { sesion_id } = await parseBody(req);
+      if (!sesion_id) {
+        return sendJSON(res, 400, { error: 'sesion_id es requerido' });
+      }
+      const db = await getDB();
+      await db.request()
+        .input('sesion_id', sql.Int, sesion_id)
+        .query(`
+          UPDATE bitacora.sesion_activa
+          SET ultima_actividad = GETDATE()
+          WHERE sesion_id = @sesion_id AND activa = 1
+        `);
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // GET /api/auth/sesiones-activas?planta_id=GEC3
+    if (pathname === '/api/auth/sesiones-activas' && method === 'GET') {
+      const planta_id = url.searchParams.get('planta_id');
+      if (!planta_id) {
+        return sendJSON(res, 400, { error: 'planta_id es requerido' });
+      }
+      const db = await getDB();
+      const result = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .query(`
+          SELECT
+            s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno,
+            s.inicio_sesion, s.ultima_actividad, s.activa,
+            u.nombre_completo, u.email, u.es_jefe_planta, u.es_jdt_default,
+            c.nombre AS cargo_nombre, c.solo_lectura
+          FROM bitacora.sesion_activa s
+          INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
+          INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
+          WHERE s.planta_id = @planta_id AND s.activa = 1
+          ORDER BY s.inicio_sesion DESC
+        `);
+      return sendJSON(res, 200, { sesiones: result.recordset });
+    }
+
+    // GET /api/catalogos/plantas
+    if (pathname === '/api/catalogos/plantas' && method === 'GET') {
+      const db = await getDB();
+      const result = await db.request().query(`
+        SELECT planta_id, nombre, activa
+        FROM lov_bit.planta
+        WHERE activa = 1
+        ORDER BY planta_id
+      `);
+      return sendJSON(res, 200, { plantas: result.recordset });
+    }
+
+    // GET /api/catalogos/cargos
+    if (pathname === '/api/catalogos/cargos' && method === 'GET') {
+      const db = await getDB();
+      const result = await db.request().query(`
+        SELECT cargo_id, nombre, solo_lectura
+        FROM lov_bit.cargo
+        ORDER BY cargo_id
+      `);
+      return sendJSON(res, 200, { cargos: result.recordset });
+    }
+
+    // GET /api/catalogos/bitacoras
+    if (pathname === '/api/catalogos/bitacoras' && method === 'GET') {
+      const db = await getDB();
+      const result = await db.request().query(`
+        SELECT bitacora_id, nombre, codigo, icono, formulario_especial, definicion_campos, orden, activa
+        FROM lov_bit.bitacora
+        WHERE activa = 1
+        ORDER BY orden
+      `);
+      return sendJSON(res, 200, { bitacoras: result.recordset });
+    }
+
+    // GET /api/catalogos/bitacoras/:id/tipos-evento
+    const tiposMatch = pathname.match(/^\/api\/catalogos\/bitacoras\/(\d+)\/tipos-evento$/);
+    if (tiposMatch && method === 'GET') {
+      const bitacora_id = parseInt(tiposMatch[1], 10);
+      const db = await getDB();
+      const result = await db.request()
+        .input('bitacora_id', sql.Int, bitacora_id)
+        .query(`
+          SELECT tipo_evento_id, bitacora_id, nombre, es_default, orden
+          FROM lov_bit.tipo_evento
+          WHERE bitacora_id = @bitacora_id
+          ORDER BY orden
+        `);
+      return sendJSON(res, 200, { tipos_evento: result.recordset });
+    }
+
+    // GET /api/catalogos/permisos/:cargo_id
+    const permisosMatch = pathname.match(/^\/api\/catalogos\/permisos\/(\d+)$/);
+    if (permisosMatch && method === 'GET') {
+      const cargo_id = parseInt(permisosMatch[1], 10);
+      const db = await getDB();
+      const result = await db.request()
+        .input('cargo_id', sql.Int, cargo_id)
+        .query(`
+          SELECT b.bitacora_id, b.nombre, b.codigo, b.icono, b.formulario_especial, b.orden,
+                 ISNULL(p.puede_ver, 0) AS puede_ver,
+                 ISNULL(p.puede_crear, 0) AS puede_crear
+          FROM lov_bit.bitacora b
+          LEFT JOIN lov_bit.cargo_bitacora_permiso p
+            ON p.bitacora_id = b.bitacora_id AND p.cargo_id = @cargo_id
+          WHERE b.activa = 1
+          ORDER BY b.orden
+        `);
+      return sendJSON(res, 200, { permisos: result.recordset });
+    }
+
+    // GET /api/catalogos/jdt-actual?planta_id=GEC3
+    if (pathname === '/api/catalogos/jdt-actual' && method === 'GET') {
+      const planta_id = url.searchParams.get('planta_id');
+      if (!planta_id) {
+        return sendJSON(res, 400, { error: 'planta_id es requerido' });
+      }
+      const db = await getDB();
+      const activo = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .query(`
+          SELECT TOP 1 u.usuario_id, u.nombre_completo, u.email, u.es_jefe_planta, u.es_jdt_default,
+                 s.inicio_sesion, s.ultima_actividad
+          FROM bitacora.sesion_activa s
+          INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
+          INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
+          WHERE s.planta_id = @planta_id AND s.activa = 1 AND c.nombre = 'Jefe de Turno'
+          ORDER BY s.inicio_sesion DESC
+        `);
+      if (activo.recordset.length > 0) {
+        return sendJSON(res, 200, { jdt: activo.recordset[0], origen: 'sesion_activa' });
+      }
+      const fallback = await db.request().query(`
+        SELECT TOP 1 usuario_id, nombre_completo, email, es_jefe_planta, es_jdt_default
+        FROM lov_bit.usuario
+        WHERE es_jdt_default = 1 AND activo = 1
+      `);
+      if (fallback.recordset.length === 0) {
+        return sendJSON(res, 404, { error: 'No hay JdT disponible' });
+      }
+      return sendJSON(res, 200, { jdt: fallback.recordset[0], origen: 'default' });
+    }
+
+    // GET /api/catalogos/jefe
+    if (pathname === '/api/catalogos/jefe' && method === 'GET') {
+      const db = await getDB();
+      const result = await db.request().query(`
+        SELECT TOP 1 usuario_id, nombre_completo, email, es_jefe_planta, es_jdt_default
+        FROM lov_bit.usuario
+        WHERE es_jefe_planta = 1 AND activo = 1
+      `);
+      if (result.recordset.length === 0) {
+        return sendJSON(res, 404, { error: 'No hay jefe de planta' });
+      }
+      return sendJSON(res, 200, { jefe: result.recordset[0] });
+    }
+
+    // GET /api/registros/activos?planta_id=&bitacora_id=
+    if (pathname === '/api/registros/activos' && method === 'GET') {
+      const planta_id = url.searchParams.get('planta_id');
+      const bitacora_id = url.searchParams.get('bitacora_id');
+      const estado = url.searchParams.get('estado');
+      const db = await getDB();
+      const reqQ = db.request();
+      let where = ['1=1'];
+      if (planta_id) { reqQ.input('planta_id', sql.VarChar(10), planta_id); where.push('r.planta_id = @planta_id'); }
+      if (bitacora_id) { reqQ.input('bitacora_id', sql.Int, parseInt(bitacora_id, 10)); where.push('r.bitacora_id = @bitacora_id'); }
+      if (estado) { reqQ.input('estado', sql.VarChar(20), estado); where.push('r.estado = @estado'); }
+      const result = await reqQ.query(`
+        SELECT r.*,
+               b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo,
+               te.nombre AS tipo_evento_nombre,
+               ing.nombre_completo AS ingeniero_nombre,
+               jdt.nombre_completo AS jdt_nombre,
+               jf.nombre_completo AS jefe_nombre
+        FROM bitacora.registro_activo r
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
+        INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = r.tipo_evento_id
+        INNER JOIN lov_bit.usuario ing ON ing.usuario_id = r.ingeniero_id
+        LEFT JOIN lov_bit.usuario jdt ON jdt.usuario_id = r.jdt_turno_id
+        INNER JOIN lov_bit.usuario jf ON jf.usuario_id = r.jefe_id
+        WHERE ${where.join(' AND ')}
+        ORDER BY r.fecha_evento DESC
+      `);
+      return sendJSON(res, 200, { registros: result.recordset });
+    }
+
+    // POST /api/registros
+    if (pathname === '/api/registros' && method === 'POST') {
+      const body = await parseBody(req);
+      const { bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id, ingeniero_id } = body;
+      if (!bitacora_id || !planta_id || !fecha_evento || !turno || !tipo_evento_id || !ingeniero_id || !detalle) {
+        return sendJSON(res, 400, { error: 'Campos requeridos faltantes (detalle, fecha_evento, turno, bitacora_id, planta_id, tipo_evento_id, ingeniero_id)' });
+      }
+      const db = await getDB();
+
+      // Resolver JdT
+      const jdtSesion = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .query(`
+          SELECT TOP 1 s.usuario_id
+          FROM bitacora.sesion_activa s
+          INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
+          WHERE s.planta_id = @planta_id AND s.activa = 1 AND c.nombre = 'Jefe de Turno'
+          ORDER BY s.inicio_sesion DESC
+        `);
+      let jdt_turno_id = jdtSesion.recordset[0]?.usuario_id || null;
+      if (!jdt_turno_id) {
+        const fallback = await db.request().query(`
+          SELECT TOP 1 usuario_id FROM lov_bit.usuario WHERE es_jdt_default = 1 AND activo = 1
+        `);
+        jdt_turno_id = fallback.recordset[0]?.usuario_id || null;
+      }
+
+      // Resolver jefe
+      const jefeRes = await db.request().query(`
+        SELECT TOP 1 usuario_id FROM lov_bit.usuario WHERE es_jefe_planta = 1 AND activo = 1
+      `);
+      const jefe_id = jefeRes.recordset[0]?.usuario_id;
+      if (!jefe_id) return sendJSON(res, 500, { error: 'No hay jefe de planta configurado' });
+
+      const camposStr = campos_extra ? (typeof campos_extra === 'string' ? campos_extra : JSON.stringify(campos_extra)) : null;
+
+      const ins = await db.request()
+        .input('bitacora_id', sql.Int, bitacora_id)
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .input('fecha_evento', sql.DateTime2, new Date(fecha_evento))
+        .input('turno', sql.TinyInt, turno)
+        .input('detalle', sql.NVarChar(sql.MAX), detalle)
+        .input('campos_extra', sql.NVarChar(sql.MAX), camposStr)
+        .input('tipo_evento_id', sql.Int, tipo_evento_id)
+        .input('ingeniero_id', sql.Int, ingeniero_id)
+        .input('jdt_turno_id', sql.Int, jdt_turno_id)
+        .input('jefe_id', sql.Int, jefe_id)
+        .query(`
+          INSERT INTO bitacora.registro_activo
+            (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+             estado, ingeniero_id, jdt_turno_id, jefe_id, creado_por)
+          OUTPUT INSERTED.*
+          VALUES (@bitacora_id, @planta_id, @fecha_evento, @turno, @detalle, @campos_extra, @tipo_evento_id,
+                  'borrador', @ingeniero_id, @jdt_turno_id, @jefe_id, @ingeniero_id)
+        `);
+      const registro = ins.recordset[0];
+
+      // Lógica especial AUTH
+      const bitRes = await db.request()
+        .input('bitacora_id', sql.Int, bitacora_id)
+        .query(`SELECT codigo FROM lov_bit.bitacora WHERE bitacora_id = @bitacora_id`);
+      if (bitRes.recordset[0]?.codigo === 'AUTH' && camposStr) {
+        try {
+          const parsed = JSON.parse(camposStr);
+          const periodo = parsed.periodo;
+          const valor = parsed.valor_autorizado_mw;
+          if (periodo && valor != null) {
+            await db.request()
+              .input('registro_origen_id', sql.Int, registro.registro_id)
+              .input('planta_id', sql.VarChar(10), planta_id)
+              .input('fecha', sql.Date, new Date(fecha_evento))
+              .input('periodo', sql.TinyInt, periodo)
+              .input('valor', sql.Float, valor)
+              .input('jdt_id', sql.Int, jdt_turno_id)
+              .input('jefe_id', sql.Int, jefe_id)
+              .query(`
+                INSERT INTO bitacora.autorizacion_dashboard
+                  (registro_origen_id, planta_id, fecha, periodo, valor_autorizado_mw, jdt_id, jefe_id)
+                VALUES (@registro_origen_id, @planta_id, @fecha, @periodo, @valor, @jdt_id, @jefe_id)
+              `);
+          }
+        } catch (e) {
+          console.error('[AUTH] Error parseando campos_extra:', e);
+        }
+      }
+
+      return sendJSON(res, 201, { registro });
+    }
+
+    // PUT /api/registros/:id
+    const putMatch = pathname.match(/^\/api\/registros\/(\d+)$/);
+    if (putMatch && method === 'PUT') {
+      const registro_id = parseInt(putMatch[1], 10);
+      const body = await parseBody(req);
+      const { detalle, turno, fecha_evento, campos_extra, tipo_evento_id, modificado_por } = body;
+      if (!modificado_por) return sendJSON(res, 400, { error: 'modificado_por es requerido' });
+
+      const db = await getDB();
+      const check = await db.request()
+        .input('registro_id', sql.Int, registro_id)
+        .query(`SELECT estado FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
+      if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
+      if (check.recordset[0].estado !== 'borrador') {
+        return sendJSON(res, 409, { error: 'Solo se pueden editar registros en borrador' });
+      }
+
+      const camposStr = campos_extra ? (typeof campos_extra === 'string' ? campos_extra : JSON.stringify(campos_extra)) : null;
+
+      const upd = await db.request()
+        .input('registro_id', sql.Int, registro_id)
+        .input('detalle', sql.NVarChar(sql.MAX), detalle ?? null)
+        .input('turno', sql.TinyInt, turno)
+        .input('fecha_evento', sql.DateTime2, fecha_evento ? new Date(fecha_evento) : null)
+        .input('campos_extra', sql.NVarChar(sql.MAX), camposStr)
+        .input('tipo_evento_id', sql.Int, tipo_evento_id)
+        .input('modificado_por', sql.Int, modificado_por)
+        .query(`
+          UPDATE bitacora.registro_activo
+          SET detalle = COALESCE(@detalle, detalle),
+              turno = COALESCE(@turno, turno),
+              fecha_evento = COALESCE(@fecha_evento, fecha_evento),
+              campos_extra = COALESCE(@campos_extra, campos_extra),
+              tipo_evento_id = COALESCE(@tipo_evento_id, tipo_evento_id),
+              modificado_por = @modificado_por,
+              modificado_en = SYSUTCDATETIME()
+          OUTPUT INSERTED.*
+          WHERE registro_id = @registro_id AND estado = 'borrador'
+        `);
+      return sendJSON(res, 200, { registro: upd.recordset[0] });
+    }
+
+    // POST /api/cierre/bitacora
+    if (pathname === '/api/cierre/bitacora' && method === 'POST') {
+      const { bitacora_id, planta_id, cerrado_por } = await parseBody(req);
+      if (!bitacora_id || !planta_id || !cerrado_por) {
+        return sendJSON(res, 400, { error: 'bitacora_id, planta_id y cerrado_por son requeridos' });
+      }
+      const pool = await getDB();
+      const transaction = new sql.Transaction(pool);
+      await transaction.begin();
+      try {
+        const insReq = new sql.Request(transaction);
+        const insResult = await insReq
+          .input('bitacora_id', sql.Int, bitacora_id)
+          .input('planta_id', sql.VarChar(10), planta_id)
+          .input('cerrado_por', sql.Int, cerrado_por)
+          .query(`
+            INSERT INTO bitacora.registro_historico
+              (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+               estado, ingeniero_id, jdt_turno_id, jefe_id, creado_por, creado_en,
+               modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
+            SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+                   'cerrado', ingeniero_id, jdt_turno_id, jefe_id, creado_por, creado_en,
+                   modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE)
+            FROM bitacora.registro_activo
+            WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
+          `);
+
+        const delReq = new sql.Request(transaction);
+        await delReq
+          .input('bitacora_id', sql.Int, bitacora_id)
+          .input('planta_id', sql.VarChar(10), planta_id)
+          .query(`
+            DELETE FROM bitacora.registro_activo
+            WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
+          `);
+
+        await transaction.commit();
+        return sendJSON(res, 200, { registros_cerrados: insResult.rowsAffected[0] || 0 });
+      } catch (err) {
+        await transaction.rollback();
+        throw err;
+      }
+    }
+
+    // POST /api/cierre/masivo
+    if (pathname === '/api/cierre/masivo' && method === 'POST') {
+      const { planta_id, cerrado_por } = await parseBody(req);
+      if (!planta_id || !cerrado_por) {
+        return sendJSON(res, 400, { error: 'planta_id y cerrado_por son requeridos' });
+      }
+      const pool = await getDB();
+      const listRes = await pool.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .query(`
+          SELECT DISTINCT bitacora_id
+          FROM bitacora.registro_activo
+          WHERE planta_id = @planta_id AND estado = 'borrador'
+        `);
+
+      const resumen = [];
+      for (const row of listRes.recordset) {
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+        try {
+          const insReq = new sql.Request(transaction);
+          const insResult = await insReq
+            .input('bitacora_id', sql.Int, row.bitacora_id)
+            .input('planta_id', sql.VarChar(10), planta_id)
+            .input('cerrado_por', sql.Int, cerrado_por)
+            .query(`
+              INSERT INTO bitacora.registro_historico
+                (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+                 estado, ingeniero_id, jdt_turno_id, jefe_id, creado_por, creado_en,
+                 modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
+              SELECT bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+                     'cerrado', ingeniero_id, jdt_turno_id, jefe_id, creado_por, creado_en,
+                     modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE)
+              FROM bitacora.registro_activo
+              WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
+            `);
+          const delReq = new sql.Request(transaction);
+          await delReq
+            .input('bitacora_id', sql.Int, row.bitacora_id)
+            .input('planta_id', sql.VarChar(10), planta_id)
+            .query(`
+              DELETE FROM bitacora.registro_activo
+              WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
+            `);
+          await transaction.commit();
+          resumen.push({ bitacora_id: row.bitacora_id, registros_cerrados: insResult.rowsAffected[0] || 0 });
+        } catch (err) {
+          await transaction.rollback();
+          resumen.push({ bitacora_id: row.bitacora_id, error: err.message });
+        }
+      }
+      return sendJSON(res, 200, { resumen });
+    }
+
+    // DELETE /api/registros/:id
+    const delMatch = pathname.match(/^\/api\/registros\/(\d+)$/);
+    if (delMatch && method === 'DELETE') {
+      const registro_id = parseInt(delMatch[1], 10);
+      const db = await getDB();
+      const check = await db.request()
+        .input('registro_id', sql.Int, registro_id)
+        .query(`SELECT estado FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
+      if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
+      if (check.recordset[0].estado !== 'borrador') {
+        return sendJSON(res, 409, { error: 'Solo se pueden eliminar registros en borrador' });
+      }
+
+      await db.request()
+        .input('registro_id', sql.Int, registro_id)
+        .query(`
+          UPDATE bitacora.autorizacion_dashboard SET activa = 0 WHERE registro_origen_id = @registro_id;
+          DELETE FROM bitacora.registro_activo WHERE registro_id = @registro_id AND estado = 'borrador';
+        `);
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // GET /api/historicos/resumen?planta_id=&fecha=
+    if (pathname === '/api/historicos/resumen' && method === 'GET') {
+      const planta_id = url.searchParams.get('planta_id');
+      const fecha = url.searchParams.get('fecha');
+      if (!planta_id || !fecha) {
+        return sendJSON(res, 400, { error: 'planta_id y fecha son requeridos' });
+      }
+      const db = await getDB();
+      const result = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .input('fecha', sql.Date, new Date(fecha))
+        .query(`
+          SELECT b.bitacora_id, b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo,
+                 COUNT(h.registro_id) AS total_registros,
+                 MAX(h.cerrado_en) AS fecha_cierre
+          FROM lov_bit.bitacora b
+          LEFT JOIN bitacora.registro_historico h
+            ON h.bitacora_id = b.bitacora_id
+           AND h.planta_id = @planta_id
+           AND h.fecha_cierre_operativo = @fecha
+          WHERE b.activa = 1
+          GROUP BY b.bitacora_id, b.nombre, b.codigo, b.orden
+          HAVING COUNT(h.registro_id) > 0
+          ORDER BY b.orden
+        `);
+      return sendJSON(res, 200, { resumen: result.recordset });
+    }
+
+    // GET /api/historicos/:id
+    const histIdMatch = pathname.match(/^\/api\/historicos\/(\d+)$/);
+    if (histIdMatch && method === 'GET') {
+      const registro_id = parseInt(histIdMatch[1], 10);
+      const db = await getDB();
+      const result = await db.request()
+        .input('registro_id', sql.Int, registro_id)
+        .query(`SELECT * FROM bitacora.v_historico_busqueda WHERE registro_id = @registro_id`);
+      if (result.recordset.length === 0) {
+        return sendJSON(res, 404, { error: 'Histórico no encontrado' });
+      }
+      return sendJSON(res, 200, { registro: result.recordset[0] });
+    }
+
+    // GET /api/historicos?filtros&page&limit
+    if (pathname === '/api/historicos' && method === 'GET') {
+      const params = url.searchParams;
+      const page = Math.max(1, parseInt(params.get('page') || '1', 10));
+      const limit = Math.min(500, Math.max(1, parseInt(params.get('limit') || '50', 10)));
+      const offset = (page - 1) * limit;
+
+      const db = await getDB();
+      const where = ['1=1'];
+      const reqData = db.request();
+      const reqCount = db.request();
+      const addInput = (name, type, value) => { reqData.input(name, type, value); reqCount.input(name, type, value); };
+
+      if (params.get('planta_id')) { addInput('planta_id', sql.VarChar(10), params.get('planta_id')); where.push('planta_id = @planta_id'); }
+      if (params.get('bitacora_id')) { addInput('bitacora_id', sql.Int, parseInt(params.get('bitacora_id'), 10)); where.push('bitacora_id = @bitacora_id'); }
+      if (params.get('ingeniero_id')) { addInput('ingeniero_id', sql.Int, parseInt(params.get('ingeniero_id'), 10)); where.push('ingeniero_id = @ingeniero_id'); }
+      if (params.get('turno')) { addInput('turno', sql.TinyInt, parseInt(params.get('turno'), 10)); where.push('turno = @turno'); }
+      if (params.get('tipo_evento_id')) { addInput('tipo_evento_id', sql.Int, parseInt(params.get('tipo_evento_id'), 10)); where.push('tipo_evento_id = @tipo_evento_id'); }
+      if (params.get('fecha_desde')) { addInput('fecha_desde', sql.Date, new Date(params.get('fecha_desde'))); where.push('fecha_cierre_operativo >= @fecha_desde'); }
+      if (params.get('fecha_hasta')) { addInput('fecha_hasta', sql.Date, new Date(params.get('fecha_hasta'))); where.push('fecha_cierre_operativo <= @fecha_hasta'); }
+      if (params.get('busqueda')) { addInput('busqueda', sql.NVarChar(200), params.get('busqueda')); where.push("detalle LIKE '%' + @busqueda + '%'"); }
+
+      const whereSql = where.join(' AND ');
+      reqData.input('offset', sql.Int, offset).input('limit', sql.Int, limit);
+
+      const dataResult = await reqData.query(`
+        SELECT *
+        FROM bitacora.v_historico_busqueda
+        WHERE ${whereSql}
+        ORDER BY fecha_cierre_operativo DESC, fecha_evento DESC
+        OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
+      `);
+      const countResult = await reqCount.query(`
+        SELECT COUNT(*) AS total FROM bitacora.v_historico_busqueda WHERE ${whereSql}
+      `);
+
+      return sendJSON(res, 200, {
+        data: dataResult.recordset,
+        total: countResult.recordset[0].total,
+        page,
+        limit,
+      });
+    }
+
+    // GET /api/autorizaciones?planta_id=&fecha=
+    if (pathname === '/api/autorizaciones' && method === 'GET') {
+      const planta_id = url.searchParams.get('planta_id');
+      const fecha = url.searchParams.get('fecha');
+      if (!planta_id || !fecha) {
+        return sendJSON(res, 400, { error: 'planta_id y fecha son requeridos' });
+      }
+      const db = await getDB();
+      const result = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .input('fecha', sql.Date, new Date(fecha))
+        .query(`
+          SELECT a.autorizacion_id, a.registro_origen_id, a.planta_id, a.fecha, a.periodo,
+                 a.valor_autorizado_mw, a.jdt_id, a.jefe_id, a.activa, a.creado_en,
+                 jdt.nombre_completo AS jdt_nombre,
+                 jf.nombre_completo AS jefe_nombre
+          FROM bitacora.autorizacion_dashboard a
+          INNER JOIN lov_bit.usuario jdt ON jdt.usuario_id = a.jdt_id
+          INNER JOIN lov_bit.usuario jf ON jf.usuario_id = a.jefe_id
+          WHERE a.planta_id = @planta_id AND a.fecha = @fecha AND a.activa = 1
+          ORDER BY a.periodo
+        `);
+      return sendJSON(res, 200, { autorizaciones: result.recordset });
+    }
+
+    // GET /api/autorizaciones/:planta_id/:fecha/:periodo
+    const authLookup = pathname.match(/^\/api\/autorizaciones\/([^/]+)\/([0-9]{4}-[0-9]{2}-[0-9]{2})\/(\d+)$/);
+    if (authLookup && method === 'GET') {
+      const [, planta_id, fecha, periodoStr] = authLookup;
+      const db = await getDB();
+      const result = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .input('fecha', sql.Date, new Date(fecha))
+        .input('periodo', sql.TinyInt, parseInt(periodoStr, 10))
+        .query(`
+          SELECT a.*, jdt.nombre_completo AS jdt_nombre, jf.nombre_completo AS jefe_nombre
+          FROM bitacora.autorizacion_dashboard a
+          INNER JOIN lov_bit.usuario jdt ON jdt.usuario_id = a.jdt_id
+          INNER JOIN lov_bit.usuario jf ON jf.usuario_id = a.jefe_id
+          WHERE a.planta_id = @planta_id AND a.fecha = @fecha
+            AND a.periodo = @periodo AND a.activa = 1
+        `);
+      if (result.recordset.length === 0) {
+        return sendJSON(res, 404, { error: 'Autorización no encontrada' });
+      }
+      return sendJSON(res, 200, { autorizacion: result.recordset[0] });
+    }
+
+    // DELETE /api/autorizaciones/:id
+    const authDel = pathname.match(/^\/api\/autorizaciones\/(\d+)$/);
+    if (authDel && method === 'DELETE') {
+      const autorizacion_id = parseInt(authDel[1], 10);
+      const db = await getDB();
+      const result = await db.request()
+        .input('autorizacion_id', sql.Int, autorizacion_id)
+        .query(`
+          UPDATE bitacora.autorizacion_dashboard
+          SET activa = 0
+          WHERE autorizacion_id = @autorizacion_id
+        `);
+      if (!result.rowsAffected[0]) {
+        return sendJSON(res, 404, { error: 'Autorización no encontrada' });
+      }
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    sendJSON(res, 404, { error: 'Not Found' });
+  } catch (err) {
+    console.error('[ERROR]', err);
+    sendJSON(res, 500, { error: err.message });
+  }
+});
+
+initDB()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`[SERVER] Escuchando en puerto ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('[DB] Error de conexión:', err);
+    process.exit(1);
+  });
