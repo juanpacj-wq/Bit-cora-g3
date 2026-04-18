@@ -95,6 +95,27 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true });
     }
 
+    // POST /api/auth/resume  (reactiva tras un beacon de logout por reload)
+    if (pathname === '/api/auth/resume' && method === 'POST') {
+      const { sesion_id } = await parseBody(req);
+      if (!sesion_id) {
+        return sendJSON(res, 400, { error: 'sesion_id es requerido' });
+      }
+      const db = await getDB();
+      const result = await db.request()
+        .input('sesion_id', sql.Int, sesion_id)
+        .query(`
+          UPDATE bitacora.sesion_activa
+          SET activa = 1, ultima_actividad = GETDATE()
+          WHERE sesion_id = @sesion_id
+            AND ultima_actividad > DATEADD(MINUTE, -5, GETDATE())
+        `);
+      if (!result.rowsAffected[0]) {
+        return sendJSON(res, 404, { error: 'Sesión expirada' });
+      }
+      return sendJSON(res, 200, { ok: true });
+    }
+
     // POST /api/auth/heartbeat
     if (pathname === '/api/auth/heartbeat' && method === 'POST') {
       const { sesion_id } = await parseBody(req);
