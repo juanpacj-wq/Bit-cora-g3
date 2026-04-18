@@ -1,0 +1,14 @@
+{
+  "name": "bitacoras-server",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node --env-file=../.env --watch server.js",
+    "start": "node --env-file=../.env server.js"
+  },
+  "dependencies": {
+    "mssql": "^11.0.1",
+    "ws": "^8.18.0"
+  }
+}
