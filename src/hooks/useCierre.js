@@ -23,5 +23,12 @@ export function useCierre() {
     } finally { setLoading(false); }
   }, []);
 
-  return { loading, error, cerrarBitacora, cierreMasivo };
+  const previewCierre = useCallback(async (planta_id, bitacora_id) => {
+    const qs = new URLSearchParams({ planta_id });
+    if (bitacora_id != null) qs.set('bitacora_id', String(bitacora_id));
+    const { preview } = await api.get(`/api/cierre/preview?${qs}`);
+    return preview || [];
+  }, []);
+
+  return { loading, error, cerrarBitacora, cierreMasivo, previewCierre };
 }

@@ -829,11 +829,17 @@ export default function App() {
     });
   }, [registrosHook, sesion, activeBitacora, showToast]);
 
-  const handleCerrarTurno = useCallback(() => {
+  const handleCerrarTurno = useCallback(async () => {
     const bit = bitacorasPermitidas.find((b) => b.bitacora_id === activeBitacora);
+    let incompletos = 0;
+    try {
+      const preview = await cierre.previewCierre(sesion.planta_id, activeBitacora);
+      incompletos = preview.reduce((acc, p) => acc + (p.incompletos || 0), 0);
+    } catch {}
+    const aviso = incompletos > 0 ? `\n\n⚠ ${incompletos} registro(s) sin detalle se cerrarán igualmente.` : "";
     setModal({
       title: "Cerrar turno",
-      message: `¿Cerrar la bitácora "${bit?.nombre}"? Los registros se moverán al histórico y no podrán editarse.`,
+      message: `¿Cerrar la bitácora "${bit?.nombre}"? Los registros se moverán al histórico y no podrán editarse.${aviso}`,
       confirmLabel: "Cerrar turno", confirmColor: "blue", icon: Lock,
       onConfirm: async () => {
         try {
@@ -846,7 +852,7 @@ export default function App() {
         }
       },
     });
-  }, [bitacorasPermitidas, activeBitacora, sesion, user, cierre, registrosHook, showToast]);
+  }, [bitacorasPermitidas, activeBitacora, sesion, cierre, registrosHook, showToast]);
 
   const handleLogout = useCallback(async () => {
     await auth.logout();
