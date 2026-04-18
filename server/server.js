@@ -2,11 +2,12 @@ import http from 'http';
 import sql from 'mssql';
 import { initDB, getDB } from './db.js';
 import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
-import { getTurnoColombia } from './utils/turno.js';
+import { getTurnoColombia, periodoFromFechaBogota } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
 import { hasPermisoBitacora, isJdT, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
 import { findAutorizacion, upsertAutorizacion, hasNotificarDashboard } from './utils/notificador.js';
+import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from './utils/snapshots.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
 
@@ -267,15 +268,12 @@ const server = http.createServer(async (req, res) => {
         SELECT r.*,
                b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo,
                te.nombre AS tipo_evento_nombre,
-               ing.nombre_completo AS ingeniero_nombre,
-               jdt.nombre_completo AS jdt_nombre,
-               jf.nombre_completo AS jefe_nombre
+               autor.nombre_completo AS creado_por_nombre,
+               r.creado_por AS creado_por_id
         FROM bitacora.registro_activo r
         INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
         INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = r.tipo_evento_id
-        INNER JOIN lov_bit.usuario ing ON ing.usuario_id = r.ingeniero_id
-        LEFT JOIN lov_bit.usuario jdt ON jdt.usuario_id = r.jdt_turno_id
-        INNER JOIN lov_bit.usuario jf ON jf.usuario_id = r.jefe_id
+        LEFT JOIN lov_bit.usuario autor ON autor.usuario_id = r.creado_por
         WHERE ${where.join(' AND ')}
         ORDER BY r.fecha_evento ASC
       `);
@@ -300,7 +298,7 @@ const server = http.createServer(async (req, res) => {
       if (new Date(fecha_evento).getTime() - Date.now() > 5 * 60 * 1000) {
         return sendJSON(res, 400, { error: 'fecha_evento no puede estar más de 5 min en el futuro' });
       }
-      const ingeniero_id = sesion.usuario_id;
+      const creado_por = sesion.usuario_id;
       const db = await getDB();
 
       const teCheck = await db.request()
@@ -322,40 +320,28 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 400, { error: 'campos_extra inválido', detalles: validation.errors });
       }
       const camposFinal = validation.definicion ? computeCamposAuto(validation.definicion, validation.data) : validation.data;
-      const camposStrValidated = camposFinal ? JSON.stringify(camposFinal) : null;
-
-      // Resolver JdT
-      const jdtSesion = await db.request()
-        .input('planta_id', sql.VarChar(10), planta_id)
-        .query(`
-          SELECT TOP 1 s.usuario_id
-          FROM bitacora.sesion_activa s
-          INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
-          WHERE s.planta_id = @planta_id AND s.activa = 1 AND c.nombre = 'Jefe de Turno'
-          ORDER BY s.inicio_sesion DESC
-        `);
-      let jdt_turno_id = jdtSesion.recordset[0]?.usuario_id || null;
-      if (!jdt_turno_id) {
-        const fallback = await db.request().query(`
-          SELECT TOP 1 usuario_id FROM lov_bit.usuario WHERE es_jdt_default = 1 AND activo = 1
-        `);
-        jdt_turno_id = fallback.recordset[0]?.usuario_id || null;
+      if (camposFinal && hasNotificarDashboard(bit.definicion_campos)) {
+        camposFinal.periodo = periodoFromFechaBogota(fecha_evento);
       }
+      const camposStr = camposFinal ? JSON.stringify(camposFinal) : null;
 
-      // Resolver jefe
-      const jefeRes = await db.request().query(`
-        SELECT TOP 1 usuario_id FROM lov_bit.usuario WHERE es_jefe_planta = 1 AND activo = 1
-      `);
-      const jefe_id = jefeRes.recordset[0]?.usuario_id;
-      if (!jefe_id) return sendJSON(res, 500, { error: 'No hay jefe de planta configurado' });
-
-      const camposStr = camposStrValidated;
       const notificar = hasNotificarDashboard(bit.definicion_campos);
       const fechaEventoDate = new Date(fecha_evento);
 
       const transaction = new sql.Transaction(db);
       await transaction.begin();
       try {
+        const reqFactory = () => new sql.Request(transaction);
+        const [jdts_snapshot, jefes_snapshot, ingenieros_snapshot] = await Promise.all([
+          snapshotJDTs(reqFactory, { planta_id }),
+          snapshotJefes(reqFactory),
+          snapshotIngenieros(reqFactory, { planta_id, bitacora_id }),
+        ]);
+        if (jefes_snapshot === '[]') {
+          await transaction.rollback();
+          return sendJSON(res, 500, { error: 'No hay jefe de planta activo' });
+        }
+
         if (notificar && camposFinal) {
           const periodo = camposFinal.periodo;
           const valor = camposFinal.valor_autorizado_mw;
@@ -381,16 +367,17 @@ const server = http.createServer(async (req, res) => {
           .input('detalle', sql.NVarChar(sql.MAX), detalle)
           .input('campos_extra', sql.NVarChar(sql.MAX), camposStr)
           .input('tipo_evento_id', sql.Int, tipo_evento_id)
-          .input('ingeniero_id', sql.Int, ingeniero_id)
-          .input('jdt_turno_id', sql.Int, jdt_turno_id)
-          .input('jefe_id', sql.Int, jefe_id)
+          .input('ingenieros_snapshot', sql.NVarChar(sql.MAX), ingenieros_snapshot)
+          .input('jdts_snapshot', sql.NVarChar(sql.MAX), jdts_snapshot)
+          .input('jefes_snapshot', sql.NVarChar(sql.MAX), jefes_snapshot)
+          .input('creado_por', sql.Int, creado_por)
           .query(`
             INSERT INTO bitacora.registro_activo
               (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-               estado, ingeniero_id, jdt_turno_id, jefe_id, creado_por)
+               estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
             OUTPUT INSERTED.*
             VALUES (@bitacora_id, @planta_id, @fecha_evento, @turno, @detalle, @campos_extra, @tipo_evento_id,
-                    'borrador', @ingeniero_id, @jdt_turno_id, @jefe_id, @ingeniero_id)
+                    'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por)
           `);
         const registro = ins.recordset[0];
 
@@ -403,8 +390,8 @@ const server = http.createServer(async (req, res) => {
               fecha: fechaEventoDate,
               periodo,
               valor,
-              jdt_id: jdt_turno_id,
-              jefe_id,
+              jdts_snapshot,
+              jefes_snapshot,
               registro_origen_id: registro.registro_id,
             });
           }
@@ -430,7 +417,7 @@ const server = http.createServer(async (req, res) => {
       const db = await getDB();
       const check = await db.request()
         .input('registro_id', sql.Int, registro_id)
-        .query(`SELECT registro_id, estado, bitacora_id, planta_id, ingeniero_id FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
+        .query(`SELECT registro_id, estado, bitacora_id, planta_id, creado_por, fecha_evento FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
       if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
       const reg = check.recordset[0];
       if (reg.estado !== 'borrador') {
@@ -458,11 +445,16 @@ const server = http.createServer(async (req, res) => {
         const bitRes = await db.request()
           .input('bitacora_id', sql.Int, reg.bitacora_id)
           .query(`SELECT definicion_campos FROM lov_bit.bitacora WHERE bitacora_id = @bitacora_id`);
-        const validation = validateCamposExtra(bitRes.recordset[0]?.definicion_campos, campos_extra);
+        const definicionCampos = bitRes.recordset[0]?.definicion_campos;
+        const validation = validateCamposExtra(definicionCampos, campos_extra);
         if (!validation.ok) {
           return sendJSON(res, 400, { error: 'campos_extra inválido', detalles: validation.errors });
         }
         const camposFinal = validation.definicion ? computeCamposAuto(validation.definicion, validation.data) : validation.data;
+        if (camposFinal && hasNotificarDashboard(definicionCampos)) {
+          const fechaEfectiva = fecha_evento ? new Date(fecha_evento) : reg.fecha_evento;
+          camposFinal.periodo = periodoFromFechaBogota(fechaEfectiva);
+        }
         camposStr = camposFinal ? JSON.stringify(camposFinal) : null;
       }
 
@@ -541,10 +533,10 @@ const server = http.createServer(async (req, res) => {
           .query(`
             INSERT INTO bitacora.registro_historico
               (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-               estado, ingeniero_id, jdt_turno_id, jefe_id, creado_por, creado_en,
+               estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
                modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
             SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-                   'cerrado', ingeniero_id, jdt_turno_id, jefe_id, creado_por, creado_en,
+                   'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
                    modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE)
             FROM bitacora.registro_activo
             WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
@@ -602,11 +594,11 @@ const server = http.createServer(async (req, res) => {
             .input('cerrado_por', sql.Int, cerrado_por)
             .query(`
               INSERT INTO bitacora.registro_historico
-                (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-                 estado, ingeniero_id, jdt_turno_id, jefe_id, creado_por, creado_en,
+                (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+                 estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
                  modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
-              SELECT bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-                     'cerrado', ingeniero_id, jdt_turno_id, jefe_id, creado_por, creado_en,
+              SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+                     'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
                      modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE)
               FROM bitacora.registro_activo
               WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
@@ -638,7 +630,7 @@ const server = http.createServer(async (req, res) => {
       const db = await getDB();
       const check = await db.request()
         .input('registro_id', sql.Int, registro_id)
-        .query(`SELECT registro_id, estado, bitacora_id, planta_id, ingeniero_id FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
+        .query(`SELECT registro_id, estado, bitacora_id, planta_id, creado_por FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
       if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
       const reg = check.recordset[0];
       if (reg.estado !== 'borrador') {
@@ -714,7 +706,7 @@ const server = http.createServer(async (req, res) => {
 
       if (params.get('planta_id')) { addInput('planta_id', sql.VarChar(10), params.get('planta_id')); where.push('planta_id = @planta_id'); }
       if (params.get('bitacora_id')) { addInput('bitacora_id', sql.Int, parseInt(params.get('bitacora_id'), 10)); where.push('bitacora_id = @bitacora_id'); }
-      if (params.get('ingeniero_id')) { addInput('ingeniero_id', sql.Int, parseInt(params.get('ingeniero_id'), 10)); where.push('ingeniero_id = @ingeniero_id'); }
+      if (params.get('creado_por_id')) { addInput('creado_por_id', sql.Int, parseInt(params.get('creado_por_id'), 10)); where.push('creado_por_id = @creado_por_id'); }
       if (params.get('turno')) { addInput('turno', sql.TinyInt, parseInt(params.get('turno'), 10)); where.push('turno = @turno'); }
       if (params.get('tipo_evento_id')) { addInput('tipo_evento_id', sql.Int, parseInt(params.get('tipo_evento_id'), 10)); where.push('tipo_evento_id = @tipo_evento_id'); }
       if (params.get('fecha_desde')) { addInput('fecha_desde', sql.Date, new Date(params.get('fecha_desde'))); where.push('fecha_cierre_operativo >= @fecha_desde'); }
@@ -756,12 +748,8 @@ const server = http.createServer(async (req, res) => {
         .input('fecha', sql.Date, new Date(fecha))
         .query(`
           SELECT a.autorizacion_id, a.registro_origen_id, a.planta_id, a.fecha, a.periodo,
-                 a.valor_autorizado_mw, a.jdt_id, a.jefe_id, a.activa, a.creado_en,
-                 jdt.nombre_completo AS jdt_nombre,
-                 jf.nombre_completo AS jefe_nombre
+                 a.valor_autorizado_mw, a.jdts_snapshot, a.jefes_snapshot, a.activa, a.creado_en
           FROM bitacora.autorizacion_dashboard a
-          INNER JOIN lov_bit.usuario jdt ON jdt.usuario_id = a.jdt_id
-          INNER JOIN lov_bit.usuario jf ON jf.usuario_id = a.jefe_id
           WHERE a.planta_id = @planta_id AND a.fecha = @fecha AND a.activa = 1
           ORDER BY a.periodo
         `);
@@ -778,10 +766,8 @@ const server = http.createServer(async (req, res) => {
         .input('fecha', sql.Date, new Date(fecha))
         .input('periodo', sql.TinyInt, parseInt(periodoStr, 10))
         .query(`
-          SELECT a.*, jdt.nombre_completo AS jdt_nombre, jf.nombre_completo AS jefe_nombre
+          SELECT a.*
           FROM bitacora.autorizacion_dashboard a
-          INNER JOIN lov_bit.usuario jdt ON jdt.usuario_id = a.jdt_id
-          INNER JOIN lov_bit.usuario jf ON jf.usuario_id = a.jefe_id
           WHERE a.planta_id = @planta_id AND a.fecha = @fecha
             AND a.periodo = @periodo AND a.activa = 1
         `);

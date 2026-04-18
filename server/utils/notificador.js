@@ -25,7 +25,7 @@ export async function findAutorizacion(transaction, { planta_id, fecha, periodo 
   return existente.recordset[0] || null;
 }
 
-export async function upsertAutorizacion(transaction, { planta_id, fecha, periodo, valor, jdt_id, jefe_id, registro_origen_id }) {
+export async function upsertAutorizacion(transaction, { planta_id, fecha, periodo, valor, jdts_snapshot, jefes_snapshot, registro_origen_id }) {
   const row = await findAutorizacion(transaction, { planta_id, fecha, periodo });
 
   if (row && row.activa) {
@@ -36,15 +36,15 @@ export async function upsertAutorizacion(transaction, { planta_id, fecha, period
     await new sql.Request(transaction)
       .input('id', sql.Int, row.autorizacion_id)
       .input('valor', sql.Float, valor)
-      .input('jdt_id', sql.Int, jdt_id)
-      .input('jefe_id', sql.Int, jefe_id)
+      .input('jdts_snapshot', sql.NVarChar(sql.MAX), jdts_snapshot)
+      .input('jefes_snapshot', sql.NVarChar(sql.MAX), jefes_snapshot)
       .input('origen', sql.Int, registro_origen_id)
       .query(`
         UPDATE bitacora.autorizacion_dashboard
         SET activa = 1,
             valor_autorizado_mw = @valor,
-            jdt_id = @jdt_id,
-            jefe_id = @jefe_id,
+            jdts_snapshot = @jdts_snapshot,
+            jefes_snapshot = @jefes_snapshot,
             registro_origen_id = @origen,
             creado_en = GETDATE()
         WHERE autorizacion_id = @id
@@ -58,13 +58,13 @@ export async function upsertAutorizacion(transaction, { planta_id, fecha, period
     .input('fecha', sql.Date, fecha)
     .input('periodo', sql.TinyInt, periodo)
     .input('valor', sql.Float, valor)
-    .input('jdt_id', sql.Int, jdt_id)
-    .input('jefe_id', sql.Int, jefe_id)
+    .input('jdts_snapshot', sql.NVarChar(sql.MAX), jdts_snapshot)
+    .input('jefes_snapshot', sql.NVarChar(sql.MAX), jefes_snapshot)
     .query(`
       INSERT INTO bitacora.autorizacion_dashboard
-        (registro_origen_id, planta_id, fecha, periodo, valor_autorizado_mw, jdt_id, jefe_id)
+        (registro_origen_id, planta_id, fecha, periodo, valor_autorizado_mw, jdts_snapshot, jefes_snapshot)
       OUTPUT INSERTED.autorizacion_id
-      VALUES (@origen, @planta_id, @fecha, @periodo, @valor, @jdt_id, @jefe_id)
+      VALUES (@origen, @planta_id, @fecha, @periodo, @valor, @jdts_snapshot, @jefes_snapshot)
     `);
   return { inserted: true, autorizacion_id: ins.recordset[0].autorizacion_id };
 }
