@@ -782,7 +782,6 @@ export default function App() {
           turno: reg.turno,
           detalle: reg.detalle,
           tipo_evento_id: reg.tipo_evento_id,
-          ingeniero_id: user.usuario_id,
           campos_extra: reg.campos_extra || null,
         });
         // refresca lista
@@ -796,7 +795,6 @@ export default function App() {
           fecha_evento: reg.fecha_evento,
           tipo_evento_id: reg.tipo_evento_id,
           campos_extra: reg.campos_extra || null,
-          modificado_por: user.usuario_id,
         });
         await registrosHook.getActivos({ planta_id: sesion.planta_id, bitacora_id: activeBitacora });
         showToast("Registro actualizado");
@@ -839,7 +837,7 @@ export default function App() {
       confirmLabel: "Cerrar turno", confirmColor: "blue", icon: Lock,
       onConfirm: async () => {
         try {
-          const res = await cierre.cerrarBitacora(activeBitacora, sesion.planta_id, user.usuario_id);
+          const res = await cierre.cerrarBitacora(activeBitacora, sesion.planta_id);
           await registrosHook.getActivos({ planta_id: sesion.planta_id, bitacora_id: activeBitacora });
           setModal(null);
           showToast(`Cierre completado: ${res.registros_cerrados} registro(s)`);

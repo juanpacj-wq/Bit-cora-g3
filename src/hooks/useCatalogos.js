@@ -1,11 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-
-async function getJSON(url) {
-  const res = await fetch(url);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
-}
+import { api } from './useApi';
 
 export function useCatalogos(cargoId) {
   const [plantas, setPlantas] = useState([]);
@@ -22,10 +16,10 @@ export function useCatalogos(cargoId) {
       setLoading(true); setError(null);
       try {
         const [p, c, b, j] = await Promise.all([
-          getJSON('/api/catalogos/plantas'),
-          getJSON('/api/catalogos/cargos'),
-          getJSON('/api/catalogos/bitacoras'),
-          getJSON('/api/catalogos/jefe').catch(() => ({ jefe: null })),
+          api.get('/api/catalogos/plantas'),
+          api.get('/api/catalogos/cargos'),
+          api.get('/api/catalogos/bitacoras'),
+          api.get('/api/catalogos/jefe').catch(() => ({ jefe: null })),
         ]);
         if (cancel) return;
         setPlantas(p.plantas || []);
@@ -46,7 +40,7 @@ export function useCatalogos(cargoId) {
     let cancel = false;
     (async () => {
       try {
-        const { permisos: p } = await getJSON(`/api/catalogos/permisos/${cargoId}`);
+        const { permisos: p } = await api.get(`/api/catalogos/permisos/${cargoId}`);
         if (!cancel) setPermisos(p || []);
       } catch (e) {
         if (!cancel) setError(e.message);
@@ -56,12 +50,12 @@ export function useCatalogos(cargoId) {
   }, [cargoId]);
 
   const getTiposEvento = useCallback(async (bitacoraId) => {
-    const { tipos_evento } = await getJSON(`/api/catalogos/bitacoras/${bitacoraId}/tipos-evento`);
+    const { tipos_evento } = await api.get(`/api/catalogos/bitacoras/${bitacoraId}/tipos-evento`);
     return tipos_evento || [];
   }, []);
 
   const getJdtActual = useCallback(async (plantaId) => {
-    const { jdt } = await getJSON(`/api/catalogos/jdt-actual?planta_id=${encodeURIComponent(plantaId)}`);
+    const { jdt } = await api.get(`/api/catalogos/jdt-actual?planta_id=${encodeURIComponent(plantaId)}`);
     return jdt;
   }, []);
 
