@@ -1,5 +1,6 @@
 import sql from 'mssql';
 import { getDB } from '../db.js';
+import { SESION_TTL_MIN } from '../utils/snapshots.js';
 
 export async function loadSession(req) {
   const raw = req.headers['x-sesion-id'];
@@ -17,6 +18,13 @@ export async function loadSession(req) {
       INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
       INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
       WHERE s.sesion_id = @sesion_id AND s.activa = 1
+        AND s.ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
     `);
-  return r.recordset[0] || null;
+  const row = r.recordset[0];
+  if (!row) return null;
+  db.request()
+    .input('sesion_id', sql.Int, sesion_id)
+    .query(`UPDATE bitacora.sesion_activa SET ultima_actividad = GETDATE() WHERE sesion_id = @sesion_id`)
+    .catch(() => {});
+  return row;
 }

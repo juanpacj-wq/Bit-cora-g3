@@ -201,6 +201,13 @@ export async function initDB() {
     );
   `);
   await db.request().batch(`
+    IF COL_LENGTH('bitacora.sesion_activa', 'ultima_actividad') IS NULL
+    BEGIN
+      ALTER TABLE bitacora.sesion_activa
+        ADD ultima_actividad DATETIME2 NOT NULL CONSTRAINT DF_sesion_ultact DEFAULT GETDATE();
+    END
+  `);
+  await db.request().batch(`
     IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_sesion_lookup' AND object_id=OBJECT_ID('bitacora.sesion_activa'))
       CREATE INDEX IX_sesion_lookup
         ON bitacora.sesion_activa(activa, planta_id, cargo_id)
