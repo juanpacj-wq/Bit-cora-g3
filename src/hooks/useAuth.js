@@ -35,6 +35,18 @@ export function useAuth() {
     return () => clearInterval(heartbeatRef.current);
   }, [sesion?.sesion_id]);
 
+  useEffect(() => {
+    if (!sesion?.sesion_id) return;
+    const onPageHide = () => {
+      try {
+        const blob = new Blob([JSON.stringify({ sesion_id: sesion.sesion_id })], { type: 'application/json' });
+        navigator.sendBeacon('/api/auth/logout', blob);
+      } catch {}
+    };
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
+  }, [sesion?.sesion_id]);
+
   const logout = useCallback(async () => {
     if (sesion?.sesion_id) {
       try { await api.post('/api/auth/logout', { sesion_id: sesion.sesion_id }, { skipAuth: true }); } catch {}
