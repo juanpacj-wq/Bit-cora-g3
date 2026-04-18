@@ -19,15 +19,45 @@ export async function call(method, path, { body, sesion_id } = {}) {
   return { status: res.status, data };
 }
 
+const TEST_USERS = [
+  { key: 'jdt',     nombre: 'Test JdT',       email: 'test.jdt@gecelca.local',     jefe: 0, jdtd: 1 },
+  { key: 'ingOp',   nombre: 'Test Ing Op',    email: 'test.ingop@gecelca.local',   jefe: 0, jdtd: 0 },
+  { key: 'gerente', nombre: 'Test Gerente',   email: 'test.gerente@gecelca.local', jefe: 1, jdtd: 0 },
+  { key: 'ingAgua', nombre: 'Test Ing Agua',  email: 'test.ingagua@gecelca.local', jefe: 0, jdtd: 0 },
+];
+
+const USER_CARGO = {
+  jdt:     'Jefe de Turno',
+  ingOp:   'Ingeniero de Operación',
+  gerente: 'Gerente de Producción',
+  ingAgua: 'Ingeniero de Planta de Agua',
+};
+
 export async function setupSessions() {
   await initDB();
   const db = await getDB();
 
+  for (const u of TEST_USERS) {
+    await db.request()
+      .input('nombre', sql.VarChar(200), u.nombre)
+      .input('email',  sql.VarChar(200), u.email)
+      .input('jefe',   sql.Bit, u.jefe)
+      .input('jdtd',   sql.Bit, u.jdtd)
+      .query(`
+        MERGE lov_bit.usuario AS t
+        USING (SELECT @email AS email) AS s ON t.email = s.email
+        WHEN MATCHED THEN UPDATE SET activo = 1, nombre_completo = @nombre, es_jefe_planta = @jefe, es_jdt_default = @jdtd
+        WHEN NOT MATCHED THEN INSERT (nombre_completo, email, es_jefe_planta, es_jdt_default)
+          VALUES (@nombre, @email, @jefe, @jdtd);
+      `);
+  }
+
+  const emails = TEST_USERS.map(u => `'${u.email}'`).join(',');
   const { recordset: usuarios } = await db.request().query(`
-    SELECT u.usuario_id, u.nombre_completo, u.email, u.es_jefe_planta, u.es_jdt_default
-    FROM lov_bit.usuario u
-    WHERE u.activo = 1
+    SELECT usuario_id, email FROM lov_bit.usuario WHERE email IN (${emails})
   `);
+  const userByEmail = Object.fromEntries(usuarios.map(u => [u.email, u.usuario_id]));
+
   const { recordset: cargos } = await db.request().query(`
     SELECT cargo_id, nombre FROM lov_bit.cargo
   `);
@@ -50,24 +80,21 @@ export async function setupSessions() {
     return ins.recordset[0].sesion_id;
   }
 
-  const jdt = usuarios.find(u => u.es_jdt_default) || usuarios[0];
-  const jefe = usuarios.find(u => u.es_jefe_planta);
-  const ingOp = usuarios.find(u => !u.es_jefe_planta && !u.es_jdt_default);
-  const ingAgua = usuarios.find(u => u.usuario_id !== jdt.usuario_id && u.usuario_id !== jefe?.usuario_id && u.usuario_id !== ingOp?.usuario_id) || ingOp;
-
-  const sesiones = {
-    jdt: await ensureSesion(jdt.usuario_id, cargoByName['Jefe de Turno']),
-    ingOp: await ensureSesion(ingOp.usuario_id, cargoByName['Ingeniero de Operación']),
-    gerente: await ensureSesion(jefe.usuario_id, cargoByName['Gerente de Producción']),
-    ingAgua: await ensureSesion(ingAgua.usuario_id, cargoByName['Ingeniero de Planta de Agua']),
-  };
+  const sesiones = {};
+  const usuariosOut = {};
+  for (const u of TEST_USERS) {
+    const usuario_id = userByEmail[u.email];
+    const cargo_id = cargoByName[USER_CARGO[u.key]];
+    sesiones[u.key] = await ensureSesion(usuario_id, cargo_id);
+    usuariosOut[u.key] = { usuario_id, email: u.email, nombre_completo: u.nombre };
+  }
 
   const { recordset: bitacoras } = await db.request().query(`
     SELECT bitacora_id, codigo FROM lov_bit.bitacora
   `);
   const bitByCodigo = Object.fromEntries(bitacoras.map(b => [b.codigo, b.bitacora_id]));
 
-  return { sesiones, usuarios: { jdt, jefe, ingOp, ingAgua }, bitByCodigo };
+  return { sesiones, usuarios: usuariosOut, bitByCodigo };
 }
 
 export async function cleanupTestRegistros() {
