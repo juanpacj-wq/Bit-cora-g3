@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from './useApi';
 
-export function useCatalogos(cargoId) {
+export function useCatalogos(cargoId, ready) {
   const [plantas, setPlantas] = useState([]);
   const [cargos, setCargos] = useState([]);
   const [bitacoras, setBitacoras] = useState([]);
@@ -11,6 +11,7 @@ export function useCatalogos(cargoId) {
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    if (!ready) return;
     let cancel = false;
     (async () => {
       setLoading(true); setError(null);
@@ -33,7 +34,7 @@ export function useCatalogos(cargoId) {
       }
     })();
     return () => { cancel = true; };
-  }, []);
+  }, [ready]);
 
   useEffect(() => {
     if (!cargoId) { setPermisos([]); return; }

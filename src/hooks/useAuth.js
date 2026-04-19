@@ -8,6 +8,7 @@ export function useAuth() {
   const [sesion, setSesion] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [ready, setReady] = useState(false);
   const heartbeatRef = useRef(null);
 
   useEffect(() => {
@@ -28,15 +29,18 @@ export function useAuth() {
         if (cancelled) return;
         if (u) setUser(u);
         if (s) setSesion(s);
-      } catch {}
+      } catch {
+      } finally {
+        if (!cancelled) setReady(true);
+      }
     })();
     return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
-    const payload = JSON.stringify({ user, sesion });
-    if (user || sesion) sessionStorage.setItem(STORAGE_KEY, payload);
-    else sessionStorage.removeItem(STORAGE_KEY);
+    if (user || sesion) {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ user, sesion }));
+    }
   }, [user, sesion]);
 
   useEffect(() => {
@@ -97,5 +101,5 @@ export function useAuth() {
     } finally { setLoading(false); }
   }, [user]);
 
-  return { user, sesion, loading, error, login, selectContext, logout };
+  return { user, sesion, loading, error, ready, login, selectContext, logout };
 }
