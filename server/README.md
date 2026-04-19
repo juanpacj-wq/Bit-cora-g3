@@ -41,8 +41,9 @@ Al arrancar, `initDB()` crea esquemas, tablas, índices, vistas y datos semilla 
 |---|---|---|
 | POST | `/api/auth/login` | Login con email/password |
 | POST | `/api/auth/select-context` | Selecciona planta/cargo y crea sesión |
-| POST | `/api/auth/logout` | Marca sesión inactiva |
+| POST | `/api/auth/resume` | Reactiva una sesión dentro del TTL (usada al reload) |
 | POST | `/api/auth/heartbeat` | Actualiza `ultima_actividad` |
+| POST | `/api/auth/logout` | Marca sesión inactiva (también invocado vía `sendBeacon` en `pagehide`) |
 | GET | `/api/auth/sesiones-activas?planta_id=` | Sesiones activas por planta |
 
 ### Catálogos
@@ -59,9 +60,9 @@ Al arrancar, `initDB()` crea esquemas, tablas, índices, vistas y datos semilla 
 ### Registros activos
 | Método | Ruta | Descripción |
 |---|---|---|
-| GET | `/api/registros/activos?planta_id=&bitacora_id=&estado=` | Listar con filtros |
-| POST | `/api/registros` | Crear (resuelve JdT/jefe, lógica especial AUTH) |
-| PUT | `/api/registros/:id` | Editar (solo `estado='borrador'`) |
+| GET | `/api/registros/activos?planta_id=&bitacora_id=&estado=` | Listar con filtros (incluye `ingenieros_snapshot`, `jdts_snapshot`, `jefes_snapshot`, `creado_por_nombre`) |
+| POST | `/api/registros` | Crear (genera snapshots de rol, `creado_por = sesion.usuario_id`, lógica especial AUTH) |
+| PUT | `/api/registros/:id` | Editar (solo `estado='borrador'`; los snapshots son inmutables) |
 | DELETE | `/api/registros/:id` | Eliminar (solo borrador, soft-delete autorización asociada) |
 
 ### Cierre
@@ -84,9 +85,21 @@ Al arrancar, `initDB()` crea esquemas, tablas, índices, vistas y datos semilla 
 | GET | `/api/autorizaciones/:planta_id/:fecha/:periodo` | Lookup específico |
 | DELETE | `/api/autorizaciones/:id` | Soft-delete (`activa=0`) |
 
+## Sesión y autenticación
+
+- Header obligatorio `X-Sesion-Id: <sesion_id>` en cada request no-`skipAuth`.
+- `middleware/auth.js::loadSession` valida contra `bitacora.sesion_activa` con TTL de 5 min sobre `ultima_actividad`; cada request autenticado bumpea el timestamp en fire-and-forget.
+- `POST /api/auth/logout` marca `activa=0`; `POST /api/auth/resume` reactiva (`activa=1`, `ultima_actividad=GETDATE()`) si dentro del TTL.
+- En arranque, `initDB()` barre sesiones huérfanas fuera del TTL.
+
+## Snapshots de usuarios por rol
+
+Desde 2026-04, los registros y autorizaciones guardan los roles presentes como JSON (no FK). Los helpers en `utils/snapshots.js` resuelven la lista de `{usuario_id, nombre_completo}` mirando `sesion_activa.activa=1` con filtro TTL. El autor del registro queda en `creado_por INT FK`, único puntero vivo a `lov_bit.usuario`.
+
 ## Notas
 
-- Todas las respuestas incluyen headers CORS.
-- Queries parametrizados con `.input(name, sql.Tipo, value)`.
-- `parseBody(req)` rechaza promesa en JSON malformado → capturado por try/catch global (500).
-- Params de URL se extraen con regex.
+- Todas las respuestas incluyen headers CORS (ver `utils/http.js`).
+- Queries parametrizados con `.input(name, sql.Tipo, value)`. No hay interpolación de strings en SQL.
+- `parseBody(req)` rechaza en JSON malformado → capturado por try/catch global (500).
+- Params de URL se extraen con regex; el router es manual en `server.js` (sin Express).
+- Dentro de transacciones `mssql` no lanzar queries en paralelo (`Promise.all`): serializar con `await`.
