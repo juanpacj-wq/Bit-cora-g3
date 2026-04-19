@@ -759,7 +759,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
 
 export default function App() {
   const auth = useAuth();
-  const catalogos = useCatalogos(auth.sesion?.cargo_id);
+  const catalogos = useCatalogos(auth.sesion?.cargo_id, auth.ready);
   const registrosHook = useRegistros();
   const cierre = useCierre();
 
@@ -953,6 +953,13 @@ export default function App() {
   }, [auth]);
 
   // ==================== RENDER ====================
+  if (!auth.ready) {
+    return (
+      <div className="min-h-screen flex items-center justify-center text-slate-400 bg-slate-950">
+        Cargando…
+      </div>
+    );
+  }
   if (!user || !sesion) {
     return (
       <>
