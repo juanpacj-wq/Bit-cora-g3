@@ -18,9 +18,11 @@ export function useAuth() {
         const raw = sessionStorage.getItem(STORAGE_KEY);
         if (!raw) return;
         const { user: u, sesion: s } = JSON.parse(raw);
+        let refreshed = s;
         if (s?.sesion_id) {
           try {
-            await api.post('/api/auth/resume', { sesion_id: s.sesion_id }, { skipAuth: true });
+            const { sesion: fresca } = await api.post('/api/auth/resume', { sesion_id: s.sesion_id }, { skipAuth: true });
+            if (fresca) refreshed = fresca;  // adopta la sesión enriquecida con puede_cerrar_turno, cargo_nombre, etc.
           } catch {
             if (!cancelled) { sessionStorage.removeItem(STORAGE_KEY); }
             return;
@@ -28,7 +30,7 @@ export function useAuth() {
         }
         if (cancelled) return;
         if (u) setUser(u);
-        if (s) setSesion(s);
+        if (refreshed) setSesion(refreshed);
       } catch {
       } finally {
         if (!cancelled) setReady(true);
@@ -76,10 +78,10 @@ export function useAuth() {
     return () => setUnauthorizedHandler(null);
   }, [logout]);
 
-  const login = useCallback(async (email, password) => {
+  const login = useCallback(async (username, password) => {
     setLoading(true); setError(null);
     try {
-      const { usuario } = await api.post('/api/auth/login', { email, password }, { skipAuth: true });
+      const { usuario } = await api.post('/api/auth/login', { username, password }, { skipAuth: true });
       setUser(usuario);
       return usuario;
     } catch (e) {

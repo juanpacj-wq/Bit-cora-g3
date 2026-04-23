@@ -16,8 +16,10 @@ export async function hasPermisoBitacora(sesion, bitacora_id, accion = 'puede_cr
   return !!r.recordset[0]?.ok;
 }
 
-export function isJdT(sesion) {
-  return !!sesion && sesion.cargo_nombre === 'Jefe de Turno';
+// Puede cerrar turno y editar cualquier registro: hoy, Ingeniero Jefe de Turno e Ingeniero de Operación.
+// El flag vive en lov_bit.cargo.puede_cerrar_turno; loadSession() lo trae en la sesión.
+export function puedeCerrarTurno(sesion) {
+  return !!sesion && sesion.puede_cerrar_turno === true;
 }
 
 export function plantaMatch(sesion, planta_id) {
@@ -28,6 +30,6 @@ export async function canEditarRegistro(sesion, registro) {
   if (!sesion || !registro) return false;
   if (registro.planta_id && registro.planta_id !== sesion.planta_id) return false;
   if (registro.creado_por === sesion.usuario_id) return true;
-  if (isJdT(sesion)) return true;
+  if (puedeCerrarTurno(sesion)) return true;
   return hasPermisoBitacora(sesion, registro.bitacora_id, 'puede_crear');
 }

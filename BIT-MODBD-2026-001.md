@@ -124,6 +124,16 @@ INSERT INTO lov_bit.usuario (nombre_completo, email, es_jefe_planta, es_jdt_defa
     ('Omar Fedullo',  'omar.fedullo@gecelca.com',  0, 1);
 ```
 
+#### 2.3.1 Semántica de `es_jdt_default`
+
+`es_jdt_default` **no es un flag de rol ni de permiso**: es un **fallback de identidad** que se usa para poblar `jdts_snapshot` (y `/api/catalogos/jdt-actual`) cuando no hay ningún usuario del cargo *Ingeniero Jefe de Turno* con sesión activa dentro del TTL (5 min). Reglas:
+
+- Se asigna a **un único usuario global** por diseño (hoy: Omar Fedullo). No se expande a más usuarios.
+- Si se setea a `1` en N usuarios, `snapshotJDTs()` devolverá a los N como fallback (lista, sin prioridad ni filtro por planta). Esto ensucia el audit trail, no lo mejora.
+- Los **permisos operativos** (cerrar turno, editar cualquier registro) viven en `lov_bit.cargo.puede_cerrar_turno`, no aquí. `puede_cerrar_turno=1` en *Ingeniero Jefe de Turno* y en *Ingeniero de Operación* — son iguales para permisos, distintos para identidad.
+- Cuando un IngOp crea un registro sin JdT en sesión, `ingenieros_snapshot` captura al IngOp real; `jdts_snapshot` contendrá al usuario con `es_jdt_default=1` como fallback. La trazabilidad del creador está intacta; la "firma" JdT es cosmética.
+- Auditoría sugerida: ejecutar `server/sql/audit_fallback_jdt.sql` mensualmente para detectar registros con fallback activo.
+
 ### 2.4 Bitácoras (catálogo dinámico — pieza central)
 
 ```sql

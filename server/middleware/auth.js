@@ -12,8 +12,9 @@ export async function loadSession(req) {
     .input('sesion_id', sql.Int, sesion_id)
     .query(`
       SELECT s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
-             u.nombre_completo, u.es_jefe_planta, u.es_jdt_default,
-             c.nombre AS cargo_nombre, c.solo_lectura
+             u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
+             c.nombre AS cargo_nombre, c.solo_lectura,
+             CAST(c.puede_cerrar_turno AS BIT) AS puede_cerrar_turno
       FROM bitacora.sesion_activa s
       INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
       INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
