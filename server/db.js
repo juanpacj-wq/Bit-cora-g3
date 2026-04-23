@@ -1,4 +1,14 @@
 import sql from 'mssql';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { hashPassword, HASH_PREFIX } from './utils/password.js';
+
+const PERSONAL_JSON_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'data',
+  'personal-2026.json'
+);
 
 const rawHost = process.env.DB_HOST || '';
 let server = rawHost;
@@ -98,6 +108,103 @@ async function migrateSnapshots(db) {
   }
 }
 
+// Migración a v2: agrega usuario.username, cargo.puede_cerrar_turno; hace usuario.email nullable;
+// rehashea contraseñas plaintext a bcrypt; renombra cargo 'Jefe de Turno' -> 'Ingeniero Jefe de Turno'.
+async function migrateSchemaV2(db) {
+  // cargo.puede_cerrar_turno
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.cargo','puede_cerrar_turno') IS NULL
+      ALTER TABLE lov_bit.cargo ADD puede_cerrar_turno BIT NOT NULL
+        CONSTRAINT DF_cargo_puede_cerrar_turno DEFAULT 0;
+  `);
+
+  // usuario.username (nullable first, backfill, then NOT NULL + UNIQUE)
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.usuario','username') IS NULL
+      ALTER TABLE lov_bit.usuario ADD username VARCHAR(50) NULL;
+  `);
+  // Backfill los 2 usuarios pre-existentes (si existen con el email antiguo)
+  await db.request().batch(`
+    UPDATE lov_bit.usuario SET username='emunoz'
+      WHERE username IS NULL AND email='ernesto.munoz@gecelca.com';
+    UPDATE lov_bit.usuario SET username='ofedullo'
+      WHERE username IS NULL AND email='omar.fedullo@gecelca.com';
+  `);
+  // Si quedan usuarios sin username, fallar con mensaje claro (no forzamos NOT NULL a ciegas).
+  const pending = await db.request().query(`
+    SELECT COUNT(*) AS n FROM lov_bit.usuario WHERE username IS NULL;
+  `);
+  if (pending.recordset[0].n > 0) {
+    throw new Error(
+      `[migrateSchemaV2] Hay ${pending.recordset[0].n} usuarios sin username. ` +
+      `Asigna username manualmente o elimínalos antes de reiniciar.`
+    );
+  }
+  await db.request().batch(`
+    IF EXISTS (
+      SELECT 1 FROM sys.columns
+      WHERE object_id=OBJECT_ID('lov_bit.usuario') AND name='username' AND is_nullable=1
+    )
+      ALTER TABLE lov_bit.usuario ALTER COLUMN username VARCHAR(50) NOT NULL;
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes WHERE name='UQ_usuario_username' AND object_id=OBJECT_ID('lov_bit.usuario')
+    )
+      CREATE UNIQUE INDEX UQ_usuario_username ON lov_bit.usuario(username);
+  `);
+
+  // usuario.email ahora nullable (antes era NOT NULL UNIQUE)
+  await db.request().batch(`
+    IF EXISTS (
+      SELECT 1 FROM sys.columns
+      WHERE object_id=OBJECT_ID('lov_bit.usuario') AND name='email' AND is_nullable=0
+    )
+      ALTER TABLE lov_bit.usuario ALTER COLUMN email VARCHAR(200) NULL;
+  `);
+
+  // La UNIQUE constraint autogenerada sobre email (era NOT NULL UNIQUE en la tabla original) impide
+  // insertar más de un usuario con email NULL en SQL Server. Se busca y elimina.
+  await db.request().batch(`
+    DECLARE @uq SYSNAME;
+    SELECT @uq = kc.name
+    FROM sys.key_constraints kc
+    INNER JOIN sys.index_columns ic ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id
+    INNER JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE kc.parent_object_id = OBJECT_ID('lov_bit.usuario')
+      AND kc.type = 'UQ' AND c.name = 'email';
+    IF @uq IS NOT NULL
+      EXEC('ALTER TABLE lov_bit.usuario DROP CONSTRAINT [' + @uq + ']');
+  `);
+
+  // usuario.password_hash: eliminar DEFAULT '1234' si existe, rehashear texto plano a bcrypt.
+  await db.request().batch(`
+    DECLARE @df SYSNAME = (
+      SELECT dc.name FROM sys.default_constraints dc
+      JOIN sys.columns c ON c.default_object_id = dc.object_id
+      WHERE dc.parent_object_id = OBJECT_ID('lov_bit.usuario') AND c.name = 'password_hash'
+    );
+    IF @df IS NOT NULL
+      EXEC('ALTER TABLE lov_bit.usuario DROP CONSTRAINT ' + @df);
+  `);
+  // Rehash de contraseñas en texto plano a scrypt. Detecta "ya hasheadas" por el prefijo `scrypt$`.
+  const { recordset: needsRehash } = await db.request().query(`
+    SELECT usuario_id FROM lov_bit.usuario
+    WHERE password_hash NOT LIKE '${HASH_PREFIX}%'
+  `);
+  for (const { usuario_id } of needsRehash) {
+    const h = await hashPassword('1234');
+    await db.request()
+      .input('uid',   sql.Int,         usuario_id)
+      .input('shash', sql.VarChar(200), h)
+      .query(`UPDATE lov_bit.usuario SET password_hash = @shash WHERE usuario_id = @uid`);
+  }
+
+  // cargo: rename 'Jefe de Turno' -> 'Ingeniero Jefe de Turno' (preserva cargo_id).
+  await db.request().batch(`
+    UPDATE lov_bit.cargo SET nombre='Ingeniero Jefe de Turno'
+      WHERE nombre='Jefe de Turno';
+  `);
+}
+
 export async function initDB() {
   const db = await getDB();
 
@@ -127,9 +234,10 @@ export async function initDB() {
   await db.request().batch(`
     IF OBJECT_ID('lov_bit.cargo', 'U') IS NULL
     CREATE TABLE lov_bit.cargo (
-      cargo_id     INT          IDENTITY(1,1) PRIMARY KEY,
-      nombre       VARCHAR(100) NOT NULL,
-      solo_lectura BIT          NOT NULL DEFAULT 0
+      cargo_id           INT          IDENTITY(1,1) PRIMARY KEY,
+      nombre             VARCHAR(100) NOT NULL,
+      solo_lectura       BIT          NOT NULL DEFAULT 0,
+      puede_cerrar_turno BIT          NOT NULL DEFAULT 0
     );
   `);
 
@@ -138,8 +246,9 @@ export async function initDB() {
     CREATE TABLE lov_bit.usuario (
       usuario_id      INT          IDENTITY(1,1) PRIMARY KEY,
       nombre_completo VARCHAR(200) NOT NULL,
-      email           VARCHAR(200) NOT NULL UNIQUE,
-      password_hash   VARCHAR(200) NOT NULL DEFAULT '1234',
+      username        VARCHAR(50)  NOT NULL UNIQUE,
+      email           VARCHAR(200) NULL,
+      password_hash   VARCHAR(200) NOT NULL,
       es_jefe_planta  BIT          NOT NULL DEFAULT 0,
       es_jdt_default  BIT          NOT NULL DEFAULT 0,
       activo          BIT          NOT NULL DEFAULT 1
@@ -315,7 +424,10 @@ export async function initDB() {
       CREATE INDEX IX_auth_lookup ON bitacora.autorizacion_dashboard(planta_id, fecha, activa);
   `);
 
-  // ---------- 6. Datos semilla ----------
+  // ---------- 6. Migración schema v2 (columnas nuevas en tablas existentes) ----------
+  await migrateSchemaV2(db);
+
+  // ---------- 7. Datos semilla ----------
   await db.request().batch(`
     MERGE lov_bit.planta AS t
     USING (VALUES ('GEC3','Gecelca 3'),('GEC32','Gecelca 3.2')) AS s(planta_id, nombre)
@@ -323,45 +435,85 @@ export async function initDB() {
     WHEN NOT MATCHED THEN INSERT (planta_id, nombre, activa) VALUES (s.planta_id, s.nombre, 1);
   `);
 
+  // Cargos definitivos según LISTADO DE PERSONAL 2026.xlsx.
+  // puede_cerrar_turno=1 para Ingeniero Jefe de Turno e Ingeniero de Operación (mismo poder operativo,
+  // roles distintos en UI y snapshots).
   await db.request().batch(`
     MERGE lov_bit.cargo AS t
     USING (VALUES
-      ('Jefe de Turno', 0),
-      ('Ingeniero de Operación', 0),
-      ('Ingeniero de Planta de Agua', 0),
-      ('Gerente de Producción', 1)
-    ) AS s(nombre, solo_lectura)
+      ('Gerente de Producción',                1, 0),
+      ('Ingeniero Jefe de Turno',              0, 1),
+      ('Ingeniero de Operación',               0, 1),
+      ('Ingeniero Químico',                    0, 0),
+      ('Operador de Planta - Caldera',         0, 0),
+      ('Operador de Planta - Analista',        0, 0),
+      ('Operador de Planta - Sala de Mando',   0, 0),
+      ('Operador de Planta - Planta de Agua',  0, 0),
+      ('Operador de Planta - Turbogrupo',      0, 0),
+      ('Operador Maquinaria Pesada',           0, 0),
+      ('Operador de Planta - Carbón y Caliza', 0, 0)
+    ) AS s(nombre, solo_lectura, puede_cerrar_turno)
       ON t.nombre = s.nombre
-    WHEN NOT MATCHED THEN INSERT (nombre, solo_lectura) VALUES (s.nombre, s.solo_lectura);
+    WHEN MATCHED THEN UPDATE SET
+      solo_lectura       = s.solo_lectura,
+      puede_cerrar_turno = s.puede_cerrar_turno
+    WHEN NOT MATCHED THEN INSERT (nombre, solo_lectura, puede_cerrar_turno)
+      VALUES (s.nombre, s.solo_lectura, s.puede_cerrar_turno);
   `);
 
+  // Eliminar cargo obsoleto 'Ingeniero de Planta de Agua' (no existe en el Excel 2026).
+  // Primero limpiamos dependencias en cargo_bitacora_permiso y sesion_activa.
   await db.request().batch(`
-    MERGE lov_bit.usuario AS t
-    USING (VALUES
-      ('Ernesto Muñoz', 'ernesto.munoz@gecelca.com', 1, 0),
-      ('Omar Fedullo',  'omar.fedullo@gecelca.com',  0, 1)
-    ) AS s(nombre_completo, email, es_jefe_planta, es_jdt_default)
-      ON t.email = s.email
-    WHEN NOT MATCHED THEN INSERT (nombre_completo, email, es_jefe_planta, es_jdt_default)
-      VALUES (s.nombre_completo, s.email, s.es_jefe_planta, s.es_jdt_default);
+    DECLARE @cargo_obsoleto INT = (SELECT cargo_id FROM lov_bit.cargo WHERE nombre='Ingeniero de Planta de Agua');
+    IF @cargo_obsoleto IS NOT NULL
+    BEGIN
+      DELETE FROM lov_bit.cargo_bitacora_permiso WHERE cargo_id = @cargo_obsoleto;
+      DELETE FROM bitacora.sesion_activa         WHERE cargo_id = @cargo_obsoleto;
+      DELETE FROM lov_bit.cargo                  WHERE cargo_id = @cargo_obsoleto;
+    END
   `);
 
+  // Paso 1: Renombrar códigos preservados (CAL→CALDERA, TURB→TURBO).
+  await db.request().batch(`
+    UPDATE lov_bit.bitacora SET codigo='CALDERA' WHERE codigo='CAL';
+    UPDATE lov_bit.bitacora SET codigo='TURBO'   WHERE codigo='TURB';
+  `);
+
+  // Paso 2: Eliminar bitácoras obsoletas (SINC, ELEC, IC, MA) y sus dependencias.
+  // Falla si hay registros (activos o históricos) que la referencien — guardarraíl defensivo.
+  await db.request().batch(`
+    DECLARE @obs TABLE (bitacora_id INT);
+    INSERT INTO @obs (bitacora_id)
+      SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo IN ('SINC','ELEC','IC','MA');
+
+    IF EXISTS (SELECT 1 FROM bitacora.registro_activo WHERE bitacora_id IN (SELECT bitacora_id FROM @obs))
+      THROW 50001, 'No se pueden eliminar bitácoras obsoletas: existen registros activos. Limpia bitacora.registro_activo primero.', 1;
+    IF EXISTS (SELECT 1 FROM bitacora.registro_historico WHERE bitacora_id IN (SELECT bitacora_id FROM @obs))
+      THROW 50002, 'No se pueden eliminar bitácoras obsoletas: existen registros históricos. Limpia bitacora.registro_historico primero.', 1;
+
+    DELETE FROM lov_bit.cargo_bitacora_permiso WHERE bitacora_id IN (SELECT bitacora_id FROM @obs);
+    DELETE FROM lov_bit.tipo_evento            WHERE bitacora_id IN (SELECT bitacora_id FROM @obs);
+    DELETE FROM lov_bit.bitacora               WHERE bitacora_id IN (SELECT bitacora_id FROM @obs);
+  `);
+
+  // Paso 3: MERGE con las 10 bitácoras definitivas (orden según hoja BITÁCORAS del Excel 2026,
+  // con DISP y AUTH separadas en posiciones 8 y 9).
   const bitReq = db.request();
   bitReq.input('disp', sql.NVarChar(sql.MAX), DISP_JSON);
   bitReq.input('auth', sql.NVarChar(sql.MAX), AUTH_JSON);
   await bitReq.batch(`
     MERGE lov_bit.bitacora AS t
     USING (VALUES
-      ('Disponibilidad',            'DISP', 'Activity',     1, @disp, 1),
-      ('Sincronización',            'SINC', 'Settings',     0, NULL,  2),
-      ('Caldera',                   'CAL',  'Flame',        0, NULL,  3),
-      ('Planta de Agua',            'AGUA', 'Droplets',     0, NULL,  4),
-      ('Turbina',                   'TURB', 'Gauge',        0, NULL,  5),
-      ('Eléctrica',                 'ELEC', 'Zap',          0, NULL,  6),
-      ('Instrumentación y Control', 'IC',   'Cpu',          0, NULL,  7),
-      ('Química',                   'QUIM', 'FlaskConical', 0, NULL,  8),
-      ('Medio Ambiente',            'MA',   'Leaf',         0, NULL,  9),
-      ('Autorizaciones',            'AUTH', 'FileCheck',    1, @auth, 10)
+      ('Caldera',                'CALDERA', 'Flame',        0, NULL,  1),
+      ('Análisis',               'ANAL',    'TestTube',     0, NULL,  2),
+      ('Sala de Mando',          'SALA',    'Monitor',      0, NULL,  3),
+      ('Planta de Agua',         'AGUA',    'Droplets',     0, NULL,  4),
+      ('Turbogrupo',             'TURBO',   'Gauge',        0, NULL,  5),
+      ('Maquinaria',             'MAQU',    'Truck',        0, NULL,  6),
+      ('Carbón y Caliza',        'CYC',     'Mountain',     0, NULL,  7),
+      ('Disponibilidad',         'DISP',    'Activity',     1, @disp, 8),
+      ('Autorizaciones',         'AUTH',    'FileCheck',    1, @auth, 9),
+      ('Química',                'QUIM',    'FlaskConical', 0, NULL, 10)
     ) AS s(nombre, codigo, icono, formulario_especial, definicion_campos, orden)
       ON t.codigo = s.codigo
     WHEN MATCHED THEN UPDATE SET
@@ -403,31 +555,58 @@ export async function initDB() {
       );
   `);
 
-  // matriz de permisos (idempotente)
+  // Matriz de permisos (cargo × bitácora) derivada del Excel 2026.
+  // Nota clave: Ingeniero Jefe de Turno e Ingeniero de Operación tienen filas idénticas (mismo
+  // poder operativo). La distinción de rol se preserva por cargo.nombre en UI y snapshots.
+  // Se reconstruye desde cero con DELETE + MERGE para limpiar combinaciones muertas.
   await db.request().batch(`
+    DELETE FROM lov_bit.cargo_bitacora_permiso;
+
     ;WITH matriz AS (
-      SELECT c.cargo_id, b.bitacora_id, c.nombre AS cargo_nombre, b.codigo,
+      SELECT c.cargo_id, b.bitacora_id,
         CASE
-          WHEN c.nombre = 'Jefe de Turno'               THEN 1
-          WHEN c.nombre = 'Ingeniero de Operación'      THEN 1
-          WHEN c.nombre = 'Ingeniero de Planta de Agua' THEN CASE WHEN b.codigo='AGUA' THEN 1 ELSE 0 END
-          WHEN c.nombre = 'Gerente de Producción'       THEN 1
+          -- Gerente de Producción ve todo
+          WHEN c.nombre = 'Gerente de Producción'                THEN 1
+          -- Ingeniero Jefe de Turno / Ingeniero de Operación ven todo
+          WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN 1
+          -- Ingeniero Químico ve todo
+          WHEN c.nombre = 'Ingeniero Químico'                    THEN 1
+          -- Operadores sólo ven su propia bitácora
+          WHEN c.nombre = 'Operador de Planta - Caldera'         THEN CASE WHEN b.codigo='CALDERA' THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador de Planta - Analista'        THEN CASE WHEN b.codigo='ANAL'    THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador de Planta - Sala de Mando'   THEN CASE WHEN b.codigo='SALA'    THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador de Planta - Planta de Agua'  THEN CASE WHEN b.codigo='AGUA'    THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador de Planta - Turbogrupo'      THEN CASE WHEN b.codigo='TURBO'   THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador Maquinaria Pesada'           THEN CASE WHEN b.codigo='MAQU'    THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador de Planta - Carbón y Caliza' THEN CASE WHEN b.codigo='CYC'     THEN 1 ELSE 0 END
           ELSE 0
         END AS puede_ver,
         CASE
-          WHEN c.nombre = 'Jefe de Turno'               THEN CASE WHEN b.codigo IN ('DISP','AUTH') THEN 1 ELSE 0 END
-          WHEN c.nombre = 'Ingeniero de Operación'      THEN CASE WHEN b.codigo IN ('DISP','AUTH','AGUA') THEN 0 ELSE 1 END
-          WHEN c.nombre = 'Ingeniero de Planta de Agua' THEN CASE WHEN b.codigo='AGUA' THEN 1 ELSE 0 END
-          WHEN c.nombre = 'Gerente de Producción'       THEN 0
+          -- Gerente no crea en nada
+          WHEN c.nombre = 'Gerente de Producción'                THEN 0
+          -- JdT e IngOp sólo crean en DISP y AUTH
+          WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN CASE WHEN b.codigo IN ('DISP','AUTH') THEN 1 ELSE 0 END
+          -- IngQuímico sólo crea en QUIM
+          WHEN c.nombre = 'Ingeniero Químico'                    THEN CASE WHEN b.codigo='QUIM'    THEN 1 ELSE 0 END
+          -- Operadores crean sólo en su propia bitácora (igual que puede_ver)
+          WHEN c.nombre = 'Operador de Planta - Caldera'         THEN CASE WHEN b.codigo='CALDERA' THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador de Planta - Analista'        THEN CASE WHEN b.codigo='ANAL'    THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador de Planta - Sala de Mando'   THEN CASE WHEN b.codigo='SALA'    THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador de Planta - Planta de Agua'  THEN CASE WHEN b.codigo='AGUA'    THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador de Planta - Turbogrupo'      THEN CASE WHEN b.codigo='TURBO'   THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador Maquinaria Pesada'           THEN CASE WHEN b.codigo='MAQU'    THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Operador de Planta - Carbón y Caliza' THEN CASE WHEN b.codigo='CYC'     THEN 1 ELSE 0 END
           ELSE 0
         END AS puede_crear
       FROM lov_bit.cargo c CROSS JOIN lov_bit.bitacora b
+      WHERE b.activa = 1
     )
-    MERGE lov_bit.cargo_bitacora_permiso AS t
-    USING matriz AS s ON t.cargo_id = s.cargo_id AND t.bitacora_id = s.bitacora_id
-    WHEN NOT MATCHED THEN INSERT (cargo_id, bitacora_id, puede_ver, puede_crear)
-      VALUES (s.cargo_id, s.bitacora_id, s.puede_ver, s.puede_crear);
+    INSERT INTO lov_bit.cargo_bitacora_permiso (cargo_id, bitacora_id, puede_ver, puede_crear)
+    SELECT cargo_id, bitacora_id, puede_ver, puede_crear FROM matriz;
   `);
+
+  // Semilla de personal (83 usuarios del Excel 2026)
+  await seedPersonal(db);
 
   // ---------- 7. Vistas ----------
   await db.request().batch(`
@@ -452,7 +631,7 @@ export async function initDB() {
     FROM bitacora.sesion_activa s
     JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
     WHERE s.activa = 1
-      AND s.cargo_id = (SELECT cargo_id FROM lov_bit.cargo WHERE nombre = 'Jefe de Turno');
+      AND s.cargo_id = (SELECT cargo_id FROM lov_bit.cargo WHERE nombre = 'Ingeniero Jefe de Turno');
   `);
 
   await db.request().batch(`
@@ -474,4 +653,53 @@ export async function initDB() {
   `);
 
   console.log('[DB] Conexión OK');
+}
+
+// Carga server/data/personal-2026.json y hace UPSERT contra lov_bit.usuario por username.
+// Todos los usuarios usan scrypt('1234') como password inicial. Las filas ya existentes conservan
+// su password_hash actual (no se resetean si alguien ya cambió su clave).
+async function seedPersonal(db) {
+  const raw = await readFile(PERSONAL_JSON_PATH, 'utf8');
+  const personal = JSON.parse(raw);
+  if (!Array.isArray(personal) || personal.length === 0) {
+    throw new Error(`[seedPersonal] ${PERSONAL_JSON_PATH} vacío o no es un array`);
+  }
+  // Un hash distinto por usuario (cada uno con salt aleatorio). Para 83 filas cuesta ~10s total;
+  // sólo ocurre en el primer arranque (WHEN NOT MATCHED no se dispara en arranques siguientes).
+
+  // Validar que cada cargo referenciado existe en lov_bit.cargo
+  const cargoSet = new Set(personal.map(p => p.cargo));
+  const cargoRows = await db.request().query('SELECT cargo_id, nombre FROM lov_bit.cargo');
+  const cargoByName = new Map(cargoRows.recordset.map(c => [c.nombre, c.cargo_id]));
+  for (const name of cargoSet) {
+    if (!cargoByName.has(name)) {
+      throw new Error(`[seedPersonal] Cargo '${name}' referenciado en personal-2026.json no existe en lov_bit.cargo`);
+    }
+  }
+
+  // UPSERT por username (fila a fila: volumen bajo, 83 registros).
+  for (const p of personal) {
+    const hashed = await hashPassword('1234');
+    await db.request()
+      .input('nombre_completo', sql.VarChar(200), p.nombre_completo)
+      .input('username',        sql.VarChar(50),  p.username)
+      .input('password_hash',   sql.VarChar(200), hashed)
+      .input('es_jefe_planta',  sql.Bit,          !!p.es_jefe_planta)
+      .input('es_jdt_default',  sql.Bit,          !!p.es_jdt_default)
+      .query(`
+        MERGE lov_bit.usuario AS t
+        USING (VALUES (@nombre_completo, @username, @password_hash, @es_jefe_planta, @es_jdt_default))
+            AS s (nombre_completo, username, password_hash, es_jefe_planta, es_jdt_default)
+          ON t.username = s.username
+        WHEN MATCHED THEN UPDATE SET
+          nombre_completo = s.nombre_completo,
+          es_jefe_planta  = s.es_jefe_planta,
+          es_jdt_default  = s.es_jdt_default,
+          activo          = 1
+        WHEN NOT MATCHED THEN INSERT (nombre_completo, username, email, password_hash, es_jefe_planta, es_jdt_default, activo)
+          VALUES (s.nombre_completo, s.username, NULL, s.password_hash, s.es_jefe_planta, s.es_jdt_default, 1);
+      `);
+  }
+
+  console.log(`[DB] seedPersonal: ${personal.length} usuarios procesados`);
 }

@@ -44,7 +44,8 @@ Al arrancar, `initDB()` crea esquemas, tablas, índices, vistas y datos semilla 
 | POST | `/api/auth/resume` | Reactiva una sesión dentro del TTL (usada al reload) |
 | POST | `/api/auth/heartbeat` | Actualiza `ultima_actividad` |
 | POST | `/api/auth/logout` | Marca sesión inactiva (también invocado vía `sendBeacon` en `pagehide`) |
-| GET | `/api/auth/sesiones-activas?planta_id=` | Sesiones activas por planta |
+| GET | `/api/auth/usuarios-activos` | Usuarios con sesión viva (todas las plantas, filtro TTL 5min, requiere sesión) |
+| WS  | `/ws/usuarios-activos?sesion_id=` | Stream de `{type:"snapshot", usuarios:[...]}` en tiempo real tras login/logout/resume y cada 60s (reconciliación TTL) |
 
 ### Catálogos
 | Método | Ruta | Descripción |

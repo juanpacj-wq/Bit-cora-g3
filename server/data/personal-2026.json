@@ -1,0 +1,583 @@
+[
+  {
+    "nombre_completo": "ERNESTO JAVIER MUÑOZ SUAREZ",
+    "username": "emunoz",
+    "cargo": "Gerente de Producción",
+    "es_jefe_planta": true,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "CARLOS ANDRES MARTINEZ ROSALES",
+    "username": "cmartinez",
+    "cargo": "Ingeniero Jefe de Turno",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "DAVID ENRIQUE ORTIZ DIAZ",
+    "username": "dortiz",
+    "cargo": "Ingeniero Jefe de Turno",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "OMAR EFRAIN FEDULLO RUEDA",
+    "username": "ofedullo",
+    "cargo": "Ingeniero Jefe de Turno",
+    "es_jefe_planta": false,
+    "es_jdt_default": true
+  },
+  {
+    "nombre_completo": "JOSE CORNELIO LEAL GONZALEZ",
+    "username": "jleal",
+    "cargo": "Ingeniero Jefe de Turno",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "AMARILDO DE JESUS REALES SILVERA",
+    "username": "areales",
+    "cargo": "Ingeniero Jefe de Turno",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JUAN CAMILO JARAMILLO SAMPAYO",
+    "username": "jjaramillo",
+    "cargo": "Ingeniero Jefe de Turno",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ERICA MARIA VILLADIEGO OROZCO",
+    "username": "evilladiego",
+    "cargo": "Ingeniero Químico",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "CARLOS ALBERTO BEDOYA MEJIA",
+    "username": "cbedoya",
+    "cargo": "Ingeniero Químico",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "CARLOS ANDRES RODRIGUEZ DIAZ",
+    "username": "crodriguez",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "EFREN DAVID DIAZ CALDERA",
+    "username": "ediaz",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "LIZ KEILY MARTÍNEZ ZABALA",
+    "username": "lmartinez",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "LUIS ANGEL ZAPATA CANTERO",
+    "username": "lzapata",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ROGELIO ALBERTO GARCÍA SOLANO",
+    "username": "rgarcia",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JAIME ALBERTO GARCÍA VERGARA",
+    "username": "jgarcia",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JOSÉ MANUEL SAAVEDRA GÓMEZ",
+    "username": "jsaavedra",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "MARCELINO MANUEL VILLADIEGO ARRIETA",
+    "username": "mvilladiego",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "BAYRON JIMENEZ MARTINEZ",
+    "username": "bjimenez",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "CARLOS DANIEL DAU SANCHEZ",
+    "username": "cdau",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "LUIS FERNANDO MORENO MENA",
+    "username": "lmoreno",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "EVER DAVID OVIEDO SALGADO",
+    "username": "eoviedo",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JUAN GUILLERMO VILLORINA SENA",
+    "username": "jvillorina",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JUAN GUILLERMO SANCHEZ TAPIA",
+    "username": "jsanchez",
+    "cargo": "Ingeniero de Operación",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ANDRES FELIPE VALDEZ ARIAS",
+    "username": "avaldez",
+    "cargo": "Operador de Planta - Caldera",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JAMES INDALECIO GUERRA PEREZ",
+    "username": "jguerra",
+    "cargo": "Operador de Planta - Caldera",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "FELIX ALFONSO OQUENDO PARRA",
+    "username": "foquendo",
+    "cargo": "Operador de Planta - Caldera",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "SANTANDER ELIAS NAVARRO CHARRIS",
+    "username": "snavarro",
+    "cargo": "Operador de Planta - Caldera",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "WADITH ENRIQUE HERRERA PEREZ",
+    "username": "wherrera",
+    "cargo": "Operador de Planta - Caldera",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ALBARO JAVIER LOBO MEJIA",
+    "username": "alobo",
+    "cargo": "Operador de Planta - Caldera",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "NEVER FRANCISCO MERCADO PEREZ",
+    "username": "nmercado",
+    "cargo": "Operador de Planta - Caldera",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "LIBARDO ANTONIO MEDRANO ALMANZA",
+    "username": "lmedrano",
+    "cargo": "Operador de Planta - Caldera",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JUAN CUSTODIO MONTIEL SALGADO",
+    "username": "jmontiel",
+    "cargo": "Operador de Planta - Caldera",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JOSE MARIA PEREZ BADER",
+    "username": "jperez",
+    "cargo": "Operador de Planta - Analista",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "DONALDO CORTES CARRASCAL",
+    "username": "dcortes",
+    "cargo": "Operador de Planta - Analista",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JOSE RAMOS ARROYO ENSUNCHO",
+    "username": "jarroyo",
+    "cargo": "Operador de Planta - Analista",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JOSE CARLOS AMARIS SALAS",
+    "username": "jamaris",
+    "cargo": "Operador de Planta - Analista",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "CARLOS ANDRÉS GARCÍA MARTÍNEZ",
+    "username": "cgarcia",
+    "cargo": "Operador de Planta - Analista",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "RICARDO ANDRES RUIZ PEÑATE",
+    "username": "rruiz",
+    "cargo": "Operador de Planta - Analista",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JEISON DAVID CORONADO GALEANO",
+    "username": "jcoronado",
+    "cargo": "Operador de Planta - Sala de Mando",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JORGE LUIS MERCADO SANCHEZ",
+    "username": "jmercado",
+    "cargo": "Operador de Planta - Sala de Mando",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ANDRES FELIPE MENDOZA URZOLA",
+    "username": "amendoza",
+    "cargo": "Operador de Planta - Sala de Mando",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "WILDER ENRIQUE AVILA ARRIETA",
+    "username": "wavila",
+    "cargo": "Operador de Planta - Sala de Mando",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JORGE ARMANDO FLOREZ ALVAREZ",
+    "username": "jaflorez",
+    "cargo": "Operador de Planta - Sala de Mando",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JONATHAN XAVIER PADILLA DE LEON",
+    "username": "jpadilladeleon",
+    "cargo": "Operador de Planta - Sala de Mando",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JEFFERSON SNEIDER CEBALLOS SANCHEZ",
+    "username": "jceballos",
+    "cargo": "Operador de Planta - Sala de Mando",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "HUMBERTO GABRIEL MESTRA SUAREZ",
+    "username": "hmestra",
+    "cargo": "Operador de Planta - Sala de Mando",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "WILMER ENRIQUE SEVERICHE CANO",
+    "username": "wseveriche",
+    "cargo": "Operador de Planta - Sala de Mando",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "CARLOS EDUARDO SANCHEZ MARCELO",
+    "username": "csanchez",
+    "cargo": "Operador de Planta - Planta de Agua",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "LUIS FERNANDO MAZO JARAMILLO",
+    "username": "lmazo",
+    "cargo": "Operador de Planta - Planta de Agua",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ALBERT ANDRÉS MERCADO ALVARADO",
+    "username": "amercado",
+    "cargo": "Operador de Planta - Planta de Agua",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "MELECD ENRIQUE DAZA MEJIA",
+    "username": "mdaza",
+    "cargo": "Operador de Planta - Planta de Agua",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "WILSON FERNANDO GONZALEZ MATUTE",
+    "username": "wgonzalez",
+    "cargo": "Operador de Planta - Planta de Agua",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "VICTOR ALFREDO MOLINA GONZALEZ",
+    "username": "vmolina",
+    "cargo": "Operador de Planta - Planta de Agua",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JESUS DAVID ARRIETA YEPES",
+    "username": "jarrieta",
+    "cargo": "Operador de Planta - Planta de Agua",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "BRICEÑO MANUEL MONTIEL ALEAN",
+    "username": "bmontiel",
+    "cargo": "Operador de Planta - Planta de Agua",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ADOLFO MANUEL TAFUR OSORIO",
+    "username": "atafur",
+    "cargo": "Operador de Planta - Planta de Agua",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JOLMAN OSMAN FLOREZ VIDES",
+    "username": "joflorez",
+    "cargo": "Operador de Planta - Turbogrupo",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JAVIER DARIO FLOREZ SAEZ",
+    "username": "jdflorez",
+    "cargo": "Operador de Planta - Turbogrupo",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "OSCAR IVAN OYOLA BASILIO",
+    "username": "ooyola",
+    "cargo": "Operador de Planta - Turbogrupo",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JAIME LUIS VERGARA VILLORINA",
+    "username": "jvergara",
+    "cargo": "Operador de Planta - Turbogrupo",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ANDRES ALBERTO MARTINEZ DE LA OSSA",
+    "username": "amartinezdelaossa",
+    "cargo": "Operador de Planta - Turbogrupo",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "EDWIN JOSE BELLO SIERRA",
+    "username": "ebello",
+    "cargo": "Operador de Planta - Turbogrupo",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "DAIRO JOSE CUADRO MORENO",
+    "username": "dcuadro",
+    "cargo": "Operador de Planta - Turbogrupo",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ANDRES FELIPE FLORIAN CARMONA",
+    "username": "aflorian",
+    "cargo": "Operador de Planta - Turbogrupo",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "CAMILO ANDRES VIDAL VERGARA",
+    "username": "cvidal",
+    "cargo": "Operador de Planta - Turbogrupo",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "DANIEL ANDRES CAMPO MADRID",
+    "username": "dcampo",
+    "cargo": "Operador Maquinaria Pesada",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "EDER FABIAN GUERRA ZABALA",
+    "username": "eguerra",
+    "cargo": "Operador Maquinaria Pesada",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ALVARO JAVIER CALLE BARRIOS",
+    "username": "acalle",
+    "cargo": "Operador Maquinaria Pesada",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "LUIS FERNANDO BEJARANO MERCADO",
+    "username": "lbejarano",
+    "cargo": "Operador Maquinaria Pesada",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ALVARO JAVIER JULIO VILLALOBO",
+    "username": "ajulio",
+    "cargo": "Operador Maquinaria Pesada",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "LUIS ALFONSO MORA ARISTIZBAL",
+    "username": "lmora",
+    "cargo": "Operador Maquinaria Pesada",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "HANER LUIS MONTIEL HERAZO",
+    "username": "hmontiel",
+    "cargo": "Operador Maquinaria Pesada",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JHEISON CAMILO ROJAS TORRES",
+    "username": "jrojas",
+    "cargo": "Operador Maquinaria Pesada",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "NILSON LEIDER GAMBOA APARICIO",
+    "username": "ngamboa",
+    "cargo": "Operador Maquinaria Pesada",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JOSE DAVID PAVA CANTERO",
+    "username": "jpava",
+    "cargo": "Operador de Planta - Carbón y Caliza",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "SERGIO DAVID FABRA MENDOZA",
+    "username": "sfabra",
+    "cargo": "Operador de Planta - Carbón y Caliza",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "JUAN JOSE SAlGADO ANGULO",
+    "username": "jsalgado",
+    "cargo": "Operador de Planta - Carbón y Caliza",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "TAIRO LÓPEZ BUSTAMANTE",
+    "username": "tlopez",
+    "cargo": "Operador de Planta - Carbón y Caliza",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "ALFONSO DOMINGUEZ CASTILLO",
+    "username": "adominguez",
+    "cargo": "Operador de Planta - Carbón y Caliza",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "RAÚL CURA BETIN",
+    "username": "rcura",
+    "cargo": "Operador de Planta - Carbón y Caliza",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "LUIS FERNANDO LOPÉZ OVIEDO",
+    "username": "llopez",
+    "cargo": "Operador de Planta - Carbón y Caliza",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "MAURICIO MARTÍNEZ LOBO",
+    "username": "mmartinez",
+    "cargo": "Operador de Planta - Carbón y Caliza",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  },
+  {
+    "nombre_completo": "MANUEL GREGORIO CASTRO BOSSA",
+    "username": "mcastro",
+    "cargo": "Operador de Planta - Carbón y Caliza",
+    "es_jefe_planta": false,
+    "es_jdt_default": false
+  }
+]

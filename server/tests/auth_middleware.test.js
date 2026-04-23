@@ -25,24 +25,24 @@ test('POST /api/registros sin header devuelve 401', async () => {
   assert.ok(sesiones.jdt);
 });
 
-test('POST /api/registros Ing. Agua a CAL devuelve 403', async () => {
+test('POST /api/registros Ing. Químico a CALDERA devuelve 403', async () => {
   const { sesiones, bitByCodigo } = ctx;
-  const tipo_evento_id = await firstTipoEvento(bitByCodigo.CAL);
+  const tipo_evento_id = await firstTipoEvento(bitByCodigo.CALDERA);
   const { status } = await call('POST', '/api/registros', {
-    sesion_id: sesiones.ingAgua,
-    body: makeRegistroPayload({ bitacora_id: bitByCodigo.CAL, tipo_evento_id }),
+    sesion_id: sesiones.ingQuim,
+    body: makeRegistroPayload({ bitacora_id: bitByCodigo.CALDERA, tipo_evento_id }),
   });
   assert.equal(status, 403);
 });
 
-test('POST /api/registros Ing. Operación a DISP devuelve 403', async () => {
+test('POST /api/registros Ing. Operación a DISP devuelve 201 (permisos iguales a JdT)', async () => {
   const { sesiones, bitByCodigo } = ctx;
   const tipo_evento_id = await firstTipoEvento(bitByCodigo.DISP);
-  const { status } = await call('POST', '/api/registros', {
+  const { status, data } = await call('POST', '/api/registros', {
     sesion_id: sesiones.ingOp,
     body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_EXTRA }),
   });
-  assert.equal(status, 403);
+  assert.equal(status, 201, JSON.stringify(data));
 });
 
 test('POST /api/registros JdT a DISP devuelve 201', async () => {
@@ -83,10 +83,19 @@ test('POST /api/registros Gerente devuelve 403', async () => {
   assert.equal(status, 403);
 });
 
-test('POST /api/cierre/bitacora Ing. Operación devuelve 403', async () => {
+test('POST /api/cierre/bitacora Ing. Operación devuelve 200 (puede_cerrar_turno=1)', async () => {
   const { sesiones, bitByCodigo } = ctx;
   const { status } = await call('POST', '/api/cierre/bitacora', {
     sesion_id: sesiones.ingOp,
+    body: { bitacora_id: bitByCodigo.DISP, planta_id: PLANTA_ID },
+  });
+  assert.equal(status, 200);
+});
+
+test('POST /api/cierre/bitacora Ing. Químico devuelve 403', async () => {
+  const { sesiones, bitByCodigo } = ctx;
+  const { status } = await call('POST', '/api/cierre/bitacora', {
+    sesion_id: sesiones.ingQuim,
     body: { bitacora_id: bitByCodigo.DISP, planta_id: PLANTA_ID },
   });
   assert.equal(status, 403);
