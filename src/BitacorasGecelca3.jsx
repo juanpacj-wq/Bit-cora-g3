@@ -3,17 +3,21 @@
 // React + Tailwind + Lucide
 // ============================================================
 
-import React, { useState, useMemo, useCallback, useEffect } from "react";
+import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   LogIn, LogOut, Clock, Plus, Save, Trash2, Lock, CheckCircle2,
   AlertTriangle, X, ChevronDown, Search, Filter, FileText,
   Activity, Flame, Droplets, Zap, Gauge, Cpu, FlaskConical, Leaf,
-  Settings, FileCheck, Edit3, Eye, XCircle, Check,
+  Settings, FileCheck, Edit3, Eye, XCircle, Check, Users, History,
 } from "lucide-react";
+import { HistoricoView } from "./components/historicos/HistoricoView";
 import { useAuth } from "./hooks/useAuth";
 import { useCatalogos } from "./hooks/useCatalogos";
 import { useRegistros } from "./hooks/useRegistros";
 import { useCierre } from "./hooks/useCierre";
+import { useUsuariosActivos } from "./hooks/useUsuariosActivos";
+import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
+import { useFlipReorder } from "./hooks/useFlipReorder";
 
 const COLORS = {
   greenPrimary: "#31a354", greenDark: "#006f36",
@@ -165,14 +169,14 @@ function EstadoBadge({ estado }) {
 
 function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
   const [paso, setPaso] = useState("credenciales"); // 'credenciales' | 'planta' | 'cargo'
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [plantaSel, setPlantaSel] = useState(null);
 
   const handleLogin = async (e) => {
     e.preventDefault();
     try {
-      await auth.login(email, password);
+      await auth.login(username, password);
       setPaso("planta");
     } catch (err) {
       showToast(err.message || "Error al iniciar sesión", "error");
@@ -202,8 +206,9 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
           <form onSubmit={handleLogin} className="space-y-4">
             <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Inicia sesión</p>
             <input
-              type="email" required placeholder="Correo corporativo"
-              value={email} onChange={(e) => setEmail(e.target.value)}
+              type="text" required placeholder="Usuario (ej. ofedullo)"
+              autoComplete="username" autoCapitalize="off" autoCorrect="off" spellCheck="false"
+              value={username} onChange={(e) => setUsername(e.target.value.trim().toLowerCase())}
               className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none text-sm"
             />
             <input
@@ -268,7 +273,7 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
                 className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left"
               >
                 <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0"
-                  style={{ backgroundColor: c.nombre === "Jefe de Turno" ? COLORS.greenDark : COLORS.blueDark }}>
+                  style={{ backgroundColor: c.puede_cerrar_turno ? COLORS.greenDark : COLORS.blueDark }}>
                   {iniciales(c.nombre)}
                 </div>
                 <div className="flex-1 min-w-0">
@@ -276,8 +281,8 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
                   <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-medium"
                       style={{
-                        backgroundColor: c.nombre === "Jefe de Turno" ? "#e6f4ea" : "#e8f0fe",
-                        color: c.nombre === "Jefe de Turno" ? COLORS.greenDark : COLORS.blueDark,
+                        backgroundColor: c.puede_cerrar_turno ? "#e6f4ea" : "#e8f0fe",
+                        color: c.puede_cerrar_turno ? COLORS.greenDark : COLORS.blueDark,
                       }}>
                       {c.solo_lectura ? "Solo lectura" : "Operativo"}
                     </span>
@@ -299,15 +304,28 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
 // Header
 // ============================================================
 
-function Header({ user, sesion, cargoNombre, plantaNombre, onLogout }) {
+function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista }) {
   const [reloj, setReloj] = useState(new Date());
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+
   useEffect(() => {
     const i = setInterval(() => setReloj(new Date()), 30000);
     return () => clearInterval(i);
   }, []);
 
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDocMouseDown = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [menuOpen]);
+
   const fechaStr = reloj.toLocaleDateString("es-CO", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
   const horaStr = reloj.toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" });
+  const activos = usuariosActivos || [];
 
   return (
     <header className="text-white px-6 py-3 flex items-center justify-between shadow-lg relative z-10"
@@ -332,6 +350,66 @@ function Header({ user, sesion, cargoNombre, plantaNombre, onLogout }) {
       </div>
 
       <div className="flex items-center gap-3">
+        {onToggleVista && (
+          <button
+            onClick={onToggleVista}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-sm font-semibold"
+            title={vista === 'historicos' ? 'Volver a bitácoras' : 'Ver históricos'}
+            aria-pressed={vista === 'historicos'}
+          >
+            {vista === 'historicos' ? <FileText size={18} /> : <History size={18} />}
+            <span className="hidden md:inline">
+              {vista === 'historicos' ? 'Bitácoras' : 'Históricos'}
+            </span>
+          </button>
+        )}
+        <div className="relative" ref={menuRef}>
+          <button
+            onClick={() => setMenuOpen((v) => !v)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors"
+            title="Usuarios conectados"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+          >
+            <Users size={18} />
+            <span className="text-sm font-semibold">{activos.length}</span>
+          </button>
+          {menuOpen && (
+            <div
+              role="menu"
+              className="absolute right-0 top-full mt-2 w-80 max-h-96 overflow-auto bg-white text-gray-800 rounded-xl shadow-xl border border-gray-200 z-20"
+            >
+              <div className="px-4 py-2 border-b border-gray-100 text-xs uppercase tracking-wide text-gray-500">
+                Conectados ({activos.length})
+              </div>
+              {activos.length === 0 ? (
+                <div className="px-4 py-6 text-sm text-gray-400 text-center">Nadie más conectado</div>
+              ) : (
+                <ul className="divide-y divide-gray-100">
+                  {activos.map((u) => (
+                    <li key={u.sesion_id} className="px-4 py-2.5 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold truncate">
+                          {u.nombre_completo}
+                          {u.sesion_id === sesionActualId && (
+                            <span className="ml-2 text-xs font-medium text-emerald-600">(tú)</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-500 truncate">
+                          {u.cargo_nombre} — {u.planta_nombre}
+                        </div>
+                      </div>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 whitespace-nowrap">
+                        T{u.turno}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+
         <div className="text-right hidden sm:block">
           <div className="text-sm font-semibold">{user.nombre_completo}</div>
           <div className="text-xs text-blue-300">{cargoNombre} — {plantaNombre}</div>
@@ -352,7 +430,16 @@ function Header({ user, sesion, cargoNombre, plantaNombre, onLogout }) {
 // Tabs
 // ============================================================
 
+const UMBRAL_ALTO = 5;
+
+function nivelCarga(count) {
+  if (count >= UMBRAL_ALTO) return "alto";
+  if (count > 0) return "medio";
+  return "nulo";
+}
+
 function BitacoraTabs({ bitacoras, activeId, onSelect, registrosPorBitacora }) {
+  const registerNode = useFlipReorder(bitacoras, "bitacora_id");
   return (
     <div className="bg-white border-b border-gray-200 px-4 overflow-x-auto">
       <div className="flex gap-1 min-w-max py-2">
@@ -360,25 +447,44 @@ function BitacoraTabs({ bitacoras, activeId, onSelect, registrosPorBitacora }) {
           const isActive = b.bitacora_id === activeId;
           const IconComp = ICON_MAP[b.icono] || FileText;
           const count = registrosPorBitacora[b.bitacora_id] || 0;
-          const tieneActivos = count > 0;
+          const nivel = nivelCarga(count);
+
+          let baseClass = "text-gray-600 hover:bg-gray-100 hover:text-gray-900";
+          let baseStyle = {};
+          if (isActive) {
+            baseClass = "text-white shadow-md";
+            baseStyle = { backgroundColor: COLORS.blueDark };
+          } else if (nivel === "alto") {
+            baseClass = "text-red-800 bg-red-50 hover:bg-red-100 ring-1 ring-red-200";
+          } else if (nivel === "medio") {
+            baseClass = "text-amber-800 bg-amber-50 hover:bg-amber-100 ring-1 ring-amber-200";
+          }
+
+          let dotColor = null;
+          if (nivel === "alto") dotColor = isActive ? "#fff" : COLORS.red;
+          else if (nivel === "medio") dotColor = isActive ? "#fff" : COLORS.yellow;
+
+          let badgeClass = "bg-gray-200 text-gray-600";
+          if (isActive) badgeClass = "bg-white/20 text-white";
+          else if (nivel === "alto") badgeClass = "bg-red-200 text-red-900";
+          else if (nivel === "medio") badgeClass = "bg-amber-200 text-amber-900";
+
           return (
             <button
               key={b.bitacora_id}
+              ref={(node) => registerNode(b.bitacora_id, node)}
               onClick={() => onSelect(b.bitacora_id)}
-              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-all whitespace-nowrap ${
-                isActive ? "text-white shadow-md" : "text-gray-600 hover:bg-gray-100 hover:text-gray-900"
-              }`}
-              style={isActive ? { backgroundColor: COLORS.blueDark } : {}}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap ${baseClass}`}
+              style={baseStyle}
+              aria-label={count > 0 ? `${b.nombre}, ${count} registros sin cerrar` : b.nombre}
             >
-              {tieneActivos && (
-                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: isActive ? "#fff" : COLORS.greenPrimary }} />
+              {dotColor && (
+                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: dotColor }} />
               )}
               <IconComp size={16} />
               <span className="hidden lg:inline">{b.nombre}</span>
               <span className="lg:hidden">{b.codigo}</span>
-              <span className={`ml-1 min-w-5 h-5 flex items-center justify-center rounded-full text-xs font-bold ${
-                isActive ? "bg-white/20 text-white" : "bg-gray-200 text-gray-600"
-              }`}>
+              <span className={`ml-1 min-w-5 h-5 flex items-center justify-center rounded-full text-xs font-bold ${badgeClass}`}>
                 {count}
               </span>
             </button>
@@ -762,6 +868,12 @@ export default function App() {
   const catalogos = useCatalogos(auth.sesion?.cargo_id, auth.ready);
   const registrosHook = useRegistros();
   const cierre = useCierre();
+  const usuariosActivos = useUsuariosActivos(auth.ready, auth.sesion?.sesion_id);
+  const { counts: registrosPorBitacora } = useBitacoraCounts(
+    auth.ready,
+    auth.sesion?.sesion_id,
+    auth.sesion?.planta_id,
+  );
 
   const [activeBitacora, setActiveBitacora] = useState(null);
   const [tiposEvento, setTiposEvento] = useState([]);
@@ -770,6 +882,7 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [modal, setModal] = useState(null);
   const [draftLocal, setDraftLocal] = useState(null);
+  const [vista, setVista] = useState('bitacoras');
 
   const showToast = useCallback((message, type = "success") => {
     setToast({ message, type, key: Date.now() });
@@ -779,14 +892,25 @@ export default function App() {
   const user = auth.user;
 
   const bitacorasPermitidas = useMemo(() => {
-    if (!catalogos.permisos.length) return catalogos.bitacoras;
-    const map = new Map(catalogos.permisos.map((p) => [p.bitacora_id, p]));
-    return catalogos.bitacoras.filter((b) => map.get(b.bitacora_id)?.puede_ver);
-  }, [catalogos.bitacoras, catalogos.permisos]);
+    const base = catalogos.permisos.length
+      ? (() => {
+          const map = new Map(catalogos.permisos.map((p) => [p.bitacora_id, p]));
+          return catalogos.bitacoras.filter((b) => map.get(b.bitacora_id)?.puede_ver);
+        })()
+      : catalogos.bitacoras;
+    return [...base].sort((a, b) => {
+      const ca = registrosPorBitacora[a.bitacora_id] || 0;
+      const cb = registrosPorBitacora[b.bitacora_id] || 0;
+      if (cb !== ca) return cb - ca;
+      return (a.orden ?? 0) - (b.orden ?? 0);
+    });
+  }, [catalogos.bitacoras, catalogos.permisos, registrosPorBitacora]);
 
   const cargoNombre = catalogos.cargos.find((c) => c.cargo_id === sesion?.cargo_id)?.nombre || "";
   const plantaNombre = catalogos.plantas.find((p) => p.planta_id === sesion?.planta_id)?.nombre || sesion?.planta_id || "";
-  const esJefeTurno = cargoNombre === "Jefe de Turno";
+  // Puede cerrar turno y editar cualquier registro — hoy: Ingeniero Jefe de Turno e Ingeniero de Operación.
+  // El flag lo trae loadSession() desde lov_bit.cargo.puede_cerrar_turno (desacoplado del nombre del cargo).
+  const esJefeTurno = !!sesion?.puede_cerrar_turno;
 
   const permisoActivo = catalogos.permisos.find((p) => p.bitacora_id === activeBitacora);
   const puedeCrear = !!permisoActivo?.puede_crear;
@@ -815,12 +939,6 @@ export default function App() {
     const lista = registrosHook.registros.filter((r) => r.bitacora_id === activeBitacora);
     return draftLocal ? [...lista, draftLocal] : lista;
   }, [registrosHook.registros, activeBitacora, draftLocal]);
-
-  const registrosPorBitacora = useMemo(() => {
-    const c = {};
-    registrosHook.registros.forEach((r) => { c[r.bitacora_id] = (c[r.bitacora_id] || 0) + 1; });
-    return c;
-  }, [registrosHook.registros]);
 
   const estadoBitacora = useMemo(() => {
     if (!registrosDeBitacora.length) return "Sin actividad";
@@ -981,43 +1099,59 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col bg-gray-100">
-      <Header user={user} sesion={sesion} cargoNombre={cargoNombre} plantaNombre={plantaNombre} onLogout={handleLogout} />
-
-      <BitacoraTabs
-        bitacoras={bitacorasPermitidas}
-        activeId={activeBitacora}
-        onSelect={(id) => { setActiveBitacora(id); setFiltroTexto(""); setFiltroTipo(""); setDraftLocal(null); }}
-        registrosPorBitacora={registrosPorBitacora}
+      <Header
+        user={user}
+        sesion={sesion}
+        cargoNombre={cargoNombre}
+        plantaNombre={plantaNombre}
+        usuariosActivos={usuariosActivos.usuarios}
+        sesionActualId={sesion?.sesion_id}
+        onLogout={handleLogout}
+        vista={vista}
+        onToggleVista={() => setVista((v) => (v === 'historicos' ? 'bitacoras' : 'historicos'))}
       />
 
-      {bitacoraActiva && (
-        <BarraEstado
-          bitacora={bitacoraActiva}
-          registros={registrosDeBitacora}
-          estadoBitacora={estadoBitacora}
-          puedeCrear={puedeCrear}
-          esJefeTurno={esJefeTurno}
-          onCerrarTurno={handleCerrarTurno}
-          filtroTexto={filtroTexto} setFiltroTexto={setFiltroTexto}
-          filtroTipo={filtroTipo} setFiltroTipo={setFiltroTipo}
-          tiposEvento={tiposEvento}
-          onAddRegistro={handleAddRegistro}
-        />
+      {vista === 'historicos' ? (
+        <HistoricoView plantaSesion={sesion?.planta_id} />
+      ) : (
+        <>
+          <BitacoraTabs
+            bitacoras={bitacorasPermitidas}
+            activeId={activeBitacora}
+            onSelect={(id) => { setActiveBitacora(id); setFiltroTexto(""); setFiltroTipo(""); setDraftLocal(null); }}
+            registrosPorBitacora={registrosPorBitacora}
+          />
+
+          {bitacoraActiva && (
+            <BarraEstado
+              bitacora={bitacoraActiva}
+              registros={registrosDeBitacora}
+              estadoBitacora={estadoBitacora}
+              puedeCrear={puedeCrear}
+              esJefeTurno={esJefeTurno}
+              onCerrarTurno={handleCerrarTurno}
+              filtroTexto={filtroTexto} setFiltroTexto={setFiltroTexto}
+              filtroTipo={filtroTipo} setFiltroTipo={setFiltroTipo}
+              tiposEvento={tiposEvento}
+              onAddRegistro={handleAddRegistro}
+            />
+          )}
+
+          <GrillaRegistros
+            registros={registrosDeBitacora}
+            bitacora={bitacoraActiva}
+            tiposEvento={tiposEvento}
+            jefeNombre={catalogos.jefe?.nombre_completo}
+            jdtNombre={null}
+            puedeCrear={puedeCrear}
+            onUpdateLocal={handleUpdateLocal}
+            onSaveRegistro={handleSaveRegistro}
+            onDeleteRegistro={handleDeleteRegistro}
+            filtroTexto={filtroTexto}
+            filtroTipo={filtroTipo}
+          />
+        </>
       )}
-
-      <GrillaRegistros
-        registros={registrosDeBitacora}
-        bitacora={bitacoraActiva}
-        tiposEvento={tiposEvento}
-        jefeNombre={catalogos.jefe?.nombre_completo}
-        jdtNombre={null}
-        puedeCrear={puedeCrear}
-        onUpdateLocal={handleUpdateLocal}
-        onSaveRegistro={handleSaveRegistro}
-        onDeleteRegistro={handleDeleteRegistro}
-        filtroTexto={filtroTexto}
-        filtroTipo={filtroTipo}
-      />
 
       {toast && (<Toast key={toast.key} message={toast.message} type={toast.type} onClose={() => setToast(null)} />)}
       {modal && (

@@ -1,5 +1,6 @@
 import sql from 'mssql';
 import { initDB, getDB } from '../db.js';
+import { hashPassword } from '../utils/password.js';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3002';
 export const PLANTA_ID = 'GEC3';
@@ -20,43 +21,47 @@ export async function call(method, path, { body, sesion_id } = {}) {
 }
 
 const TEST_USERS = [
-  { key: 'jdt',     nombre: 'Test JdT',       email: 'test.jdt@gecelca.local',     jefe: 0, jdtd: 1 },
-  { key: 'ingOp',   nombre: 'Test Ing Op',    email: 'test.ingop@gecelca.local',   jefe: 0, jdtd: 0 },
-  { key: 'gerente', nombre: 'Test Gerente',   email: 'test.gerente@gecelca.local', jefe: 1, jdtd: 0 },
-  { key: 'ingAgua', nombre: 'Test Ing Agua',  email: 'test.ingagua@gecelca.local', jefe: 0, jdtd: 0 },
+  { key: 'jdt',     nombre: 'Test JdT',      username: 'test_jdt',     jefe: 0, jdtd: 1 },
+  { key: 'ingOp',   nombre: 'Test Ing Op',   username: 'test_ingop',   jefe: 0, jdtd: 0 },
+  { key: 'gerente', nombre: 'Test Gerente',  username: 'test_gerente', jefe: 1, jdtd: 0 },
+  { key: 'ingQuim', nombre: 'Test Ing Quim', username: 'test_ingquim', jefe: 0, jdtd: 0 },
 ];
 
 const USER_CARGO = {
-  jdt:     'Jefe de Turno',
+  jdt:     'Ingeniero Jefe de Turno',
   ingOp:   'Ingeniero de Operación',
   gerente: 'Gerente de Producción',
-  ingAgua: 'Ingeniero de Planta de Agua',
+  ingQuim: 'Ingeniero Químico',
 };
 
 export async function setupSessions() {
   await initDB();
   const db = await getDB();
+  const password_hash = await hashPassword('1234');
 
   for (const u of TEST_USERS) {
     await db.request()
-      .input('nombre', sql.VarChar(200), u.nombre)
-      .input('email',  sql.VarChar(200), u.email)
-      .input('jefe',   sql.Bit, u.jefe)
-      .input('jdtd',   sql.Bit, u.jdtd)
+      .input('nombre',   sql.VarChar(200), u.nombre)
+      .input('username', sql.VarChar(50),  u.username)
+      .input('pwd',      sql.VarChar(200), password_hash)
+      .input('jefe',     sql.Bit, u.jefe)
+      .input('jdtd',     sql.Bit, u.jdtd)
       .query(`
         MERGE lov_bit.usuario AS t
-        USING (SELECT @email AS email) AS s ON t.email = s.email
-        WHEN MATCHED THEN UPDATE SET activo = 1, nombre_completo = @nombre, es_jefe_planta = @jefe, es_jdt_default = @jdtd
-        WHEN NOT MATCHED THEN INSERT (nombre_completo, email, es_jefe_planta, es_jdt_default)
-          VALUES (@nombre, @email, @jefe, @jdtd);
+        USING (SELECT @username AS username) AS s ON t.username = s.username
+        WHEN MATCHED THEN UPDATE SET
+          activo = 1, nombre_completo = @nombre,
+          es_jefe_planta = @jefe, es_jdt_default = @jdtd
+        WHEN NOT MATCHED THEN INSERT (nombre_completo, username, email, password_hash, es_jefe_planta, es_jdt_default, activo)
+          VALUES (@nombre, @username, NULL, @pwd, @jefe, @jdtd, 1);
       `);
   }
 
-  const emails = TEST_USERS.map(u => `'${u.email}'`).join(',');
+  const usernames = TEST_USERS.map(u => `'${u.username}'`).join(',');
   const { recordset: usuarios } = await db.request().query(`
-    SELECT usuario_id, email FROM lov_bit.usuario WHERE email IN (${emails})
+    SELECT usuario_id, username FROM lov_bit.usuario WHERE username IN (${usernames})
   `);
-  const userByEmail = Object.fromEntries(usuarios.map(u => [u.email, u.usuario_id]));
+  const userByUsername = Object.fromEntries(usuarios.map(u => [u.username, u.usuario_id]));
 
   const { recordset: cargos } = await db.request().query(`
     SELECT cargo_id, nombre FROM lov_bit.cargo
@@ -83,10 +88,10 @@ export async function setupSessions() {
   const sesiones = {};
   const usuariosOut = {};
   for (const u of TEST_USERS) {
-    const usuario_id = userByEmail[u.email];
+    const usuario_id = userByUsername[u.username];
     const cargo_id = cargoByName[USER_CARGO[u.key]];
     sesiones[u.key] = await ensureSesion(usuario_id, cargo_id);
-    usuariosOut[u.key] = { usuario_id, email: u.email, nombre_completo: u.nombre };
+    usuariosOut[u.key] = { usuario_id, username: u.username, nombre_completo: u.nombre };
   }
 
   const { recordset: bitacoras } = await db.request().query(`
@@ -108,10 +113,10 @@ export async function cleanupTestRegistros() {
       );
       DELETE FROM bitacora.registro_activo WHERE detalle LIKE @tag;
     `);
-  const emails = TEST_USERS.map((u) => `'${u.email}'`).join(',');
+  const usernames = TEST_USERS.map((u) => `'${u.username}'`).join(',');
   await db.request().query(`
     UPDATE bitacora.sesion_activa SET activa = 0
-    WHERE usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE email IN (${emails}))
+    WHERE usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE username IN (${usernames}))
   `);
 }
 

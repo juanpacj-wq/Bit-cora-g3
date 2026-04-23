@@ -1,13 +1,17 @@
 import http from 'http';
 import sql from 'mssql';
 import { initDB, getDB } from './db.js';
+import { verifyPassword } from './utils/password.js';
 import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
 import { getTurnoColombia, periodoFromFechaBogota } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
-import { hasPermisoBitacora, isJdT, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
+import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
 import { findAutorizacion, upsertAutorizacion, hasNotificarDashboard } from './utils/notificador.js';
-import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from './utils/snapshots.js';
+import { snapshotJDTs, snapshotJefes, snapshotIngenieros, SESION_TTL_MIN } from './utils/snapshots.js';
+import { attachWSS, broadcastUsuariosActivos } from './utils/ws-usuarios-activos.js';
+import { attachWSConteoBitacoras, broadcastConteoBitacoras } from './utils/ws-conteo-bitacoras.js';
+import { startSweeper, stopSweeper } from './utils/sesion-sweeper.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
 
@@ -27,25 +31,27 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
     }
 
-    // POST /api/auth/login
+    // POST /api/auth/login  (autentica por username + bcrypt)
     if (pathname === '/api/auth/login' && method === 'POST') {
-      const { email, password } = await parseBody(req);
-      if (!email || !password) {
-        return sendJSON(res, 400, { error: 'email y password son requeridos' });
+      const { username, password } = await parseBody(req);
+      if (!username || !password) {
+        return sendJSON(res, 400, { error: 'username y password son requeridos' });
       }
       const db = await getDB();
       const result = await db.request()
-        .input('email', sql.NVarChar(200), email)
-        .input('password', sql.NVarChar(200), password)
+        .input('username', sql.VarChar(50), username)
         .query(`
-          SELECT usuario_id, nombre_completo, email, es_jefe_planta, es_jdt_default, activo
+          SELECT usuario_id, nombre_completo, username, email, password_hash,
+                 es_jefe_planta, es_jdt_default, activo
           FROM lov_bit.usuario
-          WHERE email = @email AND password_hash = @password AND activo = 1
+          WHERE username = @username AND activo = 1
         `);
-      if (result.recordset.length === 0) {
+      const u = result.recordset[0];
+      if (!u || !(await verifyPassword(password, u.password_hash))) {
         return sendJSON(res, 401, { error: 'Credenciales inválidas' });
       }
-      return sendJSON(res, 200, { usuario: result.recordset[0] });
+      const { password_hash: _omit, ...usuario } = u;
+      return sendJSON(res, 200, { usuario });
     }
 
     // POST /api/auth/select-context
@@ -69,17 +75,32 @@ const server = http.createServer(async (req, res) => {
       }
 
       const turno = getTurnoColombia();
-      const insert = await db.request()
+      // INSERT y recuperamos la sesión ENRIQUECIDA con el nombre del cargo y el flag
+      // puede_cerrar_turno — el frontend los necesita para pintar dropdowns y habilitar
+      // el botón de "Cerrar Turno". OUTPUT INSERTED.* solo daría las columnas crudas.
+      const result = await db.request()
         .input('usuario_id', sql.Int, usuario_id)
         .input('planta_id', sql.VarChar(10), planta_id)
         .input('cargo_id', sql.Int, cargo_id)
         .input('turno', sql.TinyInt, turno)
         .query(`
+          DECLARE @out TABLE (sesion_id INT);
           INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno)
-          OUTPUT INSERTED.*
-          VALUES (@usuario_id, @planta_id, @cargo_id, @turno)
+          OUTPUT INSERTED.sesion_id INTO @out
+          VALUES (@usuario_id, @planta_id, @cargo_id, @turno);
+
+          SELECT s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
+                 s.inicio_sesion, s.ultima_actividad,
+                 u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
+                 c.nombre AS cargo_nombre, c.solo_lectura,
+                 CAST(c.puede_cerrar_turno AS BIT) AS puede_cerrar_turno
+          FROM @out o
+          INNER JOIN bitacora.sesion_activa s ON s.sesion_id = o.sesion_id
+          INNER JOIN lov_bit.usuario u        ON u.usuario_id = s.usuario_id
+          INNER JOIN lov_bit.cargo c          ON c.cargo_id   = s.cargo_id;
         `);
-      return sendJSON(res, 200, { sesion: insert.recordset[0] });
+      broadcastUsuariosActivos().catch(() => {});
+      return sendJSON(res, 200, { sesion: result.recordset[0] });
     }
 
     // POST /api/auth/logout
@@ -92,6 +113,7 @@ const server = http.createServer(async (req, res) => {
       await db.request()
         .input('sesion_id', sql.Int, sesion_id)
         .query(`UPDATE bitacora.sesion_activa SET activa = 0 WHERE sesion_id = @sesion_id`);
+      broadcastUsuariosActivos().catch(() => {});
       return sendJSON(res, 200, { ok: true });
     }
 
@@ -108,12 +130,24 @@ const server = http.createServer(async (req, res) => {
           UPDATE bitacora.sesion_activa
           SET activa = 1, ultima_actividad = GETDATE()
           WHERE sesion_id = @sesion_id
-            AND ultima_actividad > DATEADD(MINUTE, -5, GETDATE())
+            AND ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE());
+
+          SELECT s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
+                 s.inicio_sesion, s.ultima_actividad,
+                 u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
+                 c.nombre AS cargo_nombre, c.solo_lectura,
+                 CAST(c.puede_cerrar_turno AS BIT) AS puede_cerrar_turno
+          FROM bitacora.sesion_activa s
+          INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
+          INNER JOIN lov_bit.cargo c   ON c.cargo_id   = s.cargo_id
+          WHERE s.sesion_id = @sesion_id AND s.activa = 1;
         `);
-      if (!result.rowsAffected[0]) {
+      const sesion = result.recordset[0];
+      if (!sesion) {
         return sendJSON(res, 404, { error: 'Sesión expirada' });
       }
-      return sendJSON(res, 200, { ok: true });
+      broadcastUsuariosActivos().catch(() => {});
+      return sendJSON(res, 200, { ok: true, sesion });
     }
 
     // POST /api/auth/heartbeat
@@ -133,28 +167,28 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true });
     }
 
-    // GET /api/auth/sesiones-activas?planta_id=GEC3
-    if (pathname === '/api/auth/sesiones-activas' && method === 'GET') {
-      const planta_id = url.searchParams.get('planta_id');
-      if (!planta_id) {
-        return sendJSON(res, 400, { error: 'planta_id es requerido' });
-      }
+    // GET /api/auth/usuarios-activos  (todas las plantas, con TTL, requiere sesion)
+    if (pathname === '/api/auth/usuarios-activos' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+
       const db = await getDB();
-      const result = await db.request()
-        .input('planta_id', sql.VarChar(10), planta_id)
-        .query(`
-          SELECT
-            s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno,
-            s.inicio_sesion, s.ultima_actividad, s.activa,
-            u.nombre_completo, u.email, u.es_jefe_planta, u.es_jdt_default,
-            c.nombre AS cargo_nombre, c.solo_lectura
-          FROM bitacora.sesion_activa s
-          INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
-          INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
-          WHERE s.planta_id = @planta_id AND s.activa = 1
-          ORDER BY s.inicio_sesion DESC
-        `);
-      return sendJSON(res, 200, { sesiones: result.recordset });
+      const result = await db.request().query(`
+        SELECT
+          s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno,
+          s.inicio_sesion, s.ultima_actividad,
+          u.nombre_completo,
+          c.nombre AS cargo_nombre,
+          p.nombre AS planta_nombre
+        FROM bitacora.sesion_activa s
+        INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
+        INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id
+        INNER JOIN lov_bit.planta  p ON p.planta_id  = s.planta_id
+        WHERE s.activa = 1
+          AND s.ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
+        ORDER BY p.planta_id, s.inicio_sesion DESC
+      `);
+      return sendJSON(res, 200, { usuarios: result.recordset });
     }
 
     // GET /api/catalogos/plantas
@@ -173,7 +207,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/catalogos/cargos' && method === 'GET') {
       const db = await getDB();
       const result = await db.request().query(`
-        SELECT cargo_id, nombre, solo_lectura
+        SELECT cargo_id, nombre, solo_lectura, CAST(puede_cerrar_turno AS BIT) AS puede_cerrar_turno
         FROM lov_bit.cargo
         ORDER BY cargo_id
       `);
@@ -301,6 +335,29 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { registros: result.recordset });
     }
 
+    // GET /api/bitacora/counts?planta_id=GEC3  (snapshot inicial de registros abiertos por bitácora)
+    if (pathname === '/api/bitacora/counts' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      const planta_id = url.searchParams.get('planta_id');
+      if (!planta_id) return sendJSON(res, 400, { error: 'planta_id es requerido' });
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No puede consultar otra planta' });
+      }
+      const db = await getDB();
+      const result = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .query(`
+          SELECT bitacora_id, COUNT(*) AS total
+          FROM bitacora.registro_activo
+          WHERE planta_id = @planta_id AND estado = 'borrador'
+          GROUP BY bitacora_id
+        `);
+      const counts = {};
+      for (const row of result.recordset) counts[row.bitacora_id] = row.total;
+      return sendJSON(res, 200, { counts });
+    }
+
     // POST /api/registros
     if (pathname === '/api/registros' && method === 'POST') {
       const sesion = await loadSession(req);
@@ -355,7 +412,7 @@ const server = http.createServer(async (req, res) => {
         const reqFactory = () => new sql.Request(transaction);
         const jdts_snapshot = await snapshotJDTs(reqFactory, { planta_id });
         const jefes_snapshot = await snapshotJefes(reqFactory);
-        const ingenieros_snapshot = await snapshotIngenieros(reqFactory, { planta_id, bitacora_id });
+        const ingenieros_snapshot = await snapshotIngenieros(reqFactory, { planta_id });
         if (jefes_snapshot === '[]') {
           await transaction.rollback();
           return sendJSON(res, 500, { error: 'No hay jefe de planta activo' });
@@ -417,6 +474,7 @@ const server = http.createServer(async (req, res) => {
         }
 
         await transaction.commit();
+        broadcastConteoBitacoras(planta_id).catch(() => {});
         return sendJSON(res, 201, { registro });
       } catch (err) {
         try { await transaction.rollback(); } catch {}
@@ -531,7 +589,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/cierre/bitacora' && method === 'POST') {
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
-      if (!isJdT(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno puede cerrar bitácoras' });
+      if (!puedeCerrarTurno(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno o el Ingeniero de Operación pueden cerrar bitácoras' });
       const { bitacora_id, planta_id } = await parseBody(req);
       if (!bitacora_id || !planta_id) {
         return sendJSON(res, 400, { error: 'bitacora_id y planta_id son requeridos' });
@@ -571,6 +629,7 @@ const server = http.createServer(async (req, res) => {
           `);
 
         await transaction.commit();
+        broadcastConteoBitacoras(planta_id).catch(() => {});
         return sendJSON(res, 200, { registros_cerrados: insResult.rowsAffected[0] || 0 });
       } catch (err) {
         await transaction.rollback();
@@ -582,7 +641,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/cierre/masivo' && method === 'POST') {
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
-      if (!isJdT(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno puede cerrar bitácoras' });
+      if (!puedeCerrarTurno(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno o el Ingeniero de Operación pueden cerrar bitácoras' });
       const { planta_id } = await parseBody(req);
       if (!planta_id) {
         return sendJSON(res, 400, { error: 'planta_id es requerido' });
@@ -637,6 +696,7 @@ const server = http.createServer(async (req, res) => {
           resumen.push({ bitacora_id: row.bitacora_id, nombre: row.nombre, error: err.message });
         }
       }
+      broadcastConteoBitacoras(planta_id).catch(() => {});
       return sendJSON(res, 200, { resumen });
     }
 
@@ -665,6 +725,7 @@ const server = http.createServer(async (req, res) => {
           UPDATE bitacora.autorizacion_dashboard SET activa = 0 WHERE registro_origen_id = @registro_id;
           DELETE FROM bitacora.registro_activo WHERE registro_id = @registro_id AND estado = 'borrador';
         `);
+      broadcastConteoBitacoras(reg.planta_id).catch(() => {});
       return sendJSON(res, 200, { ok: true });
     }
 
@@ -801,7 +862,7 @@ const server = http.createServer(async (req, res) => {
     if (authDel && method === 'DELETE') {
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
-      if (!isJdT(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno puede anular autorizaciones' });
+      if (!puedeCerrarTurno(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno o el Ingeniero de Operación pueden anular autorizaciones' });
       const autorizacion_id = parseInt(authDel[1], 10);
       const db = await getDB();
       const result = await db.request()
@@ -826,7 +887,11 @@ const server = http.createServer(async (req, res) => {
 });
 
 initDB()
-  .then(() => {
+  .then(async () => {
+    attachWSS(server);
+    attachWSConteoBitacoras(server);
+    const db = await getDB();
+    startSweeper(db);
     server.listen(PORT, () => {
       console.log(`[SERVER] Escuchando en puerto ${PORT}`);
     });
@@ -835,3 +900,10 @@ initDB()
     console.error('[DB] Error de conexión:', err);
     process.exit(1);
   });
+
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    stopSweeper();
+    process.exit(0);
+  });
+}
