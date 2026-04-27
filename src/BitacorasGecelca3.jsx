@@ -18,6 +18,7 @@ import { useCierre } from "./hooks/useCierre";
 import { useUsuariosActivos } from "./hooks/useUsuariosActivos";
 import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
 import { useFlipReorder } from "./hooks/useFlipReorder";
+import { useBitacoraSesion } from "./hooks/useBitacoraSesion";
 
 const COLORS = {
   greenPrimary: "#31a354", greenDark: "#006f36",
@@ -883,6 +884,10 @@ export default function App() {
   const [modal, setModal] = useState(null);
   const [draftLocal, setDraftLocal] = useState(null);
   const [vista, setVista] = useState('bitacoras');
+
+  // F2: marca participación cuando el usuario abre una bitácora. Idempotente — reabrir tras
+  // finalizar el turno crea una nueva ventana de participación sin requerir re-login.
+  useBitacoraSesion(auth.sesion?.sesion_id ? activeBitacora : null);
 
   const showToast = useCallback((message, type = "success") => {
     setToast({ message, type, key: Date.now() });

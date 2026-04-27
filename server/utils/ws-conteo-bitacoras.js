@@ -1,7 +1,6 @@
 import { WebSocketServer } from 'ws';
 import sql from 'mssql';
 import { getDB } from '../db.js';
-import { SESION_TTL_MIN } from './snapshots.js';
 
 const clients = new Map();
 
@@ -48,7 +47,6 @@ async function validateSesionAndGetPlanta(sesion_id) {
       SELECT planta_id
       FROM bitacora.sesion_activa
       WHERE sesion_id = @sesion_id AND activa = 1
-        AND ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
     `);
   return r.recordset[0]?.planta_id || null;
 }

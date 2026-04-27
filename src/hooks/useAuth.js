@@ -45,25 +45,29 @@ export function useAuth() {
     }
   }, [user, sesion]);
 
-  useEffect(() => {
-    if (!sesion?.sesion_id) return;
-    heartbeatRef.current = setInterval(() => {
-      api.post('/api/auth/heartbeat', { sesion_id: sesion.sesion_id }, { skipAuth: true }).catch(() => {});
-    }, 60000);
-    return () => clearInterval(heartbeatRef.current);
-  }, [sesion?.sesion_id]);
+  // F2: heartbeat desactivado — la sesión queda activa hasta logout o cierre por sweeper de F4.
+  // F9 elimina este useEffect y el endpoint /api/auth/heartbeat.
+  // useEffect(() => {
+  //   if (!sesion?.sesion_id) return;
+  //   heartbeatRef.current = setInterval(() => {
+  //     api.post('/api/auth/heartbeat', { sesion_id: sesion.sesion_id }, { skipAuth: true }).catch(() => {});
+  //   }, 60000);
+  //   return () => clearInterval(heartbeatRef.current);
+  // }, [sesion?.sesion_id]);
 
-  useEffect(() => {
-    if (!sesion?.sesion_id) return;
-    const onPageHide = () => {
-      try {
-        const blob = new Blob([JSON.stringify({ sesion_id: sesion.sesion_id })], { type: 'application/json' });
-        navigator.sendBeacon('/api/auth/logout', blob);
-      } catch {}
-    };
-    window.addEventListener('pagehide', onPageHide);
-    return () => window.removeEventListener('pagehide', onPageHide);
-  }, [sesion?.sesion_id]);
+  // F2: pagehide beacon desactivado — cerrar la pestaña ya NO desloguea. F3 sustituye esta
+  // mecánica defensiva por un popup explícito "¿Finalizar turno antes de cerrar sesión?".
+  // useEffect(() => {
+  //   if (!sesion?.sesion_id) return;
+  //   const onPageHide = () => {
+  //     try {
+  //       const blob = new Blob([JSON.stringify({ sesion_id: sesion.sesion_id })], { type: 'application/json' });
+  //       navigator.sendBeacon('/api/auth/logout', blob);
+  //     } catch {}
+  //   };
+  //   window.addEventListener('pagehide', onPageHide);
+  //   return () => window.removeEventListener('pagehide', onPageHide);
+  // }, [sesion?.sesion_id]);
 
   const logout = useCallback(async () => {
     if (sesion?.sesion_id) {

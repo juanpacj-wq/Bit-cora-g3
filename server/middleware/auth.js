@@ -1,6 +1,5 @@
 import sql from 'mssql';
 import { getDB } from '../db.js';
-import { SESION_TTL_MIN } from '../utils/snapshots.js';
 
 export async function loadSession(req) {
   const raw = req.headers['x-sesion-id'];
@@ -8,6 +7,7 @@ export async function loadSession(req) {
   const sesion_id = parseInt(raw, 10);
   if (Number.isNaN(sesion_id)) return null;
   const db = await getDB();
+  // F2: sin TTL — sesión queda activa hasta logout explícito o cierre por sweeper de F4.
   const r = await db.request()
     .input('sesion_id', sql.Int, sesion_id)
     .query(`
@@ -19,7 +19,6 @@ export async function loadSession(req) {
       INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
       INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
       WHERE s.sesion_id = @sesion_id AND s.activa = 1
-        AND s.ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
     `);
   const row = r.recordset[0];
   if (!row) return null;
