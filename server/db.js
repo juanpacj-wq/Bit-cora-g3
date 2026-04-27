@@ -326,12 +326,9 @@ export async function initDB() {
         ADD ultima_actividad DATETIME2 NOT NULL CONSTRAINT DF_sesion_ultact DEFAULT GETDATE();
     END
   `);
-  await db.request().query(`
-    UPDATE bitacora.sesion_activa
-    SET activa = 0
-    WHERE activa = 1
-      AND ultima_actividad < DATEADD(MINUTE, -5, GETDATE())
-  `);
+  // F9: el barrido inicial por TTL (`ultima_actividad < -5min`) fue eliminado — el modelo
+  // post F2 mantiene la sesión activa hasta logout o sweeper de turno (F4). Las sesiones
+  // huérfanas de pruebas se limpian con cleanupTestRegistros (helpers.js) o manualmente.
   await db.request().batch(`
     IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_sesion_lookup' AND object_id=OBJECT_ID('bitacora.sesion_activa'))
       CREATE INDEX IX_sesion_lookup

@@ -8,13 +8,12 @@ import { loadSession } from './middleware/auth.js';
 import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
 import { findEventoDashboard, upsertEventoDashboard, hasNotificarDashboard } from './utils/notificador.js';
-import { snapshotJDTs, snapshotJefes, snapshotIngenieros, SESION_TTL_MIN } from './utils/snapshots.js';
+import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from './utils/snapshots.js';
 import { registrarEventoCierre } from './utils/ciet.js';
 import { attachWSS, broadcastUsuariosActivos } from './utils/ws-usuarios-activos.js';
 import { attachWSConteoBitacoras, broadcastConteoBitacoras } from './utils/ws-conteo-bitacoras.js';
-// F4: el viejo sesion-sweeper.js queda en disco (se borra en F9) pero ya no se ejecuta;
-// turno-sweeper finaliza sesion_bitacora cuando la ventana del turno termina, sin tocar
-// sesion_activa.activa.
+// F9: turno-sweeper reemplazó al viejo sesion-sweeper (eliminado). Finaliza sesion_bitacora
+// cuando la ventana del turno termina, sin tocar sesion_activa.activa.
 import { startTurnoSweeper, stopTurnoSweeper } from './utils/turno-sweeper.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
@@ -121,55 +120,9 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true });
     }
 
-    // POST /api/auth/resume  (reactiva tras un beacon de logout por reload)
-    if (pathname === '/api/auth/resume' && method === 'POST') {
-      const { sesion_id } = await parseBody(req);
-      if (!sesion_id) {
-        return sendJSON(res, 400, { error: 'sesion_id es requerido' });
-      }
-      const db = await getDB();
-      const result = await db.request()
-        .input('sesion_id', sql.Int, sesion_id)
-        .query(`
-          UPDATE bitacora.sesion_activa
-          SET activa = 1, ultima_actividad = GETDATE()
-          WHERE sesion_id = @sesion_id
-            AND ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE());
-
-          SELECT s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
-                 s.inicio_sesion, s.ultima_actividad,
-                 u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
-                 c.nombre AS cargo_nombre, c.solo_lectura,
-                 CAST(c.puede_cerrar_turno AS BIT) AS puede_cerrar_turno
-          FROM bitacora.sesion_activa s
-          INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
-          INNER JOIN lov_bit.cargo c   ON c.cargo_id   = s.cargo_id
-          WHERE s.sesion_id = @sesion_id AND s.activa = 1;
-        `);
-      const sesion = result.recordset[0];
-      if (!sesion) {
-        return sendJSON(res, 404, { error: 'Sesión expirada' });
-      }
-      broadcastUsuariosActivos().catch(() => {});
-      return sendJSON(res, 200, { ok: true, sesion });
-    }
-
-    // POST /api/auth/heartbeat
-    if (pathname === '/api/auth/heartbeat' && method === 'POST') {
-      const { sesion_id } = await parseBody(req);
-      if (!sesion_id) {
-        return sendJSON(res, 400, { error: 'sesion_id es requerido' });
-      }
-      const db = await getDB();
-      await db.request()
-        .input('sesion_id', sql.Int, sesion_id)
-        .query(`
-          UPDATE bitacora.sesion_activa
-          SET ultima_actividad = GETDATE()
-          WHERE sesion_id = @sesion_id AND activa = 1
-        `);
-      return sendJSON(res, 200, { ok: true });
-    }
+    // F9: /api/auth/resume y /api/auth/heartbeat eliminados. La sesión queda activa hasta
+    // logout o sweeper de turno (F4). Si una sesión queda inválida, el primer request
+    // autenticado retorna 401 y el cliente hace logout via setUnauthorizedHandler.
 
     // GET /api/auth/usuarios-activos  (todas las plantas, requiere sesion)
     // F2: sin filtro TTL — refleja sesion_activa.activa=1 hasta logout o cierre por sweeper de F4.
@@ -1292,8 +1245,10 @@ const server = http.createServer(async (req, res) => {
 
     // GET /api/autorizaciones?planta_id=&fecha=
     // F5: alias filtrado por tipo='AUTH'. Mantiene shape original (autorizacion_id, valor_autorizado_mw)
-    // vía la vista compat `bitacora.autorizacion_dashboard`. F9 lo deprecia.
+    // vía la vista compat `bitacora.autorizacion_dashboard`.
+    // F9: marcado deprecated. El dashboard ya consume /api/eventos-dashboard. Próximo release lo borra.
     if (pathname === '/api/autorizaciones' && method === 'GET') {
+      console.warn('[deprecated] GET /api/autorizaciones — usar /api/eventos-dashboard?tipo=AUTH');
       const planta_id = url.searchParams.get('planta_id');
       const fecha = url.searchParams.get('fecha');
       if (!planta_id || !fecha) {
@@ -1314,8 +1269,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     // GET /api/autorizaciones/:planta_id/:fecha/:periodo
+    // F9: deprecated — usar /api/eventos-dashboard.
     const authLookup = pathname.match(/^\/api\/autorizaciones\/([^/]+)\/([0-9]{4}-[0-9]{2}-[0-9]{2})\/(\d+)$/);
     if (authLookup && method === 'GET') {
+      console.warn('[deprecated] GET /api/autorizaciones/:p/:f/:per — usar /api/eventos-dashboard');
       const [, planta_id, fecha, periodoStr] = authLookup;
       const db = await getDB();
       const result = await db.request()
@@ -1335,8 +1292,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     // DELETE /api/autorizaciones/:id
+    // F9: deprecated — usar DELETE /api/eventos-dashboard/:id que cubre cualquier tipo.
     const authDel = pathname.match(/^\/api\/autorizaciones\/(\d+)$/);
     if (authDel && method === 'DELETE') {
+      console.warn('[deprecated] DELETE /api/autorizaciones/:id — usar /api/eventos-dashboard/:id');
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       if (!puedeCerrarTurno(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno o el Ingeniero de Operación pueden anular autorizaciones' });
