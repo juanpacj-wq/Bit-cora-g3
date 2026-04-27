@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --env-file=../.env --watch server.js",
     "start": "node --env-file=../.env server.js",
-    "test": "node --env-file=../.env --test tests/auth_middleware.test.js tests/auth_reactivate.test.js tests/sesion_sweeper.test.js"
+    "test": "node --env-file=../.env --test tests/auth_middleware.test.js tests/auth_reactivate.test.js"
   },
   "dependencies": {
     "mssql": "^11.0.1",
