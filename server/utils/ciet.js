@@ -13,8 +13,9 @@ const TIPO_NOMBRE = {
 //   - una falla en el seed de CIET no deje a medias el cierre.
 // `tipo` puede ser 'finalizacion' o 'cierre'. `bitacora_origen_id` es opcional (la bitácora que
 // se cerró/finalizó; null para finalización global). `forzado=true` cuando el cierre se origina
-// en sweeper/popup forzado de F4 — sirve para distinguir en histórico.
-export async function registrarEventoCierre(transaction, { tipo, sesion, bitacora_origen_id = null, forzado = false }) {
+// en sweeper/popup forzado de F4 — sirve para distinguir en histórico. `motivo` opcional es un
+// string libre para auditoría (ej. 'sweeper', 'popup-pendientes').
+export async function registrarEventoCierre(transaction, { tipo, sesion, bitacora_origen_id = null, forzado = false, motivo = null }) {
   const tipoNombre = TIPO_NOMBRE[tipo];
   if (!tipoNombre) {
     throw new Error(`registrarEventoCierre: tipo inválido '${tipo}' (esperado 'finalizacion' | 'cierre')`);
@@ -44,6 +45,7 @@ export async function registrarEventoCierre(transaction, { tipo, sesion, bitacor
     rol: sesion.cargo_nombre,
     bitacora_origen: bitacora_origen_id,
     forzado: !!forzado,
+    ...(motivo ? { motivo } : {}),
   });
 
   const ins = await new sql.Request(transaction)
