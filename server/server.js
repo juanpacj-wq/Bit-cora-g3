@@ -9,6 +9,7 @@ import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro } 
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
 import { findAutorizacion, upsertAutorizacion, hasNotificarDashboard } from './utils/notificador.js';
 import { snapshotJDTs, snapshotJefes, snapshotIngenieros, SESION_TTL_MIN } from './utils/snapshots.js';
+import { registrarEventoCierre } from './utils/ciet.js';
 import { attachWSS, broadcastUsuariosActivos } from './utils/ws-usuarios-activos.js';
 import { attachWSConteoBitacoras, broadcastConteoBitacoras } from './utils/ws-conteo-bitacoras.js';
 import { startSweeper, stopSweeper } from './utils/sesion-sweeper.js';
@@ -220,28 +221,48 @@ const server = http.createServer(async (req, res) => {
     // F2: POST /api/bitacora/finalizar
     // Finaliza TODAS las sesion_bitacora del usuario logueado (no solo del login actual: si el
     // usuario tiene varios logins activos —preguntas2.md respuesta sobre logins múltiples— se
-    // finalizan todos sus participaciones abiertas). F3 disparará CIET por cada bitácora.
+    // finalizan todas sus participaciones abiertas).
+    // F3: dispara UN solo evento CIET 'finalizacion' por usuario que finaliza, dentro de la
+    // misma transacción del UPDATE — atómico.
     if (pathname === '/api/bitacora/finalizar' && method === 'POST') {
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
-      const db = await getDB();
-      const result = await db.request()
-        .input('usuario_id', sql.Int, sesion.usuario_id)
-        .query(`
-          DECLARE @afectadas TABLE (sesion_bitacora_id INT, sesion_id INT, bitacora_id INT);
+      const pool = await getDB();
+      const transaction = new sql.Transaction(pool);
+      await transaction.begin();
+      try {
+        const result = await new sql.Request(transaction)
+          .input('usuario_id', sql.Int, sesion.usuario_id)
+          .query(`
+            DECLARE @afectadas TABLE (sesion_bitacora_id INT, sesion_id INT, bitacora_id INT);
 
-          UPDATE sb SET finalizada_en = GETDATE()
-          OUTPUT inserted.sesion_bitacora_id, inserted.sesion_id, inserted.bitacora_id INTO @afectadas
-          FROM bitacora.sesion_bitacora sb
-          INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
-          WHERE sa.usuario_id = @usuario_id AND sb.finalizada_en IS NULL;
+            UPDATE sb SET finalizada_en = GETDATE()
+            OUTPUT inserted.sesion_bitacora_id, inserted.sesion_id, inserted.bitacora_id INTO @afectadas
+            FROM bitacora.sesion_bitacora sb
+            INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
+            WHERE sa.usuario_id = @usuario_id AND sb.finalizada_en IS NULL;
 
-          SELECT a.sesion_bitacora_id, a.sesion_id, a.bitacora_id,
-                 b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo
-          FROM @afectadas a
-          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = a.bitacora_id;
-        `);
-      return sendJSON(res, 200, { finalizadas: result.recordset });
+            SELECT a.sesion_bitacora_id, a.sesion_id, a.bitacora_id,
+                   b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo
+            FROM @afectadas a
+            INNER JOIN lov_bit.bitacora b ON b.bitacora_id = a.bitacora_id;
+          `);
+
+        let evento_ciet = null;
+        if (result.recordset.length > 0) {
+          evento_ciet = await registrarEventoCierre(transaction, {
+            tipo: 'finalizacion',
+            sesion,
+            forzado: false,
+          });
+        }
+
+        await transaction.commit();
+        return sendJSON(res, 200, { finalizadas: result.recordset, evento_ciet });
+      } catch (err) {
+        try { await transaction.rollback(); } catch {}
+        throw err;
+      }
     }
 
     // F2: GET /api/bitacora/usuarios-en-bitacora?planta_id=&bitacora_id=
@@ -451,8 +472,9 @@ const server = http.createServer(async (req, res) => {
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const body = await parseBody(req);
       const { bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id } = body;
-      if (!bitacora_id || !planta_id || !fecha_evento || !turno || !tipo_evento_id || !detalle) {
-        return sendJSON(res, 400, { error: 'Campos requeridos faltantes (detalle, fecha_evento, turno, bitacora_id, planta_id, tipo_evento_id)' });
+      // F3: detalle ya no es requerido (CIET no lo usa, F6/MAND tampoco siempre).
+      if (!bitacora_id || !planta_id || !fecha_evento || !turno || !tipo_evento_id) {
+        return sendJSON(res, 400, { error: 'Campos requeridos faltantes (fecha_evento, turno, bitacora_id, planta_id, tipo_evento_id)' });
       }
       if (!plantaMatch(sesion, planta_id)) {
         return sendJSON(res, 403, { error: 'No puede crear registros en otra planta' });
@@ -715,6 +737,16 @@ const server = http.createServer(async (req, res) => {
             WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
           `);
 
+        // F3: registrar evento CIET 'cierre' por la bitácora cerrada. F4 refinará la ventana,
+        // por ahora se registra incluso si el cierre vacío (rowsAffected=0) — el cierre fue
+        // ejecutado deliberadamente por el JdT/IngOp y queda en histórico como auditoría.
+        await registrarEventoCierre(transaction, {
+          tipo: 'cierre',
+          sesion,
+          bitacora_origen_id: bitacora_id,
+          forzado: false,
+        });
+
         await transaction.commit();
         broadcastConteoBitacoras(planta_id).catch(() => {});
         return sendJSON(res, 200, { registros_cerrados: insResult.rowsAffected[0] || 0 });
@@ -776,6 +808,13 @@ const server = http.createServer(async (req, res) => {
               DELETE FROM bitacora.registro_activo
               WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
             `);
+          // F3: una invocación CIET 'cierre' por bitácora cerrada en el masivo.
+          await registrarEventoCierre(transaction, {
+            tipo: 'cierre',
+            sesion,
+            bitacora_origen_id: row.bitacora_id,
+            forzado: false,
+          });
           await transaction.commit();
           resumen.push({ bitacora_id: row.bitacora_id, nombre: row.nombre, registros_cerrados: insResult.rowsAffected[0] || 0 });
         } catch (err) {

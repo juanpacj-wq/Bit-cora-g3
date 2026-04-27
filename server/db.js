@@ -337,6 +337,24 @@ export async function initDB() {
       ALTER TABLE bitacora.sesion_activa ADD cerrada_en DATETIME2 NULL;
   `);
 
+  // F3: detalle pasa a nullable en ambas tablas. CIET no usa detalle, MAND (F6) tampoco lo
+  // requiere siempre. Se hace acá (después de la creación de la tabla) en lugar de en
+  // migrateSchemaV2 para mantener la migración acotada a F3.
+  await db.request().batch(`
+    IF EXISTS (
+      SELECT 1 FROM sys.columns
+      WHERE object_id=OBJECT_ID('bitacora.registro_activo') AND name='detalle' AND is_nullable=0
+    )
+      ALTER TABLE bitacora.registro_activo ALTER COLUMN detalle NVARCHAR(MAX) NULL;
+  `);
+  await db.request().batch(`
+    IF EXISTS (
+      SELECT 1 FROM sys.columns
+      WHERE object_id=OBJECT_ID('bitacora.registro_historico') AND name='detalle' AND is_nullable=0
+    )
+      ALTER TABLE bitacora.registro_historico ALTER COLUMN detalle NVARCHAR(MAX) NULL;
+  `);
+
   // F2: sesion_bitacora trackea participación de un login en cada bitácora. abierta_en al
   // entrar a la vista; finalizada_en cuando el usuario clicka "Finalizar turno" (o el sweeper
   // de F4 lo hace en su nombre). Una sola fila por (sesion_id, bitacora_id) — reabrir es UPSERT.
@@ -542,7 +560,8 @@ export async function initDB() {
       ('Carbón y Caliza',        'CYC',     'Mountain',     0, NULL,  7),
       ('Disponibilidad',         'DISP',    'Activity',     1, @disp, 8),
       ('Autorizaciones',         'AUTH',    'FileCheck',    1, @auth, 9),
-      ('Química',                'QUIM',    'FlaskConical', 0, NULL, 10)
+      ('Química',                'QUIM',    'FlaskConical', 0, NULL, 10),
+      ('Cierres y Finalizaciones','CIET',   'LogOut',       0, NULL, 11)
     ) AS s(nombre, codigo, icono, formulario_especial, definicion_campos, orden)
       ON t.codigo = s.codigo
     WHEN MATCHED THEN UPDATE SET
@@ -557,14 +576,16 @@ export async function initDB() {
   `);
 
   // tipo_evento default por bitácora
+  // F3: CIET se excluye — sus tipos son exclusivamente 'Finalización de turno' y 'Cierre de turno'.
   await db.request().batch(`
     INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, es_default, orden)
     SELECT b.bitacora_id, 'Evento General', 1, 0
     FROM lov_bit.bitacora b
-    WHERE NOT EXISTS (
-      SELECT 1 FROM lov_bit.tipo_evento te
-      WHERE te.bitacora_id = b.bitacora_id AND te.nombre = 'Evento General'
-    );
+    WHERE b.codigo <> 'CIET'
+      AND NOT EXISTS (
+        SELECT 1 FROM lov_bit.tipo_evento te
+        WHERE te.bitacora_id = b.bitacora_id AND te.nombre = 'Evento General'
+      );
   `);
 
   // tipos específicos para DISP
@@ -584,6 +605,23 @@ export async function initDB() {
       );
   `);
 
+  // F3: tipos de evento CIET. Se generan automáticamente desde /api/bitacora/finalizar y
+  // /api/cierre/bitacora — ningún cargo tiene puede_crear=1 en CIET.
+  await db.request().batch(`
+    INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden)
+    SELECT b.bitacora_id, s.nombre, s.orden
+    FROM lov_bit.bitacora b
+    CROSS JOIN (VALUES
+      ('Finalización de turno', 1),
+      ('Cierre de turno', 2)
+    ) AS s(nombre, orden)
+    WHERE b.codigo = 'CIET'
+      AND NOT EXISTS (
+        SELECT 1 FROM lov_bit.tipo_evento te
+        WHERE te.bitacora_id = b.bitacora_id AND te.nombre = s.nombre
+      );
+  `);
+
   // Matriz de permisos (cargo × bitácora) derivada del Excel 2026.
   // Nota clave: Ingeniero Jefe de Turno e Ingeniero de Operación tienen filas idénticas (mismo
   // poder operativo). La distinción de rol se preserva por cargo.nombre en UI y snapshots.
@@ -594,6 +632,8 @@ export async function initDB() {
     ;WITH matriz AS (
       SELECT c.cargo_id, b.bitacora_id,
         CASE
+          -- F3: CIET es read-only para TODOS los cargos (los registros se generan automáticamente).
+          WHEN b.codigo = 'CIET' THEN 1
           -- Gerente de Producción ve todo
           WHEN c.nombre = 'Gerente de Producción'                THEN 1
           -- Ingeniero Jefe de Turno / Ingeniero de Operación ven todo
@@ -611,6 +651,8 @@ export async function initDB() {
           ELSE 0
         END AS puede_ver,
         CASE
+          -- F3: nadie crea en CIET (registros automáticos).
+          WHEN b.codigo = 'CIET' THEN 0
           -- Gerente no crea en nada
           WHEN c.nombre = 'Gerente de Producción'                THEN 0
           -- JdT e IngOp sólo crean en DISP y AUTH
