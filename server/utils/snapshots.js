@@ -1,7 +1,7 @@
 import sql from 'mssql';
 
 const JSON_EMPTY = '[]';
-export const SESION_TTL_MIN = 5;
+// F9: SESION_TTL_MIN export eliminado — el modelo de sesión post F2 no usa TTL.
 
 const toJSON = (rows) =>
   rows?.length
