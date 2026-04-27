@@ -167,7 +167,8 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true });
     }
 
-    // GET /api/auth/usuarios-activos  (todas las plantas, con TTL, requiere sesion)
+    // GET /api/auth/usuarios-activos  (todas las plantas, requiere sesion)
+    // F2: sin filtro TTL — refleja sesion_activa.activa=1 hasta logout o cierre por sweeper de F4.
     if (pathname === '/api/auth/usuarios-activos' && method === 'GET') {
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
@@ -185,9 +186,95 @@ const server = http.createServer(async (req, res) => {
         INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id
         INNER JOIN lov_bit.planta  p ON p.planta_id  = s.planta_id
         WHERE s.activa = 1
-          AND s.ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
         ORDER BY p.planta_id, s.inicio_sesion DESC
       `);
+      return sendJSON(res, 200, { usuarios: result.recordset });
+    }
+
+    // F2: POST /api/bitacora/abrir { bitacora_id }
+    // Idempotente: UPSERT en sesion_bitacora con finalizada_en=NULL. Reabrir tras finalizar
+    // resetea finalizada_en=NULL y refresca abierta_en (es la entrada al turno nuevo).
+    if (pathname === '/api/bitacora/abrir' && method === 'POST') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      const { bitacora_id } = await parseBody(req);
+      if (!bitacora_id) return sendJSON(res, 400, { error: 'bitacora_id es requerido' });
+      const db = await getDB();
+      const result = await db.request()
+        .input('sesion_id', sql.Int, sesion.sesion_id)
+        .input('bitacora_id', sql.Int, bitacora_id)
+        .query(`
+          MERGE bitacora.sesion_bitacora AS t
+          USING (VALUES (@sesion_id, @bitacora_id)) AS s(sesion_id, bitacora_id)
+            ON t.sesion_id = s.sesion_id AND t.bitacora_id = s.bitacora_id
+          WHEN MATCHED THEN UPDATE SET finalizada_en = NULL, abierta_en = GETDATE()
+          WHEN NOT MATCHED THEN INSERT (sesion_id, bitacora_id) VALUES (s.sesion_id, s.bitacora_id);
+
+          SELECT sesion_bitacora_id, sesion_id, bitacora_id, abierta_en, finalizada_en
+          FROM bitacora.sesion_bitacora
+          WHERE sesion_id = @sesion_id AND bitacora_id = @bitacora_id;
+        `);
+      return sendJSON(res, 200, { sesion_bitacora: result.recordset[0] });
+    }
+
+    // F2: POST /api/bitacora/finalizar
+    // Finaliza TODAS las sesion_bitacora del usuario logueado (no solo del login actual: si el
+    // usuario tiene varios logins activos —preguntas2.md respuesta sobre logins múltiples— se
+    // finalizan todos sus participaciones abiertas). F3 disparará CIET por cada bitácora.
+    if (pathname === '/api/bitacora/finalizar' && method === 'POST') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      const db = await getDB();
+      const result = await db.request()
+        .input('usuario_id', sql.Int, sesion.usuario_id)
+        .query(`
+          DECLARE @afectadas TABLE (sesion_bitacora_id INT, sesion_id INT, bitacora_id INT);
+
+          UPDATE sb SET finalizada_en = GETDATE()
+          OUTPUT inserted.sesion_bitacora_id, inserted.sesion_id, inserted.bitacora_id INTO @afectadas
+          FROM bitacora.sesion_bitacora sb
+          INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
+          WHERE sa.usuario_id = @usuario_id AND sb.finalizada_en IS NULL;
+
+          SELECT a.sesion_bitacora_id, a.sesion_id, a.bitacora_id,
+                 b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo
+          FROM @afectadas a
+          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = a.bitacora_id;
+        `);
+      return sendJSON(res, 200, { finalizadas: result.recordset });
+    }
+
+    // F2: GET /api/bitacora/usuarios-en-bitacora?planta_id=&bitacora_id=
+    // Lista ingenieros con sesion_bitacora.finalizada_en IS NULL para esa (planta, bitácora).
+    // Lo consume F4 para el popup "ingenieros pendientes" antes de cierre masivo.
+    if (pathname === '/api/bitacora/usuarios-en-bitacora' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      const planta_id = url.searchParams.get('planta_id');
+      const bitacora_id = url.searchParams.get('bitacora_id');
+      if (!planta_id || !bitacora_id) {
+        return sendJSON(res, 400, { error: 'planta_id y bitacora_id son requeridos' });
+      }
+      const db = await getDB();
+      const result = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .input('bitacora_id', sql.Int, parseInt(bitacora_id, 10))
+        .query(`
+          SELECT DISTINCT
+            sb.sesion_bitacora_id, sb.sesion_id, sb.abierta_en,
+            sa.usuario_id, sa.cargo_id, sa.turno,
+            u.nombre_completo,
+            c.nombre AS cargo_nombre
+          FROM bitacora.sesion_bitacora sb
+          INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
+          INNER JOIN lov_bit.usuario u ON u.usuario_id = sa.usuario_id
+          INNER JOIN lov_bit.cargo c ON c.cargo_id = sa.cargo_id
+          WHERE sb.bitacora_id = @bitacora_id
+            AND sa.planta_id = @planta_id
+            AND sa.activa = 1
+            AND sb.finalizada_en IS NULL
+          ORDER BY u.nombre_completo
+        `);
       return sendJSON(res, 200, { usuarios: result.recordset });
     }
 

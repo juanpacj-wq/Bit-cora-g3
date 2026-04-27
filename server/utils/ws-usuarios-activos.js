@@ -1,10 +1,10 @@
 import { WebSocketServer } from 'ws';
 import sql from 'mssql';
 import { getDB } from '../db.js';
-import { SESION_TTL_MIN } from './snapshots.js';
 
 const clients = new Set();
 
+// F2: sin TTL — sesion_activa.activa=1 es la única señal de presencia.
 async function fetchSnapshot() {
   const db = await getDB();
   const r = await db.request().query(`
@@ -19,7 +19,6 @@ async function fetchSnapshot() {
     INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id
     INNER JOIN lov_bit.planta  p ON p.planta_id  = s.planta_id
     WHERE s.activa = 1
-      AND s.ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
     ORDER BY p.planta_id, s.inicio_sesion DESC
   `);
   return { type: 'snapshot', usuarios: r.recordset, ts: Date.now() };
@@ -50,7 +49,6 @@ async function validateSesion(sesion_id) {
       SELECT 1 AS ok
       FROM bitacora.sesion_activa
       WHERE sesion_id = @sesion_id AND activa = 1
-        AND ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
     `);
   return r.recordset.length > 0;
 }

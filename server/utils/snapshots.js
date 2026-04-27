@@ -26,7 +26,6 @@ export async function snapshotJDTs(reqFactory, { planta_id }) {
       INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
       INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
       WHERE s.planta_id = @planta_id AND s.activa = 1
-        AND s.ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
         AND c.nombre = 'Ingeniero Jefe de Turno' AND u.activo = 1
     `);
   if (r.recordset.length > 0) return toJSON(r.recordset);
@@ -55,7 +54,6 @@ export async function snapshotIngenieros(reqFactory, { planta_id }) {
       INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
       INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
       WHERE s.planta_id = @planta_id AND s.activa = 1
-        AND s.ultima_actividad > DATEADD(MINUTE, -${SESION_TTL_MIN}, GETDATE())
         AND u.activo = 1
         AND c.nombre NOT IN ('Ingeniero Jefe de Turno', 'Gerente de Producción')
     `);
