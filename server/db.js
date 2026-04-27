@@ -54,6 +54,14 @@ const AUTH_JSON = JSON.stringify([
   { campo: 'notificar_dashboard', tipo: 'auto', valor: true },
 ]);
 
+// F6: definicion_campos de MAND. periodo y valor_mw son requeridos; funcionariocnd opcional
+// (se exige solo cuando tipo_evento = 'Autorización' — ver server.js POST /api/registros).
+const MAND_JSON = JSON.stringify([
+  { campo: 'periodo', tipo: 'int', min: 1, max: 24, requerido: true },
+  { campo: 'valor_mw', tipo: 'float', requerido: true, label: 'Valor (MW)' },
+  { campo: 'funcionariocnd', tipo: 'text', requerido: false, label: 'Funcionario CND' },
+]);
+
 async function migrateColumnToSnapshot(db, { table, oldCol, newCol, indexToDrop }) {
   await db.request().batch(`
     IF COL_LENGTH('${table}','${oldCol}') IS NOT NULL
@@ -610,21 +618,26 @@ export async function initDB() {
   const bitReq = db.request();
   bitReq.input('disp', sql.NVarChar(sql.MAX), DISP_JSON);
   bitReq.input('auth', sql.NVarChar(sql.MAX), AUTH_JSON);
+  bitReq.input('mand', sql.NVarChar(sql.MAX), MAND_JSON);
+  // F6: la bitácora "Sala de Mando" original (codigo SALA) se reasigna a MANDOPER porque
+  // MAND la reemplaza; SALA queda como bitácora operativa "Sala de Mando Operativa" del
+  // operador. Esto evita duplicar el nombre en UI. La activa=0 de AUTH se aplica abajo.
   await bitReq.batch(`
     MERGE lov_bit.bitacora AS t
     USING (VALUES
-      ('Caldera',                'CALDERA', 'Flame',        0, NULL,  1),
-      ('Análisis',               'ANAL',    'TestTube',     0, NULL,  2),
-      ('Sala de Mando',          'SALA',    'Monitor',      0, NULL,  3),
-      ('Planta de Agua',         'AGUA',    'Droplets',     0, NULL,  4),
-      ('Turbogrupo',             'TURBO',   'Gauge',        0, NULL,  5),
-      ('Maquinaria',             'MAQU',    'Truck',        0, NULL,  6),
-      ('Carbón y Caliza',        'CYC',     'Mountain',     0, NULL,  7),
-      ('Disponibilidad',         'DISP',    'Activity',     1, @disp, 8),
-      ('Autorizaciones',         'AUTH',    'FileCheck',    1, @auth, 9),
-      ('Química',                'QUIM',    'FlaskConical', 0, NULL, 10),
-      ('Cierres y Finalizaciones','CIET',   'LogOut',       0, NULL, 11)
-    ) AS s(nombre, codigo, icono, formulario_especial, definicion_campos, orden)
+      ('Caldera',                       'CALDERA',  'Flame',        0, NULL,  1, 1),
+      ('Análisis',                      'ANAL',     'TestTube',     0, NULL,  2, 1),
+      ('Sala de Mando Operativa',       'SALA',     'Monitor',      0, NULL,  3, 1),
+      ('Planta de Agua',                'AGUA',     'Droplets',     0, NULL,  4, 1),
+      ('Turbogrupo',                    'TURBO',    'Gauge',        0, NULL,  5, 1),
+      ('Maquinaria',                    'MAQU',     'Truck',        0, NULL,  6, 1),
+      ('Carbón y Caliza',               'CYC',      'Mountain',     0, NULL,  7, 1),
+      ('Disponibilidad',                'DISP',     'Activity',     1, @disp, 8, 1),
+      ('Autorizaciones',                'AUTH',     'FileCheck',    1, @auth, 9, 0),
+      ('Química',                       'QUIM',     'FlaskConical', 0, NULL, 10, 1),
+      ('Cierres y Finalizaciones',      'CIET',     'LogOut',       0, NULL, 11, 1),
+      ('Sala de Mando',                 'MAND',     'LayoutGrid',   1, @mand,12, 1)
+    ) AS s(nombre, codigo, icono, formulario_especial, definicion_campos, orden, activa)
       ON t.codigo = s.codigo
     WHEN MATCHED THEN UPDATE SET
       nombre = s.nombre,
@@ -632,18 +645,19 @@ export async function initDB() {
       formulario_especial = s.formulario_especial,
       definicion_campos = s.definicion_campos,
       orden = s.orden,
-      activa = 1
+      activa = s.activa
     WHEN NOT MATCHED THEN INSERT (nombre, codigo, icono, formulario_especial, definicion_campos, orden, activa)
-      VALUES (s.nombre, s.codigo, s.icono, s.formulario_especial, s.definicion_campos, s.orden, 1);
+      VALUES (s.nombre, s.codigo, s.icono, s.formulario_especial, s.definicion_campos, s.orden, s.activa);
   `);
 
   // tipo_evento default por bitácora
   // F3: CIET se excluye — sus tipos son exclusivamente 'Finalización de turno' y 'Cierre de turno'.
+  // F6: MAND también se excluye — sus tipos son 'Autorización', 'Pruebas', 'Redespacho'.
   await db.request().batch(`
     INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, es_default, orden)
     SELECT b.bitacora_id, 'Evento General', 1, 0
     FROM lov_bit.bitacora b
-    WHERE b.codigo <> 'CIET'
+    WHERE b.codigo NOT IN ('CIET','MAND')
       AND NOT EXISTS (
         SELECT 1 FROM lov_bit.tipo_evento te
         WHERE te.bitacora_id = b.bitacora_id AND te.nombre = 'Evento General'
@@ -684,6 +698,50 @@ export async function initDB() {
       );
   `);
 
+  // F6: tipos de evento MAND. Cada uno se mapea a un tipo de evento_dashboard via la
+  // columna notificar_dashboard_tipo (cableado abajo).
+  await db.request().batch(`
+    INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden)
+    SELECT b.bitacora_id, s.nombre, s.orden
+    FROM lov_bit.bitacora b
+    CROSS JOIN (VALUES
+      ('Autorización', 1),
+      ('Pruebas',      2),
+      ('Redespacho',   3)
+    ) AS s(nombre, orden)
+    WHERE b.codigo = 'MAND'
+      AND NOT EXISTS (
+        SELECT 1 FROM lov_bit.tipo_evento te
+        WHERE te.bitacora_id = b.bitacora_id AND te.nombre = s.nombre
+      );
+  `);
+
+  // F6: columna notificar_dashboard_tipo en tipo_evento. Reemplaza al flag
+  // hasNotificarDashboard() que vivía dentro del JSON definicion_campos de la bitácora.
+  // Granularidad por tipo_evento permite que MAND tenga tipos que NO notifican (futuro) y
+  // que la decisión de qué `tipo` (AUTH/REDESP/PRUEBA) escribir en evento_dashboard quede
+  // en la fila del tipo de evento, no en el JSON de la bitácora.
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.tipo_evento','notificar_dashboard_tipo') IS NULL
+      ALTER TABLE lov_bit.tipo_evento
+        ADD notificar_dashboard_tipo VARCHAR(10) NULL
+            CONSTRAINT CK_te_notificar_dashboard_tipo
+              CHECK (notificar_dashboard_tipo IN ('AUTH','REDESP','PRUEBA'));
+  `);
+  await db.request().batch(`
+    UPDATE te SET notificar_dashboard_tipo = 'AUTH'
+    FROM lov_bit.tipo_evento te INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+    WHERE b.codigo = 'MAND' AND te.nombre = 'Autorización' AND te.notificar_dashboard_tipo IS NULL;
+
+    UPDATE te SET notificar_dashboard_tipo = 'PRUEBA'
+    FROM lov_bit.tipo_evento te INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+    WHERE b.codigo = 'MAND' AND te.nombre = 'Pruebas' AND te.notificar_dashboard_tipo IS NULL;
+
+    UPDATE te SET notificar_dashboard_tipo = 'REDESP'
+    FROM lov_bit.tipo_evento te INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+    WHERE b.codigo = 'MAND' AND te.nombre = 'Redespacho' AND te.notificar_dashboard_tipo IS NULL;
+  `);
+
   // Matriz de permisos (cargo × bitácora) derivada del Excel 2026.
   // Nota clave: Ingeniero Jefe de Turno e Ingeniero de Operación tienen filas idénticas (mismo
   // poder operativo). La distinción de rol se preserva por cargo.nombre en UI y snapshots.
@@ -696,6 +754,9 @@ export async function initDB() {
         CASE
           -- F3: CIET es read-only para TODOS los cargos (los registros se generan automáticamente).
           WHEN b.codigo = 'CIET' THEN 1
+          -- F6: MAND la ve TODO el mundo (la fila operativa la usan JdT/IngOp pero el resto
+          -- la consulta read-only para coordinación).
+          WHEN b.codigo = 'MAND' THEN 1
           -- Gerente de Producción ve todo
           WHEN c.nombre = 'Gerente de Producción'                THEN 1
           -- Ingeniero Jefe de Turno / Ingeniero de Operación ven todo
@@ -715,6 +776,9 @@ export async function initDB() {
         CASE
           -- F3: nadie crea en CIET (registros automáticos).
           WHEN b.codigo = 'CIET' THEN 0
+          -- F6: en MAND solo crean JdT e IngOp (preguntas.md punto 1).
+          WHEN b.codigo = 'MAND' THEN
+            CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN 1 ELSE 0 END
           -- Gerente no crea en nada
           WHEN c.nombre = 'Gerente de Producción'                THEN 0
           -- JdT e IngOp sólo crean en DISP y AUTH
