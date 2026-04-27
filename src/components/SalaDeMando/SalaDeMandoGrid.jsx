@@ -3,9 +3,9 @@ import { LayoutGrid, Save, AlertTriangle } from 'lucide-react';
 import { useSalaDeMando } from '../../hooks/useSalaDeMando';
 
 const TIPOS = [
-  { key: 'AUTH',   label: 'Autorización', tipoEventoNombre: 'Autorización', color: '#1e40af' },
-  { key: 'PRUEBA', label: 'Pruebas',      tipoEventoNombre: 'Pruebas',      color: '#9333ea' },
-  { key: 'REDESP', label: 'Redespacho',   tipoEventoNombre: 'Redespacho',   color: '#0d9488' },
+  { key: 'AUTH',   label: 'Autorización', tipoEventoNombre: 'Autorización', color: '#1e40af', cancelMsg: 'Autorización cancelada' },
+  { key: 'PRUEBA', label: 'Pruebas',      tipoEventoNombre: 'Pruebas',      color: '#9333ea', cancelMsg: 'Prueba cancelada' },
+  { key: 'REDESP', label: 'Redespacho',   tipoEventoNombre: 'Redespacho',   color: '#0d9488', cancelMsg: 'Redespacho cancelado' },
 ];
 
 // F6: grilla 3×24 de Sala de Mando. Cada celda numérica es editable; al perder foco
@@ -73,8 +73,11 @@ export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, fecha
         // PUT
         await actualizarCelda(registroId, { valor_mw: newValor, detalle, funcionariocnd, periodo });
       } else if (registroId && newValor == null) {
-        // DELETE — F7 lo cubre formalmente; backend ya soft-deletea evento_dashboard.
+        // F7: vaciar celda → DELETE. Backend hace hard-delete de registro_activo y soft-delete
+        // (`activa=0`) sobre la fila correspondiente de evento_dashboard. Volver a llenar la
+        // celda hace POST → upsertEventoDashboard reactiva la fila preservando evento_id.
         await eliminarCelda(registroId);
+        showToast?.(`${tipoMeta.cancelMsg} (P${periodo})`);
       } else if (!registroId && newValor != null) {
         // POST
         const r = await crearCelda({
