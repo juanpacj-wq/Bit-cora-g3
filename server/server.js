@@ -3,7 +3,7 @@ import sql from 'mssql';
 import { initDB, getDB } from './db.js';
 import { verifyPassword } from './utils/password.js';
 import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
-import { getTurnoColombia, periodoFromFechaBogota, ventanaTurno } from './utils/turno.js';
+import { getTurnoColombia, periodoFromFechaBogota, turnoFromPeriodo, ventanaTurno } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
 import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
@@ -542,10 +542,10 @@ const server = http.createServer(async (req, res) => {
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const body = await parseBody(req);
-      const { bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id } = body;
-      // F3: detalle ya no es requerido (CIET no lo usa, F6/MAND tampoco siempre).
-      if (!bitacora_id || !planta_id || !fecha_evento || !turno || !tipo_evento_id) {
-        return sendJSON(res, 400, { error: 'Campos requeridos faltantes (fecha_evento, turno, bitacora_id, planta_id, tipo_evento_id)' });
+      const { bitacora_id, planta_id, fecha_evento, turno: turnoBody, detalle, campos_extra, tipo_evento_id } = body;
+      // F3: detalle ya no es requerido. F6: turno tampoco — para MAND lo derivamos de periodo.
+      if (!bitacora_id || !planta_id || !fecha_evento || !tipo_evento_id) {
+        return sendJSON(res, 400, { error: 'Campos requeridos faltantes (fecha_evento, bitacora_id, planta_id, tipo_evento_id)' });
       }
       if (!plantaMatch(sesion, planta_id)) {
         return sendJSON(res, 403, { error: 'No puede crear registros en otra planta' });
@@ -553,18 +553,33 @@ const server = http.createServer(async (req, res) => {
       if (!(await hasPermisoBitacora(sesion, bitacora_id, 'puede_crear'))) {
         return sendJSON(res, 403, { error: 'Sin permiso para crear en esta bitácora' });
       }
-      if (new Date(fecha_evento).getTime() - Date.now() > 5 * 60 * 1000) {
-        return sendJSON(res, 400, { error: 'fecha_evento no puede estar más de 5 min en el futuro' });
-      }
       const creado_por = sesion.usuario_id;
       const db = await getDB();
 
+      // F6: lookup expandido — trae código de bitácora, nombre del tipo y notificar_dashboard_tipo
+      // (columna nueva en F6 que parametriza el upsert sobre evento_dashboard).
       const teCheck = await db.request()
         .input('te', sql.Int, tipo_evento_id)
         .input('b', sql.Int, bitacora_id)
-        .query(`SELECT 1 AS ok FROM lov_bit.tipo_evento WHERE tipo_evento_id = @te AND bitacora_id = @b`);
+        .query(`
+          SELECT te.tipo_evento_id, te.nombre AS tipo_evento_nombre,
+                 te.notificar_dashboard_tipo,
+                 bb.codigo AS bitacora_codigo
+          FROM lov_bit.tipo_evento te
+          INNER JOIN lov_bit.bitacora bb ON bb.bitacora_id = te.bitacora_id
+          WHERE te.tipo_evento_id = @te AND te.bitacora_id = @b
+        `);
       if (teCheck.recordset.length === 0) {
         return sendJSON(res, 400, { error: 'tipo_evento_id no pertenece a la bitácora' });
+      }
+      const teRow = teCheck.recordset[0];
+      const isMAND = teRow.bitacora_codigo === 'MAND';
+
+      // F6: check de fecha futura. Para MAND aceptamos cualquier hora del día actual (la
+      // grilla pre-carga periodos posteriores a la hora actual, e.g. P17=16:00 a las 14:00).
+      // Para el resto de bitácoras se mantiene el guard de 5 minutos.
+      if (!isMAND && new Date(fecha_evento).getTime() - Date.now() > 5 * 60 * 1000) {
+        return sendJSON(res, 400, { error: 'fecha_evento no puede estar más de 5 min en el futuro' });
       }
 
       const bitRes = await db.request()
@@ -578,12 +593,40 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 400, { error: 'campos_extra inválido', detalles: validation.errors });
       }
       const camposFinal = validation.definicion ? computeCamposAuto(validation.definicion, validation.data) : validation.data;
-      if (camposFinal && hasNotificarDashboard(bit.definicion_campos)) {
+      // F6: solo AUTH legacy auto-rellena periodo desde fecha. MAND trae periodo del usuario
+      // (la celda elegida en la grilla).
+      if (camposFinal && hasNotificarDashboard(bit.definicion_campos) && !isMAND && camposFinal.periodo == null) {
         camposFinal.periodo = periodoFromFechaBogota(fecha_evento);
       }
       const camposStr = camposFinal ? JSON.stringify(camposFinal) : null;
 
-      const notificar = hasNotificarDashboard(bit.definicion_campos);
+      // F6: turno se autoselecciona desde periodo en MAND; para no-MAND viene del body. Esta
+      // autoselección NO se reactualiza al editar (preguntas3.md respuesta D) — se aplica
+      // solo en POST.
+      let turno = turnoBody;
+      if (isMAND) {
+        const periodo = camposFinal?.periodo;
+        if (!periodo) return sendJSON(res, 400, { error: 'periodo es requerido para MAND' });
+        turno = turnoFromPeriodo(parseInt(periodo, 10));
+      }
+      if (!turno) {
+        return sendJSON(res, 400, { error: 'turno es requerido' });
+      }
+
+      // F6: validación funcionariocnd para MAND/Autorización (preguntas.md punto 3).
+      if (isMAND && teRow.tipo_evento_nombre === 'Autorización') {
+        const fcnd = camposFinal?.funcionariocnd;
+        if (!fcnd || String(fcnd).trim() === '') {
+          return sendJSON(res, 400, { error: 'funcionariocnd es requerido para Autorización' });
+        }
+      }
+
+      // F6: el flag de notificación pasó de definicion_campos a tipo_evento.notificar_dashboard_tipo.
+      // El path legacy (hasNotificarDashboard sobre AUTH) sigue activo como fallback porque
+      // AUTH original tiene `activa=0` pero la helper sigue siendo invocada por consistencia.
+      const dashboardTipo = teRow.notificar_dashboard_tipo
+        || (hasNotificarDashboard(bit.definicion_campos) ? 'AUTH' : null);
+      const notificar = dashboardTipo != null;
       const fechaEventoDate = new Date(fecha_evento);
 
       const transaction = new sql.Transaction(db);
@@ -600,16 +643,16 @@ const server = http.createServer(async (req, res) => {
 
         if (notificar && camposFinal) {
           const periodo = camposFinal.periodo;
-          const valor = camposFinal.valor_autorizado_mw;
+          // F6: MAND usa valor_mw, AUTH legacy usa valor_autorizado_mw.
+          const valor = camposFinal.valor_mw ?? camposFinal.valor_autorizado_mw;
           if (periodo && valor != null) {
-            // F5: AUTH viaja por la columna nueva `tipo`. F6 parametrizará por tipo_evento.
             const existente = await findEventoDashboard(transaction, {
-              planta_id, fecha: fechaEventoDate, periodo, tipo: 'AUTH',
+              planta_id, fecha: fechaEventoDate, periodo, tipo: dashboardTipo,
             });
             if (existente && existente.activa) {
               await transaction.rollback();
               return sendJSON(res, 409, {
-                error: 'Ya existe autorización vigente para este periodo',
+                error: `Ya existe ${dashboardTipo} vigente para este periodo`,
                 evento_id: existente.evento_id,
               });
             }
@@ -640,7 +683,7 @@ const server = http.createServer(async (req, res) => {
 
         if (notificar && camposFinal) {
           const periodo = camposFinal.periodo;
-          const valor = camposFinal.valor_autorizado_mw;
+          const valor = camposFinal.valor_mw ?? camposFinal.valor_autorizado_mw;
           if (periodo && valor != null) {
             await upsertEventoDashboard(transaction, {
               planta_id,
@@ -650,7 +693,7 @@ const server = http.createServer(async (req, res) => {
               jdts_snapshot,
               jefes_snapshot,
               registro_origen_id: registro.registro_id,
-              tipo: 'AUTH',
+              tipo: dashboardTipo,
             });
           }
         }
@@ -699,45 +742,166 @@ const server = http.createServer(async (req, res) => {
       }
       const modificado_por = sesion.usuario_id;
 
+      // F6: lookup del tipo_evento (puede ser el del body o el original del registro) para
+      // saber si hay que reescribir evento_dashboard.
+      const teEffectiveId = tipo_evento_id != null
+        ? tipo_evento_id
+        : (await db.request()
+            .input('rid', sql.Int, registro_id)
+            .query(`SELECT tipo_evento_id FROM bitacora.registro_activo WHERE registro_id = @rid`)
+          ).recordset[0]?.tipo_evento_id;
+      const teInfo = await db.request()
+        .input('te', sql.Int, teEffectiveId)
+        .query(`
+          SELECT te.nombre AS tipo_evento_nombre, te.notificar_dashboard_tipo,
+                 b.codigo AS bitacora_codigo, b.definicion_campos
+          FROM lov_bit.tipo_evento te
+          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+          WHERE te.tipo_evento_id = @te
+        `);
+      const teRow = teInfo.recordset[0] || {};
+      const isMAND = teRow.bitacora_codigo === 'MAND';
+
       let camposStr = null;
+      let camposFinal = null;
       if (campos_extra !== undefined && campos_extra !== null) {
-        const bitRes = await db.request()
-          .input('bitacora_id', sql.Int, reg.bitacora_id)
-          .query(`SELECT definicion_campos FROM lov_bit.bitacora WHERE bitacora_id = @bitacora_id`);
-        const definicionCampos = bitRes.recordset[0]?.definicion_campos;
-        const validation = validateCamposExtra(definicionCampos, campos_extra);
+        const validation = validateCamposExtra(teRow.definicion_campos, campos_extra);
         if (!validation.ok) {
           return sendJSON(res, 400, { error: 'campos_extra inválido', detalles: validation.errors });
         }
-        const camposFinal = validation.definicion ? computeCamposAuto(validation.definicion, validation.data) : validation.data;
-        if (camposFinal && hasNotificarDashboard(definicionCampos)) {
+        camposFinal = validation.definicion ? computeCamposAuto(validation.definicion, validation.data) : validation.data;
+        // F6: solo AUTH legacy auto-rellena periodo desde fecha en PUT.
+        if (camposFinal && hasNotificarDashboard(teRow.definicion_campos) && !isMAND) {
           const fechaEfectiva = fecha_evento ? new Date(fecha_evento) : reg.fecha_evento;
           camposFinal.periodo = periodoFromFechaBogota(fechaEfectiva);
+        }
+        // F6: validación funcionariocnd para MAND/Autorización en edición.
+        if (isMAND && teRow.tipo_evento_nombre === 'Autorización') {
+          const fcnd = camposFinal?.funcionariocnd;
+          if (!fcnd || String(fcnd).trim() === '') {
+            return sendJSON(res, 400, { error: 'funcionariocnd es requerido para Autorización' });
+          }
         }
         camposStr = camposFinal ? JSON.stringify(camposFinal) : null;
       }
 
-      const upd = await db.request()
-        .input('registro_id', sql.Int, registro_id)
-        .input('detalle', sql.NVarChar(sql.MAX), detalle ?? null)
-        .input('turno', sql.TinyInt, turno)
-        .input('fecha_evento', sql.DateTime2, fecha_evento ? new Date(fecha_evento) : null)
-        .input('campos_extra', sql.NVarChar(sql.MAX), camposStr)
-        .input('tipo_evento_id', sql.Int, tipo_evento_id)
-        .input('modificado_por', sql.Int, modificado_por)
+      // F6: turno NO se reactualiza en PUT (preguntas3.md respuesta D). Si llega en el body,
+      // se respeta; si no, queda como estaba.
+      const transaction = new sql.Transaction(db);
+      await transaction.begin();
+      try {
+        const upd = await new sql.Request(transaction)
+          .input('registro_id', sql.Int, registro_id)
+          .input('detalle', sql.NVarChar(sql.MAX), detalle ?? null)
+          .input('turno', sql.TinyInt, turno)
+          .input('fecha_evento', sql.DateTime2, fecha_evento ? new Date(fecha_evento) : null)
+          .input('campos_extra', sql.NVarChar(sql.MAX), camposStr)
+          .input('tipo_evento_id', sql.Int, tipo_evento_id)
+          .input('modificado_por', sql.Int, modificado_por)
+          .query(`
+            UPDATE bitacora.registro_activo
+            SET detalle = COALESCE(@detalle, detalle),
+                turno = COALESCE(@turno, turno),
+                fecha_evento = COALESCE(@fecha_evento, fecha_evento),
+                campos_extra = COALESCE(@campos_extra, campos_extra),
+                tipo_evento_id = COALESCE(@tipo_evento_id, tipo_evento_id),
+                modificado_por = @modificado_por,
+                modificado_en = SYSUTCDATETIME()
+            OUTPUT INSERTED.*
+            WHERE registro_id = @registro_id AND estado = 'borrador'
+          `);
+
+        // F6: si el registro notifica al dashboard y cambió valor/periodo, reescribir la
+        // fila correspondiente en evento_dashboard (UPSERT por (planta, fecha, periodo, tipo)).
+        const dashboardTipo = teRow.notificar_dashboard_tipo
+          || (hasNotificarDashboard(teRow.definicion_campos) ? 'AUTH' : null);
+        if (camposFinal && dashboardTipo) {
+          const periodo = camposFinal.periodo;
+          const valor = camposFinal.valor_mw ?? camposFinal.valor_autorizado_mw;
+          if (periodo && valor != null) {
+            const reqFactory = () => new sql.Request(transaction);
+            const jdts_snapshot = await snapshotJDTs(reqFactory, { planta_id: reg.planta_id });
+            const jefes_snapshot = await snapshotJefes(reqFactory);
+            await upsertEventoDashboard(transaction, {
+              planta_id: reg.planta_id,
+              fecha: fecha_evento ? new Date(fecha_evento) : reg.fecha_evento,
+              periodo,
+              valor,
+              jdts_snapshot,
+              jefes_snapshot,
+              registro_origen_id: registro_id,
+              tipo: dashboardTipo,
+            });
+          }
+        }
+
+        await transaction.commit();
+        return sendJSON(res, 200, { registro: upd.recordset[0] });
+      } catch (err) {
+        try { await transaction.rollback(); } catch {}
+        throw err;
+      }
+    }
+
+    // F6: GET /api/sala-de-mando?planta_id=&fecha=
+    // Devuelve la grilla 3×24 (AUTH | PRUEBA | REDESP) que renderea el frontend de Sala de
+    // Mando. Para cada tipo: arreglo de 24 posiciones (índice = periodo-1), mapa periodo→
+    // registro_id, y los campos de fila (detalle, funcionariocnd) tomados del registro más
+    // reciente (preguntas.md punto 3 dice que detalle/funcionario aplican por fila).
+    if (pathname === '/api/sala-de-mando' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      const planta_id = url.searchParams.get('planta_id');
+      const fecha = url.searchParams.get('fecha');
+      if (!planta_id || !fecha) return sendJSON(res, 400, { error: 'planta_id y fecha son requeridos' });
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No puede consultar otra planta' });
+      }
+      const db = await getDB();
+      const r = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .input('fecha', sql.Date, new Date(fecha))
         .query(`
-          UPDATE bitacora.registro_activo
-          SET detalle = COALESCE(@detalle, detalle),
-              turno = COALESCE(@turno, turno),
-              fecha_evento = COALESCE(@fecha_evento, fecha_evento),
-              campos_extra = COALESCE(@campos_extra, campos_extra),
-              tipo_evento_id = COALESCE(@tipo_evento_id, tipo_evento_id),
-              modificado_por = @modificado_por,
-              modificado_en = SYSUTCDATETIME()
-          OUTPUT INSERTED.*
-          WHERE registro_id = @registro_id AND estado = 'borrador'
+          SELECT ra.registro_id, ra.detalle, ra.creado_en, ra.fecha_evento,
+                 te.notificar_dashboard_tipo AS tipo,
+                 te.nombre AS tipo_evento_nombre,
+                 TRY_CAST(JSON_VALUE(ra.campos_extra, '$.periodo') AS INT) AS periodo,
+                 TRY_CAST(JSON_VALUE(ra.campos_extra, '$.valor_mw') AS FLOAT) AS valor_mw,
+                 JSON_VALUE(ra.campos_extra, '$.funcionariocnd') AS funcionariocnd
+          FROM bitacora.registro_activo ra
+          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+          INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = ra.tipo_evento_id
+          WHERE b.codigo = 'MAND'
+            AND ra.planta_id = @planta_id
+            AND CAST(ra.fecha_evento AS DATE) = @fecha
+            AND ra.estado = 'borrador'
+          ORDER BY ra.creado_en DESC
         `);
-      return sendJSON(res, 200, { registro: upd.recordset[0] });
+
+      const buildEmpty = () => ({
+        valores: Array(24).fill(null),
+        detalle: null,
+        funcionariocnd: null,
+        registros: {},
+      });
+      const out = { AUTH: buildEmpty(), PRUEBA: buildEmpty(), REDESP: buildEmpty() };
+      for (const row of r.recordset) {
+        const fila = out[row.tipo];
+        if (!fila) continue;
+        if (row.periodo && row.periodo >= 1 && row.periodo <= 24) {
+          // El primer recordset (más reciente) gana para una celda dada — registros viejos
+          // del mismo periodo NO se sobreescriben (no debería pasar por el UNIQUE de
+          // evento_dashboard, pero defensivo).
+          if (fila.valores[row.periodo - 1] == null) {
+            fila.valores[row.periodo - 1] = row.valor_mw;
+            fila.registros[row.periodo] = row.registro_id;
+          }
+        }
+        // Detalle y funcionario por fila: primer (más reciente) que tenga valor no vacío.
+        if (fila.detalle == null && row.detalle) fila.detalle = row.detalle;
+        if (fila.funcionariocnd == null && row.funcionariocnd) fila.funcionariocnd = row.funcionariocnd;
+      }
+      return sendJSON(res, 200, out);
     }
 
     // GET /api/cierre/preview?planta_id=&bitacora_id=

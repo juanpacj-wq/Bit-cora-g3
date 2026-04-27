@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 import CierrePendientesModal from "./components/CierrePendientesModal";
+import SalaDeMandoGrid from "./components/SalaDeMando/SalaDeMandoGrid";
 import { useAuth } from "./hooks/useAuth";
 import { useCatalogos } from "./hooks/useCatalogos";
 import { useRegistros } from "./hooks/useRegistros";
@@ -1245,19 +1246,31 @@ export default function App() {
             />
           )}
 
-          <GrillaRegistros
-            registros={registrosDeBitacora}
-            bitacora={bitacoraActiva}
-            tiposEvento={tiposEvento}
-            jefeNombre={catalogos.jefe?.nombre_completo}
-            jdtNombre={null}
-            puedeCrear={puedeCrear}
-            onUpdateLocal={handleUpdateLocal}
-            onSaveRegistro={handleSaveRegistro}
-            onDeleteRegistro={handleDeleteRegistro}
-            filtroTexto={filtroTexto}
-            filtroTipo={filtroTipo}
-          />
+          {bitacoraActiva?.codigo === 'MAND' ? (
+            <SalaDeMandoGrid
+              bitacora={bitacoraActiva}
+              tiposEvento={tiposEvento}
+              plantaId={sesion?.planta_id}
+              fecha={new Date().toISOString().slice(0, 10)}
+              puedeCrear={puedeCrear}
+              showToast={(m) => showToast(m)}
+              onError={(m) => showToast(m, 'error')}
+            />
+          ) : (
+            <GrillaRegistros
+              registros={registrosDeBitacora}
+              bitacora={bitacoraActiva}
+              tiposEvento={tiposEvento}
+              jefeNombre={catalogos.jefe?.nombre_completo}
+              jdtNombre={null}
+              puedeCrear={puedeCrear}
+              onUpdateLocal={handleUpdateLocal}
+              onSaveRegistro={handleSaveRegistro}
+              onDeleteRegistro={handleDeleteRegistro}
+              filtroTexto={filtroTexto}
+              filtroTipo={filtroTipo}
+            />
+          )}
         </>
       )}
 
