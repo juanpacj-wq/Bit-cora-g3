@@ -7,7 +7,7 @@ import { getTurnoColombia, periodoFromFechaBogota, ventanaTurno } from './utils/
 import { loadSession } from './middleware/auth.js';
 import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
-import { findAutorizacion, upsertAutorizacion, hasNotificarDashboard } from './utils/notificador.js';
+import { findEventoDashboard, upsertEventoDashboard, hasNotificarDashboard } from './utils/notificador.js';
 import { snapshotJDTs, snapshotJefes, snapshotIngenieros, SESION_TTL_MIN } from './utils/snapshots.js';
 import { registrarEventoCierre } from './utils/ciet.js';
 import { attachWSS, broadcastUsuariosActivos } from './utils/ws-usuarios-activos.js';
@@ -602,14 +602,15 @@ const server = http.createServer(async (req, res) => {
           const periodo = camposFinal.periodo;
           const valor = camposFinal.valor_autorizado_mw;
           if (periodo && valor != null) {
-            const existente = await findAutorizacion(transaction, {
-              planta_id, fecha: fechaEventoDate, periodo,
+            // F5: AUTH viaja por la columna nueva `tipo`. F6 parametrizará por tipo_evento.
+            const existente = await findEventoDashboard(transaction, {
+              planta_id, fecha: fechaEventoDate, periodo, tipo: 'AUTH',
             });
             if (existente && existente.activa) {
               await transaction.rollback();
               return sendJSON(res, 409, {
                 error: 'Ya existe autorización vigente para este periodo',
-                autorizacion_id: existente.autorizacion_id,
+                evento_id: existente.evento_id,
               });
             }
           }
@@ -641,7 +642,7 @@ const server = http.createServer(async (req, res) => {
           const periodo = camposFinal.periodo;
           const valor = camposFinal.valor_autorizado_mw;
           if (periodo && valor != null) {
-            await upsertAutorizacion(transaction, {
+            await upsertEventoDashboard(transaction, {
               planta_id,
               fecha: fechaEventoDate,
               periodo,
@@ -649,6 +650,7 @@ const server = http.createServer(async (req, res) => {
               jdts_snapshot,
               jefes_snapshot,
               registro_origen_id: registro.registro_id,
+              tipo: 'AUTH',
             });
           }
         }
@@ -1026,10 +1028,12 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 403, { error: 'Sin permiso para eliminar este registro' });
       }
 
+      // F5: soft-delete cubre TODOS los tipos (AUTH/REDESP/PRUEBA), no solo AUTH. F7 confía
+      // en este comportamiento para que vaciar una celda de MAND cancele cualquier evento.
       await db.request()
         .input('registro_id', sql.Int, registro_id)
         .query(`
-          UPDATE bitacora.autorizacion_dashboard SET activa = 0 WHERE registro_origen_id = @registro_id;
+          UPDATE bitacora.evento_dashboard SET activa = 0 WHERE registro_origen_id = @registro_id;
           DELETE FROM bitacora.registro_activo WHERE registro_id = @registro_id AND estado = 'borrador';
         `);
       broadcastConteoBitacoras(reg.planta_id).catch(() => {});
@@ -1123,6 +1127,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     // GET /api/autorizaciones?planta_id=&fecha=
+    // F5: alias filtrado por tipo='AUTH'. Mantiene shape original (autorizacion_id, valor_autorizado_mw)
+    // vía la vista compat `bitacora.autorizacion_dashboard`. F9 lo deprecia.
     if (pathname === '/api/autorizaciones' && method === 'GET') {
       const planta_id = url.searchParams.get('planta_id');
       const fecha = url.searchParams.get('fecha');
@@ -1172,16 +1178,70 @@ const server = http.createServer(async (req, res) => {
       if (!puedeCerrarTurno(sesion)) return sendJSON(res, 403, { error: 'Solo el Jefe de Turno o el Ingeniero de Operación pueden anular autorizaciones' });
       const autorizacion_id = parseInt(authDel[1], 10);
       const db = await getDB();
+      // F5: el id viejo (autorizacion_id) coincide con evento_id porque sp_rename solo cambió
+      // el nombre de la columna, no los valores. Filtramos tipo='AUTH' para preservar la
+      // semántica del alias (no permitimos borrar REDESP/PRUEBA por aquí).
       const result = await db.request()
-        .input('autorizacion_id', sql.Int, autorizacion_id)
+        .input('evento_id', sql.Int, autorizacion_id)
         .input('planta_id', sql.VarChar(10), sesion.planta_id)
         .query(`
-          UPDATE bitacora.autorizacion_dashboard
+          UPDATE bitacora.evento_dashboard
           SET activa = 0
-          WHERE autorizacion_id = @autorizacion_id AND planta_id = @planta_id
+          WHERE evento_id = @evento_id AND planta_id = @planta_id AND tipo = 'AUTH'
         `);
       if (!result.rowsAffected[0]) {
         return sendJSON(res, 404, { error: 'Autorización no encontrada' });
+      }
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // F5: GET /api/eventos-dashboard?planta_id=&fecha=&tipo=
+    // Endpoint nuevo para F8 (dashboard externo). `tipo` opcional — sin él retorna todos los
+    // tipos (AUTH+REDESP+PRUEBA) activos para esa (planta, fecha).
+    if (pathname === '/api/eventos-dashboard' && method === 'GET') {
+      const planta_id = url.searchParams.get('planta_id');
+      const fecha = url.searchParams.get('fecha');
+      const tipo = url.searchParams.get('tipo');
+      if (!planta_id || !fecha) {
+        return sendJSON(res, 400, { error: 'planta_id y fecha son requeridos' });
+      }
+      const db = await getDB();
+      const result = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .input('fecha', sql.Date, new Date(fecha))
+        .input('tipo', sql.VarChar(10), tipo || null)
+        .query(`
+          SELECT e.evento_id, e.registro_origen_id, e.planta_id, e.fecha, e.periodo,
+                 e.valor_mw, e.tipo, e.jdts_snapshot, e.jefes_snapshot, e.activa, e.creado_en
+          FROM bitacora.evento_dashboard e
+          WHERE e.planta_id = @planta_id AND e.fecha = @fecha AND e.activa = 1
+            AND (@tipo IS NULL OR e.tipo = @tipo)
+          ORDER BY e.periodo, e.tipo
+        `);
+      return sendJSON(res, 200, { eventos: result.recordset });
+    }
+
+    // F5: DELETE /api/eventos-dashboard/:id — opera sobre cualquier tipo. F7 lo usa para
+    // cancelar (vaciar) celdas en MAND.
+    const eventoDel = pathname.match(/^\/api\/eventos-dashboard\/(\d+)$/);
+    if (eventoDel && method === 'DELETE') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      if (!puedeCerrarTurno(sesion)) {
+        return sendJSON(res, 403, { error: 'Solo el Jefe de Turno o el Ingeniero de Operación pueden anular eventos' });
+      }
+      const evento_id = parseInt(eventoDel[1], 10);
+      const db = await getDB();
+      const result = await db.request()
+        .input('evento_id', sql.Int, evento_id)
+        .input('planta_id', sql.VarChar(10), sesion.planta_id)
+        .query(`
+          UPDATE bitacora.evento_dashboard
+          SET activa = 0
+          WHERE evento_id = @evento_id AND planta_id = @planta_id
+        `);
+      if (!result.rowsAffected[0]) {
+        return sendJSON(res, 404, { error: 'Evento no encontrado' });
       }
       return sendJSON(res, 200, { ok: true });
     }
