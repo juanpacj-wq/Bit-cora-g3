@@ -100,8 +100,10 @@ async function migrateSnapshots(db) {
     { table: 'bitacora.registro_historico', oldCol: 'ingeniero_id', newCol: 'ingenieros_snapshot', indexToDrop: 'IX_rh_ing' },
     { table: 'bitacora.registro_historico', oldCol: 'jdt_turno_id', newCol: 'jdts_snapshot' },
     { table: 'bitacora.registro_historico', oldCol: 'jefe_id', newCol: 'jefes_snapshot' },
-    { table: 'bitacora.autorizacion_dashboard', oldCol: 'jdt_id', newCol: 'jdts_snapshot' },
-    { table: 'bitacora.autorizacion_dashboard', oldCol: 'jefe_id', newCol: 'jefes_snapshot' },
+    // F5: la tabla se renombra a evento_dashboard. Si todavía existe la vieja, las migraciones
+    // de snapshots ya corrieron en deploys previos — el COL_LENGTH guard evita re-trabajo.
+    { table: 'bitacora.evento_dashboard', oldCol: 'jdt_id', newCol: 'jdts_snapshot' },
+    { table: 'bitacora.evento_dashboard', oldCol: 'jefe_id', newCol: 'jefes_snapshot' },
   ];
   for (const m of migrations) {
     await migrateColumnToSnapshot(db, m);
@@ -449,26 +451,86 @@ export async function initDB() {
     `);
   }
 
-  // ---------- 5. Autorizaciones Dashboard ----------
+  // ---------- 5. Eventos Dashboard (F5: renombrado desde autorizacion_dashboard) ----------
+  // F5: rename idempotente de la tabla y sus columnas. Solo corre la primera vez que el
+  // server arranca después del upgrade. En BD pristine no hace nada (la tabla nueva se crea
+  // directamente con el CREATE de abajo).
   await db.request().batch(`
-    IF OBJECT_ID('bitacora.autorizacion_dashboard', 'U') IS NULL
-    CREATE TABLE bitacora.autorizacion_dashboard (
-      autorizacion_id     INT           IDENTITY(1,1) PRIMARY KEY,
+    IF EXISTS (
+      SELECT 1 FROM sys.tables t INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+      WHERE s.name = 'bitacora' AND t.name = 'autorizacion_dashboard'
+    )
+    BEGIN
+      EXEC sp_rename 'bitacora.autorizacion_dashboard', 'evento_dashboard';
+      IF COL_LENGTH('bitacora.evento_dashboard', 'autorizacion_id') IS NOT NULL
+        EXEC sp_rename 'bitacora.evento_dashboard.autorizacion_id', 'evento_id', 'COLUMN';
+      IF COL_LENGTH('bitacora.evento_dashboard', 'valor_autorizado_mw') IS NOT NULL
+        EXEC sp_rename 'bitacora.evento_dashboard.valor_autorizado_mw', 'valor_mw', 'COLUMN';
+    END
+  `);
+
+  await db.request().batch(`
+    IF OBJECT_ID('bitacora.evento_dashboard', 'U') IS NULL
+    CREATE TABLE bitacora.evento_dashboard (
+      evento_id           INT           IDENTITY(1,1) PRIMARY KEY,
       registro_origen_id  INT           NOT NULL,
       planta_id           VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
       fecha               DATE          NOT NULL,
       periodo             TINYINT       NOT NULL CHECK (periodo BETWEEN 1 AND 24),
-      valor_autorizado_mw FLOAT         NOT NULL,
+      valor_mw            FLOAT         NOT NULL,
       jdts_snapshot       NVARCHAR(MAX) NOT NULL,
       jefes_snapshot      NVARCHAR(MAX) NOT NULL,
+      tipo                VARCHAR(10)   NOT NULL DEFAULT 'AUTH'
+                          CHECK (tipo IN ('AUTH','REDESP','PRUEBA')),
       activa              BIT           NOT NULL DEFAULT 1,
       creado_en           DATETIME2     NOT NULL DEFAULT GETDATE(),
-      CONSTRAINT UQ_auth_planta_fecha_periodo UNIQUE (planta_id, fecha, periodo)
+      CONSTRAINT UQ_evento_planta_fecha_periodo_tipo UNIQUE (planta_id, fecha, periodo, tipo)
     );
   `);
+
+  // F5: en deploys que ya tenían autorizacion_dashboard sin la columna tipo, agregarla.
   await db.request().batch(`
-    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_auth_lookup' AND object_id=OBJECT_ID('bitacora.autorizacion_dashboard'))
-      CREATE INDEX IX_auth_lookup ON bitacora.autorizacion_dashboard(planta_id, fecha, activa);
+    IF COL_LENGTH('bitacora.evento_dashboard','tipo') IS NULL
+      ALTER TABLE bitacora.evento_dashboard
+        ADD tipo VARCHAR(10) NOT NULL
+            CONSTRAINT DF_evento_tipo DEFAULT 'AUTH'
+            CONSTRAINT CK_evento_tipo CHECK (tipo IN ('AUTH','REDESP','PRUEBA'));
+  `);
+
+  // F5: drop UNIQUE viejo (planta, fecha, periodo) si todavía existe; el constraint nuevo
+  // (planta, fecha, periodo, tipo) permite que un mismo periodo tenga AUTH + PRUEBA en simultáneo
+  // (preguntas2.md respuesta B).
+  await db.request().batch(`
+    IF EXISTS (SELECT 1 FROM sys.key_constraints WHERE name='UQ_auth_planta_fecha_periodo')
+      ALTER TABLE bitacora.evento_dashboard DROP CONSTRAINT UQ_auth_planta_fecha_periodo;
+  `);
+  await db.request().batch(`
+    IF NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE name='UQ_evento_planta_fecha_periodo_tipo')
+      ALTER TABLE bitacora.evento_dashboard
+        ADD CONSTRAINT UQ_evento_planta_fecha_periodo_tipo UNIQUE (planta_id, fecha, periodo, tipo);
+  `);
+
+  // Índice de lookup por planta/fecha/activa renombrado al esquema nuevo.
+  await db.request().batch(`
+    IF EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_auth_lookup' AND object_id=OBJECT_ID('bitacora.evento_dashboard'))
+      DROP INDEX IX_auth_lookup ON bitacora.evento_dashboard;
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_evento_lookup' AND object_id=OBJECT_ID('bitacora.evento_dashboard'))
+      CREATE INDEX IX_evento_lookup ON bitacora.evento_dashboard(planta_id, fecha, activa);
+  `);
+
+  // F5: vista compat para que el dashboard externo siga consultando el nombre viejo. Solo
+  // expone tipo='AUTH' con los nombres originales de columna. F9 la elimina cuando el dashboard
+  // pase a usar /api/eventos-dashboard.
+  await db.request().batch(`
+    IF OBJECT_ID('bitacora.autorizacion_dashboard', 'V') IS NOT NULL
+      DROP VIEW bitacora.autorizacion_dashboard;
+  `);
+  await db.request().batch(`
+    EXEC('CREATE VIEW bitacora.autorizacion_dashboard AS
+      SELECT evento_id AS autorizacion_id, registro_origen_id, planta_id, fecha, periodo,
+             valor_mw AS valor_autorizado_mw, jdts_snapshot, jefes_snapshot, activa, creado_en
+      FROM bitacora.evento_dashboard
+      WHERE tipo = ''AUTH''');
   `);
 
   // ---------- 6. Migración schema v2 (columnas nuevas en tablas existentes) ----------
