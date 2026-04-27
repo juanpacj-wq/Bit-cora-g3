@@ -329,6 +329,35 @@ export async function initDB() {
         INCLUDE (usuario_id, turno, inicio_sesion);
   `);
 
+  // F2: cerrada_en distingue logout explícito (activa=0 + cerrada_en=NULL) del cierre por
+  // sweeper de F4 (activa=0 + cerrada_en=GETDATE()). Hoy todavía nadie escribe esta columna;
+  // se añade idempotente para que F4 la consuma sin migración adicional.
+  await db.request().batch(`
+    IF COL_LENGTH('bitacora.sesion_activa', 'cerrada_en') IS NULL
+      ALTER TABLE bitacora.sesion_activa ADD cerrada_en DATETIME2 NULL;
+  `);
+
+  // F2: sesion_bitacora trackea participación de un login en cada bitácora. abierta_en al
+  // entrar a la vista; finalizada_en cuando el usuario clicka "Finalizar turno" (o el sweeper
+  // de F4 lo hace en su nombre). Una sola fila por (sesion_id, bitacora_id) — reabrir es UPSERT.
+  await db.request().batch(`
+    IF OBJECT_ID('bitacora.sesion_bitacora', 'U') IS NULL
+    CREATE TABLE bitacora.sesion_bitacora (
+      sesion_bitacora_id INT       IDENTITY(1,1) PRIMARY KEY,
+      sesion_id          INT       NOT NULL REFERENCES bitacora.sesion_activa(sesion_id),
+      bitacora_id        INT       NOT NULL REFERENCES lov_bit.bitacora(bitacora_id),
+      abierta_en         DATETIME2 NOT NULL DEFAULT GETDATE(),
+      finalizada_en      DATETIME2 NULL,
+      CONSTRAINT UQ_sesion_bitacora UNIQUE (sesion_id, bitacora_id)
+    );
+  `);
+  await db.request().batch(`
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_sesion_bit_finalizada' AND object_id=OBJECT_ID('bitacora.sesion_bitacora'))
+      CREATE INDEX IX_sesion_bit_finalizada
+        ON bitacora.sesion_bitacora(finalizada_en)
+        WHERE finalizada_en IS NULL;
+  `);
+
   // ---------- 4. Registros ----------
   await db.request().batch(`
     IF OBJECT_ID('bitacora.registro_activo', 'U') IS NULL
