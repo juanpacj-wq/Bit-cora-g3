@@ -3,7 +3,7 @@ import sql from 'mssql';
 import { initDB, getDB } from './db.js';
 import { verifyPassword } from './utils/password.js';
 import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
-import { getTurnoColombia, periodoFromFechaBogota } from './utils/turno.js';
+import { getTurnoColombia, periodoFromFechaBogota, ventanaTurno } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
 import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
@@ -12,7 +12,10 @@ import { snapshotJDTs, snapshotJefes, snapshotIngenieros, SESION_TTL_MIN } from 
 import { registrarEventoCierre } from './utils/ciet.js';
 import { attachWSS, broadcastUsuariosActivos } from './utils/ws-usuarios-activos.js';
 import { attachWSConteoBitacoras, broadcastConteoBitacoras } from './utils/ws-conteo-bitacoras.js';
-import { startSweeper, stopSweeper } from './utils/sesion-sweeper.js';
+// F4: el viejo sesion-sweeper.js queda en disco (se borra en F9) pero ya no se ejecuta;
+// turno-sweeper finaliza sesion_bitacora cuando la ventana del turno termina, sin tocar
+// sesion_activa.activa.
+import { startTurnoSweeper, stopTurnoSweeper } from './utils/turno-sweeper.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
 
@@ -259,6 +262,74 @@ const server = http.createServer(async (req, res) => {
 
         await transaction.commit();
         return sendJSON(res, 200, { finalizadas: result.recordset, evento_ciet });
+      } catch (err) {
+        try { await transaction.rollback(); } catch {}
+        throw err;
+      }
+    }
+
+    // F4: POST /api/bitacora/finalizar-forzado { usuarios: [usuario_id, ...] }
+    // Solo cargos con puede_cerrar_turno=1 pueden invocarlo. Por cada usuario en la lista:
+    //   - UPDATE sus sesion_bitacora con finalizada_en = GETDATE().
+    //   - Emite CIET 'finalizacion' con forzado=true, motivo='popup-pendientes'.
+    // El "sesion" que se pasa al helper es sintética: usuario_id/turno/cargo_nombre del target,
+    // planta_id del JdT que invoca (asumimos misma planta).
+    if (pathname === '/api/bitacora/finalizar-forzado' && method === 'POST') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      if (!puedeCerrarTurno(sesion)) {
+        return sendJSON(res, 403, { error: 'Solo el Jefe de Turno o el Ingeniero de Operación pueden forzar finalización' });
+      }
+      const { usuarios } = await parseBody(req);
+      if (!Array.isArray(usuarios) || usuarios.length === 0) {
+        return sendJSON(res, 400, { error: 'usuarios debe ser un array no vacío de usuario_id' });
+      }
+      const ids = usuarios.map((u) => parseInt(u, 10)).filter((n) => Number.isInteger(n));
+      if (ids.length === 0) return sendJSON(res, 400, { error: 'usuarios contiene IDs inválidos' });
+
+      const pool = await getDB();
+      const transaction = new sql.Transaction(pool);
+      await transaction.begin();
+      try {
+        const finalizados = [];
+        for (const usuario_id of ids) {
+          // Lookup de la sesión más reciente del target en esta planta para obtener turno+cargo.
+          const userSesRes = await new sql.Request(transaction)
+            .input('usuario_id', sql.Int, usuario_id)
+            .input('planta_id', sql.VarChar(10), sesion.planta_id)
+            .query(`
+              SELECT TOP 1 sa.usuario_id, sa.planta_id, sa.turno, c.nombre AS cargo_nombre
+              FROM bitacora.sesion_activa sa
+              INNER JOIN lov_bit.cargo c ON c.cargo_id = sa.cargo_id
+              WHERE sa.usuario_id = @usuario_id AND sa.planta_id = @planta_id AND sa.activa = 1
+              ORDER BY sa.inicio_sesion DESC
+            `);
+          const targetSesion = userSesRes.recordset[0];
+          if (!targetSesion) continue;
+
+          const upd = await new sql.Request(transaction)
+            .input('usuario_id', sql.Int, usuario_id)
+            .input('planta_id', sql.VarChar(10), sesion.planta_id)
+            .query(`
+              UPDATE sb SET finalizada_en = GETDATE()
+              FROM bitacora.sesion_bitacora sb
+              INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
+              WHERE sa.usuario_id = @usuario_id AND sa.planta_id = @planta_id
+                AND sb.finalizada_en IS NULL;
+            `);
+
+          if ((upd.rowsAffected[0] || 0) > 0) {
+            const ciet = await registrarEventoCierre(transaction, {
+              tipo: 'finalizacion',
+              sesion: targetSesion,
+              forzado: true,
+              motivo: 'popup-pendientes',
+            });
+            finalizados.push({ usuario_id, ciet_registro_id: ciet.registro_id });
+          }
+        }
+        await transaction.commit();
+        return sendJSON(res, 200, { finalizados });
       } catch (err) {
         try { await transaction.rollback(); } catch {}
         throw err;
@@ -694,6 +765,65 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { preview: result.recordset });
     }
 
+    // F4: GET /api/cierre/preview-masivo?planta_id=
+    // Devuelve lo que el JdT/IngOp necesita para mostrar el modal antes de cerrar masivo:
+    //   - bitácoras con borradores (excluye CIET, igual que el masivo)
+    //   - ingenieros con sesion_bitacora abierta (finalizada_en IS NULL) y la lista de
+    //     bitácoras donde están participando.
+    if (pathname === '/api/cierre/preview-masivo' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      if (!puedeCerrarTurno(sesion)) {
+        return sendJSON(res, 403, { error: 'Solo el Jefe de Turno o el Ingeniero de Operación pueden cerrar bitácoras' });
+      }
+      const planta_id = url.searchParams.get('planta_id');
+      if (!planta_id) return sendJSON(res, 400, { error: 'planta_id es requerido' });
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No puede consultar otra planta' });
+      }
+      const db = await getDB();
+
+      const bitsRes = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .query(`
+          SELECT r.bitacora_id, b.nombre, COUNT(*) AS registros_borrador
+          FROM bitacora.registro_activo r
+          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
+          WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
+            AND b.codigo <> 'CIET'
+          GROUP BY r.bitacora_id, b.nombre
+          ORDER BY b.nombre
+        `);
+
+      const usersRes = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .query(`
+          SELECT sa.usuario_id, u.nombre_completo,
+                 STRING_AGG(CAST(sb.bitacora_id AS VARCHAR(20)), ',') AS bitacoras_csv
+          FROM bitacora.sesion_bitacora sb
+          INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
+          INNER JOIN lov_bit.usuario u ON u.usuario_id = sa.usuario_id
+          WHERE sa.planta_id = @planta_id
+            AND sa.activa = 1
+            AND sb.finalizada_en IS NULL
+          GROUP BY sa.usuario_id, u.nombre_completo
+          ORDER BY u.nombre_completo
+        `);
+
+      const ingenieros_no_finalizados = usersRes.recordset.map((row) => ({
+        usuario_id: row.usuario_id,
+        nombre_completo: row.nombre_completo,
+        bitacoras_abiertas: row.bitacoras_csv
+          ? row.bitacoras_csv.split(',').map((s) => parseInt(s, 10))
+          : [],
+      }));
+
+      return sendJSON(res, 200, {
+        bitacoras_pendientes: bitsRes.recordset,
+        ingenieros_no_finalizados,
+      });
+    }
+
     // POST /api/cierre/bitacora
     if (pathname === '/api/cierre/bitacora' && method === 'POST') {
       const sesion = await loadSession(req);
@@ -711,35 +841,59 @@ const server = http.createServer(async (req, res) => {
       const transaction = new sql.Transaction(pool);
       await transaction.begin();
       try {
-        const insReq = new sql.Request(transaction);
-        const insResult = await insReq
-          .input('bitacora_id', sql.Int, bitacora_id)
-          .input('planta_id', sql.VarChar(10), planta_id)
-          .input('cerrado_por', sql.Int, cerrado_por)
-          .query(`
-            INSERT INTO bitacora.registro_historico
-              (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-               estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-               modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
-            SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-                   'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-                   modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE)
-            FROM bitacora.registro_activo
-            WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
-          `);
-
-        const delReq = new sql.Request(transaction);
-        await delReq
+        // F4: cierre cronológico. Identificamos el turno del registro más antiguo y solo
+        // movemos los registros que caen en su ventana. Los registros del turno siguiente
+        // permanecen como borrador hasta que el JdT/IngOp los cierre con un nuevo click.
+        // UPDLOCK + HOLDLOCK previene que dos JdTs cierren el mismo turno simultáneamente.
+        const oldest = await new sql.Request(transaction)
           .input('bitacora_id', sql.Int, bitacora_id)
           .input('planta_id', sql.VarChar(10), planta_id)
           .query(`
-            DELETE FROM bitacora.registro_activo
-            WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
+            SELECT TOP 1 fecha_evento, turno
+            FROM bitacora.registro_activo WITH (UPDLOCK, HOLDLOCK)
+            WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador'
+            ORDER BY fecha_evento ASC
           `);
 
-        // F3: registrar evento CIET 'cierre' por la bitácora cerrada. F4 refinará la ventana,
-        // por ahora se registra incluso si el cierre vacío (rowsAffected=0) — el cierre fue
-        // ejecutado deliberadamente por el JdT/IngOp y queda en histórico como auditoría.
+        let registros_cerrados = 0;
+        if (oldest.recordset.length > 0) {
+          const { fecha_evento, turno } = oldest.recordset[0];
+          const { inicio, fin } = ventanaTurno(turno, fecha_evento);
+
+          const insResult = await new sql.Request(transaction)
+            .input('bitacora_id', sql.Int, bitacora_id)
+            .input('planta_id', sql.VarChar(10), planta_id)
+            .input('cerrado_por', sql.Int, cerrado_por)
+            .input('inicio', sql.DateTime2, inicio)
+            .input('fin', sql.DateTime2, fin)
+            .query(`
+              INSERT INTO bitacora.registro_historico
+                (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+                 estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
+                 modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
+              SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+                     'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
+                     modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE)
+              FROM bitacora.registro_activo
+              WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador'
+                AND fecha_evento >= @inicio AND fecha_evento < @fin;
+            `);
+          registros_cerrados = insResult.rowsAffected[0] || 0;
+
+          await new sql.Request(transaction)
+            .input('bitacora_id', sql.Int, bitacora_id)
+            .input('planta_id', sql.VarChar(10), planta_id)
+            .input('inicio', sql.DateTime2, inicio)
+            .input('fin', sql.DateTime2, fin)
+            .query(`
+              DELETE FROM bitacora.registro_activo
+              WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador'
+                AND fecha_evento >= @inicio AND fecha_evento < @fin;
+            `);
+        }
+
+        // F3: registrar evento CIET 'cierre' (de F3) — auditoría de la operación incluso si
+        // el cierre fue vacío (no había borradores). El JdT/IngOp ejecutó el cierre deliberadamente.
         await registrarEventoCierre(transaction, {
           tipo: 'cierre',
           sesion,
@@ -749,7 +903,7 @@ const server = http.createServer(async (req, res) => {
 
         await transaction.commit();
         broadcastConteoBitacoras(planta_id).catch(() => {});
-        return sendJSON(res, 200, { registros_cerrados: insResult.rowsAffected[0] || 0 });
+        return sendJSON(res, 200, { registros_cerrados });
       } catch (err) {
         await transaction.rollback();
         throw err;
@@ -770,6 +924,9 @@ const server = http.createServer(async (req, res) => {
       }
       const cerrado_por = sesion.usuario_id;
       const pool = await getDB();
+      // F4: excluimos CIET del listado para evitar recursión (cada cierre genera un CIET
+      // nuevo; absorberlo en el masivo siguiente emite otro CIET, etc.). CIET se cierra
+      // explícitamente vía /api/cierre/bitacora si alguien lo necesita.
       const listRes = await pool.request()
         .input('planta_id', sql.VarChar(10), planta_id)
         .query(`
@@ -777,6 +934,7 @@ const server = http.createServer(async (req, res) => {
           FROM bitacora.registro_activo r
           INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
           WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
+            AND b.codigo <> 'CIET'
         `);
 
       const resumen = [];
@@ -784,31 +942,54 @@ const server = http.createServer(async (req, res) => {
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
         try {
-          const insReq = new sql.Request(transaction);
-          const insResult = await insReq
-            .input('bitacora_id', sql.Int, row.bitacora_id)
-            .input('planta_id', sql.VarChar(10), planta_id)
-            .input('cerrado_por', sql.Int, cerrado_por)
-            .query(`
-              INSERT INTO bitacora.registro_historico
-                (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-                 estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-                 modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
-              SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-                     'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-                     modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE)
-              FROM bitacora.registro_activo
-              WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
-            `);
-          const delReq = new sql.Request(transaction);
-          await delReq
+          // F4: cierre cronológico por bitácora. Mismo patrón que /api/cierre/bitacora.
+          const oldest = await new sql.Request(transaction)
             .input('bitacora_id', sql.Int, row.bitacora_id)
             .input('planta_id', sql.VarChar(10), planta_id)
             .query(`
-              DELETE FROM bitacora.registro_activo
-              WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador';
+              SELECT TOP 1 fecha_evento, turno
+              FROM bitacora.registro_activo WITH (UPDLOCK, HOLDLOCK)
+              WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador'
+              ORDER BY fecha_evento ASC
             `);
-          // F3: una invocación CIET 'cierre' por bitácora cerrada en el masivo.
+
+          let registros_cerrados = 0;
+          if (oldest.recordset.length > 0) {
+            const { fecha_evento, turno } = oldest.recordset[0];
+            const { inicio, fin } = ventanaTurno(turno, fecha_evento);
+
+            const insResult = await new sql.Request(transaction)
+              .input('bitacora_id', sql.Int, row.bitacora_id)
+              .input('planta_id', sql.VarChar(10), planta_id)
+              .input('cerrado_por', sql.Int, cerrado_por)
+              .input('inicio', sql.DateTime2, inicio)
+              .input('fin', sql.DateTime2, fin)
+              .query(`
+                INSERT INTO bitacora.registro_historico
+                  (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+                   estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
+                   modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
+                SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+                       'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
+                       modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE)
+                FROM bitacora.registro_activo
+                WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador'
+                  AND fecha_evento >= @inicio AND fecha_evento < @fin;
+              `);
+            registros_cerrados = insResult.rowsAffected[0] || 0;
+
+            await new sql.Request(transaction)
+              .input('bitacora_id', sql.Int, row.bitacora_id)
+              .input('planta_id', sql.VarChar(10), planta_id)
+              .input('inicio', sql.DateTime2, inicio)
+              .input('fin', sql.DateTime2, fin)
+              .query(`
+                DELETE FROM bitacora.registro_activo
+                WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador'
+                  AND fecha_evento >= @inicio AND fecha_evento < @fin;
+              `);
+          }
+
           await registrarEventoCierre(transaction, {
             tipo: 'cierre',
             sesion,
@@ -816,7 +997,7 @@ const server = http.createServer(async (req, res) => {
             forzado: false,
           });
           await transaction.commit();
-          resumen.push({ bitacora_id: row.bitacora_id, nombre: row.nombre, registros_cerrados: insResult.rowsAffected[0] || 0 });
+          resumen.push({ bitacora_id: row.bitacora_id, nombre: row.nombre, registros_cerrados });
         } catch (err) {
           await transaction.rollback();
           resumen.push({ bitacora_id: row.bitacora_id, nombre: row.nombre, error: err.message });
@@ -1017,7 +1198,7 @@ initDB()
     attachWSS(server);
     attachWSConteoBitacoras(server);
     const db = await getDB();
-    startSweeper(db);
+    startTurnoSweeper(db);
     server.listen(PORT, () => {
       console.log(`[SERVER] Escuchando en puerto ${PORT}`);
     });
@@ -1029,7 +1210,7 @@ initDB()
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
-    stopSweeper();
+    stopTurnoSweeper();
     process.exit(0);
   });
 }

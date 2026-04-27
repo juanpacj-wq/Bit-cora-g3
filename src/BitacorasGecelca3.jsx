@@ -11,6 +11,7 @@ import {
   Settings, FileCheck, Edit3, Eye, XCircle, Check, Users, History,
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
+import CierrePendientesModal from "./components/CierrePendientesModal";
 import { useAuth } from "./hooks/useAuth";
 import { useCatalogos } from "./hooks/useCatalogos";
 import { useRegistros } from "./hooks/useRegistros";
@@ -18,7 +19,7 @@ import { useCierre } from "./hooks/useCierre";
 import { useUsuariosActivos } from "./hooks/useUsuariosActivos";
 import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
 import { useFlipReorder } from "./hooks/useFlipReorder";
-import { useBitacoraSesion } from "./hooks/useBitacoraSesion";
+import { useBitacoraSesion, useFinalizarTurno } from "./hooks/useBitacoraSesion";
 
 const COLORS = {
   greenPrimary: "#31a354", greenDark: "#006f36",
@@ -108,7 +109,7 @@ function Toast({ message, type, onClose }) {
   );
 }
 
-function ConfirmModal({ open, title, message, confirmLabel, confirmColor, onConfirm, onCancel, icon: IconProp }) {
+function ConfirmModal({ open, title, message, confirmLabel, confirmColor, onConfirm, onCancel, icon: IconProp, secondaryLabel, onSecondary }) {
   if (!open) return null;
   const btnClass = confirmColor === "red"
     ? "bg-red-600 hover:bg-red-700"
@@ -134,10 +135,15 @@ function ConfirmModal({ open, title, message, confirmLabel, confirmColor, onConf
             <p className="text-sm text-gray-500 mt-1">{message}</p>
           </div>
         </div>
-        <div className="px-6 pb-6 flex gap-3 justify-end">
+        <div className="px-6 pb-6 flex flex-wrap gap-3 justify-end">
           <button onClick={onCancel} className="px-5 py-2.5 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors">
             Cancelar
           </button>
+          {secondaryLabel && onSecondary && (
+            <button onClick={onSecondary} className="px-5 py-2.5 rounded-xl text-sm font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-100 transition-colors">
+              {secondaryLabel}
+            </button>
+          )}
           <button onClick={onConfirm} className={`px-5 py-2.5 rounded-xl text-sm font-medium text-white ${btnClass} transition-colors`}>
             {confirmLabel || "Confirmar"}
           </button>
@@ -502,7 +508,8 @@ function BitacoraTabs({ bitacoras, activeId, onSelect, registrosPorBitacora }) {
 
 function BarraEstado({
   bitacora, registros, estadoBitacora, puedeCrear, esJefeTurno,
-  onCerrarTurno, filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
+  onCerrarTurno, onCerrarMasivo, onFinalizarTurno, finalizandoTurno,
+  filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
   tiposEvento, onAddRegistro,
 }) {
   const borradores = registros.filter((r) => r.estado === "borrador").length;
@@ -559,12 +566,33 @@ function BarraEstado({
         </button>
       )}
 
+      {/* F4: "Finalizar turno" para todo ingeniero logueado (preguntas3.md punto E). Finaliza
+          globalmente todas sus sesion_bitacora y emite CIET. Convive con el popup de logout. */}
+      {onFinalizarTurno && (
+        <button onClick={onFinalizarTurno} disabled={finalizandoTurno}
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
+          style={{ backgroundColor: COLORS.greenDark }}>
+          <CheckCircle2 size={16} />
+          {finalizandoTurno ? 'Finalizando…' : 'Finalizar Turno'}
+        </button>
+      )}
+
       {esJefeTurno && borradores + cerrados > 0 && (
         <button onClick={onCerrarTurno}
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
           style={{ backgroundColor: COLORS.blueDark }}>
           <Lock size={16} />
           Cerrar Turno
+        </button>
+      )}
+
+      {/* F4: cierre masivo con popup de pendientes — solo cargos puede_cerrar_turno. */}
+      {esJefeTurno && (
+        <button onClick={onCerrarMasivo}
+          className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
+          style={{ backgroundColor: COLORS.blueDeep }}>
+          <Lock size={16} />
+          Cerrar Masivo
         </button>
       )}
     </div>
@@ -889,6 +917,10 @@ export default function App() {
   // finalizar el turno crea una nueva ventana de participación sin requerir re-login.
   useBitacoraSesion(auth.sesion?.sesion_id ? activeBitacora : null);
 
+  // F4: hook para botón "Finalizar Turno" del header.
+  const { finalizar: finalizarTurno, loading: finalizandoTurno } = useFinalizarTurno();
+  const [pendientesModal, setPendientesModal] = useState(null);
+
   const showToast = useCallback((message, type = "success") => {
     setToast({ message, type, key: Date.now() });
   }, []);
@@ -1069,11 +1101,79 @@ export default function App() {
     });
   }, [bitacorasPermitidas, activeBitacora, sesion, cierre, registrosHook, showToast]);
 
-  const handleLogout = useCallback(async () => {
-    await auth.logout();
-    setActiveBitacora(null);
-    setDraftLocal(null);
-  }, [auth]);
+  // F4: botón "Cerrar Masivo" — abre modal con preview de pendientes antes de cerrar.
+  const handleCerrarMasivo = useCallback(async () => {
+    try {
+      const preview = await cierre.previewMasivo(sesion.planta_id);
+      setPendientesModal({ preview });
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+  }, [cierre, sesion, showToast]);
+
+  const handleConfirmMasivo = useCallback(async () => {
+    if (!pendientesModal?.preview) return;
+    const usuarios_pendientes = pendientesModal.preview.ingenieros_no_finalizados.map((u) => u.usuario_id);
+    try {
+      const r = await cierre.cerrarMasivoConFinalizacionForzada({
+        planta_id: sesion.planta_id,
+        usuarios_pendientes,
+      });
+      if (activeBitacora) {
+        await registrosHook.getActivos({ planta_id: sesion.planta_id, bitacora_id: activeBitacora });
+      }
+      setPendientesModal(null);
+      const totalCerrados = (r.resumen || []).reduce((acc, x) => acc + (x.registros_cerrados || 0), 0);
+      showToast(`Cierre masivo: ${totalCerrados} registro(s) cerrado(s), ${r.finalizados.length} ingeniero(s) finalizado(s)`);
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+  }, [pendientesModal, cierre, sesion, activeBitacora, registrosHook, showToast]);
+
+  // F4: botón "Finalizar Turno" — finaliza globalmente todas las sesion_bitacora del usuario
+  // actual y emite UN CIET. No cierra registros (eso es del JdT/IngOp).
+  const handleFinalizarTurno = useCallback(async () => {
+    setModal({
+      title: 'Finalizar turno',
+      message: 'Esto registra que terminaste tu turno. Tu actividad se marcará como finalizada en todas las bitácoras donde participás. ¿Continuar?',
+      confirmLabel: 'Finalizar', confirmColor: 'green', icon: CheckCircle2,
+      onConfirm: async () => {
+        try {
+          const r = await finalizarTurno();
+          setModal(null);
+          showToast(`Turno finalizado en ${r.finalizadas?.length || 0} bitácora(s)`);
+        } catch (e) {
+          showToast(e.message, 'error');
+        }
+      },
+    });
+  }, [finalizarTurno, showToast]);
+
+  // F4: popup defensivo en logout — pregunta si quiere finalizar antes de salir.
+  // 3 opciones: Sí, finalizar y salir / No, salir directo / Cancelar.
+  const handleLogout = useCallback(() => {
+    setModal({
+      title: 'Cerrar sesión',
+      message: '¿Finalizás tu turno antes de salir? Si lo hacés, se registra en histórico que terminaste tu participación.',
+      confirmLabel: 'Sí, finalizar y salir',
+      confirmColor: 'green',
+      icon: LogOut,
+      secondaryLabel: 'No, salir sin finalizar',
+      onSecondary: async () => {
+        await auth.logout();
+        setModal(null);
+        setActiveBitacora(null);
+        setDraftLocal(null);
+      },
+      onConfirm: async () => {
+        try { await finalizarTurno(); } catch {}
+        await auth.logout();
+        setModal(null);
+        setActiveBitacora(null);
+        setDraftLocal(null);
+      },
+    });
+  }, [auth, finalizarTurno]);
 
   // ==================== RENDER ====================
   if (!auth.ready) {
@@ -1135,6 +1235,9 @@ export default function App() {
               puedeCrear={puedeCrear}
               esJefeTurno={esJefeTurno}
               onCerrarTurno={handleCerrarTurno}
+              onCerrarMasivo={handleCerrarMasivo}
+              onFinalizarTurno={handleFinalizarTurno}
+              finalizandoTurno={finalizandoTurno}
               filtroTexto={filtroTexto} setFiltroTexto={setFiltroTexto}
               filtroTipo={filtroTipo} setFiltroTipo={setFiltroTipo}
               tiposEvento={tiposEvento}
@@ -1165,8 +1268,21 @@ export default function App() {
           title={modal.title} message={modal.message}
           confirmLabel={modal.confirmLabel} confirmColor={modal.confirmColor}
           icon={modal.icon}
+          secondaryLabel={modal.secondaryLabel}
+          onSecondary={modal.onSecondary}
           onConfirm={modal.onConfirm}
           onCancel={() => setModal(null)}
+        />
+      )}
+
+      {pendientesModal && (
+        <CierrePendientesModal
+          open={true}
+          preview={pendientesModal.preview}
+          bitacorasMap={new Map(catalogos.bitacoras.map((b) => [b.bitacora_id, b.nombre]))}
+          loading={cierre.loading}
+          onConfirm={handleConfirmMasivo}
+          onCancel={() => setPendientesModal(null)}
         />
       )}
 
