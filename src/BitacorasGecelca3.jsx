@@ -921,6 +921,10 @@ export default function App() {
   // F4: hook para botón "Finalizar Turno" del header.
   const { finalizar: finalizarTurno, loading: finalizandoTurno } = useFinalizarTurno();
   const [pendientesModal, setPendientesModal] = useState(null);
+  // F10: incrementa este contador tras un cierre masivo exitoso. SalaDeMandoGrid lo
+  // observa via prop `refreshKey` y refetcha la lista de días pendientes (sino tendría
+  // que esperar al polling de 5min para enterarse).
+  const [pendientesRefreshKey, setPendientesRefreshKey] = useState(0);
 
   const showToast = useCallback((message, type = "success") => {
     setToast({ message, type, key: Date.now() });
@@ -1124,6 +1128,8 @@ export default function App() {
         await registrosHook.getActivos({ planta_id: sesion.planta_id, bitacora_id: activeBitacora });
       }
       setPendientesModal(null);
+      // F10: notificar al SalaDeMandoGrid (si está montado) para que refetche pendientes.
+      setPendientesRefreshKey((k) => k + 1);
       const totalCerrados = (r.resumen || []).reduce((acc, x) => acc + (x.registros_cerrados || 0), 0);
       showToast(`Cierre masivo: ${totalCerrados} registro(s) cerrado(s), ${r.finalizados.length} ingeniero(s) finalizado(s)`);
     } catch (e) {
@@ -1251,10 +1257,10 @@ export default function App() {
               bitacora={bitacoraActiva}
               tiposEvento={tiposEvento}
               plantaId={sesion?.planta_id}
-              fecha={new Date().toISOString().slice(0, 10)}
               puedeCrear={puedeCrear}
               showToast={(m) => showToast(m)}
               onError={(m) => showToast(m, 'error')}
+              refreshKey={pendientesRefreshKey}
             />
           ) : (
             <GrillaRegistros

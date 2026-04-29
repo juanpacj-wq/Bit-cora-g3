@@ -78,30 +78,59 @@ const server = http.createServer(async (req, res) => {
       }
 
       const turno = getTurnoColombia();
-      // INSERT y recuperamos la sesión ENRIQUECIDA con el nombre del cargo y el flag
-      // puede_cerrar_turno — el frontend los necesita para pintar dropdowns y habilitar
-      // el botón de "Cerrar Turno". OUTPUT INSERTED.* solo daría las columnas crudas.
-      const result = await db.request()
-        .input('usuario_id', sql.Int, usuario_id)
-        .input('planta_id', sql.VarChar(10), planta_id)
-        .input('cargo_id', sql.Int, cargo_id)
-        .input('turno', sql.TinyInt, turno)
-        .query(`
-          DECLARE @out TABLE (sesion_id INT);
-          INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno)
-          OUTPUT INSERTED.sesion_id INTO @out
-          VALUES (@usuario_id, @planta_id, @cargo_id, @turno);
+      // F10: dedupe por (usuario_id, planta_id, cargo_id). Si ya existe sesión (cualquier
+      // estado), reusamos el sesion_id reactivando si quedó activa=0. NO pisamos
+      // inicio_sesion ni turno — la "sesión" es persistente para el usuario; el segundo
+      // login se incorpora a la fila existente. UPDLOCK+HOLDLOCK previene la carrera
+      // entre 2 pestañas/dispositivos del mismo usuario haciendo select-context simultáneo.
+      const transaction = new sql.Transaction(db);
+      await transaction.begin();
+      let result;
+      try {
+        result = await new sql.Request(transaction)
+          .input('usuario_id', sql.Int, usuario_id)
+          .input('planta_id', sql.VarChar(10), planta_id)
+          .input('cargo_id', sql.Int, cargo_id)
+          .input('turno', sql.TinyInt, turno)
+          .query(`
+            DECLARE @sesion_id INT;
+            SELECT TOP 1 @sesion_id = sesion_id
+            FROM bitacora.sesion_activa WITH (UPDLOCK, HOLDLOCK)
+            WHERE usuario_id = @usuario_id
+              AND planta_id  = @planta_id
+              AND cargo_id   = @cargo_id
+            ORDER BY inicio_sesion DESC;
 
-          SELECT s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
-                 s.inicio_sesion, s.ultima_actividad,
-                 u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
-                 c.nombre AS cargo_nombre, c.solo_lectura,
-                 CAST(c.puede_cerrar_turno AS BIT) AS puede_cerrar_turno
-          FROM @out o
-          INNER JOIN bitacora.sesion_activa s ON s.sesion_id = o.sesion_id
-          INNER JOIN lov_bit.usuario u        ON u.usuario_id = s.usuario_id
-          INNER JOIN lov_bit.cargo c          ON c.cargo_id   = s.cargo_id;
-        `);
+            IF @sesion_id IS NOT NULL
+            BEGIN
+              UPDATE bitacora.sesion_activa
+                 SET activa           = 1,
+                     cerrada_en       = NULL,
+                     ultima_actividad = SYSUTCDATETIME()
+               WHERE sesion_id = @sesion_id;
+            END
+            ELSE
+            BEGIN
+              INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno)
+              VALUES (@usuario_id, @planta_id, @cargo_id, @turno);
+              SET @sesion_id = SCOPE_IDENTITY();
+            END
+
+            SELECT s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
+                   s.inicio_sesion, s.ultima_actividad,
+                   u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
+                   c.nombre AS cargo_nombre, c.solo_lectura,
+                   CAST(c.puede_cerrar_turno AS BIT) AS puede_cerrar_turno
+            FROM bitacora.sesion_activa s
+            INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
+            INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id
+            WHERE s.sesion_id = @sesion_id;
+          `);
+        await transaction.commit();
+      } catch (err) {
+        try { await transaction.rollback(); } catch {}
+        throw err;
+      }
       broadcastUsuariosActivos().catch(() => {});
       return sendJSON(res, 200, { sesion: result.recordset[0] });
     }
@@ -347,12 +376,13 @@ const server = http.createServer(async (req, res) => {
     }
 
     // GET /api/catalogos/bitacoras
+    // F10: oculta=0 esconde bitácoras de auditoría interna (CIET) del frontend.
     if (pathname === '/api/catalogos/bitacoras' && method === 'GET') {
       const db = await getDB();
       const result = await db.request().query(`
         SELECT bitacora_id, nombre, codigo, icono, formulario_especial, definicion_campos, orden, activa
         FROM lov_bit.bitacora
-        WHERE activa = 1
+        WHERE activa = 1 AND oculta = 0
         ORDER BY orden
       `);
       return sendJSON(res, 200, { bitacoras: result.recordset });
@@ -388,7 +418,7 @@ const server = http.createServer(async (req, res) => {
           FROM lov_bit.bitacora b
           LEFT JOIN lov_bit.cargo_bitacora_permiso p
             ON p.bitacora_id = b.bitacora_id AND p.cargo_id = @cargo_id
-          WHERE b.activa = 1
+          WHERE b.activa = 1 AND b.oculta = 0
           ORDER BY b.orden
         `);
       return sendJSON(res, 200, { permisos: result.recordset });
@@ -447,7 +477,9 @@ const server = http.createServer(async (req, res) => {
       const estado = url.searchParams.get('estado');
       const db = await getDB();
       const reqQ = db.request();
-      let where = ['1=1'];
+      // F10: defensa-en-profundidad — los registros de bitácoras ocultas (CIET) no llegan
+      // al frontend aunque alguien pase su bitacora_id directo.
+      let where = ['b.oculta = 0'];
       if (planta_id) { reqQ.input('planta_id', sql.VarChar(10), planta_id); where.push('r.planta_id = @planta_id'); }
       if (bitacora_id) { reqQ.input('bitacora_id', sql.Int, parseInt(bitacora_id, 10)); where.push('r.bitacora_id = @bitacora_id'); }
       if (estado) { reqQ.input('estado', sql.VarChar(20), estado); where.push('r.estado = @estado'); }
@@ -477,13 +509,17 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 403, { error: 'No puede consultar otra planta' });
       }
       const db = await getDB();
+      // F10: excluir bitácoras ocultas (CIET) del conteo — los tabs no las muestran y el
+      // contador no debe inflarse con sus borradores.
       const result = await db.request()
         .input('planta_id', sql.VarChar(10), planta_id)
         .query(`
-          SELECT bitacora_id, COUNT(*) AS total
-          FROM bitacora.registro_activo
-          WHERE planta_id = @planta_id AND estado = 'borrador'
-          GROUP BY bitacora_id
+          SELECT r.bitacora_id, COUNT(*) AS total
+          FROM bitacora.registro_activo r
+          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
+          WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
+            AND b.oculta = 0
+          GROUP BY r.bitacora_id
         `);
       const counts = {};
       for (const row of result.recordset) counts[row.bitacora_id] = row.total;
@@ -796,6 +832,42 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // F10: GET /api/sala-de-mando/dias-pendientes?planta_id=
+    // Lista las fechas con borradores MAND para una planta, ordenadas asc. El frontend lo
+    // usa como índice de paginación entre días sin cerrar (el cierre cronológico de F4
+    // exige cerrarlos uno a uno; sin esta lista, los días viejos quedaban invisibles).
+    if (pathname === '/api/sala-de-mando/dias-pendientes' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      const planta_id = url.searchParams.get('planta_id');
+      if (!planta_id) return sendJSON(res, 400, { error: 'planta_id es requerido' });
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No puede consultar otra planta' });
+      }
+      const db = await getDB();
+      const r = await db.request()
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .query(`
+          SELECT CAST(ra.fecha_evento AS DATE) AS fecha,
+                 COUNT(*) AS registros_borrador
+          FROM bitacora.registro_activo ra
+          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+          WHERE b.codigo = 'MAND'
+            AND ra.planta_id = @planta_id
+            AND ra.estado = 'borrador'
+          GROUP BY CAST(ra.fecha_evento AS DATE)
+          ORDER BY fecha ASC
+        `);
+      // Normalizar: el server retorna Date; el cliente quiere 'YYYY-MM-DD'.
+      const fechas = r.recordset.map((row) => ({
+        fecha: row.fecha instanceof Date
+          ? row.fecha.toISOString().slice(0, 10)
+          : String(row.fecha).slice(0, 10),
+        registros_borrador: row.registros_borrador,
+      }));
+      return sendJSON(res, 200, { fechas });
+    }
+
     // F6: GET /api/sala-de-mando?planta_id=&fecha=
     // Devuelve la grilla 3×24 (AUTH | PRUEBA | REDESP) que renderea el frontend de Sala de
     // Mando. Para cada tipo: arreglo de 24 posiciones (índice = periodo-1), mapa periodo→
@@ -878,6 +950,7 @@ const server = http.createServer(async (req, res) => {
         FROM bitacora.registro_activo r
         INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
         WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
+          AND b.oculta = 0
           AND (@bitacora_id IS NULL OR r.bitacora_id = @bitacora_id)
         GROUP BY r.bitacora_id, b.nombre
       `);
@@ -886,7 +959,7 @@ const server = http.createServer(async (req, res) => {
 
     // F4: GET /api/cierre/preview-masivo?planta_id=
     // Devuelve lo que el JdT/IngOp necesita para mostrar el modal antes de cerrar masivo:
-    //   - bitácoras con borradores (excluye CIET, igual que el masivo)
+    //   - bitácoras con borradores (excluye bitácoras ocultas — CIET — desde F10)
     //   - ingenieros con sesion_bitacora abierta (finalizada_en IS NULL) y la lista de
     //     bitácoras donde están participando.
     if (pathname === '/api/cierre/preview-masivo' && method === 'GET') {
@@ -909,7 +982,7 @@ const server = http.createServer(async (req, res) => {
           FROM bitacora.registro_activo r
           INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
           WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
-            AND b.codigo <> 'CIET'
+            AND b.oculta = 0
           GROUP BY r.bitacora_id, b.nombre
           ORDER BY b.nombre
         `);
@@ -1043,9 +1116,9 @@ const server = http.createServer(async (req, res) => {
       }
       const cerrado_por = sesion.usuario_id;
       const pool = await getDB();
-      // F4: excluimos CIET del listado para evitar recursión (cada cierre genera un CIET
-      // nuevo; absorberlo en el masivo siguiente emite otro CIET, etc.). CIET se cierra
-      // explícitamente vía /api/cierre/bitacora si alguien lo necesita.
+      // F4/F10: excluimos bitácoras ocultas (CIET) del listado para evitar recursión (cada
+      // cierre genera un CIET nuevo; absorberlo en el masivo siguiente emite otro CIET).
+      // CIET se cierra explícitamente vía /api/cierre/bitacora si un DBA lo necesita.
       const listRes = await pool.request()
         .input('planta_id', sql.VarChar(10), planta_id)
         .query(`
@@ -1053,7 +1126,7 @@ const server = http.createServer(async (req, res) => {
           FROM bitacora.registro_activo r
           INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
           WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
-            AND b.codigo <> 'CIET'
+            AND b.oculta = 0
         `);
 
       const resumen = [];
@@ -1158,6 +1231,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // GET /api/historicos/resumen?planta_id=&fecha=
+    // F10: oculta=0 esconde bitácoras de auditoría interna (CIET) del histórico visible.
     if (pathname === '/api/historicos/resumen' && method === 'GET') {
       const planta_id = url.searchParams.get('planta_id');
       const fecha = url.searchParams.get('fecha');
@@ -1177,7 +1251,7 @@ const server = http.createServer(async (req, res) => {
             ON h.bitacora_id = b.bitacora_id
            AND h.planta_id = @planta_id
            AND h.fecha_cierre_operativo = @fecha
-          WHERE b.activa = 1
+          WHERE b.activa = 1 AND b.oculta = 0
           GROUP BY b.bitacora_id, b.nombre, b.codigo, b.orden
           HAVING COUNT(h.registro_id) > 0
           ORDER BY b.orden
@@ -1186,13 +1260,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     // GET /api/historicos/:id
+    // F10: rechaza el registro si su bitácora es oculta — coherente con "no aparece en histórico".
     const histIdMatch = pathname.match(/^\/api\/historicos\/(\d+)$/);
     if (histIdMatch && method === 'GET') {
       const registro_id = parseInt(histIdMatch[1], 10);
       const db = await getDB();
       const result = await db.request()
         .input('registro_id', sql.Int, registro_id)
-        .query(`SELECT * FROM bitacora.v_historico_busqueda WHERE registro_id = @registro_id`);
+        .query(`SELECT * FROM bitacora.v_historico_busqueda WHERE registro_id = @registro_id AND bitacora_oculta = 0`);
       if (result.recordset.length === 0) {
         return sendJSON(res, 404, { error: 'Histórico no encontrado' });
       }
@@ -1207,7 +1282,9 @@ const server = http.createServer(async (req, res) => {
       const offset = (page - 1) * limit;
 
       const db = await getDB();
-      const where = ['1=1'];
+      // F10: filtro base oculta=0 — registros de bitácoras de auditoría interna (CIET) NO
+      // aparecen en históricos visibles aunque alguien envíe filtros que los matcheen.
+      const where = ['bitacora_oculta = 0'];
       const reqData = db.request();
       const reqCount = db.request();
       const addInput = (name, type, value) => { reqData.input(name, type, value); reqCount.input(name, type, value); };

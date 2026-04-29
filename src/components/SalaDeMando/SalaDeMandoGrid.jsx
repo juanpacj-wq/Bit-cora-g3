@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { LayoutGrid, Save, AlertTriangle } from 'lucide-react';
+import { LayoutGrid, Save, AlertTriangle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useSalaDeMando } from '../../hooks/useSalaDeMando';
 
 const TIPOS = [
@@ -8,14 +8,49 @@ const TIPOS = [
   { key: 'REDESP', label: 'Redespacho',   tipoEventoNombre: 'Redespacho',   color: '#0d9488', cancelMsg: 'Redespacho cancelado' },
 ];
 
+// F10: derivado en zona Bogotá para alinearse con `getTurnoColombia()` del backend. Sin
+// esto, el usuario en otra TZ vería desfasado el cambio de día.
+function getTodayBogota() {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+  return fmt.format(new Date()); // 'YYYY-MM-DD'
+}
+
+function diasDesde(fecha, hoy) {
+  // Ambos 'YYYY-MM-DD'. Devuelve número de días entre hoy y fecha (positivo = pasado).
+  const a = new Date(fecha + 'T00:00:00Z');
+  const b = new Date(hoy + 'T00:00:00Z');
+  return Math.round((b.getTime() - a.getTime()) / (24 * 3600 * 1000));
+}
+
+function labelFecha(fecha, hoy, registrosBorrador) {
+  const dias = diasDesde(fecha, hoy);
+  let suffix;
+  if (dias === 0) suffix = '(Hoy)';
+  else if (dias === 1) suffix = '(Ayer)';
+  else if (dias > 1) suffix = `(hace ${dias} días)`;
+  else suffix = `(en ${-dias} día${-dias === 1 ? '' : 's'})`;
+  const cnt = registrosBorrador != null
+    ? ` — ${registrosBorrador} borrador${registrosBorrador === 1 ? '' : 'es'}`
+    : '';
+  return `Día: ${fecha} ${suffix}${cnt}`;
+}
+
 // F6: grilla 3×24 de Sala de Mando. Cada celda numérica es editable; al perder foco
 // (onBlur) se decide POST/PUT/DELETE según el delta. Detalle y FuncionarioCND son por fila
-// y, al cambiar, se propagan a todos los registros existentes de esa fila para mantener
-// consistencia (preguntas.md punto 3 dice que aplican por fila).
-export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, fecha, puedeCrear, showToast, onError }) {
-  const { getGrilla, crearCelda, actualizarCelda, eliminarCelda, loading } = useSalaDeMando();
+// y, al cambiar, se propagan a todos los registros existentes de esa fila.
+// F10: la grilla pagina entre días con borradores sin cerrar. El default al montar es el
+// día más antiguo pendiente (forzar al JdT a cerrarlos en orden cronológico). Indicador
+// arriba muestra la fecha activa con label tipificado y botones de navegación.
+export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, puedeCrear, showToast, onError, refreshKey }) {
+  const { getGrilla, getDiasPendientes, crearCelda, actualizarCelda, eliminarCelda, loading } = useSalaDeMando();
   const [grilla, setGrilla] = useState(null);
   const [editFila, setEditFila] = useState({}); // { AUTH: { detalle, funcionariocnd }, ... }
+  const [today, setToday] = useState(() => getTodayBogota());
+  const [fechasPendientes, setFechasPendientes] = useState([]); // [{fecha, registros_borrador}, ...]
+  const [fechaSeleccionada, setFechaSeleccionada] = useState(null);
+  const [pendientesInicializadas, setPendientesInicializadas] = useState(false);
 
   const tipoEventoIdByNombre = useMemo(() => {
     const m = new Map();
@@ -23,10 +58,73 @@ export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, fecha
     return m;
   }, [tiposEvento]);
 
-  const refresh = useCallback(async () => {
-    if (!plantaId || !fecha) return;
+  // Carga (o refresca) la lista de fechas pendientes. Si es la primera carga, además fija
+  // la fecha seleccionada al día más antiguo (o today si no hay pendientes).
+  const refreshPendientes = useCallback(async () => {
+    if (!plantaId) return;
     try {
-      const g = await getGrilla(plantaId, fecha);
+      const dias = await getDiasPendientes(plantaId);
+      setFechasPendientes(dias);
+      if (!pendientesInicializadas) {
+        const def = dias.length > 0 ? dias[0].fecha : getTodayBogota();
+        setFechaSeleccionada(def);
+        setPendientesInicializadas(true);
+      }
+    } catch (e) {
+      onError?.(e.message);
+    }
+  }, [plantaId, getDiasPendientes, pendientesInicializadas, onError]);
+
+  useEffect(() => { refreshPendientes(); }, [refreshPendientes]);
+
+  // F10: refresh externo (e.g. tras handleConfirmMasivo en BitacorasGecelca3) — incrementa
+  // refreshKey y la grilla refetcha pendientes inmediatamente sin esperar al polling.
+  useEffect(() => {
+    if (refreshKey == null) return;
+    refreshPendientes();
+  }, [refreshKey, refreshPendientes]);
+
+  // Polling cada 5 min de pendientes. Útil si otro JdT cierra desde otra pestaña.
+  useEffect(() => {
+    if (!plantaId) return;
+    const i = setInterval(() => { refreshPendientes(); }, 5 * 60_000);
+    return () => clearInterval(i);
+  }, [plantaId, refreshPendientes]);
+
+  // Watcher de medianoche: cada 60s detecta cambio de día (TZ Bogotá) y, si la grilla
+  // está mostrando el viejo today, la salta al nuevo. Refresca pendientes también.
+  useEffect(() => {
+    const i = setInterval(() => {
+      const t = getTodayBogota();
+      if (t !== today) {
+        setToday(t);
+        if (fechaSeleccionada === today) setFechaSeleccionada(t);
+        refreshPendientes();
+      }
+    }, 60_000);
+    return () => clearInterval(i);
+  }, [today, fechaSeleccionada, refreshPendientes]);
+
+  // Auto-skip si la fecha seleccionada se cierra externamente y deja de aparecer en
+  // fechasPendientes (y tampoco es today).
+  const fechasNavegables = useMemo(() => {
+    const set = new Set(fechasPendientes.map((d) => d.fecha));
+    set.add(today);
+    return Array.from(set).sort();
+  }, [fechasPendientes, today]);
+
+  useEffect(() => {
+    if (!fechaSeleccionada) return;
+    if (!fechasNavegables.includes(fechaSeleccionada)) {
+      // saltar al primer pendiente (más antiguo) o today
+      setFechaSeleccionada(fechasNavegables[0] || today);
+    }
+  }, [fechasNavegables, fechaSeleccionada, today]);
+
+  const refresh = useCallback(async () => {
+    if (!plantaId || !fechaSeleccionada) return;
+    try {
+      const g = await getGrilla(plantaId, fechaSeleccionada);
       setGrilla(g);
       // sincronizar el form de fila con lo que vino del server
       const next = {};
@@ -38,7 +136,7 @@ export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, fecha
     } catch (e) {
       onError?.(e.message);
     }
-  }, [getGrilla, plantaId, fecha, onError]);
+  }, [getGrilla, plantaId, fechaSeleccionada, onError]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -88,11 +186,13 @@ export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, fecha
           valor_mw: newValor,
           detalle,
           funcionariocnd,
-          fecha,
+          fecha: fechaSeleccionada,
         });
         if (r?.registro?.registro_id) showToast?.(`${tipoMeta.label} P${periodo}: registro ${r.registro.registro_id}`);
       }
       await refresh();
+      // F10: el conteo de borradores del día puede haber cambiado (creación/eliminación).
+      await refreshPendientes();
     } catch (e) {
       onError?.(e.message);
       ev.target.value = oldValor ?? '';
@@ -131,12 +231,58 @@ export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, fecha
     }
   };
 
-  if (!grilla) {
+  if (!grilla || !fechaSeleccionada) {
     return <div className="flex-1 flex items-center justify-center text-gray-400">Cargando Sala de Mando…</div>;
   }
 
+  // F10: paginación entre días con borradores. fechasNavegables es la unión de pendientes
+  // y today, deduplicada y ordenada asc. Los botones avanzan/retroceden por esa lista.
+  const idx = fechasNavegables.indexOf(fechaSeleccionada);
+  const irAnterior = () => idx > 0 && setFechaSeleccionada(fechasNavegables[idx - 1]);
+  const irSiguiente = () => idx >= 0 && idx < fechasNavegables.length - 1 && setFechaSeleccionada(fechasNavegables[idx + 1]);
+  const conteoActual = fechasPendientes.find((d) => d.fecha === fechaSeleccionada)?.registros_borrador
+    ?? (fechaSeleccionada === today ? 0 : null);
+  const labelActual = labelFecha(fechaSeleccionada, today, conteoActual);
+  const totalPendientes = fechasPendientes.length;
+
   return (
     <div className="flex-1 overflow-auto px-6 py-4">
+      {/* F10: indicador de fecha activa con paginación. Thin bar sobre la tabla. */}
+      <div className="bg-white rounded-xl border border-gray-200 mb-3 px-3 py-2 flex items-center gap-3 flex-wrap">
+        <button
+          onClick={irAnterior}
+          disabled={idx <= 0}
+          title="Día anterior pendiente"
+          className="p-1.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          <ChevronLeft size={16} />
+        </button>
+        <select
+          value={fechaSeleccionada}
+          onChange={(e) => setFechaSeleccionada(e.target.value)}
+          className="px-3 py-1.5 rounded border border-gray-200 text-sm font-medium text-gray-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-400 min-w-64"
+        >
+          {fechasNavegables.map((f) => {
+            const cnt = fechasPendientes.find((d) => d.fecha === f)?.registros_borrador
+              ?? (f === today ? 0 : null);
+            return <option key={f} value={f}>{labelFecha(f, today, cnt)}</option>;
+          })}
+        </select>
+        <button
+          onClick={irSiguiente}
+          disabled={idx < 0 || idx >= fechasNavegables.length - 1}
+          title="Día siguiente"
+          className="p-1.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          <ChevronRight size={16} />
+        </button>
+        <span className="text-xs text-gray-500 ml-auto">
+          {totalPendientes > 0
+            ? `${totalPendientes} día${totalPendientes === 1 ? '' : 's'} con borradores sin cerrar`
+            : 'Sin días pendientes'}
+        </span>
+      </div>
+
       <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 border-b border-gray-200">
@@ -230,7 +376,7 @@ export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, fecha
 
       <div className="mt-4 text-xs text-gray-400 flex items-center gap-2">
         <LayoutGrid size={14} />
-        <span>Fecha: {fecha} — vaciar una celda elimina ese registro y su evento de dashboard.</span>
+        <span>Fecha: {fechaSeleccionada} — vaciar una celda elimina ese registro y su evento de dashboard.</span>
       </div>
     </div>
   );

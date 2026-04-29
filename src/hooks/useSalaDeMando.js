@@ -13,6 +13,14 @@ export function useSalaDeMando() {
     return await api.get(`/api/sala-de-mando?${qs}`);
   }, []);
 
+  // F10: lista las fechas con borradores MAND para que el grid pagine entre días sin
+  // cerrar. Devuelve [{fecha:'YYYY-MM-DD', registros_borrador}, ...] ordenado asc.
+  const getDiasPendientes = useCallback(async (planta_id) => {
+    const qs = new URLSearchParams({ planta_id });
+    const { fechas } = await api.get(`/api/sala-de-mando/dias-pendientes?${qs}`);
+    return fechas || [];
+  }, []);
+
   const crearCelda = useCallback(async ({ bitacora_id, planta_id, tipo_evento_id, periodo, valor_mw, detalle, funcionariocnd, fecha }) => {
     setLoading(true); setError(null);
     try {
@@ -61,7 +69,7 @@ export function useSalaDeMando() {
     } finally { setLoading(false); }
   }, []);
 
-  return { loading, error, getGrilla, crearCelda, actualizarCelda, eliminarCelda };
+  return { loading, error, getGrilla, getDiasPendientes, crearCelda, actualizarCelda, eliminarCelda };
 }
 
 // Devuelve un ISO-like local string para `fecha` (YYYY-MM-DD) a la hora correspondiente al
