@@ -6,7 +6,8 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   LogIn, LogOut, Clock, Plus, Save, Trash2, Lock, CheckCircle2,
-  AlertTriangle, X, ChevronDown, Search, Filter, FileText,
+  AlertTriangle, X, ChevronDown, ChevronLeft, ChevronRight, Calendar,
+  Search, Filter, FileText,
   Activity, Flame, Droplets, Zap, Gauge, Cpu, FlaskConical, Leaf,
   Settings, FileCheck, Edit3, Eye, XCircle, Check, Users, History,
 } from "lucide-react";
@@ -21,6 +22,7 @@ import { useUsuariosActivos } from "./hooks/useUsuariosActivos";
 import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
 import { useFlipReorder } from "./hooks/useFlipReorder";
 import { useBitacoraSesion, useFinalizarTurno } from "./hooks/useBitacoraSesion";
+import { getTodayBogota, shiftDate } from "./utils/fecha";
 
 const COLORS = {
   greenPrimary: "#31a354", greenDark: "#006f36",
@@ -511,6 +513,7 @@ function BarraEstado({
   bitacora, registros, estadoBitacora, puedeCrear, esJefeTurno,
   onCerrarTurno, onCerrarMasivo, onFinalizarTurno, finalizandoTurno,
   filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
+  filtroFecha, setFiltroFecha, filtroTurno, setFiltroTurno,
   tiposEvento, onAddRegistro,
 }) {
   const borradores = registros.filter((r) => r.estado === "borrador").length;
@@ -533,6 +536,59 @@ function BarraEstado({
       </div>
 
       <div className="flex-1" />
+
+      {/* F11: filtros fecha+turno para no-MAND. MAND tiene su propia paginación entre días
+          (F10) y muestra los 24 periodos, así que el turno es derivable visualmente. */}
+      {bitacora?.codigo !== 'MAND' && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <Calendar size={16} className="text-gray-400" />
+          <button
+            onClick={() => setFiltroFecha(shiftDate(filtroFecha || getTodayBogota(), -1))}
+            title="Día anterior"
+            className="p-1.5 rounded border border-gray-200 hover:bg-gray-50"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <input
+            type="date"
+            value={filtroFecha}
+            onChange={(e) => setFiltroFecha(e.target.value)}
+            className="px-3 py-2 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+          />
+          <button
+            onClick={() => setFiltroFecha(shiftDate(filtroFecha || getTodayBogota(), 1))}
+            title="Día siguiente"
+            className="p-1.5 rounded border border-gray-200 hover:bg-gray-50"
+          >
+            <ChevronRight size={16} />
+          </button>
+          <button
+            onClick={() => setFiltroFecha(getTodayBogota())}
+            title="Saltar a hoy"
+            className="px-3 py-2 rounded-xl border border-gray-300 text-sm font-medium hover:bg-gray-50"
+          >
+            Hoy
+          </button>
+          <select
+            value={filtroTurno}
+            onChange={(e) => setFiltroTurno(e.target.value)}
+            className="px-3 py-2 rounded-xl border border-gray-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400"
+          >
+            <option value="">Todos los turnos</option>
+            <option value="1">Turno 1 (Diurno)</option>
+            <option value="2">Turno 2 (Nocturno)</option>
+          </select>
+          {(filtroFecha || filtroTurno) && (
+            <button
+              onClick={() => { setFiltroFecha(''); setFiltroTurno(''); }}
+              title="Limpiar filtros de fecha y turno"
+              className="text-xs text-gray-500 hover:text-gray-700 underline"
+            >
+              Limpiar
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="flex items-center gap-3">
         <div className="relative">
@@ -607,7 +663,7 @@ function BarraEstado({
 function GrillaRegistros({
   registros, bitacora, tiposEvento, jefeNombre, jdtNombre,
   puedeCrear, onUpdateLocal, onSaveRegistro, onDeleteRegistro,
-  filtroTexto, filtroTipo,
+  filtroTexto, filtroTipo, filtroFecha, filtroTurno,
 }) {
   const [editingId, setEditingId] = useState(null);
 
@@ -630,8 +686,15 @@ function GrillaRegistros({
         return true;
       })
       .filter((r) => (filtroTipo ? String(r.tipo_evento_id) === String(filtroTipo) : true))
+      .filter((r) => {
+        if (!filtroFecha) return true;
+        return String(r.fecha_evento || '').slice(0, 10) === filtroFecha;
+      })
+      .filter((r) => (filtroTurno ? String(r.turno) === String(filtroTurno) : true))
       .sort((a, b) => new Date(a.fecha_evento) - new Date(b.fecha_evento));
-  }, [registros, filtroTexto, filtroTipo]);
+  }, [registros, filtroTexto, filtroTipo, filtroFecha, filtroTurno]);
+
+  const hayFiltrosActivos = !!(filtroTexto || filtroTipo || filtroFecha || filtroTurno);
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -639,10 +702,19 @@ function GrillaRegistros({
         {regs.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-gray-400">
             <FileText size={48} className="mb-4 opacity-50" />
-            <p className="text-lg font-medium">No hay registros aún</p>
-            <p className="text-sm mt-1">
-              {puedeCrear ? "Haz clic en \"Nuevo Registro\" para comenzar" : "Esta bitácora no tiene registros del día"}
-            </p>
+            {hayFiltrosActivos ? (
+              <>
+                <p className="text-lg font-medium">No hay registros para los filtros aplicados</p>
+                <p className="text-sm mt-1">Probá limpiar fecha, turno, tipo o texto.</p>
+              </>
+            ) : (
+              <>
+                <p className="text-lg font-medium">No hay registros aún</p>
+                <p className="text-sm mt-1">
+                  {puedeCrear ? "Haz clic en \"Nuevo Registro\" para comenzar" : "Esta bitácora no tiene registros del día"}
+                </p>
+              </>
+            )}
           </div>
         ) : (
           <div className="space-y-3">
@@ -909,6 +981,16 @@ export default function App() {
   const [tiposEvento, setTiposEvento] = useState([]);
   const [filtroTexto, setFiltroTexto] = useState("");
   const [filtroTipo, setFiltroTipo] = useState("");
+  // F11: filtros fecha+turno para bitácoras no-MAND. Persisten en sessionStorage para
+  // sobrevivir al cambio de tab y al refresh, no entre sesiones del navegador.
+  const [filtroFecha, setFiltroFecha] = useState(
+    () => sessionStorage.getItem('bitacoras.filtroFecha') || ''
+  );
+  const [filtroTurno, setFiltroTurno] = useState(
+    () => sessionStorage.getItem('bitacoras.filtroTurno') || ''
+  );
+  useEffect(() => { sessionStorage.setItem('bitacoras.filtroFecha', filtroFecha); }, [filtroFecha]);
+  useEffect(() => { sessionStorage.setItem('bitacoras.filtroTurno', filtroTurno); }, [filtroTurno]);
   const [toast, setToast] = useState(null);
   const [modal, setModal] = useState(null);
   const [draftLocal, setDraftLocal] = useState(null);
@@ -1142,7 +1224,7 @@ export default function App() {
   const handleFinalizarTurno = useCallback(async () => {
     setModal({
       title: 'Finalizar turno',
-      message: 'Esto registra que terminaste tu turno. Tu actividad se marcará como finalizada en todas las bitácoras donde participás. ¿Continuar?',
+      message: 'Esto registra que terminaste tu turno. Tu actividad se marcará como finalizada en todas las bitácoras donde participas. ¿Continuar?',
       confirmLabel: 'Finalizar', confirmColor: 'green', icon: CheckCircle2,
       onConfirm: async () => {
         try {
@@ -1247,6 +1329,8 @@ export default function App() {
               finalizandoTurno={finalizandoTurno}
               filtroTexto={filtroTexto} setFiltroTexto={setFiltroTexto}
               filtroTipo={filtroTipo} setFiltroTipo={setFiltroTipo}
+              filtroFecha={filtroFecha} setFiltroFecha={setFiltroFecha}
+              filtroTurno={filtroTurno} setFiltroTurno={setFiltroTurno}
               tiposEvento={tiposEvento}
               onAddRegistro={handleAddRegistro}
             />
@@ -1275,6 +1359,8 @@ export default function App() {
               onDeleteRegistro={handleDeleteRegistro}
               filtroTexto={filtroTexto}
               filtroTipo={filtroTipo}
+              filtroFecha={filtroFecha}
+              filtroTurno={filtroTurno}
             />
           )}
         </>
