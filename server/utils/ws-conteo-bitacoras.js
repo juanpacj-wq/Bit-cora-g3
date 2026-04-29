@@ -6,13 +6,16 @@ const clients = new Map();
 
 async function fetchSnapshot(planta_id) {
   const db = await getDB();
+  // F10: bitácoras ocultas (CIET) no se muestran en tabs, no deben contar para los badges.
   const r = await db.request()
     .input('planta_id', sql.VarChar(10), planta_id)
     .query(`
-      SELECT bitacora_id, COUNT(*) AS total
-      FROM bitacora.registro_activo
-      WHERE planta_id = @planta_id AND estado = 'borrador'
-      GROUP BY bitacora_id
+      SELECT r.bitacora_id, COUNT(*) AS total
+      FROM bitacora.registro_activo r
+      INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
+      WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
+        AND b.oculta = 0
+      GROUP BY r.bitacora_id
     `);
   const counts = {};
   for (const row of r.recordset) counts[row.bitacora_id] = row.total;

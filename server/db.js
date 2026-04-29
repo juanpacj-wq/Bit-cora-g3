@@ -275,8 +275,19 @@ export async function initDB() {
       formulario_especial BIT           NOT NULL DEFAULT 0,
       definicion_campos   NVARCHAR(MAX) NULL,
       orden               INT           NOT NULL DEFAULT 0,
-      activa              BIT           NOT NULL DEFAULT 1
+      activa              BIT           NOT NULL DEFAULT 1,
+      oculta              BIT           NOT NULL DEFAULT 0
     );
+  `);
+
+  // F10: oculta=1 marca bitácoras de auditoría interna que NO deben aparecer en frontend
+  // (tabs, catálogos, históricos, cierres masivos). Sus registros se siguen creando vía
+  // helpers internos (ej. registrarEventoCierre para CIET). El UPDATE post-MERGE garantiza
+  // el flag.
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.bitacora','oculta') IS NULL
+      ALTER TABLE lov_bit.bitacora
+        ADD oculta BIT NOT NULL CONSTRAINT DF_bitacora_oculta DEFAULT 0;
   `);
 
   await db.request().batch(`
@@ -647,6 +658,13 @@ export async function initDB() {
       VALUES (s.nombre, s.codigo, s.icono, s.formulario_especial, s.definicion_campos, s.orden, s.activa);
   `);
 
+  // F10: marca CIET como oculta (auditoría interna). El UPDATE complementario sobre el resto
+  // garantiza que un seteo accidental fuera-de-init quede revertido en el próximo arranque.
+  await db.request().batch(`
+    UPDATE lov_bit.bitacora SET oculta = 1 WHERE codigo = 'CIET' AND oculta <> 1;
+    UPDATE lov_bit.bitacora SET oculta = 0 WHERE codigo <> 'CIET' AND oculta <> 0;
+  `);
+
   // tipo_evento default por bitácora
   // F3: CIET se excluye — sus tipos son exclusivamente 'Finalización de turno' y 'Cierre de turno'.
   // F6: MAND también se excluye — sus tipos son 'Autorización', 'Pruebas', 'Redespacho'.
@@ -828,11 +846,14 @@ export async function initDB() {
       AND s.cargo_id = (SELECT cargo_id FROM lov_bit.cargo WHERE nombre = 'Ingeniero Jefe de Turno');
   `);
 
+  // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de
+  // auditoría interna (CIET).
   await db.request().batch(`
     CREATE OR ALTER VIEW bitacora.v_historico_busqueda AS
     SELECT h.registro_id, h.fecha_evento, h.turno, h.detalle,
            h.campos_extra, h.fecha_cierre_operativo,
            b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo,
+           b.oculta AS bitacora_oculta,
            p.nombre AS planta_nombre, h.planta_id,
            te.nombre AS tipo_evento,
            h.ingenieros_snapshot, h.jdts_snapshot, h.jefes_snapshot,
