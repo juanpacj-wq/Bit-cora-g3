@@ -1,21 +1,13 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { LayoutGrid, Save, AlertTriangle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useSalaDeMando } from '../../hooks/useSalaDeMando';
+import { getTodayBogota } from '../../utils/fecha';
 
 const TIPOS = [
   { key: 'AUTH',   label: 'Autorización', tipoEventoNombre: 'Autorización', color: '#1e40af', cancelMsg: 'Autorización cancelada' },
   { key: 'PRUEBA', label: 'Pruebas',      tipoEventoNombre: 'Pruebas',      color: '#9333ea', cancelMsg: 'Prueba cancelada' },
   { key: 'REDESP', label: 'Redespacho',   tipoEventoNombre: 'Redespacho',   color: '#0d9488', cancelMsg: 'Redespacho cancelado' },
 ];
-
-// F10: derivado en zona Bogotá para alinearse con `getTurnoColombia()` del backend. Sin
-// esto, el usuario en otra TZ vería desfasado el cambio de día.
-function getTodayBogota() {
-  const fmt = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit',
-  });
-  return fmt.format(new Date()); // 'YYYY-MM-DD'
-}
 
 function diasDesde(fecha, hoy) {
   // Ambos 'YYYY-MM-DD'. Devuelve número de días entre hoy y fecha (positivo = pasado).
@@ -314,7 +306,7 @@ export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, puede
                       type="text"
                       value={filaForm.detalle ?? ''}
                       onChange={(e) => setEditFila((s) => ({ ...s, [t.key]: { ...s[t.key], detalle: e.target.value } }))}
-                      placeholder="Comentario de la fila…"
+                      placeholder="Comentario"
                       disabled={!puedeCrear}
                       className="w-full px-2 py-1 rounded border border-gray-200 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-gray-50"
                     />
