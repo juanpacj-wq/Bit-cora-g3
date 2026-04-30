@@ -679,22 +679,8 @@ export async function initDB() {
       );
   `);
 
-  // tipos específicos para DISP
-  await db.request().batch(`
-    INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden)
-    SELECT b.bitacora_id, s.nombre, s.orden
-    FROM lov_bit.bitacora b
-    CROSS JOIN (VALUES
-      ('Cambio de Estado', 1),
-      ('Redespacho', 2),
-      ('Sincronización', 3)
-    ) AS s(nombre, orden)
-    WHERE b.codigo = 'DISP'
-      AND NOT EXISTS (
-        SELECT 1 FROM lov_bit.tipo_evento te
-        WHERE te.bitacora_id = b.bitacora_id AND te.nombre = s.nombre
-      );
-  `);
+  // F12: tipos viejos de DISP ('Cambio de Estado','Redespacho','Sincronización') retirados.
+  // El seed nuevo se hace en F12.A4 ('Cambio de Disponibilidad' único).
 
   // F3: tipos de evento CIET. Se generan automáticamente desde /api/bitacora/finalizar y
   // /api/cierre/bitacora — ningún cargo tiene puede_crear=1 en CIET.
@@ -815,6 +801,153 @@ export async function initDB() {
     )
     INSERT INTO lov_bit.cargo_bitacora_permiso (cargo_id, bitacora_id, puede_ver, puede_crear)
     SELECT cargo_id, bitacora_id, puede_ver, puede_crear FROM matriz;
+  `);
+
+  // ---------- F12.A — Disponibilidad: BD ----------
+  // F12: DISP pasa de grilla genérica a mini-dashboard. La rama POST/PUT/deshacer en
+  // server.js asume:
+  //   - turno nullable (DISP graba NULL — no aplica turno operativo).
+  //   - fecha_fin_estado nullable en activo+histórico (NULL=vigente, no-NULL=cerrado).
+  //   - Filtered unique index (planta_id) WHERE bitacora=DISP AND fecha_fin_estado IS NULL
+  //     garantiza 1 vigente por planta (segunda barrera al UPDLOCK del POST).
+  //   - tipo_evento DISP único 'Cambio de Disponibilidad' — el backend lo fuerza, ignora
+  //     lo que mande el frontend.
+  //   - tipo CIET 'Deshacer disponibilidad' para audit del POST /api/disponibilidad/deshacer.
+  //   - DISP visible para todos los cargos (puede_ver=1); creación restringida a JdT+IngOp.
+  //   - Tabla disponibilidad_dashboard (1 fila/planta) como cimiento separado de
+  //     evento_dashboard (semántica distinta — no por periodo).
+
+  await db.request().batch(`
+    IF EXISTS (
+      SELECT 1 FROM sys.columns
+      WHERE object_id=OBJECT_ID('bitacora.registro_activo') AND name='turno' AND is_nullable=0
+    )
+      ALTER TABLE bitacora.registro_activo ALTER COLUMN turno TINYINT NULL;
+    IF EXISTS (
+      SELECT 1 FROM sys.columns
+      WHERE object_id=OBJECT_ID('bitacora.registro_historico') AND name='turno' AND is_nullable=0
+    )
+      ALTER TABLE bitacora.registro_historico ALTER COLUMN turno TINYINT NULL;
+  `);
+
+  await db.request().batch(`
+    IF COL_LENGTH('bitacora.registro_activo','fecha_fin_estado') IS NULL
+      ALTER TABLE bitacora.registro_activo ADD fecha_fin_estado DATETIME2 NULL;
+    IF COL_LENGTH('bitacora.registro_historico','fecha_fin_estado') IS NULL
+      ALTER TABLE bitacora.registro_historico ADD fecha_fin_estado DATETIME2 NULL;
+  `);
+
+  // Resolvemos el bitacora_id de DISP en JS porque SQL Server no admite subqueries en el
+  // predicate de un filtered index. El valor se incrusta como literal en el CREATE INDEX.
+  const dispRow = await db.request().query(`
+    SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='DISP'
+  `);
+  const DISP_BITACORA_ID = dispRow.recordset[0]?.bitacora_id;
+  if (!DISP_BITACORA_ID) {
+    throw new Error('[initDB] bitácora DISP no fue sembrada antes de F12.A');
+  }
+
+  // F12.A1: TRUNCATE selectivo de DISP — one-shot, solo cuando aún no existe la tabla
+  // disponibilidad_dashboard (gate de "primer arranque post-F12"). Datos previos eran de
+  // prueba (preguntas_disp.md A1). En arranques posteriores los registros productivos
+  // se preservan.
+  const tablaCreadaCheck = await db.request().query(`
+    SELECT CASE WHEN OBJECT_ID('bitacora.disponibilidad_dashboard','U') IS NULL THEN 1 ELSE 0 END AS pristine
+  `);
+  const dispPristine = tablaCreadaCheck.recordset[0].pristine === 1;
+  if (dispPristine) {
+    await db.request()
+      .input('bitacora_id', sql.Int, DISP_BITACORA_ID)
+      .query(`
+        DELETE FROM bitacora.registro_historico WHERE bitacora_id = @bitacora_id;
+        DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @bitacora_id;
+      `);
+  }
+
+  // F12.A4: reemplaza los 3 tipos de evento viejos (Cambio de Estado / Redespacho /
+  // Sincronización) por 1 fijo 'Cambio de Disponibilidad'. El usuario nunca elige tipo
+  // para DISP — POST/PUT lo fuerzan al único tipo válido.
+  await db.request()
+    .input('bitacora_id', sql.Int, DISP_BITACORA_ID)
+    .query(`
+      DELETE FROM lov_bit.tipo_evento
+      WHERE bitacora_id = @bitacora_id
+        AND nombre IN ('Cambio de Estado', 'Redespacho', 'Sincronización');
+
+      IF NOT EXISTS (
+        SELECT 1 FROM lov_bit.tipo_evento
+        WHERE bitacora_id = @bitacora_id AND nombre = 'Cambio de Disponibilidad'
+      )
+        INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden)
+        VALUES (@bitacora_id, 'Cambio de Disponibilidad', 1);
+    `);
+
+  // F12.A5: tipo CIET 'Deshacer disponibilidad' (orden 3, después de finalización/cierre).
+  // POST /api/disponibilidad/deshacer lo emite con audit del autor + JdTs/Gerentes activos
+  // en sesion_activa.
+  await db.request().batch(`
+    IF EXISTS (SELECT 1 FROM lov_bit.bitacora WHERE codigo='CIET')
+      AND NOT EXISTS (
+        SELECT 1 FROM lov_bit.tipo_evento te
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+        WHERE b.codigo='CIET' AND te.nombre = 'Deshacer disponibilidad'
+      )
+      INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden)
+      SELECT bitacora_id, 'Deshacer disponibilidad', 3 FROM lov_bit.bitacora WHERE codigo='CIET';
+  `);
+
+  // F12.A6: DISP visible para TODOS los cargos; creación solo para JdT/IngOp. La matriz
+  // INSERT de arriba ya cubre los cargos sembrados, pero forzamos defensivamente para
+  // sobrevivir cargos nuevos o renumeraciones — el match es por nombre, no por id.
+  await db.request()
+    .input('bitacora_id', sql.Int, DISP_BITACORA_ID)
+    .query(`
+      INSERT INTO lov_bit.cargo_bitacora_permiso (cargo_id, bitacora_id, puede_ver, puede_crear)
+      SELECT c.cargo_id, @bitacora_id, 0, 0
+      FROM lov_bit.cargo c
+      WHERE NOT EXISTS (
+        SELECT 1 FROM lov_bit.cargo_bitacora_permiso p
+        WHERE p.cargo_id = c.cargo_id AND p.bitacora_id = @bitacora_id
+      );
+
+      UPDATE p
+      SET puede_ver   = 1,
+          puede_crear = CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación')
+                             THEN 1 ELSE 0 END
+      FROM lov_bit.cargo_bitacora_permiso p
+      INNER JOIN lov_bit.cargo c ON c.cargo_id = p.cargo_id
+      WHERE p.bitacora_id = @bitacora_id;
+    `);
+
+  // F12.A7: cimiento del mini-dashboard. UPSERT desde POST/PUT/deshacer mantiene 1 fila
+  // por planta con el estado vigente. Snapshots viajan con la fila para que F15 renderee
+  // el indicador con audit completo sin joins.
+  await db.request().batch(`
+    IF OBJECT_ID('bitacora.disponibilidad_dashboard', 'U') IS NULL
+    CREATE TABLE bitacora.disponibilidad_dashboard (
+      planta_id              VARCHAR(10) PRIMARY KEY REFERENCES lov_bit.planta(planta_id),
+      evento                 VARCHAR(20) NOT NULL CHECK (evento IN ('Disponible','Indisponible','En Reserva')),
+      codigo                 SMALLINT NOT NULL CHECK (codigo IN (-1, 0, 1)),
+      fecha_inicio_estado    DATETIME2 NOT NULL,
+      registro_activo_id     INT NOT NULL,
+      jdts_snapshot          NVARCHAR(MAX) NOT NULL CONSTRAINT DF_dispdash_jdts DEFAULT '[]',
+      jefes_snapshot         NVARCHAR(MAX) NOT NULL CONSTRAINT DF_dispdash_jefes DEFAULT '[]',
+      modificado_por         INT NULL REFERENCES lov_bit.usuario(usuario_id),
+      modificado_en          DATETIME2 NULL,
+      actualizado_en         DATETIME2 NOT NULL CONSTRAINT DF_dispdash_act DEFAULT GETDATE()
+    );
+  `);
+
+  // F12.A3: filtered unique index = segunda barrera (después del UPDLOCK del POST) contra
+  // dos vigentes simultáneos por planta.
+  await db.request().batch(`
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes
+      WHERE name='UQ_disp_vigente_por_planta' AND object_id=OBJECT_ID('bitacora.registro_activo')
+    )
+      CREATE UNIQUE INDEX UQ_disp_vigente_por_planta
+        ON bitacora.registro_activo (planta_id)
+        WHERE bitacora_id = ${DISP_BITACORA_ID} AND fecha_fin_estado IS NULL;
   `);
 
   // Semilla de personal (83 usuarios del Excel 2026)
