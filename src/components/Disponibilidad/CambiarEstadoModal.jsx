@@ -77,7 +77,7 @@ export default function CambiarEstadoModal({
 
     const isoFecha = toIsoFromLocal(fechaLocal);
     if (!isoFecha) {
-      setPopup({ tipo: 'warn', titulo: 'Fecha inválida', mensaje: 'Ingresá una fecha y hora válidas.' });
+      setPopup({ tipo: 'warn', titulo: 'Fecha inválida', mensaje: 'Ingresa una fecha y hora válidas.' });
       return;
     }
     if (detalle.length > 500) {
@@ -274,7 +274,7 @@ function buildPopup(err, planta, fechaLocal) {
     };
   }
   if (err?.status === 403) {
-    return { tipo: 'error', titulo: 'Sin permiso', mensaje: 'No tenés permiso para esta operación.' };
+    return { tipo: 'error', titulo: 'Sin permiso', mensaje: 'No tienes permiso para esta operación.' };
   }
   if (err?.status === 422) {
     return { tipo: 'warn', titulo: 'No válido', mensaje: err?.body?.mensaje || err?.message || 'La operación fue rechazada.' };

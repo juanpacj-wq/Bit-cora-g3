@@ -706,7 +706,7 @@ function GrillaRegistros({
             {hayFiltrosActivos ? (
               <>
                 <p className="text-lg font-medium">No hay registros para los filtros aplicados</p>
-                <p className="text-sm mt-1">Probá limpiar fecha, turno, tipo o texto.</p>
+                <p className="text-sm mt-1">Prueba limpiar fecha, turno, tipo o texto.</p>
               </>
             ) : (
               <>
@@ -1244,7 +1244,7 @@ export default function App() {
   const handleLogout = useCallback(() => {
     setModal({
       title: 'Cerrar sesión',
-      message: '¿Finalizás tu turno antes de salir? Si lo hacés, se registra en histórico que terminaste tu participación.',
+      message: '¿Finalizas tu turno antes de salir? Si lo haces, se registra en histórico que terminaste tu participación.',
       confirmLabel: 'Sí, finalizar y salir',
       confirmColor: 'green',
       icon: LogOut,
