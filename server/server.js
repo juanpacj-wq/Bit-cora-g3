@@ -1984,6 +1984,10 @@ const server = http.createServer(async (req, res) => {
     // tipos (AUTH+REDESP+PRUEBA) activos para esa (planta, fecha).
     // F12: tipo='DISP' lee de bitacora.disponibilidad_dashboard (semántica distinta — sin
     // periodo, sin fecha; 1 fila por planta con el estado vigente). Cimiento para F15.
+    //
+    // F15 TODO: el consumer en dashboard-gen-gec3 debe hacer polling cada 60s y catch
+    // silencioso. Vite proxy + Nginx (`/api/eventos-dashboard → 3002`) ya cubren el routing
+    // desde F8 — F15 solo necesita agregar el hook + componente <BadgeDisponibilidad>.
     if (pathname === '/api/eventos-dashboard' && method === 'GET') {
       const planta_id = url.searchParams.get('planta_id');
       const fecha = url.searchParams.get('fecha');
