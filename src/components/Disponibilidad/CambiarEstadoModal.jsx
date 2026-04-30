@@ -104,23 +104,16 @@ export default function CambiarEstadoModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm disp-modal-overlay">
       <div
-        className="bg-white rounded-2xl shadow-2xl max-w-lg w-full mx-4 overflow-hidden disp-modal-card"
+        className="bg-white rounded-xl shadow-xl max-w-lg w-full mx-4 overflow-hidden disp-modal-card"
         style={{ borderTop: `4px solid ${BRAND.green}` }}
       >
         <div
           className="px-6 py-4 flex items-center justify-between border-b"
           style={{ borderColor: NEUTRAL.hairline }}
         >
-          <div>
-            <h3 className="text-lg font-bold" style={{ color: NEUTRAL.fgInk }}>
-              {isEdit ? 'Editar estado vigente' : 'Cambiar estado de planta'}
-            </h3>
-            <p className="text-xs mt-0.5" style={{ color: NEUTRAL.fgTer }}>
-              {isEdit
-                ? 'Editás el registro vigente. Cambiar la fecha actualizará la cronología del histórico.'
-                : 'Registra un nuevo evento de disponibilidad.'}
-            </p>
-          </div>
+          <h3 className="text-base font-semibold" style={{ color: NEUTRAL.fgInk }}>
+            {isEdit ? 'Editar estado vigente' : 'Cambiar estado de planta'}
+          </h3>
           <button
             onClick={onClose}
             disabled={submitting}
@@ -137,7 +130,7 @@ export default function CambiarEstadoModal({
               value={planta}
               onChange={(e) => setPlanta(e.target.value)}
               disabled={isEdit}
-              className="w-full px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 disabled:bg-gray-50 disabled:text-gray-500"
+              className="w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 disabled:bg-gray-50 disabled:text-gray-500"
               style={{ borderColor: NEUTRAL.hairline }}
             >
               {PLANTAS.map((p) => (
@@ -150,7 +143,7 @@ export default function CambiarEstadoModal({
             <select
               value={evento}
               onChange={(e) => setEvento(e.target.value)}
-              className="w-full px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2"
+              className="w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
               style={{ borderColor: NEUTRAL.hairline }}
             >
               {ESTADOS.map((s) => (
@@ -167,12 +160,12 @@ export default function CambiarEstadoModal({
               min={minLocal || undefined}
               max={maxLocal}
               required
-              className="w-full px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2"
+              className="w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
               style={{ borderColor: NEUTRAL.hairline }}
             />
             {minLocal && (
               <p className="text-[11px] mt-1" style={{ color: NEUTRAL.fgTer }}>
-                Mínimo: {formatFechaCorta(toIsoFromLocal(minLocal))}
+               
               </p>
             )}
           </Field>
@@ -246,7 +239,7 @@ export default function CambiarEstadoModal({
 function Field({ label, children }) {
   return (
     <label className="block">
-      <div className="text-xs uppercase tracking-wider mb-1" style={{ color: NEUTRAL.fgTer }}>
+      <div className="text-[11px] font-medium mb-1" style={{ color: NEUTRAL.fgTer }}>
         {label}
       </div>
       {children}
@@ -263,21 +256,21 @@ function buildPopup(err, planta, fechaLocal) {
     return {
       tipo: 'error',
       titulo: 'Estado igual al vigente',
-      mensaje: `${planta} ya está en estado ${vig.evento} desde ${formatFechaCorta(vig.fecha_inicio_estado)}. Para registrar un cambio, elegí un estado distinto.`,
+      mensaje: `${planta} ya está en estado ${vig.evento} desde ${formatFechaCorta(vig.fecha_inicio_estado)}. Para registrar un cambio, elige un estado distinto.`,
     };
   }
   if (code === 'fecha_anterior_a_vigente' && vig) {
     return {
       tipo: 'error',
       titulo: 'Fecha inválida',
-      mensaje: `La fecha que ingresaste (${formatFechaCorta(toIsoFromLocal(fechaLocal))}) es anterior o igual al estado actual de ${planta} (${formatFechaCorta(vig.fecha_inicio_estado)}). Elegí una fecha posterior.`,
+      mensaje: `La fecha que ingresaste (${formatFechaCorta(toIsoFromLocal(fechaLocal))}) es anterior o igual al estado actual de ${planta} (${formatFechaCorta(vig.fecha_inicio_estado)}). Elige una fecha posterior.`,
     };
   }
   if (code === 'mismo_estado_que_anterior' && nminus1) {
     return {
       tipo: 'error',
       titulo: 'Estado igual al anterior',
-      mensaje: `El estado anterior ya era ${nminus1.evento}; no se permite la misma secuencia. Deshacé el último o elegí otro estado.`,
+      mensaje: `El estado anterior ya era ${nminus1.evento}; no se permite la misma secuencia. Desház el último o selecciona otro estado.`,
     };
   }
   if (err?.status === 403) {
