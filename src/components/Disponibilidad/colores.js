@@ -27,4 +27,6 @@ export const ESTADO_COLORS = {
 
 export const ESTADOS = ['Disponible', 'En Reserva', 'Indisponible'];
 
-export const PLANTAS = ['GC3', 'GC32'];
+// `planta_id` reales en `lov_bit.planta` (seed en Bit-cora-g3/server/db.js).
+// El plan_disp.md usa "GC3"/"GC32" como nombre coloquial pero los IDs son GEC3/GEC32.
+export const PLANTAS = ['GEC3', 'GEC32'];
