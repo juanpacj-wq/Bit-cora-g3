@@ -5,7 +5,7 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 1.1 |
+| Versión | 1.2 |
 | Fecha | Abril 2026 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
@@ -378,6 +378,18 @@ Si no hay usuarios para un rol, se escribe la cadena `"[]"` — **nunca `NULL`**
 | `jefes_snapshot` | `usuario.es_jefe_planta=1 AND activo=1` (lista estable independiente de sesión) |
 | `ingenieros_snapshot` | `sesion_activa.activa=1` y TTL válido, cuyo cargo tenga `cargo_bitacora_permiso.puede_crear=1` para la `bitacora_id`, excluyendo los cargos "Jefe de Turno" y "Gerente de Producción" |
 
+**Columna `fecha_fin_estado` (F12, DISP only):**
+
+```sql
+ALTER TABLE bitacora.registro_activo ADD fecha_fin_estado DATETIME2 NULL;
+```
+
+`NULL` para todas las bitácoras excepto DISP. Para DISP, `NULL` = registro vigente; el filtered unique index `UQ_disp_vigente_por_planta` (ver 4.4) garantiza máximo 1 vigente por planta. Se puebla con la `fecha_inicio_estado` del próximo evento al transicionar al histórico (ver 4.2).
+
+**Nullable `turno` (F12):**
+
+`turno TINYINT NOT NULL CHECK (turno IN (1,2))` se relajó a `NULL`-able. El `CHECK` admite `UNKNOWN` sobre NULL. DISP graba `NULL` siempre — la mecánica de turnos no aplica.
+
 ### 4.2 Tabla histórica (inmutable, cerrada por JdT)
 
 ```sql
@@ -441,9 +453,37 @@ COMMIT;
 
 Los snapshots JSON viajan como strings — **sin re-cálculo ni JOINs** — preservando la fotografía exacta capturada en el INSERT original.
 
+**Columna `fecha_fin_estado` (F12, DISP only):**
+
+```sql
+ALTER TABLE bitacora.registro_historico ADD fecha_fin_estado DATETIME2 NULL;
+```
+
+Para DISP, viaja del activo al histórico ya poblada (= `fecha_inicio_estado` del evento que lo cerró). Esto rompe parcialmente la inmutabilidad del histórico: editar la `fecha_inicio_estado` del vigente vía `PUT /api/registros/:id` actualiza la `fecha_fin_estado` del N-1 (último histórico) para mantener cronología sin gap. Es la **única excepción documentada** a la regla "histórico es inmutable" (ver 7.8).
+
+### 4.3 Filtered unique index para vigente DISP
+
+```sql
+-- Garantiza máximo 1 vigente por planta para DISP. SQL Server no admite
+-- subqueries en filtered index predicates → bitacora_id se incrusta como
+-- literal en el script de migración (resuelto en JS antes del CREATE).
+CREATE UNIQUE INDEX UQ_disp_vigente_por_planta
+  ON bitacora.registro_activo (planta_id)
+  WHERE bitacora_id = <DISP> AND fecha_fin_estado IS NULL;
+```
+
+Es la segunda barrera defensiva al `UPDLOCK + HOLDLOCK` del POST DISP transaccional (RF-055): aunque dos POSTs concurrentes burlaran el lock, el unique index los rechaza antes del COMMIT.
+
 ---
 
 ## 5. Integración con el Dashboard (esquema `bitacora`)
+
+El esquema expone dos tablas-puente independientes hacia el Dashboard de Generación:
+
+- **5.1 `evento_dashboard`** — eventos por hora/periodo (AUTH, REDESP, PRUEBA) emitidos desde MAND. Reemplaza la tabla v1.0 `autorizacion_dashboard` (renombrada en F5; vista compat eliminada en F9).
+- **5.2 `disponibilidad_dashboard`** (F12) — estado vigente por planta (DISP). Separada deliberadamente: DISP no tiene periodo ni semántica horaria.
+
+### 5.1 `evento_dashboard` (eventos por periodo, MAND)
 
 Las autorizaciones son registros de la bitácora AUTH que disparan automáticamente una fila en esta tabla. El Dashboard la consume vía REST para suprimir la desviación en periodos autorizados.
 
@@ -483,6 +523,50 @@ CREATE INDEX IX_auth_lookup
 4. El Dashboard consulta el endpoint y suprime la alerta de desviación para ese periodo.
 
 El Dashboard debe **parsear `jdts_snapshot` y `jefes_snapshot` como JSON**: ya no son `INT` como en versiones previas del modelo.
+
+### 5.2 `disponibilidad_dashboard` (estado vigente por planta, DISP)
+
+Cimiento cross-app para que F15 (futuro) muestre un badge de disponibilidad por planta en `dashboard-gen-gec3`. Se mantiene **una fila por planta** sincronizada con el vigente real en `registro_activo` mediante UPSERT atómico.
+
+```sql
+CREATE TABLE bitacora.disponibilidad_dashboard (
+  planta_id              VARCHAR(10) PRIMARY KEY
+      REFERENCES lov_bit.planta(planta_id),
+  evento                 VARCHAR(20) NOT NULL
+      CHECK (evento IN ('Disponible','Indisponible','En Reserva')),
+  codigo                 SMALLINT    NOT NULL CHECK (codigo IN (-1, 0, 1)),
+  fecha_inicio_estado    DATETIME2   NOT NULL,
+  registro_activo_id     INT         NOT NULL,
+  jdts_snapshot          NVARCHAR(MAX) NOT NULL DEFAULT '[]',
+  jefes_snapshot         NVARCHAR(MAX) NOT NULL DEFAULT '[]',
+  modificado_por         INT         NULL
+      REFERENCES lov_bit.usuario(usuario_id),
+  modificado_en          DATETIME2   NULL,
+  actualizado_en         DATETIME2   NOT NULL DEFAULT GETDATE()
+);
+```
+
+**Invariantes:**
+
+- 1 fila por planta. PK garantiza unicidad.
+- Refleja siempre el `registro_activo` vigente (`fecha_fin_estado IS NULL`).
+- UPSERT atómico desde 3 caminos transaccionales:
+  - `POST /api/registros` (rama DISP) — RF-055.
+  - `PUT /api/registros/:id` (rama DISP) — RF-056.
+  - `POST /api/disponibilidad/deshacer` — RF-057. Si el deshacer no encuentra histórico, se hace `DELETE` (la planta vuelve al empty state — vigente null).
+- `modificado_por`/`modificado_en` se setean al editor cuando es un PUT; se limpian a NULL en POST y deshacer (el autor original vive en `registro_activo.creado_por`).
+- `codigo` deriva del `evento` con la regla fija `Disponible:1 / 'En Reserva':0 / Indisponible:-1`.
+
+**Diferencias con `evento_dashboard` (5.1):**
+
+| Aspecto | `evento_dashboard` | `disponibilidad_dashboard` |
+|---|---|---|
+| Granularidad | Por (planta, fecha, periodo, tipo) | Por planta |
+| Tipo enum | AUTH/REDESP/PRUEBA | — (DISP siempre) |
+| Soft delete | `activa=0` reactivable | DELETE total al deshacer sin histórico |
+| Histórico | El dashboard no lo necesita (un valor por celda 24h) | El dashboard solo ve el vigente; histórico vive en `registro_historico` |
+
+**Endpoint expuesto:** `GET /api/eventos-dashboard?tipo=DISP&planta_id=GEC3` (extendido en F12; el handler detecta `tipo='DISP'` y consulta `disponibilidad_dashboard` en lugar de `evento_dashboard`). Shape de respuesta: `{ eventos: [{ planta_id, evento, codigo, fecha_inicio_estado, jdts_snapshot, jefes_snapshot, actualizado_en }] }`.
 
 ---
 
@@ -602,6 +686,18 @@ Los nombres humanos de los roles se resuelven **del lado del cliente** parseando
 - Permisos de lectura/escritura: se validan en el API middleware, no en la BD.
 - Unicidad temporal de la marca `es_jefe_planta=1`: regla organizativa validada en código al cambiar el titular (ver RN-03 en el RF).
 
+### 7.8 Disponibilidad como mini-dashboard (F12)
+
+La bitácora DISP rompe deliberadamente varias invariantes del modelo general porque su semántica operativa es distinta (estado vigente único por planta, sin ciclo de turno):
+
+- **No usa cierre de turno:** los registros se cierran automáticamente cuando llega un evento posterior (UPDATE `fecha_fin_estado` + INSERT en histórico + DELETE del activo, todo en transacción).
+- **No emite CIET de finalización/cierre:** F3 y F4 no se aplican. El único CIET que emite DISP es `'Deshacer disponibilidad'` desde `POST /api/disponibilidad/deshacer` (audit con autor + jdts/gerentes activos).
+- **`turno = NULL` siempre:** ver 4.1.
+- **Una sola fila vigente por planta:** garantizado por filtered unique index `UQ_disp_vigente_por_planta` (4.3) + `UPDLOCK + HOLDLOCK` en el SELECT del POST (RF-055).
+- **Side-effect controlado en `registro_historico`:** editar `fecha_inicio_estado` del vigente vía PUT actualiza `fecha_fin_estado` del último histórico (N-1) para mantener cronología sin gap. **Es la única excepción documentada a "histórico inmutable".** Cualquier código nuevo que asuma inmutabilidad estricta debe excluir este caso.
+- **`disponibilidad_dashboard` (5.2) vive aparte de `evento_dashboard` (5.1):** no comparten UNIQUE ni schema. Mezclarlas obligaría a hacer `periodo` nullable en `evento_dashboard` y romper la UNIQUE existente — preferimos dos tablas con semánticas claras.
+- **Permisos diferenciados:** `puede_ver=1` para todos los cargos (es información operativa de interés universal); `puede_crear=1` solo para JdT (1) e IngOp (2). Frontend gatea botones; backend rechaza con 403 desde `hasPermisoBitacora`.
+
 ---
 
 ## 8. Historial de versiones
@@ -610,6 +706,7 @@ Los nombres humanos de los roles se resuelven **del lado del cliente** parseando
 |---|---|---|
 | 1.0 | 2026-04-10 | Versión inicial: esquema completo de catálogos, sesiones, registros activo/histórico, tabla puente al Dashboard, vistas y notas de diseño. |
 | 1.1 | 2026-04-18 | Roles por rol (JdTs, Jefes, Ingenieros) migrados a snapshots JSON (`*_snapshot NVARCHAR(MAX) NOT NULL`). `creado_por` queda como único FK vivo a `lov_bit.usuario` en tablas transaccionales. Se añade TTL de 5 min sobre `sesion_activa.ultima_actividad`, sweep de arranque y endpoint `/api/auth/resume`. Vista `v_historico_busqueda` reescrita sin JOINs por rol. |
+| 1.2 | 2026-04-29 | F12+F13+F14 (Disponibilidad como mini-dashboard). Columna `fecha_fin_estado DATETIME2 NULL` en `registro_activo` y `registro_historico` (DISP only). Filtered unique index `UQ_disp_vigente_por_planta` (4.3). Tabla nueva `bitacora.disponibilidad_dashboard` (5.2) — separada de `evento_dashboard`. `turno` se vuelve nullable (DISP graba NULL). Sección 7.8 documenta las invariantes que DISP rompe deliberadamente. **Fuera del alcance de v1.2:** F2/F4/F5/F9 ya estaban incorporados al modelo en parches previos sin bumpear esta versión — la `autorizacion_dashboard` se renombró a `evento_dashboard` con columna `tipo` (F5) y la vista compat se eliminó (F9); la columna `cerrada_en` de `sesion_activa` y la tabla `sesion_bitacora` (F2) viven en código pero no estaban reflejadas acá. |
 
 ---
 
