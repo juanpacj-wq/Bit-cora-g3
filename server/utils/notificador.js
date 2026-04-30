@@ -100,6 +100,11 @@ export const upsertAutorizacion = (transaction, args) =>
 
 // F12: tabla aparte de evento_dashboard porque DISP no comparte la semántica horaria
 // (sin periodo). 1 fila por planta con el estado vigente.
+//
+// F15 TODO: dashboard-gen-gec3 consumirá GET /api/eventos-dashboard?tipo=DISP&planta_id=
+// para mostrar un badge de disponibilidad por planta. El endpoint ya está listo (server.js
+// detecta tipo='DISP' y delega a esta tabla). Patrón consumer esperado: polling 60s +
+// catch silencioso (no romper dashboard si bitácora cae) — mismo patrón que F8.
 export async function findDisponibilidadDashboard(transaction, { planta_id }) {
   const r = await new sql.Request(transaction)
     .input('planta_id', sql.VarChar(10), planta_id)
