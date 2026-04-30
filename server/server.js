@@ -208,7 +208,7 @@ const server = http.createServer(async (req, res) => {
           MERGE bitacora.sesion_bitacora AS t
           USING (VALUES (@sesion_id, @bitacora_id)) AS s(sesion_id, bitacora_id)
             ON t.sesion_id = s.sesion_id AND t.bitacora_id = s.bitacora_id
-          WHEN MATCHED THEN UPDATE SET finalizada_en = NULL, abierta_en = GETDATE()
+          WHEN MATCHED THEN UPDATE SET finalizada_en = NULL, abierta_en = SYSUTCDATETIME()
           WHEN NOT MATCHED THEN INSERT (sesion_id, bitacora_id) VALUES (s.sesion_id, s.bitacora_id);
 
           SELECT sesion_bitacora_id, sesion_id, bitacora_id, abierta_en, finalizada_en
@@ -236,7 +236,7 @@ const server = http.createServer(async (req, res) => {
           .query(`
             DECLARE @afectadas TABLE (sesion_bitacora_id INT, sesion_id INT, bitacora_id INT);
 
-            UPDATE sb SET finalizada_en = GETDATE()
+            UPDATE sb SET finalizada_en = SYSUTCDATETIME()
             OUTPUT inserted.sesion_bitacora_id, inserted.sesion_id, inserted.bitacora_id INTO @afectadas
             FROM bitacora.sesion_bitacora sb
             INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
@@ -267,7 +267,7 @@ const server = http.createServer(async (req, res) => {
 
     // F4: POST /api/bitacora/finalizar-forzado { usuarios: [usuario_id, ...] }
     // Solo cargos con puede_cerrar_turno=1 pueden invocarlo. Por cada usuario en la lista:
-    //   - UPDATE sus sesion_bitacora con finalizada_en = GETDATE().
+    //   - UPDATE sus sesion_bitacora con finalizada_en = SYSUTCDATETIME().
     //   - Emite CIET 'finalizacion' con forzado=true, motivo='popup-pendientes'.
     // El "sesion" que se pasa al helper es sintética: usuario_id/turno/cargo_nombre del target,
     // planta_id del JdT que invoca (asumimos misma planta).
@@ -308,7 +308,7 @@ const server = http.createServer(async (req, res) => {
             .input('usuario_id', sql.Int, usuario_id)
             .input('planta_id', sql.VarChar(10), sesion.planta_id)
             .query(`
-              UPDATE sb SET finalizada_en = GETDATE()
+              UPDATE sb SET finalizada_en = SYSUTCDATETIME()
               FROM bitacora.sesion_bitacora sb
               INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
               WHERE sa.usuario_id = @usuario_id AND sa.planta_id = @planta_id
@@ -671,7 +671,7 @@ const server = http.createServer(async (req, res) => {
                    fecha_fin_estado)
                 SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
                        'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-                       modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE),
+                       modificado_por, modificado_en, @cerrado_por, SYSUTCDATETIME(), CAST(DATEADD(HOUR, -5, SYSUTCDATETIME()) AS DATE),
                        fecha_fin_estado
                 FROM bitacora.registro_activo WHERE registro_id = @rid;
 
@@ -1314,6 +1314,7 @@ const server = http.createServer(async (req, res) => {
         INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
         WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
           AND b.oculta = 0
+          AND b.codigo NOT IN ('DISP','MAND')
           AND (@bitacora_id IS NULL OR r.bitacora_id = @bitacora_id)
         GROUP BY r.bitacora_id, b.nombre
       `);
@@ -1346,6 +1347,7 @@ const server = http.createServer(async (req, res) => {
           INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
           WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
             AND b.oculta = 0
+            AND b.codigo NOT IN ('DISP','MAND')
           GROUP BY r.bitacora_id, b.nombre
           ORDER BY b.nombre
         `);
@@ -1393,6 +1395,18 @@ const server = http.createServer(async (req, res) => {
       }
       const cerrado_por = sesion.usuario_id;
       const pool = await getDB();
+      // F13.3: DISP y MAND no se cierran por turno. DISP envía al histórico al llegar un
+      // nuevo registro (rama POST /api/registros). MAND vive permanentemente en activo.
+      const codigoRes = await pool.request()
+        .input('bitacora_id', sql.Int, bitacora_id)
+        .query(`SELECT codigo FROM lov_bit.bitacora WHERE bitacora_id = @bitacora_id`);
+      const codigo = codigoRes.recordset[0]?.codigo;
+      if (codigo === 'DISP' || codigo === 'MAND') {
+        return sendJSON(res, 422, {
+          error: 'bitacora_no_cerrable',
+          mensaje: `La bitácora ${codigo} no se cierra por turno`,
+        });
+      }
       const transaction = new sql.Transaction(pool);
       await transaction.begin();
       try {
@@ -1428,7 +1442,7 @@ const server = http.createServer(async (req, res) => {
                  modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
               SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
                      'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-                     modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE)
+                     modificado_por, modificado_en, @cerrado_por, SYSUTCDATETIME(), CAST(DATEADD(HOUR, -5, SYSUTCDATETIME()) AS DATE)
               FROM bitacora.registro_activo
               WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador'
                 AND fecha_evento >= @inicio AND fecha_evento < @fin;
@@ -1490,6 +1504,7 @@ const server = http.createServer(async (req, res) => {
           INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
           WHERE r.planta_id = @planta_id AND r.estado = 'borrador'
             AND b.oculta = 0
+            AND b.codigo NOT IN ('DISP','MAND')
         `);
 
       const resumen = [];
@@ -1526,7 +1541,7 @@ const server = http.createServer(async (req, res) => {
                    modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
                 SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
                        'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-                       modificado_por, modificado_en, @cerrado_por, GETDATE(), CAST(GETDATE() AS DATE)
+                       modificado_por, modificado_en, @cerrado_por, SYSUTCDATETIME(), CAST(DATEADD(HOUR, -5, SYSUTCDATETIME()) AS DATE)
                 FROM bitacora.registro_activo
                 WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador'
                   AND fecha_evento >= @inicio AND fecha_evento < @fin;
