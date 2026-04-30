@@ -97,3 +97,64 @@ export const findAutorizacion = (transaction, args) =>
 
 export const upsertAutorizacion = (transaction, args) =>
   upsertEventoDashboard(transaction, { ...args, tipo: 'AUTH' });
+
+// F12: tabla aparte de evento_dashboard porque DISP no comparte la semántica horaria
+// (sin periodo). 1 fila por planta con el estado vigente.
+export async function findDisponibilidadDashboard(transaction, { planta_id }) {
+  const r = await new sql.Request(transaction)
+    .input('planta_id', sql.VarChar(10), planta_id)
+    .query(`
+      SELECT planta_id, evento, codigo, fecha_inicio_estado, registro_activo_id,
+             jdts_snapshot, jefes_snapshot, modificado_por, modificado_en, actualizado_en
+      FROM bitacora.disponibilidad_dashboard
+      WHERE planta_id = @planta_id
+    `);
+  return r.recordset[0] || null;
+}
+
+// F12: UPSERT MERGE por planta_id. modificado_por / modificado_en se setean solo cuando
+// el caller los manda (ej. PUT) — POST y deshacer pasan undefined → quedan NULL.
+export async function upsertDisponibilidadDashboard(transaction, {
+  planta_id, evento, codigo, fecha_inicio_estado, registro_activo_id,
+  jdts_snapshot, jefes_snapshot, modificado_por,
+}) {
+  await new sql.Request(transaction)
+    .input('planta_id', sql.VarChar(10), planta_id)
+    .input('evento', sql.VarChar(20), evento)
+    .input('codigo', sql.SmallInt, codigo)
+    .input('fecha_inicio_estado', sql.DateTime2, fecha_inicio_estado)
+    .input('registro_activo_id', sql.Int, registro_activo_id)
+    .input('jdts_snapshot', sql.NVarChar(sql.MAX), jdts_snapshot ?? '[]')
+    .input('jefes_snapshot', sql.NVarChar(sql.MAX), jefes_snapshot ?? '[]')
+    .input('modificado_por', sql.Int, modificado_por ?? null)
+    .query(`
+      MERGE bitacora.disponibilidad_dashboard AS dd
+      USING (VALUES (@planta_id, @evento, @codigo, @fecha_inicio_estado, @registro_activo_id,
+                     @jdts_snapshot, @jefes_snapshot, @modificado_por))
+        AS s(planta_id, evento, codigo, fecha_inicio_estado, registro_activo_id,
+             jdts_snapshot, jefes_snapshot, modificado_por)
+        ON dd.planta_id = s.planta_id
+      WHEN MATCHED THEN UPDATE SET
+        evento              = s.evento,
+        codigo              = s.codigo,
+        fecha_inicio_estado = s.fecha_inicio_estado,
+        registro_activo_id  = s.registro_activo_id,
+        jdts_snapshot       = s.jdts_snapshot,
+        jefes_snapshot      = s.jefes_snapshot,
+        modificado_por      = s.modificado_por,
+        modificado_en       = CASE WHEN s.modificado_por IS NULL THEN NULL ELSE GETDATE() END,
+        actualizado_en      = GETDATE()
+      WHEN NOT MATCHED THEN INSERT
+        (planta_id, evento, codigo, fecha_inicio_estado, registro_activo_id,
+         jdts_snapshot, jefes_snapshot, actualizado_en)
+        VALUES (s.planta_id, s.evento, s.codigo, s.fecha_inicio_estado, s.registro_activo_id,
+                s.jdts_snapshot, s.jefes_snapshot, GETDATE());
+    `);
+}
+
+// F12: deshacer último sin histórico → la planta pierde estado registrado (empty state).
+export async function deleteDisponibilidadDashboard(transaction, { planta_id }) {
+  await new sql.Request(transaction)
+    .input('planta_id', sql.VarChar(10), planta_id)
+    .query(`DELETE FROM bitacora.disponibilidad_dashboard WHERE planta_id = @planta_id`);
+}
