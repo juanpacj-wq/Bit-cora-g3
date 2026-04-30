@@ -14,6 +14,7 @@ import {
 import { HistoricoView } from "./components/historicos/HistoricoView";
 import CierrePendientesModal from "./components/CierrePendientesModal";
 import SalaDeMandoGrid from "./components/SalaDeMando/SalaDeMandoGrid";
+import DisponibilidadDashboard from "./components/Disponibilidad/DisponibilidadDashboard";
 import { useAuth } from "./hooks/useAuth";
 import { useCatalogos } from "./hooks/useCatalogos";
 import { useRegistros } from "./hooks/useRegistros";
@@ -1316,7 +1317,7 @@ export default function App() {
             registrosPorBitacora={registrosPorBitacora}
           />
 
-          {bitacoraActiva && (
+          {bitacoraActiva && bitacoraActiva.codigo !== 'DISP' && (
             <BarraEstado
               bitacora={bitacoraActiva}
               registros={registrosDeBitacora}
@@ -1345,6 +1346,13 @@ export default function App() {
               showToast={(m) => showToast(m)}
               onError={(m) => showToast(m, 'error')}
               refreshKey={pendientesRefreshKey}
+            />
+          ) : bitacoraActiva?.codigo === 'DISP' ? (
+            <DisponibilidadDashboard
+              bitacoraId={bitacoraActiva.bitacora_id}
+              plantaInicial={sesion?.planta_id}
+              puedeEditar={puedeCrear}
+              showToast={showToast}
             />
           ) : (
             <GrillaRegistros
