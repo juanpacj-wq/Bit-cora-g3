@@ -10,16 +10,17 @@ export default function DashboardSkeleton({ filas = 6 }) {
         className="rounded-xl shadow-sm border bg-white overflow-hidden"
         style={{ borderColor: NEUTRAL.hairline }}
       >
-        <div className="px-6 py-5 flex items-center gap-4 bg-gray-100">
+        <div className="px-6 py-4 flex items-center gap-4 bg-gray-100">
           <div className="w-12 h-12 rounded-xl bg-gray-200" />
           <div className="flex-1 space-y-2">
             <div className="h-5 w-40 bg-gray-200 rounded" />
             <div className="h-3 w-24 bg-gray-200 rounded" />
           </div>
-          <div className="hidden md:flex gap-2">
-            <div className="h-9 w-32 bg-gray-200 rounded-xl" />
-            <div className="h-9 w-20 bg-gray-200 rounded-xl" />
-            <div className="h-9 w-24 bg-gray-200 rounded-xl" />
+          <div className="hidden md:flex gap-2 items-center">
+            <div className="h-7 w-28 bg-gray-200 rounded-lg" />
+            <div className="h-9 w-32 bg-gray-200 rounded-lg" />
+            <div className="h-9 w-20 bg-gray-200 rounded-lg" />
+            <div className="h-9 w-24 bg-gray-200 rounded-lg" />
           </div>
         </div>
         <div className="px-6 py-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
