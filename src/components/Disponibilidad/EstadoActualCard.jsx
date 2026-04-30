@@ -1,5 +1,5 @@
 import React from 'react';
-import { CheckCircle2, Clock, XCircle, Edit3, RefreshCw, Undo2, User } from 'lucide-react';
+import { CheckCircle2, Clock, XCircle, Edit3, RefreshCw, Undo2 } from 'lucide-react';
 import TiempoEnEstado from './TiempoEnEstado';
 import { ESTADO_COLORS, NEUTRAL } from './colores';
 
@@ -34,25 +34,24 @@ export default function EstadoActualCard({
 
   return (
     <div
-      className="rounded-2xl shadow-sm overflow-hidden border"
+      className="rounded-xl shadow-sm overflow-hidden border"
       style={{ borderColor: NEUTRAL.hairline, backgroundColor: NEUTRAL.surface }}
     >
       <div
-        className="px-6 py-5 flex flex-col md:flex-row md:items-center gap-4 transition-colors duration-300"
+        className="px-6 py-4 flex flex-col md:flex-row md:items-center gap-4"
         style={{ backgroundColor: tokens.bg, color: tokens.text }}
       >
         <div className="flex items-center gap-4 flex-1 min-w-0">
           <div
-            className="w-14 h-14 rounded-2xl flex items-center justify-center flex-shrink-0"
+            className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"
             style={{ backgroundColor: tokens.badge, color: '#fff' }}
           >
-            <Icon size={30} />
+            <Icon size={26} />
           </div>
           <div className="min-w-0">
-            <div className="text-xs uppercase tracking-wider opacity-80">Estado actual</div>
-            <div className="text-2xl font-bold truncate">{evento || 'Sin estado'}</div>
-            <div className="text-sm opacity-90">
-              Código: <span className="font-semibold">{vigente?.codigo ?? '—'}</span>
+            <div className="text-xl font-semibold truncate">{evento || 'Sin estado'}</div>
+            <div className="text-xs opacity-90">
+              Código <span className="font-semibold">{vigente?.codigo ?? '—'}</span>
             </div>
           </div>
         </div>
@@ -61,22 +60,19 @@ export default function EstadoActualCard({
           <div className="flex flex-wrap gap-2 md:justify-end">
             <button
               onClick={onCambiar}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/95 text-gray-900 text-sm font-semibold shadow hover:bg-white transition-colors"
-              title="Registrar nuevo cambio de estado"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white text-gray-900 text-sm font-medium hover:bg-gray-50 transition-colors"
             >
               <RefreshCw size={16} /> Cambiar estado
             </button>
             <button
               onClick={onEditar}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-white text-sm font-semibold border border-white/40 transition-colors"
-              title="Editar estado vigente"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/15 hover:bg-white/25 text-white text-sm font-medium border border-white/40 transition-colors"
             >
               <Edit3 size={16} /> Editar
             </button>
             <button
               onClick={onDeshacer}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-white text-sm font-semibold border border-white/40 transition-colors"
-              title="Deshacer último registro"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/15 hover:bg-white/25 text-white text-sm font-medium border border-white/40 transition-colors"
             >
               <Undo2 size={16} /> Deshacer
             </button>
@@ -84,14 +80,14 @@ export default function EstadoActualCard({
         )}
       </div>
 
-      <div className="px-6 py-5 grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+      <div className="px-6 py-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
         <Field label="Desde">
           <span style={{ color: NEUTRAL.fgInk }} className="font-medium">
             {formatFechaCorta(vigente?.fecha_inicio_estado)}
           </span>
         </Field>
 
-        <Field label="Tiempo en este estado">
+        <Field label="En estado">
           <TiempoEnEstado
             fechaInicio={vigente?.fecha_inicio_estado}
             className="font-mono font-semibold tabular-nums"
@@ -99,10 +95,10 @@ export default function EstadoActualCard({
           />
         </Field>
 
-        <Field label="Registrado por" icon={<User size={14} />}>
+        <Field label="Registrado por">
           <span style={{ color: NEUTRAL.fgInk }}>{autorNombre}</span>
           {modificador && (
-            <span className="ml-2 text-xs italic" style={{ color: NEUTRAL.fgTer }}>
+            <span className="ml-2 text-xs" style={{ color: NEUTRAL.fgTer }}>
               · editado por {modificador} el {formatFechaCorta(vigente?.modificado_en)}
             </span>
           )}
@@ -112,7 +108,7 @@ export default function EstadoActualCard({
           {detalle ? (
             <span style={{ color: NEUTRAL.fgInk }}>{detalle}</span>
           ) : (
-            <span className="italic" style={{ color: NEUTRAL.fgTer }}>—</span>
+            <span style={{ color: NEUTRAL.fgTer }}>—</span>
           )}
         </Field>
       </div>
@@ -120,14 +116,13 @@ export default function EstadoActualCard({
   );
 }
 
-function Field({ label, icon, children }) {
+function Field({ label, children }) {
   return (
     <div>
       <div
-        className="text-xs uppercase tracking-wider mb-1 flex items-center gap-1"
+        className="text-[11px] font-medium mb-1"
         style={{ color: NEUTRAL.fgTer }}
       >
-        {icon}
         {label}
       </div>
       <div className="text-sm">{children}</div>
