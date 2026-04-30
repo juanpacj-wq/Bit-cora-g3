@@ -4,6 +4,7 @@ import EstadoActualCard from './EstadoActualCard';
 import HistorialList from './HistorialList';
 import CambiarEstadoModal from './CambiarEstadoModal';
 import DashboardSkeleton from './Skeleton';
+import PlantaToggle from './PlantaToggle';
 import { useDisponibilidad } from '../../hooks/useDisponibilidad';
 import { BRAND, NEUTRAL, PLANTAS } from './colores';
 
@@ -162,12 +163,7 @@ export default function DisponibilidadDashboard({
       className="flex-1 flex flex-col overflow-hidden"
       style={{ backgroundColor: NEUTRAL.canvas }}
     >
-      <div className="max-w-7xl mx-auto w-full px-8 pt-6 pb-4 flex flex-col flex-1 min-h-0 gap-4">
-        <Header
-          plantaSeleccionada={plantaSeleccionada}
-          onChangePlanta={setPlantaSeleccionada}
-        />
-
+      <div className="max-w-7xl mx-auto w-full px-8 pt-3 pb-4 flex flex-col flex-1 min-h-0 gap-3">
         {error && (
           <div
             className="rounded-lg p-3 flex items-start gap-3 border"
@@ -183,7 +179,7 @@ export default function DisponibilidadDashboard({
 
         <div
           key={fadeKey.current}
-          className="flex flex-col flex-1 min-h-0 gap-4 disp-fade"
+          className="flex flex-col flex-1 min-h-0 gap-3 disp-fade"
         >
           {isFirstLoad ? (
             <DashboardSkeleton />
@@ -192,6 +188,8 @@ export default function DisponibilidadDashboard({
               <EstadoActualCard
                 vigente={data.vigente}
                 puedeEditar={puedeEditar}
+                plantaSeleccionada={plantaSeleccionada}
+                onChangePlanta={setPlantaSeleccionada}
                 onCambiar={() => setModal({ mode: 'crear' })}
                 onEditar={() => setModal({ mode: 'editar' })}
                 onDeshacer={() => setConfirmDeshacer(true)}
@@ -212,6 +210,7 @@ export default function DisponibilidadDashboard({
               <EmptyState
                 planta={plantaSeleccionada}
                 puedeEditar={puedeEditar}
+                onChangePlanta={setPlantaSeleccionada}
                 onRegistrar={() => setModal({ mode: 'crear' })}
               />
               <div className="flex-1 min-h-0 flex flex-col">
@@ -259,44 +258,19 @@ export default function DisponibilidadDashboard({
   );
 }
 
-function Header({ plantaSeleccionada, onChangePlanta }) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <h1 className="text-lg font-semibold" style={{ color: NEUTRAL.fgInk }}>
-        Disponibilidad de Plantas
-      </h1>
-
-      <div
-        className="inline-flex p-1 rounded-lg border"
-        style={{ borderColor: NEUTRAL.hairline, backgroundColor: NEUTRAL.surface }}
-      >
-        {PLANTAS.map((p) => {
-          const active = p === plantaSeleccionada;
-          return (
-            <button
-              key={p}
-              onClick={() => onChangePlanta(p)}
-              className="px-4 py-1.5 rounded-md text-sm font-medium transition-colors"
-              style={{
-                backgroundColor: active ? BRAND.navy : 'transparent',
-                color: active ? '#fff' : NEUTRAL.fgInk,
-              }}
-            >
-              {p}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function EmptyState({ planta, puedeEditar, onRegistrar }) {
+function EmptyState({ planta, puedeEditar, plantaSeleccionada, onChangePlanta, onRegistrar }) {
   return (
     <div
-      className="rounded-xl border border-dashed p-8 flex flex-col items-center text-center gap-3"
+      className="rounded-xl border border-dashed p-8 flex flex-col items-center text-center gap-3 relative"
       style={{ borderColor: NEUTRAL.hairline, backgroundColor: NEUTRAL.surface }}
     >
+      <div className="absolute top-3 right-3">
+        <PlantaToggle
+          plantaSeleccionada={plantaSeleccionada}
+          onChangePlanta={onChangePlanta}
+          variant="light"
+        />
+      </div>
       <Inbox size={36} style={{ color: NEUTRAL.fgTer }} />
       <div>
         <div className="text-base font-semibold" style={{ color: NEUTRAL.fgInk }}>
@@ -320,6 +294,7 @@ function EmptyState({ planta, puedeEditar, onRegistrar }) {
     </div>
   );
 }
+
 
 function ConfirmDeshacer({ planta, tieneHistorico, vigenteEvento, historicoEvento, onCancel, onConfirm }) {
   return (

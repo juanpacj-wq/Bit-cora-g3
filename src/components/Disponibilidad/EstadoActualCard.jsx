@@ -1,6 +1,7 @@
 import React from 'react';
 import { CheckCircle2, Clock, XCircle, Edit3, RefreshCw, Undo2 } from 'lucide-react';
 import TiempoEnEstado from './TiempoEnEstado';
+import PlantaToggle from './PlantaToggle';
 import { ESTADO_COLORS, NEUTRAL } from './colores';
 
 const ICONS = { CheckCircle2, Clock, XCircle };
@@ -18,6 +19,8 @@ function formatFechaCorta(iso) {
 export default function EstadoActualCard({
   vigente,
   puedeEditar,
+  plantaSeleccionada,
+  onChangePlanta,
   onCambiar,
   onEditar,
   onDeshacer,
@@ -56,28 +59,37 @@ export default function EstadoActualCard({
           </div>
         </div>
 
-        {puedeEditar && (
-          <div className="flex flex-wrap gap-2 md:justify-end">
-            <button
-              onClick={onCambiar}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white text-gray-900 text-sm font-medium hover:bg-gray-50 transition-colors"
-            >
-              <RefreshCw size={16} /> Cambiar estado
-            </button>
-            <button
-              onClick={onEditar}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/15 hover:bg-white/25 text-white text-sm font-medium border border-white/40 transition-colors"
-            >
-              <Edit3 size={16} /> Editar
-            </button>
-            <button
-              onClick={onDeshacer}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/15 hover:bg-white/25 text-white text-sm font-medium border border-white/40 transition-colors"
-            >
-              <Undo2 size={16} /> Deshacer
-            </button>
-          </div>
-        )}
+        <div className="flex flex-wrap items-center gap-2 md:justify-end">
+          {onChangePlanta && (
+            <PlantaToggle
+              plantaSeleccionada={plantaSeleccionada}
+              onChangePlanta={onChangePlanta}
+              variant="overlay"
+            />
+          )}
+          {puedeEditar && (
+            <>
+              <button
+                onClick={onCambiar}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white text-gray-900 text-sm font-medium hover:bg-gray-50 transition-colors"
+              >
+                <RefreshCw size={16} /> Cambiar estado
+              </button>
+              <button
+                onClick={onEditar}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/15 hover:bg-white/25 text-white text-sm font-medium border border-white/40 transition-colors"
+              >
+                <Edit3 size={16} /> Editar
+              </button>
+              <button
+                onClick={onDeshacer}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/15 hover:bg-white/25 text-white text-sm font-medium border border-white/40 transition-colors"
+              >
+                <Undo2 size={16} /> Deshacer
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="px-6 py-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
