@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, AlertTriangle, Plus, X, Undo2 } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { AlertTriangle, Inbox, Plus, Undo2 } from 'lucide-react';
 import EstadoActualCard from './EstadoActualCard';
 import HistorialList from './HistorialList';
 import CambiarEstadoModal from './CambiarEstadoModal';
+import DashboardSkeleton from './Skeleton';
 import { useDisponibilidad } from '../../hooks/useDisponibilidad';
 import { BRAND, NEUTRAL, PLANTAS } from './colores';
 
@@ -19,6 +20,8 @@ function loadStoredPlanta(fallback) {
   return PLANTAS[0];
 }
 
+const EMPTY_BY_PLANTA = PLANTAS.reduce((acc, p) => ({ ...acc, [p]: null }), {});
+
 export default function DisponibilidadDashboard({
   bitacoraId,
   plantaInicial,
@@ -28,14 +31,16 @@ export default function DisponibilidadDashboard({
   const { getEstado, crear, editar, deshacer } = useDisponibilidad(bitacoraId);
 
   const [plantaSeleccionada, setPlantaSeleccionada] = useState(() => loadStoredPlanta(plantaInicial));
-  const [data, setData] = useState({ vigente: null, historial: [], historial_total: 0 });
-  const [loading, setLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+
+  // F13.1 SWR cache: cada planta mantiene su data {vigente,historial,historial_total} y un
+  // flag `loaded` (false hasta el primer fetch). Skeleton se muestra solo cuando
+  // !dataByPlanta[planta].loaded — re-visitas son instantáneas + refresh silencioso.
+  const [dataByPlanta, setDataByPlanta] = useState(EMPTY_BY_PLANTA);
   const [error, setError] = useState(null);
   const [modal, setModal] = useState(null); // { mode: 'crear' | 'editar' }
   const [confirmDeshacer, setConfirmDeshacer] = useState(false);
-  const [paneAnim, setPaneAnim] = useState('entered'); // 'entering' | 'entered'
-  const lastPlanta = useRef(plantaSeleccionada);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const fadeKey = useRef(0);
 
   useEffect(() => {
     try { sessionStorage.setItem(STORAGE_KEY, plantaSeleccionada); } catch {}
@@ -43,39 +48,34 @@ export default function DisponibilidadDashboard({
 
   const fetchEstado = useCallback(
     async (planta, { silent = false } = {}) => {
-      if (!silent) setLoading(true);
       try {
         const res = await getEstado(planta, { historial_limit: HIST_PAGE, historial_offset: 0 });
-        setData({
-          vigente: res.vigente || null,
-          historial: res.historial || [],
-          historial_total: res.historial_total || 0,
-        });
-        setError(null);
+        setDataByPlanta((prev) => ({
+          ...prev,
+          [planta]: {
+            vigente: res.vigente || null,
+            historial: res.historial || [],
+            historial_total: res.historial_total || 0,
+            loaded: true,
+          },
+        }));
+        if (!silent) setError(null);
       } catch (e) {
         if (!silent) setError(e.message || 'Error al cargar disponibilidad');
-      } finally {
-        if (!silent) setLoading(false);
       }
     },
     [getEstado]
   );
 
-  // Cambio de planta: animar slide + fetch.
+  // Fetch al cambiar de planta. SWR: si ya hay cache, refrescamos en silencio.
   useEffect(() => {
-    if (lastPlanta.current !== plantaSeleccionada) {
-      setPaneAnim('entering');
-      const t = setTimeout(() => setPaneAnim('entered'), 30);
-      lastPlanta.current = plantaSeleccionada;
-      return () => clearTimeout(t);
-    }
-  }, [plantaSeleccionada]);
-
-  useEffect(() => {
-    fetchEstado(plantaSeleccionada);
+    fadeKey.current += 1;
+    const cached = dataByPlanta[plantaSeleccionada];
+    fetchEstado(plantaSeleccionada, { silent: !!cached?.loaded });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plantaSeleccionada, fetchEstado]);
 
-  // Polling silencioso para captar cambios de otros usuarios.
+  // Polling silencioso cada 30s solo de la planta activa.
   useEffect(() => {
     const id = setInterval(() => {
       fetchEstado(plantaSeleccionada, { silent: true });
@@ -85,28 +85,40 @@ export default function DisponibilidadDashboard({
 
   const cargarMasHistorial = useCallback(async () => {
     if (loadingMore) return;
+    const cur = dataByPlanta[plantaSeleccionada];
+    if (!cur) return;
     setLoadingMore(true);
     try {
       const res = await getEstado(plantaSeleccionada, {
         historial_limit: HIST_PAGE,
-        historial_offset: data.historial.length,
+        historial_offset: cur.historial.length,
       });
-      setData((prev) => ({
-        vigente: prev.vigente,
-        historial: [...prev.historial, ...(res.historial || [])],
-        historial_total: res.historial_total ?? prev.historial_total,
-      }));
+      setDataByPlanta((prev) => {
+        const prevCur = prev[plantaSeleccionada];
+        if (!prevCur) return prev;
+        return {
+          ...prev,
+          [plantaSeleccionada]: {
+            ...prevCur,
+            historial: [...prevCur.historial, ...(res.historial || [])],
+            historial_total: res.historial_total ?? prevCur.historial_total,
+          },
+        };
+      });
     } catch (e) {
       showToast?.(e.message || 'Error al cargar más', 'error');
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, getEstado, plantaSeleccionada, data.historial.length, showToast]);
+  }, [loadingMore, dataByPlanta, plantaSeleccionada, getEstado, showToast]);
+
+  const data = dataByPlanta[plantaSeleccionada];
+  const isFirstLoad = !data?.loaded;
 
   const handleSubmitModal = useCallback(
     async (form) => {
       if (modal?.mode === 'editar') {
-        const reg = data.vigente;
+        const reg = data?.vigente;
         await editar(reg.registro_id, {
           evento: form.evento,
           codigo: form.codigo,
@@ -126,9 +138,9 @@ export default function DisponibilidadDashboard({
         if (form.planta !== plantaSeleccionada) setPlantaSeleccionada(form.planta);
       }
       setModal(null);
-      await fetchEstado(form.planta || plantaSeleccionada);
+      await fetchEstado(form.planta || plantaSeleccionada, { silent: true });
     },
-    [modal, data.vigente, editar, crear, showToast, plantaSeleccionada, fetchEstado]
+    [modal, data, editar, crear, showToast, plantaSeleccionada, fetchEstado]
   );
 
   const handleDeshacerConfirm = useCallback(async () => {
@@ -136,27 +148,29 @@ export default function DisponibilidadDashboard({
     try {
       await deshacer(plantaSeleccionada);
       showToast?.('Último registro deshecho');
-      await fetchEstado(plantaSeleccionada);
+      await fetchEstado(plantaSeleccionada, { silent: true });
     } catch (e) {
       showToast?.(e.body?.mensaje || e.message || 'Error al deshacer', 'error');
     }
   }, [deshacer, plantaSeleccionada, showToast, fetchEstado]);
 
-  const ultimoHistorico = data.historial[0] || null;
-  const tienePuedeMas = data.historial.length < (data.historial_total || 0);
+  const ultimoHistorico = data?.historial?.[0] || null;
+  const tienePuedeMas = data ? data.historial.length < (data.historial_total || 0) : false;
 
   return (
-    <div className="flex-1 overflow-auto" style={{ backgroundColor: NEUTRAL.canvas }}>
-      <div className="max-w-5xl mx-auto px-6 py-6 space-y-5">
+    <div
+      className="flex-1 flex flex-col overflow-hidden"
+      style={{ backgroundColor: NEUTRAL.canvas }}
+    >
+      <div className="max-w-7xl mx-auto w-full px-8 pt-6 pb-4 flex flex-col flex-1 min-h-0 gap-4">
         <Header
           plantaSeleccionada={plantaSeleccionada}
           onChangePlanta={setPlantaSeleccionada}
-          loading={loading}
         />
 
         {error && (
           <div
-            className="rounded-xl p-4 flex items-start gap-3 border"
+            className="rounded-lg p-3 flex items-start gap-3 border"
             style={{ borderColor: '#FCA5A5', backgroundColor: '#FEF2F2', color: '#7F1D1D' }}
           >
             <AlertTriangle size={18} className="flex-shrink-0 mt-0.5" />
@@ -168,42 +182,58 @@ export default function DisponibilidadDashboard({
         )}
 
         <div
-          className={`disp-pane ${paneAnim === 'entering' ? 'disp-pane-entering' : 'disp-pane-entered'}`}
-          key={plantaSeleccionada}
+          key={fadeKey.current}
+          className="flex flex-col flex-1 min-h-0 gap-4 disp-fade"
         >
-          {data.vigente ? (
-            <EstadoActualCard
-              vigente={data.vigente}
-              puedeEditar={puedeEditar}
-              onCambiar={() => setModal({ mode: 'crear' })}
-              onEditar={() => setModal({ mode: 'editar' })}
-              onDeshacer={() => setConfirmDeshacer(true)}
-            />
+          {isFirstLoad ? (
+            <DashboardSkeleton />
+          ) : data?.vigente ? (
+            <>
+              <EstadoActualCard
+                vigente={data.vigente}
+                puedeEditar={puedeEditar}
+                onCambiar={() => setModal({ mode: 'crear' })}
+                onEditar={() => setModal({ mode: 'editar' })}
+                onDeshacer={() => setConfirmDeshacer(true)}
+              />
+              <div className="flex-1 min-h-0 flex flex-col">
+                <HistorialList
+                  planta={plantaSeleccionada}
+                  historial={data.historial}
+                  total={data.historial_total}
+                  loading={loadingMore}
+                  hasMore={tienePuedeMas}
+                  onLoadMore={cargarMasHistorial}
+                />
+              </div>
+            </>
           ) : (
-            <EmptyState
-              planta={plantaSeleccionada}
-              puedeEditar={puedeEditar}
-              onRegistrar={() => setModal({ mode: 'crear' })}
-              loading={loading}
-            />
+            <>
+              <EmptyState
+                planta={plantaSeleccionada}
+                puedeEditar={puedeEditar}
+                onRegistrar={() => setModal({ mode: 'crear' })}
+              />
+              <div className="flex-1 min-h-0 flex flex-col">
+                <HistorialList
+                  planta={plantaSeleccionada}
+                  historial={data?.historial || []}
+                  total={data?.historial_total || 0}
+                  loading={loadingMore}
+                  hasMore={tienePuedeMas}
+                  onLoadMore={cargarMasHistorial}
+                />
+              </div>
+            </>
           )}
         </div>
-
-        <HistorialList
-          planta={plantaSeleccionada}
-          historial={data.historial}
-          total={data.historial_total}
-          loading={loading || loadingMore}
-          hasMore={tienePuedeMas}
-          onLoadMore={cargarMasHistorial}
-        />
       </div>
 
       {modal && (
         <CambiarEstadoModal
           mode={modal.mode}
           plantaActual={plantaSeleccionada}
-          vigente={data.vigente}
+          vigente={data?.vigente}
           ultimoHistorico={ultimoHistorico}
           onClose={() => setModal(null)}
           onSubmit={handleSubmitModal}
@@ -214,7 +244,7 @@ export default function DisponibilidadDashboard({
         <ConfirmDeshacer
           planta={plantaSeleccionada}
           tieneHistorico={!!ultimoHistorico}
-          vigenteEvento={data.vigente?.evento}
+          vigenteEvento={data?.vigente?.evento}
           historicoEvento={ultimoHistorico?.evento}
           onCancel={() => setConfirmDeshacer(false)}
           onConfirm={handleDeshacerConfirm}
@@ -222,36 +252,22 @@ export default function DisponibilidadDashboard({
       )}
 
       <style>{`
-        .disp-pane { transition: opacity 250ms ease, transform 250ms ease; }
-        .disp-pane-entering { opacity: 0; transform: translateX(20px); }
-        .disp-pane-entered  { opacity: 1; transform: translateX(0); }
+        .disp-fade { animation: dispFadeIn 150ms ease-out; }
+        @keyframes dispFadeIn { from { opacity: 0; } to { opacity: 1; } }
       `}</style>
     </div>
   );
 }
 
-function Header({ plantaSeleccionada, onChangePlanta, loading }) {
+function Header({ plantaSeleccionada, onChangePlanta }) {
   return (
-    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-      <div className="flex items-center gap-3">
-        <div
-          className="w-12 h-12 rounded-2xl flex items-center justify-center"
-          style={{ backgroundColor: BRAND.green, color: '#fff' }}
-        >
-          <Activity size={22} />
-        </div>
-        <div>
-          <h1 className="text-xl font-bold" style={{ color: NEUTRAL.fgInk }}>
-            Disponibilidad de Plantas
-          </h1>
-          <p className="text-xs" style={{ color: NEUTRAL.fgTer }}>
-            Mini-dashboard interactivo · estado vigente y cambios recientes
-          </p>
-        </div>
-      </div>
+    <div className="flex items-center justify-between gap-3">
+      <h1 className="text-lg font-semibold" style={{ color: NEUTRAL.fgInk }}>
+        Disponibilidad de Plantas
+      </h1>
 
       <div
-        className="inline-flex p-1 rounded-2xl border self-start md:self-auto"
+        className="inline-flex p-1 rounded-lg border"
         style={{ borderColor: NEUTRAL.hairline, backgroundColor: NEUTRAL.surface }}
       >
         {PLANTAS.map((p) => {
@@ -259,8 +275,8 @@ function Header({ plantaSeleccionada, onChangePlanta, loading }) {
           return (
             <button
               key={p}
-              onClick={() => !loading && onChangePlanta(p)}
-              className="px-5 py-2 rounded-xl text-sm font-semibold transition-colors"
+              onClick={() => onChangePlanta(p)}
+              className="px-4 py-1.5 rounded-md text-sm font-medium transition-colors"
               style={{
                 backgroundColor: active ? BRAND.navy : 'transparent',
                 color: active ? '#fff' : NEUTRAL.fgInk,
@@ -275,30 +291,30 @@ function Header({ plantaSeleccionada, onChangePlanta, loading }) {
   );
 }
 
-function EmptyState({ planta, puedeEditar, onRegistrar, loading }) {
+function EmptyState({ planta, puedeEditar, onRegistrar }) {
   return (
     <div
-      className="rounded-2xl border-2 border-dashed p-10 flex flex-col items-center text-center gap-4"
+      className="rounded-xl border border-dashed p-8 flex flex-col items-center text-center gap-3"
       style={{ borderColor: NEUTRAL.hairline, backgroundColor: NEUTRAL.surface }}
     >
-      <div className="text-5xl" aria-hidden>🤷</div>
+      <Inbox size={36} style={{ color: NEUTRAL.fgTer }} />
       <div>
-        <div className="text-lg font-bold" style={{ color: NEUTRAL.fgInk }}>
-          {loading ? 'Cargando…' : `Sin estado registrado para ${planta}`}
+        <div className="text-base font-semibold" style={{ color: NEUTRAL.fgInk }}>
+          Sin estado registrado para {planta}
         </div>
-        <p className="text-sm mt-1" style={{ color: NEUTRAL.fgTer }}>
-          {puedeEditar
-            ? 'Registra el primer estado de disponibilidad para esta planta.'
-            : 'Aún no hay un registro vigente. Pedile a un Ingeniero JdT/Operación que registre el primer estado.'}
-        </p>
+        {!puedeEditar && (
+          <p className="text-sm mt-1" style={{ color: NEUTRAL.fgTer }}>
+            Sin permisos de escritura.
+          </p>
+        )}
       </div>
-      {puedeEditar && !loading && (
+      {puedeEditar && (
         <button
           onClick={onRegistrar}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white shadow-sm hover:shadow transition-all"
           style={{ backgroundColor: BRAND.green }}
         >
-          <Plus size={18} /> Registrar primer estado
+          <Plus size={16} /> Registrar primer estado
         </button>
       )}
     </div>
@@ -309,38 +325,29 @@ function ConfirmDeshacer({ planta, tieneHistorico, vigenteEvento, historicoEvent
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm disp-modal-overlay">
       <div
-        className="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 overflow-hidden disp-modal-card"
+        className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 overflow-hidden disp-modal-card"
         style={{ borderTop: '4px solid #DC3545' }}
       >
         <div className="px-6 py-5">
-          <div className="flex items-start gap-3">
-            <div className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 bg-red-100 text-red-600">
-              <Undo2 size={22} />
-            </div>
-            <div>
-              <h3 className="text-lg font-bold text-gray-900">Deshacer último registro</h3>
-              <p className="text-sm text-gray-600 mt-1">
-                Vas a borrar el estado vigente de {planta} (
-                <strong>{vigenteEvento || '—'}</strong>) y{' '}
-                {tieneHistorico ? (
-                  <>restaurar el anterior (<strong>{historicoEvento}</strong>) como vigente.</>
-                ) : (
-                  <>la planta volverá al empty state (no hay histórico).</>
-                )}{' '}
-                Se emitirá un registro de auditoría (CIET).
-              </p>
-            </div>
-          </div>
+          <h3 className="text-base font-semibold text-gray-900">Deshacer último registro</h3>
+          <p className="text-sm text-gray-600 mt-2">
+            Borra el vigente de <strong>{planta}</strong> ({vigenteEvento || '—'}) y{' '}
+            {tieneHistorico
+              ? <>restaura el anterior (<strong>{historicoEvento}</strong>) como vigente.</>
+              : <>deja la planta sin estado.</>
+            }{' '}
+            Queda registro de auditoría.
+          </p>
           <div className="mt-5 flex justify-end gap-2">
             <button
               onClick={onCancel}
-              className="px-4 py-2 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200"
+              className="px-4 py-2 rounded-lg text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200"
             >
               Cancelar
             </button>
             <button
               onClick={onConfirm}
-              className="flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold text-white bg-red-600 hover:bg-red-700"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700"
             >
               <Undo2 size={16} /> Sí, deshacer
             </button>
@@ -352,7 +359,7 @@ function ConfirmDeshacer({ planta, tieneHistorico, vigenteEvento, historicoEvent
         .disp-modal-card    { animation: dispRise 220ms ease-out; }
         @keyframes dispFade { from { opacity: 0; } to { opacity: 1; } }
         @keyframes dispRise {
-          from { opacity: 0; transform: translateY(12px) scale(0.98); }
+          from { opacity: 0; transform: translateY(8px) scale(0.99); }
           to   { opacity: 1; transform: translateY(0) scale(1); }
         }
       `}</style>
