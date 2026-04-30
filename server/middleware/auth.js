@@ -24,7 +24,7 @@ export async function loadSession(req) {
   if (!row) return null;
   db.request()
     .input('sesion_id', sql.Int, sesion_id)
-    .query(`UPDATE bitacora.sesion_activa SET ultima_actividad = GETDATE() WHERE sesion_id = @sesion_id`)
+    .query(`UPDATE bitacora.sesion_activa SET ultima_actividad = SYSUTCDATETIME() WHERE sesion_id = @sesion_id`)
     .catch(() => {});
   return row;
 }
