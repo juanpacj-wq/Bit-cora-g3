@@ -111,7 +111,17 @@ export async function cleanupTestRegistros() {
       WHERE registro_origen_id IN (
         SELECT registro_id FROM bitacora.registro_activo WHERE detalle LIKE @tag
       );
+      -- F12: limpia disponibilidad_dashboard antes de borrar el registro_activo que la
+      -- referencia (registro_activo_id es FK lógico — la integridad la mantiene el
+      -- helper upsert).
+      DELETE FROM bitacora.disponibilidad_dashboard
+      WHERE registro_activo_id IN (
+        SELECT registro_id FROM bitacora.registro_activo WHERE detalle LIKE @tag
+      );
       DELETE FROM bitacora.registro_activo WHERE detalle LIKE @tag;
+      -- F12: registros DISP cerrados pasan a registro_historico — los tests deben limpiarlos
+      -- por TEST_TAG en detalle para no acumular leftover entre runs.
+      DELETE FROM bitacora.registro_historico WHERE detalle LIKE @tag;
     `);
   const usernames = TEST_USERS.map((u) => `'${u.username}'`).join(',');
   await db.request().query(`
