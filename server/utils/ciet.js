@@ -64,7 +64,7 @@ export async function registrarEventoCierre(transaction, { tipo, sesion, bitacor
         (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
          estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
       OUTPUT INSERTED.registro_id, INSERTED.bitacora_id, INSERTED.tipo_evento_id, INSERTED.fecha_evento
-      VALUES (@bitacora_id, @planta_id, GETDATE(), @turno, NULL, @campos_extra, @tipo_evento_id,
+      VALUES (@bitacora_id, @planta_id, SYSUTCDATETIME(), @turno, NULL, @campos_extra, @tipo_evento_id,
               'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por)
     `);
   return ins.recordset[0];
@@ -140,7 +140,7 @@ export async function registrarDeshacerDisponibilidad(transaction, {
         (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
          estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
       OUTPUT INSERTED.registro_id, INSERTED.bitacora_id, INSERTED.tipo_evento_id, INSERTED.fecha_evento
-      VALUES (@bitacora_id, @planta_id, GETDATE(), @turno, NULL, @campos_extra, @tipo_evento_id,
+      VALUES (@bitacora_id, @planta_id, SYSUTCDATETIME(), @turno, NULL, @campos_extra, @tipo_evento_id,
               'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por)
     `);
   return ins.recordset[0];

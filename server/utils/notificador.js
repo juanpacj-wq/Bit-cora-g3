@@ -66,7 +66,7 @@ export async function upsertEventoDashboard(transaction, {
             jdts_snapshot = @jdts_snapshot,
             jefes_snapshot = @jefes_snapshot,
             registro_origen_id = @origen,
-            creado_en = GETDATE()
+            creado_en = SYSUTCDATETIME()
         WHERE evento_id = @id
       `);
     return { reactivated: true, evento_id: row.evento_id };
@@ -147,13 +147,13 @@ export async function upsertDisponibilidadDashboard(transaction, {
         jdts_snapshot       = s.jdts_snapshot,
         jefes_snapshot      = s.jefes_snapshot,
         modificado_por      = s.modificado_por,
-        modificado_en       = CASE WHEN s.modificado_por IS NULL THEN NULL ELSE GETDATE() END,
-        actualizado_en      = GETDATE()
+        modificado_en       = CASE WHEN s.modificado_por IS NULL THEN NULL ELSE SYSUTCDATETIME() END,
+        actualizado_en      = SYSUTCDATETIME()
       WHEN NOT MATCHED THEN INSERT
         (planta_id, evento, codigo, fecha_inicio_estado, registro_activo_id,
          jdts_snapshot, jefes_snapshot, actualizado_en)
         VALUES (s.planta_id, s.evento, s.codigo, s.fecha_inicio_estado, s.registro_activo_id,
-                s.jdts_snapshot, s.jefes_snapshot, GETDATE());
+                s.jdts_snapshot, s.jefes_snapshot, SYSUTCDATETIME());
     `);
 }
 

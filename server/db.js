@@ -325,8 +325,8 @@ export async function initDB() {
       planta_id        VARCHAR(10) NOT NULL REFERENCES lov_bit.planta(planta_id),
       cargo_id         INT         NOT NULL REFERENCES lov_bit.cargo(cargo_id),
       turno            TINYINT     NOT NULL CHECK (turno IN (1, 2)),
-      inicio_sesion    DATETIME2   NOT NULL DEFAULT GETDATE(),
-      ultima_actividad DATETIME2   NOT NULL DEFAULT GETDATE(),
+      inicio_sesion    DATETIME2   NOT NULL DEFAULT SYSUTCDATETIME(),
+      ultima_actividad DATETIME2   NOT NULL DEFAULT SYSUTCDATETIME(),
       activa           BIT         NOT NULL DEFAULT 1
     );
   `);
@@ -334,7 +334,7 @@ export async function initDB() {
     IF COL_LENGTH('bitacora.sesion_activa', 'ultima_actividad') IS NULL
     BEGIN
       ALTER TABLE bitacora.sesion_activa
-        ADD ultima_actividad DATETIME2 NOT NULL CONSTRAINT DF_sesion_ultact DEFAULT GETDATE();
+        ADD ultima_actividad DATETIME2 NOT NULL CONSTRAINT DF_sesion_ultact DEFAULT SYSUTCDATETIME();
     END
   `);
   // F9: el barrido inicial por TTL (`ultima_actividad < -5min`) fue eliminado — el modelo
@@ -382,7 +382,7 @@ export async function initDB() {
       sesion_bitacora_id INT       IDENTITY(1,1) PRIMARY KEY,
       sesion_id          INT       NOT NULL REFERENCES bitacora.sesion_activa(sesion_id),
       bitacora_id        INT       NOT NULL REFERENCES lov_bit.bitacora(bitacora_id),
-      abierta_en         DATETIME2 NOT NULL DEFAULT GETDATE(),
+      abierta_en         DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
       finalizada_en      DATETIME2 NULL,
       CONSTRAINT UQ_sesion_bitacora UNIQUE (sesion_id, bitacora_id)
     );
@@ -412,7 +412,7 @@ export async function initDB() {
       jdts_snapshot       NVARCHAR(MAX) NOT NULL,
       jefes_snapshot      NVARCHAR(MAX) NOT NULL,
       creado_por          INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
-      creado_en           DATETIME2     NOT NULL DEFAULT GETDATE(),
+      creado_en           DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
       modificado_por      INT           NULL     REFERENCES lov_bit.usuario(usuario_id),
       modificado_en       DATETIME2     NULL
     );
@@ -450,7 +450,7 @@ export async function initDB() {
       modificado_por         INT           NULL,
       modificado_en          DATETIME2     NULL,
       cerrado_por            INT           NOT NULL,
-      cerrado_en             DATETIME2     NOT NULL DEFAULT GETDATE(),
+      cerrado_en             DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
       fecha_cierre_operativo DATE          NOT NULL
     );
   `);
@@ -499,7 +499,7 @@ export async function initDB() {
       tipo                VARCHAR(10)   NOT NULL DEFAULT 'AUTH'
                           CHECK (tipo IN ('AUTH','REDESP','PRUEBA')),
       activa              BIT           NOT NULL DEFAULT 1,
-      creado_en           DATETIME2     NOT NULL DEFAULT GETDATE(),
+      creado_en           DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
       CONSTRAINT UQ_evento_planta_fecha_periodo_tipo UNIQUE (planta_id, fecha, periodo, tipo)
     );
   `);
@@ -934,7 +934,7 @@ export async function initDB() {
       jefes_snapshot         NVARCHAR(MAX) NOT NULL CONSTRAINT DF_dispdash_jefes DEFAULT '[]',
       modificado_por         INT NULL REFERENCES lov_bit.usuario(usuario_id),
       modificado_en          DATETIME2 NULL,
-      actualizado_en         DATETIME2 NOT NULL CONSTRAINT DF_dispdash_act DEFAULT GETDATE()
+      actualizado_en         DATETIME2 NOT NULL CONSTRAINT DF_dispdash_act DEFAULT SYSUTCDATETIME()
     );
   `);
 
@@ -978,6 +978,38 @@ export async function initDB() {
     WHERE s.activa = 1
       AND s.cargo_id = (SELECT cargo_id FROM lov_bit.cargo WHERE nombre = 'Ingeniero Jefe de Turno');
   `);
+
+  // F13.3: migración de DEFAULTs GETDATE() → SYSUTCDATETIME() para columnas DATETIME2.
+  // GETDATE() retorna hora local del SQL Server; mssql con useUTC=true (default) las lee
+  // como UTC y el frontend resta -5h al formatear → fechas mostradas 5h temprano. Las
+  // tablas ya existen al hacer hot-reload, así que el CREATE TABLE no re-ejecuta los
+  // DEFAULTs nuevos — necesitamos DROP+ADD del constraint en vivo.
+  // Idempotente: si el DEFAULT ya es SYSUTCDATETIME() (post-migración), no lo cambia.
+  const datetimeUTCDefaults = [
+    { schema: 'bitacora', table: 'sesion_activa',          column: 'inicio_sesion',    cname: 'DF_sesion_inicio'   },
+    { schema: 'bitacora', table: 'sesion_activa',          column: 'ultima_actividad', cname: 'DF_sesion_ultact'   },
+    { schema: 'bitacora', table: 'sesion_bitacora',        column: 'abierta_en',       cname: 'DF_sesion_bit_open' },
+    { schema: 'bitacora', table: 'registro_activo',        column: 'creado_en',        cname: 'DF_ra_creado_en'    },
+    { schema: 'bitacora', table: 'registro_historico',     column: 'cerrado_en',       cname: 'DF_rh_cerrado_en'   },
+    { schema: 'bitacora', table: 'evento_dashboard',       column: 'creado_en',        cname: 'DF_ed_creado_en'    },
+    { schema: 'bitacora', table: 'disponibilidad_dashboard', column: 'actualizado_en', cname: 'DF_dispdash_act'    },
+  ];
+  for (const m of datetimeUTCDefaults) {
+    await db.request().batch(`
+      DECLARE @cname SYSNAME, @def NVARCHAR(MAX);
+      SELECT @cname = dc.name, @def = dc.definition
+        FROM sys.default_constraints dc
+        JOIN sys.columns c ON c.column_id = dc.parent_column_id AND c.object_id = dc.parent_object_id
+        JOIN sys.tables t ON t.object_id = c.object_id
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        WHERE s.name = '${m.schema}' AND t.name = '${m.table}' AND c.name = '${m.column}';
+      IF @cname IS NOT NULL AND @def NOT LIKE '%SYSUTCDATETIME%'
+      BEGIN
+        EXEC('ALTER TABLE ${m.schema}.${m.table} DROP CONSTRAINT ' + @cname);
+        EXEC('ALTER TABLE ${m.schema}.${m.table} ADD CONSTRAINT ${m.cname} DEFAULT SYSUTCDATETIME() FOR ${m.column}');
+      END
+    `);
+  }
 
   // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de
   // auditoría interna (CIET).

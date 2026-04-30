@@ -47,7 +47,7 @@ export async function sweepTurnosVencidos(pool) {
       const idsCsv = ids.join(',');
       const upd = await new sql.Request(transaction).query(`
         UPDATE bitacora.sesion_bitacora
-        SET finalizada_en = GETDATE()
+        SET finalizada_en = SYSUTCDATETIME()
         WHERE sesion_bitacora_id IN (${idsCsv}) AND finalizada_en IS NULL
       `);
       const n = upd.rowsAffected[0] || 0;
