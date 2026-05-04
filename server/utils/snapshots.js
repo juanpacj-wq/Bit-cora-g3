@@ -59,3 +59,63 @@ export async function snapshotIngenieros(reqFactory, { planta_id }) {
     `);
   return toJSON(r.recordset);
 }
+
+// F16: snapshots agregados del día completo. Capturan TODOS los usuarios cuya sesión
+// inició o tuvo actividad durante el día Bogotá @fecha en planta_id. A diferencia de
+// snapshotJDTs/snapshotIngenieros (que cierran sobre el momento), estos ven toda la guardia
+// que rotó por la grilla MAND ese día. Los consume el sweeper diario (mand-sweeper.js).
+//
+// Criterio de "presente en el día": inicio_sesion cae el día Bogotá O ultima_actividad
+// cae el día Bogotá. Los rangos se calculan con offset -5h (UTC ↔ Bogotá).
+export async function snapshotJDTsDelDia(reqFactory, { planta_id, fecha }) {
+  const r = await reqFactory()
+    .input('planta_id', sql.VarChar(10), planta_id)
+    .input('fecha', sql.Date, fecha)
+    .query(`
+      SELECT DISTINCT u.usuario_id, u.nombre_completo
+      FROM bitacora.sesion_activa s
+      INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
+      INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
+      WHERE s.planta_id = @planta_id
+        AND c.nombre = 'Ingeniero Jefe de Turno'
+        AND u.activo = 1
+        AND (
+          CAST(DATEADD(HOUR, -5, s.inicio_sesion) AS DATE) = @fecha
+          OR CAST(DATEADD(HOUR, -5, s.ultima_actividad) AS DATE) = @fecha
+        )
+    `);
+  return toJSON(r.recordset);
+}
+
+// Los jefes de planta no se filtran por sesión — son los mismos siempre (es_jefe_planta=1).
+// El "del día" se mantiene por simetría con los demás helpers; el resultado es estable.
+export async function snapshotJefesDelDia(reqFactory) {
+  const r = await reqFactory().query(`
+    SELECT usuario_id, nombre_completo FROM lov_bit.usuario
+    WHERE es_jefe_planta = 1 AND activo = 1
+    ORDER BY usuario_id
+  `);
+  return toJSON(r.recordset);
+}
+
+// IngOp + operadores que rotaron en planta_id durante el día Bogotá @fecha.
+// Excluye JdT y Gerente de Producción (capturados en otros snapshots).
+export async function snapshotIngenierosDelDia(reqFactory, { planta_id, fecha }) {
+  const r = await reqFactory()
+    .input('planta_id', sql.VarChar(10), planta_id)
+    .input('fecha', sql.Date, fecha)
+    .query(`
+      SELECT DISTINCT u.usuario_id, u.nombre_completo
+      FROM bitacora.sesion_activa s
+      INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
+      INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
+      WHERE s.planta_id = @planta_id
+        AND u.activo = 1
+        AND c.nombre NOT IN ('Ingeniero Jefe de Turno', 'Gerente de Producción')
+        AND (
+          CAST(DATEADD(HOUR, -5, s.inicio_sesion) AS DATE) = @fecha
+          OR CAST(DATEADD(HOUR, -5, s.ultima_actividad) AS DATE) = @fecha
+        )
+    `);
+  return toJSON(r.recordset);
+}
