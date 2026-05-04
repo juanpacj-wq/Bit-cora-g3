@@ -1,6 +1,10 @@
 import http from 'http';
 import sql from 'mssql';
 import { initDB, getDB } from './db.js';
+// F16: USUARIO_SISTEMA_ID es un export `let` que se inicializa al final de initDB(). El
+// binding live de ESM permite usarlo después; al momento de los handlers del request ya
+// está cargado.
+import * as dbBindings from './db.js';
 import { verifyPassword } from './utils/password.js';
 import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
 import { getTurnoColombia, periodoFromFechaBogota, turnoFromPeriodo, ventanaTurno } from './utils/turno.js';
@@ -18,6 +22,8 @@ import { attachWSConteoBitacoras, broadcastConteoBitacoras } from './utils/ws-co
 // F9: turno-sweeper reemplazó al viejo sesion-sweeper (eliminado). Finaliza sesion_bitacora
 // cuando la ventana del turno termina, sin tocar sesion_activa.activa.
 import { startTurnoSweeper, stopTurnoSweeper } from './utils/turno-sweeper.js';
+// F16: sweeper diario MAND + helper de cierre manual.
+import { startMandSweeper, stopMandSweeper, cerrarDiaMand } from './utils/mand-sweeper.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
 
@@ -1195,41 +1201,9 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // F10: GET /api/sala-de-mando/dias-pendientes?planta_id=
-    // Lista las fechas con borradores MAND para una planta, ordenadas asc. El frontend lo
-    // usa como índice de paginación entre días sin cerrar (el cierre cronológico de F4
-    // exige cerrarlos uno a uno; sin esta lista, los días viejos quedaban invisibles).
-    if (pathname === '/api/sala-de-mando/dias-pendientes' && method === 'GET') {
-      const sesion = await loadSession(req);
-      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
-      const planta_id = url.searchParams.get('planta_id');
-      if (!planta_id) return sendJSON(res, 400, { error: 'planta_id es requerido' });
-      if (!plantaMatch(sesion, planta_id)) {
-        return sendJSON(res, 403, { error: 'No puede consultar otra planta' });
-      }
-      const db = await getDB();
-      const r = await db.request()
-        .input('planta_id', sql.VarChar(10), planta_id)
-        .query(`
-          SELECT CAST(ra.fecha_evento AS DATE) AS fecha,
-                 COUNT(*) AS registros_borrador
-          FROM bitacora.registro_activo ra
-          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
-          WHERE b.codigo = 'MAND'
-            AND ra.planta_id = @planta_id
-            AND ra.estado = 'borrador'
-          GROUP BY CAST(ra.fecha_evento AS DATE)
-          ORDER BY fecha ASC
-        `);
-      // Normalizar: el server retorna Date; el cliente quiere 'YYYY-MM-DD'.
-      const fechas = r.recordset.map((row) => ({
-        fecha: row.fecha instanceof Date
-          ? row.fecha.toISOString().slice(0, 10)
-          : String(row.fecha).slice(0, 10),
-        registros_borrador: row.registros_borrador,
-      }));
-      return sendJSON(res, 200, { fechas });
-    }
+    // F16: GET /api/sala-de-mando/dias-pendientes ELIMINADO. La grilla solo muestra HOY y
+    // el cierre es automático vía sweeper diario (mand-sweeper.js). El frontend ya no usa
+    // paginación entre días — F17 limpia los callsites en useSalaDeMando.js.
 
     // F6: GET /api/sala-de-mando?planta_id=&fecha=
     // Devuelve la grilla 3×24 (AUTH | PRUEBA | REDESP) que renderea el frontend de Sala de
@@ -1290,6 +1264,342 @@ const server = http.createServer(async (req, res) => {
         if (fila.funcionariocnd == null && row.funcionariocnd) fila.funcionariocnd = row.funcionariocnd;
       }
       return sendJSON(res, 200, out);
+    }
+
+    // F16.B1: POST /api/sala-de-mando/guardar — batch save atómico para la grilla MAND.
+    // Body: { planta_id, fecha, filas: [{ tipo, detalle, funcionariocnd, periodos: [{periodo, valor_mw}] }] }
+    // Reglas (preguntas_mand.md + preguntas_mand2.md):
+    //   - tipo ∈ {'AUTH','PRUEBA','REDESP'}; valor_mw=null → DELETE de la celda.
+    //   - planta_id ∈ {GEC3, GEC32}; fecha = hoy en TZ Bogotá (sino 400 fecha_no_es_hoy).
+    //   - REDESP: rechaza periodo < periodo_actual = floor(hora_bogota_now)+1 con motivo
+    //     'periodo_bloqueado'. AUTH/PRUEBA editables siempre dentro del día.
+    //   - AUTH con al menos una celda con valor != null exige funcionariocnd no vacío.
+    //   - PRUEBA/REDESP fuerzan funcionariocnd = null en persistencia (silencioso).
+    //   - modificado_por se actualiza SOLO en celdas cuyo valor_mw cambió (regla 2b).
+    //   - Toda la batch corre en una transacción; cualquier error → rollback completo.
+    if (pathname === '/api/sala-de-mando/guardar' && method === 'POST') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+
+      const body = await parseBody(req);
+      const { planta_id, fecha, filas } = body || {};
+
+      if (!planta_id || !['GEC3', 'GEC32'].includes(planta_id)) {
+        return sendJSON(res, 400, { error: 'planta_id inválido (debe ser GEC3 o GEC32)' });
+      }
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No puede guardar en otra planta' });
+      }
+      if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+        return sendJSON(res, 400, { error: 'fecha es requerida en formato YYYY-MM-DD' });
+      }
+      if (!Array.isArray(filas)) {
+        return sendJSON(res, 400, { error: 'filas debe ser un array' });
+      }
+
+      // Validación: fecha = hoy en TZ Bogotá. Calculamos hoy con offset -5h.
+      const nowMs = Date.now();
+      const nowBogota = new Date(nowMs - 5 * 3600 * 1000);
+      const hoyStr = `${nowBogota.getUTCFullYear()}-${String(nowBogota.getUTCMonth() + 1).padStart(2, '0')}-${String(nowBogota.getUTCDate()).padStart(2, '0')}`;
+      if (fecha !== hoyStr) {
+        return sendJSON(res, 400, {
+          errores: [{ motivo: 'fecha_no_es_hoy', mensaje: `fecha debe ser hoy (${hoyStr} en zona Bogotá)` }],
+        });
+      }
+
+      // Periodo actual = floor(hora_bogota_now) + 1 → P1=00:00..00:59, P15=14:00..14:59.
+      // Se usa para validar el lock REDESP.
+      const periodoActual = nowBogota.getUTCHours() + 1;
+
+      const db = await getDB();
+
+      // Lookup MAND + tipos de evento (Autorización/Pruebas/Redespacho) → mapeo
+      // notificar_dashboard_tipo (AUTH/PRUEBA/REDESP).
+      const meta = await db.request().query(`
+        SELECT b.bitacora_id AS mand_id,
+               te.tipo_evento_id, te.nombre AS tipo_nombre, te.notificar_dashboard_tipo AS tipo_dashboard
+        FROM lov_bit.bitacora b
+        INNER JOIN lov_bit.tipo_evento te ON te.bitacora_id = b.bitacora_id
+        WHERE b.codigo = 'MAND'
+      `);
+      if (meta.recordset.length === 0) {
+        return sendJSON(res, 500, { error: 'Bitácora MAND no encontrada' });
+      }
+      const MAND_ID = meta.recordset[0].mand_id;
+      const tipoMap = {};
+      for (const row of meta.recordset) {
+        if (row.tipo_dashboard) tipoMap[row.tipo_dashboard] = {
+          tipo_evento_id: row.tipo_evento_id,
+          tipo_nombre: row.tipo_nombre,
+        };
+      }
+      if (!tipoMap.AUTH || !tipoMap.PRUEBA || !tipoMap.REDESP) {
+        return sendJSON(res, 500, { error: 'Mapeo de tipos MAND incompleto en lov_bit.tipo_evento' });
+      }
+
+      // Permiso: puede_crear en MAND. plantaMatch ya validado arriba.
+      if (!(await hasPermisoBitacora(sesion, MAND_ID, 'puede_crear'))) {
+        return sendJSON(res, 403, { error: 'Sin permiso para crear/editar en MAND' });
+      }
+
+      // Validaciones de negocio (acumulan errores, NO escriben si hay alguno).
+      const errores = [];
+      const filasNorm = [];
+      for (const fila of filas) {
+        const { tipo, detalle, funcionariocnd, periodos } = fila || {};
+        if (!['AUTH', 'PRUEBA', 'REDESP'].includes(tipo)) {
+          errores.push({ tipo: tipo ?? null, motivo: 'tipo_invalido' });
+          continue;
+        }
+        if (!Array.isArray(periodos)) {
+          errores.push({ tipo, motivo: 'periodos_invalido' });
+          continue;
+        }
+        // Sanitizar periodos: cada item debe tener {periodo:int 1..24, valor_mw: number|null}.
+        const periodosNorm = [];
+        for (const item of periodos) {
+          const p = parseInt(item?.periodo, 10);
+          if (!Number.isInteger(p) || p < 1 || p > 24) {
+            errores.push({ tipo, periodo: item?.periodo ?? null, motivo: 'periodo_fuera_rango' });
+            continue;
+          }
+          const v = (item.valor_mw === null || item.valor_mw === undefined || item.valor_mw === '')
+            ? null
+            : Number(item.valor_mw);
+          if (v !== null && !Number.isFinite(v)) {
+            errores.push({ tipo, periodo: p, motivo: 'valor_mw_invalido' });
+            continue;
+          }
+          // Validación REDESP: rechaza periodo bloqueado solo si valor_mw != null
+          // (vaciar una celda bloqueada — improbable — no debería fallar por la regla del lock).
+          if (tipo === 'REDESP' && v !== null && p < periodoActual) {
+            errores.push({ tipo, periodo: p, motivo: 'periodo_bloqueado' });
+            continue;
+          }
+          periodosNorm.push({ periodo: p, valor_mw: v });
+        }
+
+        // funcionariocnd: AUTH lo requiere si hay al menos un valor != null.
+        // PRUEBA/REDESP: forzamos a null (silencioso).
+        let funcEff = funcionariocnd;
+        if (tipo === 'AUTH') {
+          const hayValor = periodosNorm.some((x) => x.valor_mw !== null);
+          if (hayValor && (!funcEff || String(funcEff).trim() === '')) {
+            errores.push({ tipo, motivo: 'funcionariocnd_requerido' });
+          }
+          if (funcEff != null && String(funcEff).trim() === '') funcEff = null;
+        } else {
+          funcEff = null;
+        }
+
+        filasNorm.push({
+          tipo, detalle: detalle ?? null, funcionariocnd: funcEff, periodos: periodosNorm,
+        });
+      }
+
+      if (errores.length > 0) {
+        return sendJSON(res, 400, { errores });
+      }
+
+      // Procesamiento atómico.
+      const transaction = new sql.Transaction(db);
+      await transaction.begin();
+      try {
+        const reqFactory = () => new sql.Request(transaction);
+        const jdts_snapshot = await snapshotJDTs(reqFactory, { planta_id });
+        const jefes_snapshot = await snapshotJefes(reqFactory);
+        const ingenieros_snapshot = await snapshotIngenieros(reqFactory, { planta_id });
+        if (jefes_snapshot === '[]') {
+          await transaction.rollback();
+          return sendJSON(res, 500, { error: 'No hay jefe de planta activo' });
+        }
+
+        let creados = 0, actualizados = 0, eliminados = 0;
+
+        for (const fila of filasNorm) {
+          const teInfo = tipoMap[fila.tipo];
+          const tipoEventoId = teInfo.tipo_evento_id;
+          const dashboardTipo = fila.tipo;
+
+          for (const { periodo, valor_mw } of fila.periodos) {
+            // Lookup: registro existente para (MAND, planta, fecha Bogotá, periodo, tipo_evento).
+            const existRes = await new sql.Request(transaction)
+              .input('mand', sql.Int, MAND_ID)
+              .input('planta', sql.VarChar(10), planta_id)
+              .input('fecha', sql.Date, fecha)
+              .input('periodo', sql.Int, periodo)
+              .input('te', sql.Int, tipoEventoId)
+              .query(`
+                SELECT TOP 1 ra.registro_id, ra.detalle,
+                       TRY_CAST(JSON_VALUE(ra.campos_extra, '$.valor_mw') AS FLOAT) AS valor_mw_old,
+                       JSON_VALUE(ra.campos_extra, '$.funcionariocnd') AS funcionariocnd_old
+                FROM bitacora.registro_activo ra
+                WHERE ra.bitacora_id = @mand
+                  AND ra.planta_id = @planta
+                  AND CAST(DATEADD(HOUR, -5, ra.fecha_evento) AS DATE) = @fecha
+                  AND ra.tipo_evento_id = @te
+                  AND TRY_CAST(JSON_VALUE(ra.campos_extra, '$.periodo') AS INT) = @periodo
+                  AND ra.estado = 'borrador'
+                ORDER BY ra.creado_en DESC
+              `);
+            const existing = existRes.recordset[0];
+            const turno = turnoFromPeriodo(periodo);
+
+            if (existing && valor_mw === null) {
+              // Caso B: existe + valor null → DELETE + soft-delete evento_dashboard.
+              await new sql.Request(transaction)
+                .input('rid', sql.Int, existing.registro_id)
+                .query(`
+                  UPDATE bitacora.evento_dashboard SET activa = 0
+                  WHERE registro_origen_id = @rid;
+                  DELETE FROM bitacora.registro_activo WHERE registro_id = @rid;
+                `);
+              eliminados++;
+              continue;
+            }
+
+            if (existing && valor_mw !== null) {
+              // Caso A: existe + valor != null. UPDATE de valor/detalle/funcionariocnd.
+              // modificado_por SOLO si valor_mw cambió (regla 2b preguntas_mand2.md).
+              const valorCambio = (existing.valor_mw_old !== valor_mw);
+              const detalleCambio = (existing.detalle ?? null) !== (fila.detalle ?? null);
+              const funcCambio = (existing.funcionariocnd_old ?? null) !== (fila.funcionariocnd ?? null);
+              if (!valorCambio && !detalleCambio && !funcCambio) continue; // no-op
+
+              const camposExtra = JSON.stringify({
+                periodo,
+                valor_mw,
+                ...(fila.funcionariocnd != null ? { funcionariocnd: fila.funcionariocnd } : { funcionariocnd: null }),
+              });
+              if (valorCambio) {
+                await new sql.Request(transaction)
+                  .input('rid', sql.Int, existing.registro_id)
+                  .input('detalle', sql.NVarChar(sql.MAX), fila.detalle ?? null)
+                  .input('campos_extra', sql.NVarChar(sql.MAX), camposExtra)
+                  .input('mod_por', sql.Int, sesion.usuario_id)
+                  .query(`
+                    UPDATE bitacora.registro_activo
+                    SET detalle = @detalle,
+                        campos_extra = @campos_extra,
+                        modificado_por = @mod_por,
+                        modificado_en = SYSUTCDATETIME()
+                    WHERE registro_id = @rid
+                  `);
+              } else {
+                // Solo cambió detalle/funcionariocnd — actualizamos sin tocar modificado_por.
+                await new sql.Request(transaction)
+                  .input('rid', sql.Int, existing.registro_id)
+                  .input('detalle', sql.NVarChar(sql.MAX), fila.detalle ?? null)
+                  .input('campos_extra', sql.NVarChar(sql.MAX), camposExtra)
+                  .query(`
+                    UPDATE bitacora.registro_activo
+                    SET detalle = @detalle,
+                        campos_extra = @campos_extra
+                    WHERE registro_id = @rid
+                  `);
+              }
+
+              // UPSERT evento_dashboard. Reusa fila si existía (preserva evento_id).
+              await upsertEventoDashboard(transaction, {
+                planta_id,
+                fecha,
+                periodo,
+                valor: valor_mw,
+                jdts_snapshot,
+                jefes_snapshot,
+                registro_origen_id: existing.registro_id,
+                tipo: dashboardTipo,
+              });
+              actualizados++;
+              continue;
+            }
+
+            if (!existing && valor_mw === null) {
+              // Caso D: no existe + valor null → no-op.
+              continue;
+            }
+
+            // Caso C: no existe + valor != null → INSERT registro_activo + UPSERT evento_dashboard.
+            const camposExtra = JSON.stringify({
+              periodo,
+              valor_mw,
+              ...(fila.funcionariocnd != null ? { funcionariocnd: fila.funcionariocnd } : { funcionariocnd: null }),
+            });
+            const ins = await new sql.Request(transaction)
+              .input('mand', sql.Int, MAND_ID)
+              .input('planta', sql.VarChar(10), planta_id)
+              .input('turno', sql.TinyInt, turno)
+              .input('detalle', sql.NVarChar(sql.MAX), fila.detalle ?? null)
+              .input('campos_extra', sql.NVarChar(sql.MAX), camposExtra)
+              .input('te', sql.Int, tipoEventoId)
+              .input('ingenieros_snapshot', sql.NVarChar(sql.MAX), ingenieros_snapshot)
+              .input('jdts_snapshot', sql.NVarChar(sql.MAX), jdts_snapshot)
+              .input('jefes_snapshot', sql.NVarChar(sql.MAX), jefes_snapshot)
+              .input('creado_por', sql.Int, sesion.usuario_id)
+              .query(`
+                INSERT INTO bitacora.registro_activo
+                  (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+                   estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
+                OUTPUT INSERTED.registro_id
+                VALUES (@mand, @planta, SYSUTCDATETIME(), @turno, @detalle, @campos_extra, @te,
+                        'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por)
+              `);
+            const newId = ins.recordset[0].registro_id;
+            await upsertEventoDashboard(transaction, {
+              planta_id,
+              fecha,
+              periodo,
+              valor: valor_mw,
+              jdts_snapshot,
+              jefes_snapshot,
+              registro_origen_id: newId,
+              tipo: dashboardTipo,
+            });
+            creados++;
+          }
+        }
+
+        await transaction.commit();
+        broadcastConteoBitacoras(planta_id).catch(() => {});
+        return sendJSON(res, 200, { resumen: { creados, actualizados, eliminados } });
+      } catch (err) {
+        try { await transaction.rollback(); } catch {}
+        throw err;
+      }
+    }
+
+    // F16.B4: POST /api/sala-de-mando/cierre-diario — endpoint manual que dispara el cierre
+    // del día para una planta (mismo helper que el sweeper diario). Útil para tests, recovery
+    // operativo y reproducción manual.
+    if (pathname === '/api/sala-de-mando/cierre-diario' && method === 'POST') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      if (!puedeCerrarTurno(sesion)) {
+        return sendJSON(res, 403, { error: 'Solo el Jefe de Turno o el Ingeniero de Operación pueden cerrar el día MAND' });
+      }
+      const body = await parseBody(req);
+      const { fecha, planta_id } = body || {};
+      if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+        return sendJSON(res, 400, { error: 'fecha es requerida en formato YYYY-MM-DD' });
+      }
+      if (!planta_id || !['GEC3', 'GEC32'].includes(planta_id)) {
+        return sendJSON(res, 400, { error: 'planta_id inválido (debe ser GEC3 o GEC32)' });
+      }
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No puede cerrar el día de otra planta' });
+      }
+      const pool = await getDB();
+      try {
+        const result = await cerrarDiaMand(pool, {
+          fecha,
+          planta_id,
+          usuarioCierre: dbBindings.USUARIO_SISTEMA_ID,
+        });
+        broadcastConteoBitacoras(planta_id).catch(() => {});
+        return sendJSON(res, 200, result);
+      } catch (err) {
+        return sendJSON(res, 500, { error: err.message });
+      }
     }
 
     // GET /api/cierre/preview?planta_id=&bitacora_id=
@@ -1395,16 +1705,23 @@ const server = http.createServer(async (req, res) => {
       }
       const cerrado_por = sesion.usuario_id;
       const pool = await getDB();
-      // F13.3: DISP y MAND no se cierran por turno. DISP envía al histórico al llegar un
-      // nuevo registro (rama POST /api/registros). MAND vive permanentemente en activo.
+      // F13.3: DISP no se cierra por turno (envía al histórico al llegar un nuevo registro).
+      // F16: MAND tampoco — el cierre es automático vía sweeper diario. Devolvemos 400 con
+      // mensaje específico para que el frontend pueda gatear el botón sin ambigüedad.
       const codigoRes = await pool.request()
         .input('bitacora_id', sql.Int, bitacora_id)
         .query(`SELECT codigo FROM lov_bit.bitacora WHERE bitacora_id = @bitacora_id`);
       const codigo = codigoRes.recordset[0]?.codigo;
-      if (codigo === 'DISP' || codigo === 'MAND') {
+      if (codigo === 'MAND') {
+        return sendJSON(res, 400, {
+          error: 'mand_cierre_individual_no_permitido',
+          mensaje: 'MAND no acepta cierre individual — el cierre es automático al finalizar el día.',
+        });
+      }
+      if (codigo === 'DISP') {
         return sendJSON(res, 422, {
           error: 'bitacora_no_cerrable',
-          mensaje: `La bitácora ${codigo} no se cierra por turno`,
+          mensaje: 'La bitácora DISP no se cierra por turno',
         });
       }
       const transaction = new sql.Transaction(pool);
@@ -2082,6 +2399,7 @@ initDB()
     attachWSConteoBitacoras(server);
     const db = await getDB();
     startTurnoSweeper(db);
+    startMandSweeper(db);
     server.listen(PORT, () => {
       console.log(`[SERVER] Escuchando en puerto ${PORT}`);
     });
@@ -2094,6 +2412,7 @@ initDB()
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     stopTurnoSweeper();
+    stopMandSweeper();
     process.exit(0);
   });
 }
