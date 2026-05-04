@@ -42,6 +42,10 @@ export async function getDB() {
   return pool;
 }
 
+// F16.A3: id del usuario sistema dedicado a CIETs automáticos (cierre diario MAND).
+// Se cachea al final de initDB() y lo consume mand-sweeper.js + el endpoint de cierre manual.
+export let USUARIO_SISTEMA_ID = null;
+
 // JSON definitions EXACTAMENTE como en BIT-MODBD-2026-001
 const DISP_JSON = JSON.stringify([
   { campo: 'evento', tipo: 'select', opciones: ['Disponible', 'Indisponible', 'En Reserva'], requerido: true },
@@ -63,6 +67,15 @@ const MAND_JSON = JSON.stringify([
 ]);
 
 async function migrateColumnToSnapshot(db, { table, oldCol, newCol, indexToDrop }) {
+  // Guard a nivel JS: SQL Server compila el batch completo antes del IF y resuelve
+  // referencias de columna en compile-time (no hay deferred name resolution para columnas
+  // de tablas existentes en batches ad-hoc). Si la columna vieja ya no existe, los batches
+  // de abajo —que referencian r.${oldCol}— fallarían a compilar aunque el IF nunca corra.
+  const probe = await db.request().query(
+    `SELECT COL_LENGTH('${table}','${oldCol}') AS len`
+  );
+  if (probe.recordset[0].len === null) return;
+
   await db.request().batch(`
     IF COL_LENGTH('${table}','${oldCol}') IS NOT NULL
     BEGIN
@@ -1010,6 +1023,104 @@ export async function initDB() {
       END
     `);
   }
+
+  // ---------- F16.A — Sala de Mando: backend batch + cierre automático ----------
+  // F16.A0: tabla flag para marcar migraciones one-time aplicadas. Sirve para que F16.A1
+  // (TRUNCATE selectivo MAND) y F16.A2 (limpieza funcionariocnd) corran solo una vez
+  // aunque initDB() vuelva a ejecutarse.
+  await db.request().batch(`
+    IF OBJECT_ID('bitacora.migracion_aplicada','U') IS NULL
+    CREATE TABLE bitacora.migracion_aplicada (
+      codigo      VARCHAR(50) NOT NULL PRIMARY KEY,
+      aplicada_en DATETIME2   NOT NULL DEFAULT SYSUTCDATETIME()
+    );
+  `);
+
+  const mandRow = await db.request().query(
+    `SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='MAND'`
+  );
+  const MAND_BITACORA_ID = mandRow.recordset[0]?.bitacora_id;
+
+  // F16.A1: TRUNCATE selectivo MAND (datos de prueba — preguntas_mand.md C4). Soft-delete
+  // de evento_dashboard por registro_origen_id antes de borrar registro_activo + histórico.
+  // Una sola vez: el flag F16.A1 protege contra re-ejecución en restart.
+  if (MAND_BITACORA_ID) {
+    await db.request()
+      .input('mand', sql.Int, MAND_BITACORA_ID)
+      .batch(`
+        IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F16.A1')
+        BEGIN
+          UPDATE bitacora.evento_dashboard SET activa = 0
+            WHERE registro_origen_id IN (
+              SELECT registro_id FROM bitacora.registro_activo WHERE bitacora_id = @mand
+            );
+          DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @mand;
+          DELETE FROM bitacora.registro_historico WHERE bitacora_id = @mand;
+          INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F16.A1');
+        END
+      `);
+  }
+
+  // F16.A2: limpia funcionariocnd remanente en PRUEBA/REDESP en histórico (los activos
+  // ya quedaron limpios tras A1; los históricos previos pueden tener datos del flujo viejo).
+  if (MAND_BITACORA_ID) {
+    await db.request()
+      .input('mand', sql.Int, MAND_BITACORA_ID)
+      .batch(`
+        IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F16.A2')
+        BEGIN
+          UPDATE rh
+          SET campos_extra = JSON_MODIFY(campos_extra, '$.funcionariocnd', NULL)
+          FROM bitacora.registro_historico rh
+          INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = rh.tipo_evento_id
+          WHERE rh.bitacora_id = @mand
+            AND te.nombre IN ('Pruebas','Redespacho')
+            AND JSON_VALUE(rh.campos_extra, '$.funcionariocnd') IS NOT NULL;
+
+          UPDATE ra
+          SET campos_extra = JSON_MODIFY(campos_extra, '$.funcionariocnd', NULL)
+          FROM bitacora.registro_activo ra
+          INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = ra.tipo_evento_id
+          WHERE ra.bitacora_id = @mand
+            AND te.nombre IN ('Pruebas','Redespacho')
+            AND JSON_VALUE(ra.campos_extra, '$.funcionariocnd') IS NOT NULL;
+
+          INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F16.A2');
+        END
+      `);
+  }
+
+  // F16.A3: usuario SISTEMA dedicado para CIETs automáticos. activo=0 evita login;
+  // password_hash='!disabled!' no matchea scrypt → defensa en profundidad.
+  await db.request().batch(`
+    IF NOT EXISTS (SELECT 1 FROM lov_bit.usuario WHERE username = 'SISTEMA')
+    BEGIN
+      INSERT INTO lov_bit.usuario
+        (nombre_completo, username, email, password_hash, es_jefe_planta, es_jdt_default, activo)
+      VALUES ('Sistema (cierre automático)', 'SISTEMA', NULL, '!disabled!', 0, 0, 0);
+    END
+  `);
+  const sistemaRes = await db.request().query(
+    `SELECT usuario_id FROM lov_bit.usuario WHERE username = 'SISTEMA'`
+  );
+  USUARIO_SISTEMA_ID = sistemaRes.recordset[0]?.usuario_id ?? null;
+  if (!USUARIO_SISTEMA_ID) {
+    throw new Error("[initDB] usuario 'SISTEMA' no fue sembrado (F16.A3)");
+  }
+
+  // F16.A4: log de cierre diario MAND. Idempotencia del sweeper — segunda llamada para
+  // (fecha, planta) detecta la fila y retorna skipped sin duplicar el cierre. Resiliente
+  // a reinicios del server.
+  await db.request().batch(`
+    IF OBJECT_ID('bitacora.mand_cierre_log','U') IS NULL
+    CREATE TABLE bitacora.mand_cierre_log (
+      fecha_cerrada       DATE         NOT NULL,
+      planta_id           VARCHAR(10)  NOT NULL REFERENCES lov_bit.planta(planta_id),
+      cerrado_en          DATETIME2    NOT NULL CONSTRAINT DF_mand_cierre_en DEFAULT SYSUTCDATETIME(),
+      registros_cerrados  INT          NOT NULL,
+      CONSTRAINT PK_mand_cierre_log PRIMARY KEY (fecha_cerrada, planta_id)
+    );
+  `);
 
   // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de
   // auditoría interna (CIET).
