@@ -53,7 +53,15 @@ const formatFechaHora = (isoStr) => {
 };
 
 const getTurnoLabel = (turno) => (turno === 1 || turno === "1" ? "Turno 1" : "Turno 2");
-const getTurnoActualNum = () => (new Date().getHours() < 12 ? 1 : 2);
+// Canonical turno window (F1, server/utils/turno.js): 1=diurno [6,17], 2=nocturno [18,5].
+const turnoFromHora = (hora) => (hora >= 6 && hora < 18 ? 1 : 2);
+const getTurnoActualNum = () => turnoFromHora(new Date().getHours());
+// datetime-local format: "YYYY-MM-DDTHH:mm" — substring is local-time hour, no TZ math needed.
+const turnoFromFechaLocal = (fechaLocal) => {
+  if (!fechaLocal || fechaLocal.length < 13) return getTurnoActualNum();
+  const hora = parseInt(fechaLocal.slice(11, 13), 10);
+  return Number.isFinite(hora) ? turnoFromHora(hora) : getTurnoActualNum();
+};
 
 const iniciales = (nombre = "") =>
   nombre.trim().split(/\s+/).slice(0, 2).map((n) => n[0]).join("").toUpperCase() || "?";
@@ -805,7 +813,11 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
               <input
                 type="datetime-local"
                 value={(reg.fecha_evento || "").slice(0, 16)}
-                onChange={(e) => onUpdate("fecha_evento", e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  onUpdate("fecha_evento", v);
+                  onUpdate("turno", turnoFromFechaLocal(v));
+                }}
                 className="w-full px-3 py-1.5 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
               />
               <select
