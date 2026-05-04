@@ -119,13 +119,16 @@ test('A2. POST /api/cierre/bitacora con bitacora_id=DISP retorna 422', async () 
   assert.equal(data.error, 'bitacora_no_cerrable');
 });
 
-test('A3. POST /api/cierre/bitacora con bitacora_id=MAND retorna 422', async () => {
+test('A3. POST /api/cierre/bitacora con bitacora_id=MAND retorna 400 (F16)', async () => {
   const { status, data } = await call('POST', '/api/cierre/bitacora', {
     sesion_id: ctx.sesiones.jdt,
     body: { bitacora_id: MAND_ID, planta_id: PLANTA_ID },
   });
-  assert.equal(status, 422, JSON.stringify(data));
-  assert.equal(data.error, 'bitacora_no_cerrable');
+  // F16 cambió 422 → 400 con código específico para que el frontend pueda gatear el botón
+  // sin ambigüedad. El cierre individual MAND quedó bloqueado: el cierre es automático vía
+  // mand-sweeper.js al cambiar el día Bogotá.
+  assert.equal(status, 400, JSON.stringify(data));
+  assert.equal(data.error, 'mand_cierre_individual_no_permitido');
 });
 
 test('A4. /api/cierre/masivo NO mueve el vigente DISP al histórico', async () => {
