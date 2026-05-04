@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --env-file=../.env --watch server.js",
     "start": "node --env-file=../.env server.js",
-    "test": "node --env-file=../.env --test --test-concurrency=1 tests/auth_middleware.test.js tests/auth_reactivate.test.js tests/disponibilidad.test.js tests/cierre_y_fechas.test.js"
+    "test": "node --env-file=../.env --test --test-concurrency=1 tests/auth_middleware.test.js tests/auth_reactivate.test.js tests/disponibilidad.test.js tests/cierre_y_fechas.test.js tests/sala_de_mando_batch.test.js"
   },
   "dependencies": {
     "mssql": "^11.0.1",
