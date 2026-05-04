@@ -123,6 +123,23 @@ export async function cleanupTestRegistros() {
       -- por TEST_TAG en detalle para no acumular leftover entre runs.
       DELETE FROM bitacora.registro_historico WHERE detalle LIKE @tag;
     `);
+  // F16: limpia mand_cierre_log para la planta de test. El log no tiene un campo "tag";
+  // borrar por planta_id es seguro porque la BD de tests usa GEC3 dedicado.
+  await db.request()
+    .input('planta', sql.VarChar(10), PLANTA_ID)
+    .query(`
+      DELETE FROM bitacora.mand_cierre_log WHERE planta_id = @planta;
+    `);
+  // F16: limpia evento_dashboard MAND remanente (los soft-deleted ya quedan así, pero por
+  // si algun test deja filas activas tras un fallo).
+  await db.request()
+    .input('planta', sql.VarChar(10), PLANTA_ID)
+    .query(`
+      DELETE FROM bitacora.evento_dashboard
+      WHERE planta_id = @planta
+        AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_activo)
+        AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_historico);
+    `);
   const usernames = TEST_USERS.map((u) => `'${u.username}'`).join(',');
   await db.request().query(`
     UPDATE bitacora.sesion_activa SET activa = 0
