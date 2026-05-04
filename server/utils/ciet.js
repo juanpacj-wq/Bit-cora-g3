@@ -7,6 +7,7 @@ const TIPO_NOMBRE = {
   cierre: 'Cierre de turno',
 };
 const TIPO_DESHACER_DISP = 'Deshacer disponibilidad';
+const TIPO_CIERRE_MAND = 'Cierre de turno';
 
 // F3: registra un evento en la bitácora CIET dentro de la transacción que se le pasa.
 // El caller es responsable de manejar commit/rollback. Esto permite que:
@@ -135,6 +136,62 @@ export async function registrarDeshacerDisponibilidad(transaction, {
     .input('jdts_snapshot', sql.NVarChar(sql.MAX), jdts_snapshot)
     .input('jefes_snapshot', sql.NVarChar(sql.MAX), jefes_snapshot)
     .input('creado_por', sql.Int, sesion.usuario_id)
+    .query(`
+      INSERT INTO bitacora.registro_activo
+        (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+         estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
+      OUTPUT INSERTED.registro_id, INSERTED.bitacora_id, INSERTED.tipo_evento_id, INSERTED.fecha_evento
+      VALUES (@bitacora_id, @planta_id, SYSUTCDATETIME(), @turno, NULL, @campos_extra, @tipo_evento_id,
+              'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por)
+    `);
+  return ins.recordset[0];
+}
+
+// F16: registra el CIET 'Cierre de turno' que el sweeper diario MAND emite al cerrar el día.
+// A diferencia de registrarEventoCierre, los snapshots son AGREGADOS DEL DÍA (toda la guardia
+// que rotó por la grilla, no solo la sesión actual del cron) y el autor es el usuario SISTEMA
+// — el cron no tiene sesión humana. El caller le pasa los snapshots ya construidos para que
+// este helper no haga IO extra y mantenga la responsabilidad de "cuál criterio del día usar"
+// en mand-sweeper.js.
+export async function registrarCierreMand(transaction, {
+  planta_id, fecha, turno, usuarioCierre, bitacora_origen_id,
+  jdts_snapshot, jefes_snapshot, ingenieros_snapshot, registros_cerrados,
+}) {
+  const ids = await new sql.Request(transaction)
+    .input('codigo', sql.VarChar(10), CIET_CODE)
+    .input('tipo_nombre', sql.VarChar(100), TIPO_CIERRE_MAND)
+    .query(`
+      SELECT b.bitacora_id, te.tipo_evento_id
+      FROM lov_bit.bitacora b
+      INNER JOIN lov_bit.tipo_evento te ON te.bitacora_id = b.bitacora_id
+      WHERE b.codigo = @codigo AND te.nombre = @tipo_nombre
+    `);
+  if (!ids.recordset[0]) {
+    throw new Error(`registrarCierreMand: bitácora ${CIET_CODE} o tipo '${TIPO_CIERRE_MAND}' no encontrado en BD`);
+  }
+  const { bitacora_id, tipo_evento_id } = ids.recordset[0];
+
+  const camposExtra = JSON.stringify({
+    rol: 'SISTEMA',
+    bitacora_origen: bitacora_origen_id ?? null,
+    forzado: true,
+    motivo: 'mand-sweeper-diario',
+    fecha_cerrada: fecha instanceof Date
+      ? fecha.toISOString().slice(0, 10)
+      : fecha,
+    registros_cerrados: registros_cerrados ?? null,
+  });
+
+  const ins = await new sql.Request(transaction)
+    .input('bitacora_id', sql.Int, bitacora_id)
+    .input('planta_id', sql.VarChar(10), planta_id)
+    .input('turno', sql.TinyInt, turno ?? null)
+    .input('campos_extra', sql.NVarChar(sql.MAX), camposExtra)
+    .input('tipo_evento_id', sql.Int, tipo_evento_id)
+    .input('ingenieros_snapshot', sql.NVarChar(sql.MAX), ingenieros_snapshot ?? '[]')
+    .input('jdts_snapshot', sql.NVarChar(sql.MAX), jdts_snapshot ?? '[]')
+    .input('jefes_snapshot', sql.NVarChar(sql.MAX), jefes_snapshot ?? '[]')
+    .input('creado_por', sql.Int, usuarioCierre)
     .query(`
       INSERT INTO bitacora.registro_activo
         (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
