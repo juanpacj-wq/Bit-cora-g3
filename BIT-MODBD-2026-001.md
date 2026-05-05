@@ -5,8 +5,8 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 1.2 |
-| Fecha | Abril 2026 |
+| Versión | 1.3 |
+| Fecha | Mayo 2026 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
@@ -27,6 +27,7 @@
 2. [Catálogos (esquema `lov_bit`)](#2-catálogos-esquema-lov_bit)
 3. [Sesiones activas (esquema `bitacora`)](#3-sesiones-activas-esquema-bitacora)
 4. [Registros de bitácora (esquema `bitacora`)](#4-registros-de-bitácora-esquema-bitacora)
+   - 4.4 [Tablas auxiliares de migración y cierre MAND](#44-tablas-auxiliares-de-migración-y-cierre-mand)
 5. [Integración con el Dashboard (esquema `bitacora`)](#5-integración-con-el-dashboard-esquema-bitacora)
 6. [Vistas útiles](#6-vistas-útiles)
 7. [Notas de diseño](#7-notas-de-diseño)
@@ -133,6 +134,26 @@ INSERT INTO lov_bit.usuario (nombre_completo, email, es_jefe_planta, es_jdt_defa
 - Los **permisos operativos** (cerrar turno, editar cualquier registro) viven en `lov_bit.cargo.puede_cerrar_turno`, no aquí. `puede_cerrar_turno=1` en *Ingeniero Jefe de Turno* y en *Ingeniero de Operación* — son iguales para permisos, distintos para identidad.
 - Cuando un IngOp crea un registro sin JdT en sesión, `ingenieros_snapshot` captura al IngOp real; `jdts_snapshot` contendrá al usuario con `es_jdt_default=1` como fallback. La trazabilidad del creador está intacta; la "firma" JdT es cosmética.
 - Auditoría sugerida: ejecutar `server/sql/audit_fallback_jdt.sql` mensualmente para detectar registros con fallback activo.
+
+#### 2.3.2 Usuario `SISTEMA` (autor automático, F16)
+
+Seed idempotente al arranque (`db.js::initDB()` flag `'F16.A3'`):
+
+```sql
+IF NOT EXISTS (SELECT 1 FROM lov_bit.usuario WHERE username = 'SISTEMA')
+INSERT INTO lov_bit.usuario
+    (nombre_completo, username, email, password_hash, es_jefe_planta, es_jdt_default, activo)
+VALUES ('Sistema (cierre automático)', 'SISTEMA', NULL, '!disabled!', 0, 0, 0);
+```
+
+Reglas:
+
+- Único usuario marcado `activo=0` en el seed. El `activo=0` impide que aparezca en login y en cualquier listado de "usuarios activos" / dropdowns.
+- `password_hash='!disabled!'` no matchea el formato de scrypt (`scrypt:N:r:p:salt:hash`) — defensa en profundidad ante un eventual bypass de la check de `activo=0`.
+- `email=NULL` por diseño: el usuario no recibe notificaciones ni se comunica con humanos.
+- Su `usuario_id` se cachea en `db.js` como `USUARIO_SISTEMA_ID` y se exporta. Los procesos automáticos (hoy: sweeper diario MAND, ver 4.4 y 7.9) lo usan como `creado_por` en CIETs de cierre. La traza humana de quién operó la grilla durante el día queda en los snapshots agregados (`*_snapshot` con la guardia que rotó por la grilla — ver `notificador.snapshotJDTsDelDia` y siblings).
+
+Si en el futuro se agregan más procesos automáticos (cron jobs adicionales, integraciones), reusar el mismo `USUARIO_SISTEMA_ID` — no crear un usuario nuevo por cada cron.
 
 ### 2.4 Bitácoras (catálogo dinámico — pieza central)
 
@@ -474,6 +495,49 @@ CREATE UNIQUE INDEX UQ_disp_vigente_por_planta
 
 Es la segunda barrera defensiva al `UPDLOCK + HOLDLOCK` del POST DISP transaccional (RF-055): aunque dos POSTs concurrentes burlaran el lock, el unique index los rechaza antes del COMMIT.
 
+### 4.4 Tablas auxiliares de migración y cierre MAND
+
+Dos tablas operativas internas, ajenas al flujo transaccional principal pero referenciadas desde `initDB()` y desde el sweeper diario.
+
+#### 4.4.1 `bitacora.migracion_aplicada` (F16)
+
+```sql
+CREATE TABLE bitacora.migracion_aplicada (
+    codigo      VARCHAR(50)  NOT NULL PRIMARY KEY,
+    aplicada_en DATETIME2    NOT NULL DEFAULT SYSUTCDATETIME()
+);
+```
+
+Flag genérico para migraciones one-time idempotentes ejecutadas desde `initDB()`. Se inserta `INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('<flag>')` al final de cada bloque de migración, y el bloque se gateaba al inicio con `IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='<flag>')`. Esto permite que `initDB()` corra en restart sin duplicar el efecto.
+
+Flags hoy en uso:
+
+| Código | Efecto |
+|---|---|
+| `F16.A1` | TRUNCATE selectivo MAND (`evento_dashboard.activa=0` por origen MAND + DELETE `registro_activo` + DELETE `registro_historico`). Datos de prueba previos a F16 — ver `preguntas_mand.md` C4. |
+| `F16.A2` | Limpieza `funcionariocnd` remanente en MAND PRUEBA/REDESP en histórico (`JSON_MODIFY` con NULL). Los activos quedaron limpios tras `F16.A1`. |
+
+Las dos migraciones son **destructivas** y solo se ejecutaron por confirmación expresa (datos de prueba). Si se necesita repetir el efecto, se debe `DELETE FROM bitacora.migracion_aplicada WHERE codigo='F16.A1'` antes de reiniciar — y entender que se borran datos.
+
+#### 4.4.2 `bitacora.mand_cierre_log` (F16)
+
+```sql
+CREATE TABLE bitacora.mand_cierre_log (
+    fecha_cerrada       DATE         NOT NULL,
+    planta_id           VARCHAR(10)  NOT NULL REFERENCES lov_bit.planta(planta_id),
+    cerrado_en          DATETIME2    NOT NULL DEFAULT SYSUTCDATETIME(),
+    registros_cerrados  INT          NOT NULL,
+    CONSTRAINT PK_mand_cierre_log PRIMARY KEY (fecha_cerrada, planta_id)
+);
+```
+
+Idempotencia primaria del sweeper diario MAND (`server/utils/mand-sweeper.js::cerrarDiaMand`):
+
+- Antes de cualquier escritura, el sweeper hace `SELECT 1 ... WHERE fecha_cerrada=@f AND planta_id=@p`. Si encuentra fila, retorna `{ skipped: true, reason: 'already_closed' }` sin abrir transacción.
+- La fila se inserta DENTRO de la transacción que cierra el día (junto al INSERT histórico, soft-delete `evento_dashboard`, DELETE activo y CIET). Si dos calls concurrentes llegan al INSERT, la PK colisiona y la segunda hace rollback automático — comportamiento correcto.
+- `registros_cerrados` = cuántos registros borrador se movieron a histórico. Sirve para auditoría operacional (¿el día N tuvo uso? ¿cuánto?).
+- El sweeper también hace early return `{ skipped: true, reason: 'no_records' }` (sin INSERT al log) si no hay registros borrador para `(fecha, planta)`. Esto evita que un día sin uso aparezca en el log y bloquee re-procesos legítimos. Trade-off aceptado: si pasado un tiempo aparecen registros para ese día y se gatilla el cron, el sweeper sí cerrará correctamente porque no hay fila previa en el log.
+
 ---
 
 ## 5. Integración con el Dashboard (esquema `bitacora`)
@@ -698,6 +762,20 @@ La bitácora DISP rompe deliberadamente varias invariantes del modelo general po
 - **`disponibilidad_dashboard` (5.2) vive aparte de `evento_dashboard` (5.1):** no comparten UNIQUE ni schema. Mezclarlas obligaría a hacer `periodo` nullable en `evento_dashboard` y romper la UNIQUE existente — preferimos dos tablas con semánticas claras.
 - **Permisos diferenciados:** `puede_ver=1` para todos los cargos (es información operativa de interés universal); `puede_crear=1` solo para JdT (1) e IngOp (2). Frontend gatea botones; backend rechaza con 403 desde `hasPermisoBitacora`.
 
+### 7.9 Sala de Mando con batch save y cierre automático (F16+F17)
+
+La bitácora MAND también rompe varias invariantes del modelo general — distintas a las de DISP:
+
+- **No usa cierre individual ni masivo:** `POST /api/cierre/bitacora` con `bitacora.codigo='MAND'` retorna `400 mand_cierre_individual_no_permitido`. La exclusión del cierre masivo (vigente desde F10) se mantiene. El cierre se ejecuta automáticamente al final del día Bogotá vía sweeper diario (`server/utils/mand-sweeper.js`) que cada 60s detecta cambio de día y mueve los registros activos del día anterior a `registro_historico` con `estado='cerrado'`. Resiliente a reinicios: el primer tick post-arranque intenta cerrar AYER por si el server estaba caído al cruzar medianoche.
+- **No acepta save por celda:** `POST /api/registros` y `PUT /api/registros/:id` siguen aceptando registros MAND (compatibilidad con flujos automáticos legacy), pero la UI usa exclusivamente `POST /api/sala-de-mando/guardar` con shape de batch atómico `{ planta_id, fecha, filas: [{ tipo, detalle, funcionariocnd, periodos: [{ periodo, valor_mw }] }] }`. Toda la batch corre en una transacción única. Validaciones de negocio devuelven 400 con `{ errores: [{ tipo, periodo?, motivo }] }` y NO escriben. Motivos: `fecha_no_es_hoy`, `tipo_invalido`, `periodos_invalido`, `periodo_fuera_rango`, `valor_mw_invalido`, `periodo_bloqueado`, `funcionariocnd_requerido`.
+- **`fecha` debe ser hoy en Bogotá:** el server fuerza `fecha == hoyStr` (Bogotá calculado como `new Date(now - 5h)`). Sino 400 `fecha_no_es_hoy`. La grilla solo opera sobre HOY tras F17 — la paginación entre días F10 (`/api/sala-de-mando/dias-pendientes`) fue eliminada en F16.
+- **REDESP locked en periodos pasados:** server rechaza `tipo='REDESP' && valor_mw!=null && periodo < periodoActual` (`= floor(horaBogota)+1`) con 400 `periodo_bloqueado`. AUTH y PRUEBA no tienen lock — pueden registrarse a-posteriori dentro del día.
+- **`funcionariocnd` por tipo:** AUTH lo requiere si hay al menos un `valor_mw != null` en la fila (`funcionariocnd_requerido` si vacío). PRUEBA y REDESP fuerzan `funcionariocnd = NULL` en persistencia (silencioso, sin error). Esto vale tanto para el INSERT como para el UPDATE.
+- **`modificado_por` selectivo:** se actualiza únicamente cuando `valor_mw` cambió. Cambios de `detalle`/`funcionariocnd` no tocan `modificado_por`/`modificado_en`. Trade-off explícito de F16 (regla 2b de `preguntas_mand2.md`): `modificado_por` audita cambios numéricos al despacho, no edición de metadatos.
+- **CIET de cierre con autor SISTEMA:** distinto del CIET regular (autor=usuario que cierra, snapshot del momento). El sweeper diario emite CIET con `creado_por=USUARIO_SISTEMA_ID` y snapshots agregados con todo el personal que rotó por la guardia ese día (`snapshotJDTsDelDia`, `snapshotJefesDelDia`, `snapshotIngenierosDelDia`). `campos_extra = { rol: 'SISTEMA', bitacora_origen, forzado: true, motivo: 'mand-sweeper-diario', fecha_cerrada, registros_cerrados }`. Idempotencia vía `bitacora.mand_cierre_log` (4.4.2).
+- **`evento_dashboard` soft-delete en cierre:** al cerrar el día, las filas en `evento_dashboard` cuyo `registro_origen_id` apunta a registros que se mueven al histórico se marcan `activa=0`. El dashboard productivo deja de verlas inmediatamente.
+- **Permisos:** `puede_ver=1` y `puede_crear=1` solo para cargos 1 (JdT) y 2 (IngOp). Otros cargos no ven la bitácora en el sidebar.
+
 ---
 
 ## 8. Historial de versiones
@@ -707,6 +785,7 @@ La bitácora DISP rompe deliberadamente varias invariantes del modelo general po
 | 1.0 | 2026-04-10 | Versión inicial: esquema completo de catálogos, sesiones, registros activo/histórico, tabla puente al Dashboard, vistas y notas de diseño. |
 | 1.1 | 2026-04-18 | Roles por rol (JdTs, Jefes, Ingenieros) migrados a snapshots JSON (`*_snapshot NVARCHAR(MAX) NOT NULL`). `creado_por` queda como único FK vivo a `lov_bit.usuario` en tablas transaccionales. Se añade TTL de 5 min sobre `sesion_activa.ultima_actividad`, sweep de arranque y endpoint `/api/auth/resume`. Vista `v_historico_busqueda` reescrita sin JOINs por rol. |
 | 1.2 | 2026-04-29 | F12+F13+F14 (Disponibilidad como mini-dashboard). Columna `fecha_fin_estado DATETIME2 NULL` en `registro_activo` y `registro_historico` (DISP only). Filtered unique index `UQ_disp_vigente_por_planta` (4.3). Tabla nueva `bitacora.disponibilidad_dashboard` (5.2) — separada de `evento_dashboard`. `turno` se vuelve nullable (DISP graba NULL). Sección 7.8 documenta las invariantes que DISP rompe deliberadamente. **Fuera del alcance de v1.2:** F2/F4/F5/F9 ya estaban incorporados al modelo en parches previos sin bumpear esta versión — la `autorizacion_dashboard` se renombró a `evento_dashboard` con columna `tipo` (F5) y la vista compat se eliminó (F9); la columna `cerrada_en` de `sesion_activa` y la tabla `sesion_bitacora` (F2) viven en código pero no estaban reflejadas acá. |
+| 1.3 | 2026-05-04 | F16+F17+F18 (Sala de Mando con batch save y cierre automático fin de día). Sección 2.3.2 nueva — usuario `SISTEMA` (autor automático para CIETs de procesos cron). Sección 4.4 nueva con dos tablas auxiliares: `bitacora.migracion_aplicada` (flag genérico de migraciones one-time) y `bitacora.mand_cierre_log` (idempotencia del sweeper diario MAND). Sección 7.9 nueva — políticas MAND (no acepta cierre individual/masivo, batch save atómico vía `POST /api/sala-de-mando/guardar`, lock REDESP por hora actual, funcionariocnd condicional por tipo, CIET con autor SISTEMA y snapshots agregados del día). El endpoint `GET /api/sala-de-mando/dias-pendientes` (F10) fue eliminado en F16. |
 
 ---
 
