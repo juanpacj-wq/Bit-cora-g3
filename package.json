@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.7.0",
@@ -16,5 +18,8 @@
     "react-dom": "^19.2.4",
     "tailwindcss": "^3.4.19",
     "vite": "^5.4.21"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0"
   }
 }
