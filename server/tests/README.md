@@ -64,9 +64,9 @@ Las fallas D4-D6 son pre-existentes a F19+F20+F21 (verificadas en baseline `git 
 
 `Bit-cora-g3/package.json` agrega `npm test` con vitest (F21.D). Cubren `src/utils/fecha.js` y la convención canónica `Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Bogota' })` + offset `-05:00` que viven inline en `BitacorasGecelca3.jsx` y `CambiarEstadoModal.jsx`. Si el patrón cambia en el callsite, el test rompe y obliga a re-auditar.
 
-> **Setup pendiente:** durante F21 el `npm install` colgó >30min (probable issue de red/proxy en el entorno de desarrollo) y vitest quedó listado en `devDependencies` sin instalar. El `vitest.config.js` y `src/utils/fecha.test.js` ya están commiteados; correr `npm install` cuando la red esté disponible y luego:
-
 ```bash
 cd Bit-cora-g3
 npm test
 ```
+
+> **Nota de install:** durante F21 el `npm install` desde la red corporativa colgó (proxy o firewall corporativo cortando los binarios nativos de rollup/esbuild). Quedó resuelto cambiando a datos móviles — `added 35 packages in 15s` y `15/15` tests verdes. Si en otro equipo el install se cuelga, validar con `npm config get registry` que apunte a un mirror que tenga vitest 3.x cacheado, o usar conexión sin firewall corp.
