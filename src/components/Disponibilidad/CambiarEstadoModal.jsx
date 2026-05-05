@@ -4,30 +4,37 @@ import { ESTADOS, PLANTAS, NEUTRAL, BRAND } from './colores';
 
 const CODIGO_POR_EVENTO = { Disponible: 1, 'En Reserva': 0, Indisponible: -1 };
 
-function pad(n) { return String(n).padStart(2, '0'); }
+// F20: input `datetime-local` interpreta el valor tipeado como hora Bogotá; el frontend
+// convierte a UTC apendiendo -05:00 fijo (Colombia sin DST) antes de enviar al server.
+const BOGOTA_LOCAL_FMT = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'America/Bogota',
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hour12: false,
+});
+const FECHA_CORTA_FMT = new Intl.DateTimeFormat('es-CO', {
+  timeZone: 'America/Bogota',
+  day: '2-digit', month: 'short', year: 'numeric',
+  hour: '2-digit', minute: '2-digit',
+});
 
 function toDatetimeLocal(value) {
   if (!value) return '';
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return '';
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return BOGOTA_LOCAL_FMT.format(d).replace(' ', 'T').slice(0, 16);
 }
 
 function toIsoFromLocal(value) {
   if (!value) return null;
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString();
+  const d = new Date(`${value}:00-05:00`);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 function formatFechaCorta(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
-  return d.toLocaleString('es-CO', {
-    day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  });
+  return FECHA_CORTA_FMT.format(d);
 }
 
 // `mode='crear'`: planta editable, vigente?.fecha_inicio_estado define `min`.
