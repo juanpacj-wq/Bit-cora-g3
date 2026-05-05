@@ -95,6 +95,14 @@ export default function SalaDeMandoGrid({
   const [fechaCargada, setFechaCargada] = useState(null);
   const tableRef = useRef(null);
   const guardarRef = useRef(null);
+  // F18-fix: refs latentes para callbacks externos. El padre puede pasarlos como arrows
+  // inline (recreadas en cada render), y si los pusiéramos en deps de useCallback, cada
+  // render del padre invalidaría refresh/guardar → el useEffect del initial-load
+  // re-ejecutaría refresh() → setBuffer/setEditing limpian lo tipeado por el usuario.
+  const onErrorRef = useRef(onError);
+  const showToastRef = useRef(showToast);
+  useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  useEffect(() => { showToastRef.current = showToast; }, [showToast]);
 
   const refresh = useCallback(async () => {
     if (!plantaId) return;
@@ -108,11 +116,13 @@ export default function SalaDeMandoGrid({
       setEditing({});
       setErrores([]);
     } catch (e) {
-      onError?.(e.message);
+      onErrorRef.current?.(e.message);
     }
-  }, [getGrilla, plantaId, onError]);
+  }, [getGrilla, plantaId]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  // F18-fix: dep [plantaId] (no [refresh]) — el initial-load conceptualmente depende de
+  // la planta, no de la identidad de la función. getGrilla es estable (useCallback []).
+  useEffect(() => { refresh(); }, [plantaId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Watcher cada 60s: actualiza periodo actual (lock REDESP) + detecta cambio de día
   // Bogotá. Si cruzó medianoche, refetch (vendrá vacía porque el sweeper habrá cerrado).
@@ -151,20 +161,20 @@ export default function SalaDeMandoGrid({
     try {
       const r = await guardarBatch({ planta_id: plantaId, fecha: getTodayBogota(), filas });
       const res = r?.resumen || { creados: 0, actualizados: 0, eliminados: 0 };
-      showToast?.(`Guardado: ${res.creados} nuevos, ${res.actualizados} actualizados, ${res.eliminados} eliminados`);
+      showToastRef.current?.(`Guardado: ${res.creados} nuevos, ${res.actualizados} actualizados, ${res.eliminados} eliminados`);
       setErrores([]);
       await refresh();
     } catch (e) {
       if (Array.isArray(e?.errores)) {
         setErrores(e.errores);
-        onError?.('Hay errores en el formulario. Corregí las celdas resaltadas.');
+        onErrorRef.current?.('Hay errores en el formulario. Corregí las celdas resaltadas.');
       } else {
-        onError?.(e.message);
+        onErrorRef.current?.(e.message);
       }
     } finally {
       setGuardando(false);
     }
-  }, [buffer, snapshot, guardarBatch, plantaId, showToast, onError, refresh]);
+  }, [buffer, snapshot, guardarBatch, plantaId, refresh]);
 
   useEffect(() => { guardarRef.current = guardar; }, [guardar]);
   useEffect(() => {
