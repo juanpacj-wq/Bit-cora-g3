@@ -23,7 +23,7 @@ import { useUsuariosActivos } from "./hooks/useUsuariosActivos";
 import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
 import { useFlipReorder } from "./hooks/useFlipReorder";
 import { useBitacoraSesion, useFinalizarTurno } from "./hooks/useBitacoraSesion";
-import { getTodayBogota, shiftDate } from "./utils/fecha";
+import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
 
 const COLORS = {
   greenPrimary: "#31a354", greenDark: "#006f36",
@@ -38,25 +38,64 @@ const ICON_MAP = {
   FlaskConical, Leaf, FileCheck,
 };
 
-const getLocalISOString = (date = new Date()) => {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+// F20: presentación + entrada de fecha en hora Bogotá explícita, independiente del navegador.
+const FECHA_HORA_FMT = new Intl.DateTimeFormat("es-CO", {
+  timeZone: "America/Bogota",
+  day: "2-digit", month: "2-digit", year: "numeric",
+  hour: "2-digit", minute: "2-digit",
+});
+const BOGOTA_LOCAL_FMT = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: "America/Bogota",
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hour12: false,
+});
+const BOGOTA_DATE_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/Bogota", year: "numeric", month: "2-digit", day: "2-digit",
+});
+const RELOJ_FECHA_FMT = new Intl.DateTimeFormat("es-CO", {
+  timeZone: "America/Bogota",
+  weekday: "long", day: "numeric", month: "long", year: "numeric",
+});
+const RELOJ_HORA_FMT = new Intl.DateTimeFormat("es-CO", {
+  timeZone: "America/Bogota", hour: "2-digit", minute: "2-digit",
+});
+
+// `value` puede ser ISO con Z/offset (post-backend) o "YYYY-MM-DDTHH:mm" wallclock Bogotá (post-edit).
+// Devuelve "YYYY-MM-DDTHH:mm" Bogotá wallclock para popular <input type="datetime-local">.
+const toBogotaLocal = (value) => {
+  if (!value) return "";
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return value;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return BOGOTA_LOCAL_FMT.format(d).replace(" ", "T").slice(0, 16);
 };
 
-const formatFechaHora = (isoStr) => {
-  if (!isoStr) return "";
-  const d = new Date(isoStr);
-  return d.toLocaleString("es-CO", {
-    day: "2-digit", month: "2-digit", year: "numeric",
-    hour: "2-digit", minute: "2-digit",
-  });
+const toBogotaDate = (value) => {
+  if (!value) return "";
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value) && !/Z|[+-]\d{2}:?\d{2}$/.test(value)) {
+    return value.slice(0, 10);
+  }
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? "" : BOGOTA_DATE_FMT.format(d);
 };
+
+// Wallclock Bogotá → ISO UTC. Apendemos -05:00 fijo (Colombia sin DST). Idempotente con ISO UTC.
+const bogotaLocalToIso = (value) => {
+  if (!value) return null;
+  const wall = toBogotaLocal(value);
+  if (!wall) return null;
+  return new Date(`${wall}:00-05:00`).toISOString();
+};
+
+const nowBogotaLocal = () => toBogotaLocal(new Date());
+
+const formatFechaHora = (isoStr) => (isoStr ? FECHA_HORA_FMT.format(new Date(isoStr)) : "");
 
 const getTurnoLabel = (turno) => (turno === 1 || turno === "1" ? "Turno 1" : "Turno 2");
 // Canonical turno window (F1, server/utils/turno.js): 1=diurno [6,17], 2=nocturno [18,5].
 const turnoFromHora = (hora) => (hora >= 6 && hora < 18 ? 1 : 2);
-const getTurnoActualNum = () => turnoFromHora(new Date().getHours());
-// datetime-local format: "YYYY-MM-DDTHH:mm" — substring is local-time hour, no TZ math needed.
+const getTurnoActualNum = () => turnoFromHora(Math.floor(horaBogota()));
+// `fechaLocal` es Bogotá wallclock "YYYY-MM-DDTHH:mm" — el slice de hora ya está en hora Bogotá.
 const turnoFromFechaLocal = (fechaLocal) => {
   if (!fechaLocal || fechaLocal.length < 13) return getTurnoActualNum();
   const hora = parseInt(fechaLocal.slice(11, 13), 10);
@@ -342,8 +381,8 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
     return () => document.removeEventListener('mousedown', onDocMouseDown);
   }, [menuOpen]);
 
-  const fechaStr = reloj.toLocaleDateString("es-CO", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
-  const horaStr = reloj.toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" });
+  const fechaStr = RELOJ_FECHA_FMT.format(reloj);
+  const horaStr = RELOJ_HORA_FMT.format(reloj);
   const activos = usuariosActivos || [];
 
   return (
@@ -720,7 +759,7 @@ function GrillaRegistros({
       .filter((r) => (filtroTipo ? String(r.tipo_evento_id) === String(filtroTipo) : true))
       .filter((r) => {
         if (!filtroFecha) return true;
-        return String(r.fecha_evento || '').slice(0, 10) === filtroFecha;
+        return toBogotaDate(r.fecha_evento) === filtroFecha;
       })
       .filter((r) => (filtroTurno ? String(r.turno) === String(filtroTurno) : true))
       .sort((a, b) => new Date(a.fecha_evento) - new Date(b.fecha_evento));
@@ -835,7 +874,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
             <div className="space-y-1.5">
               <input
                 type="datetime-local"
-                value={(reg.fecha_evento || "").slice(0, 16)}
+                value={toBogotaLocal(reg.fecha_evento)}
                 onChange={(e) => {
                   const v = e.target.value;
                   onUpdate("fecha_evento", v);
@@ -1051,6 +1090,12 @@ export default function App() {
     setToast({ message, type, key: Date.now() });
   }, []);
 
+  // F18-fix: callback estable para SalaDeMandoGrid. Sin esto, la arrow inline se recreaba
+  // en cada render del padre, invalidaba `refresh` (useCallback con dep [onError]) en el
+  // child y disparaba un re-fetch que limpiaba el buffer + editing → valores tipeados se
+  // borraban antes de poder guardarlos.
+  const handleMandError = useCallback((m) => showToast(m, 'error'), [showToast]);
+
   const sesion = auth.sesion;
   const user = auth.user;
 
@@ -1118,7 +1163,7 @@ export default function App() {
       _dirty: true,
       bitacora_id: activeBitacora,
       planta_id: sesion.planta_id,
-      fecha_evento: getLocalISOString(),
+      fecha_evento: nowBogotaLocal(),
       turno: getTurnoActualNum(),
       detalle: "",
       tipo_evento_id: defTipo?.tipo_evento_id || null,
@@ -1146,12 +1191,13 @@ export default function App() {
     if (!reg.detalle || !reg.detalle.trim()) { showToast("Escribe una descripción", "error"); return false; }
 
     try {
+      const fechaEventoIso = bogotaLocalToIso(reg.fecha_evento);
       if (!reg.registro_id) {
         // Crear
         const creado = await registrosHook.crear({
           bitacora_id: reg.bitacora_id,
           planta_id: reg.planta_id,
-          fecha_evento: reg.fecha_evento,
+          fecha_evento: fechaEventoIso,
           turno: reg.turno,
           detalle: reg.detalle,
           tipo_evento_id: reg.tipo_evento_id,
@@ -1165,7 +1211,7 @@ export default function App() {
         await registrosHook.actualizar(reg.registro_id, {
           detalle: reg.detalle,
           turno: reg.turno,
-          fecha_evento: reg.fecha_evento,
+          fecha_evento: fechaEventoIso,
           tipo_evento_id: reg.tipo_evento_id,
           campos_extra: reg.campos_extra || null,
         });
@@ -1383,8 +1429,8 @@ export default function App() {
               bitacora={bitacoraActiva}
               plantaId={sesion?.planta_id}
               puedeCrear={puedeCrear}
-              showToast={(m) => showToast(m)}
-              onError={(m) => showToast(m, 'error')}
+              showToast={showToast}
+              onError={handleMandError}
               onDirtyChange={setMandDirty}
               onGuardandoChange={setMandGuardando}
               registerSaveHandler={registerMandSave}
