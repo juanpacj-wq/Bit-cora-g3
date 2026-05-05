@@ -2,14 +2,18 @@ import React from 'react';
 import { History, ChevronDown } from 'lucide-react';
 import { ESTADO_COLORS, NEUTRAL } from './colores';
 
+// F20: render Bogotá explícito — `fecha_inicio_estado` es un instante UTC en BD.
+const FECHA_FMT = new Intl.DateTimeFormat('es-CO', {
+  timeZone: 'America/Bogota',
+  day: '2-digit', month: 'short',
+  hour: '2-digit', minute: '2-digit',
+});
+
 function formatFecha(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
-  return d.toLocaleString('es-CO', {
-    day: '2-digit', month: 'short',
-    hour: '2-digit', minute: '2-digit',
-  });
+  return FECHA_FMT.format(d);
 }
 
 function EstadoBadge({ evento }) {
