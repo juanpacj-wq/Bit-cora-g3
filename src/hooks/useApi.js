@@ -33,7 +33,12 @@ async function request(url, { method = 'GET', body, skipAuth = false } = {}) {
   if (res.status === 401 && !skipAuth && unauthorizedHandler) {
     try { unauthorizedHandler(); } catch {}
   }
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data.error || `HTTP ${res.status}`);
+    if (Array.isArray(data?.errores)) err.errores = data.errores;
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
