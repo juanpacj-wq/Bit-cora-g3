@@ -1,20 +1,19 @@
 import { FileText, ChevronLeft, ChevronRight } from 'lucide-react';
 import { JsonPopover } from './JsonPopover';
 
-const fmtFecha = (iso) => {
-  if (!iso) return '';
-  const d = new Date(iso);
-  return d.toLocaleString('es-CO', {
-    day: '2-digit', month: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  });
-};
+// F20: render Bogotá explícito (sin importar TZ del navegador).
+const FECHA_FMT = new Intl.DateTimeFormat('es-CO', {
+  timeZone: 'America/Bogota',
+  day: '2-digit', month: '2-digit', year: 'numeric',
+  hour: '2-digit', minute: '2-digit',
+});
+const FECHA_CORTA_FMT = new Intl.DateTimeFormat('es-CO', {
+  timeZone: 'America/Bogota',
+  day: '2-digit', month: '2-digit', year: 'numeric',
+});
 
-const fmtFechaCorta = (iso) => {
-  if (!iso) return '';
-  const d = new Date(iso);
-  return d.toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' });
-};
+const fmtFecha = (iso) => (iso ? FECHA_FMT.format(new Date(iso)) : '');
+const fmtFechaCorta = (iso) => (iso ? FECHA_CORTA_FMT.format(new Date(iso)) : '');
 
 export function HistoricoTable({ rows, loading, page, limit, total, onPageChange, onLimitChange }) {
   const totalPaginas = Math.max(1, Math.ceil(total / limit));
