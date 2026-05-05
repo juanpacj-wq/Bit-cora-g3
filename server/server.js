@@ -1235,7 +1235,7 @@ const server = http.createServer(async (req, res) => {
           INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = ra.tipo_evento_id
           WHERE b.codigo = 'MAND'
             AND ra.planta_id = @planta_id
-            AND CAST(ra.fecha_evento AS DATE) = @fecha
+            AND CAST(DATEADD(HOUR, -5, ra.fecha_evento) AS DATE) = @fecha
             AND ra.estado = 'borrador'
           ORDER BY ra.creado_en DESC
         `);
