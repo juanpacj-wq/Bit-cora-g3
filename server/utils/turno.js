@@ -53,3 +53,28 @@ export function ventanaTurno(turno, fechaRef) {
     fin: colombiaHourToUtcDate(year, month, day + 1, 6),
   };
 }
+
+// F19: serializadores de fecha en wallclock Bogotá. Usan el offset puro -5h (Colombia sin
+// DST) y leen con getUTC*() después del shift — mismo patrón canónico que colombiaParts.
+// Centralizados acá para que ciet.js, mand-sweeper.js y futuros callers no reinventen el
+// shift al persistir campos JSON con semántica de fecha operativa.
+export function fechaBogotaStr(input) {
+  const d = input instanceof Date ? input : new Date(input);
+  const col = new Date(d.getTime() - COLOMBIA_OFFSET_HOURS * 3600 * 1000);
+  const Y = col.getUTCFullYear();
+  const M = String(col.getUTCMonth() + 1).padStart(2, '0');
+  const D = String(col.getUTCDate()).padStart(2, '0');
+  return `${Y}-${M}-${D}`;
+}
+
+export function fechaBogotaIso(input) {
+  const d = input instanceof Date ? input : new Date(input);
+  const col = new Date(d.getTime() - COLOMBIA_OFFSET_HOURS * 3600 * 1000);
+  const Y = col.getUTCFullYear();
+  const M = String(col.getUTCMonth() + 1).padStart(2, '0');
+  const D = String(col.getUTCDate()).padStart(2, '0');
+  const h = String(col.getUTCHours()).padStart(2, '0');
+  const m = String(col.getUTCMinutes()).padStart(2, '0');
+  const s = String(col.getUTCSeconds()).padStart(2, '0');
+  return `${Y}-${M}-${D}T${h}:${m}:${s}-05:00`;
+}
