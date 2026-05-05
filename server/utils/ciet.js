@@ -1,5 +1,6 @@
 import sql from 'mssql';
 import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from './snapshots.js';
+import { fechaBogotaStr, fechaBogotaIso } from './turno.js';
 
 const CIET_CODE = 'CIET';
 const TIPO_NOMBRE = {
@@ -114,8 +115,10 @@ export async function registrarDeshacerDisponibilidad(transaction, {
   const camposExtra = JSON.stringify({
     planta_id,
     evento_revertido,
+    // F19: persistido en wallclock Bogotá (con sufijo -05:00) en lugar de ISO UTC.
+    // CIETs históricos pre-F19 conservan formato UTC — diferencia de shape documentada.
     fecha_revertida: fecha_revertida instanceof Date
-      ? fecha_revertida.toISOString()
+      ? fechaBogotaIso(fecha_revertida)
       : fecha_revertida,
     autor_delete: {
       usuario_id: sesion.usuario_id,
@@ -176,8 +179,10 @@ export async function registrarCierreMand(transaction, {
     bitacora_origen: bitacora_origen_id ?? null,
     forzado: true,
     motivo: 'mand-sweeper-diario',
+    // F19: día Bogotá (no UTC). El sweeper diario corre a 23:59:59 Bogotá (= 04:59 UTC
+    // del día siguiente); usar toISOString().slice(0,10) registraría el día UTC siguiente.
     fecha_cerrada: fecha instanceof Date
-      ? fecha.toISOString().slice(0, 10)
+      ? fechaBogotaStr(fecha)
       : fecha,
     registros_cerrados: registros_cerrados ?? null,
   });
