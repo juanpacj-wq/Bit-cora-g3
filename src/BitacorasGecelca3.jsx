@@ -524,7 +524,9 @@ function BarraEstado({
   filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
   filtroFecha, setFiltroFecha, filtroTurno, setFiltroTurno,
   tiposEvento, onAddRegistro,
+  mandDirty, mandGuardando, onGuardarMand,
 }) {
+  const isMand = bitacora?.codigo === 'MAND';
   const borradores = registros.filter((r) => r.estado === "borrador").length;
   const cerrados = registros.filter((r) => r.estado === "cerrado").length;
 
@@ -599,42 +601,62 @@ function BarraEstado({
         </div>
       )}
 
-      <div className="flex items-center gap-3">
-        <div className="relative">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            type="text" placeholder="Buscar en registros..."
-            value={filtroTexto} onChange={(e) => setFiltroTexto(e.target.value)}
-            className="pl-9 pr-4 py-2 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent w-64"
-          />
+      {/* F17: filtros de búsqueda no aplican a MAND — la grilla muestra solo HOY. */}
+      {!isMand && (
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              type="text" placeholder="Buscar en registros..."
+              value={filtroTexto} onChange={(e) => setFiltroTexto(e.target.value)}
+              className="pl-9 pr-4 py-2 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent w-64"
+            />
+          </div>
+          <div className="relative">
+            <Filter size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <select
+              value={filtroTipo} onChange={(e) => setFiltroTipo(e.target.value)}
+              className="pl-9 pr-8 py-2 rounded-xl border border-gray-300 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent bg-white cursor-pointer"
+            >
+              <option value="">Todos los tipos</option>
+              {tiposEvento.map((t) => (
+                <option key={t.tipo_evento_id} value={t.tipo_evento_id}>{t.nombre}</option>
+              ))}
+            </select>
+            <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          </div>
         </div>
-        <div className="relative">
-          <Filter size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <select
-            value={filtroTipo} onChange={(e) => setFiltroTipo(e.target.value)}
-            className="pl-9 pr-8 py-2 rounded-xl border border-gray-300 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent bg-white cursor-pointer"
-          >
-            <option value="">Todos los tipos</option>
-            {tiposEvento.map((t) => (
-              <option key={t.tipo_evento_id} value={t.tipo_evento_id}>{t.nombre}</option>
-            ))}
-          </select>
-          <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-        </div>
-      </div>
+      )}
 
-      {puedeCrear && (
-        <button onClick={onAddRegistro}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all"
-          style={{ backgroundColor: COLORS.greenPrimary }}>
-          <Plus size={18} />
-          Nuevo Registro
-        </button>
+      {/* F17: en MAND el slot del "+ Nuevo Registro" se reemplaza por el botón "Guardar"
+          que despacha el batch save del child via mandSaveRef. */}
+      {isMand ? (
+        puedeCrear && (
+          <button
+            onClick={onGuardarMand}
+            disabled={!mandDirty || mandGuardando}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ backgroundColor: COLORS.greenPrimary }}
+          >
+            <Save size={16} />
+            {mandGuardando ? 'Guardando…' : 'Guardar'}
+          </button>
+        )
+      ) : (
+        puedeCrear && (
+          <button onClick={onAddRegistro}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all"
+            style={{ backgroundColor: COLORS.greenPrimary }}>
+            <Plus size={18} />
+            Nuevo Registro
+          </button>
+        )
       )}
 
       {/* F4: "Finalizar turno" para todo ingeniero logueado (preguntas3.md punto E). Finaliza
-          globalmente todas sus sesion_bitacora y emite CIET. Convive con el popup de logout. */}
-      {onFinalizarTurno && (
+          globalmente todas sus sesion_bitacora y emite CIET. Convive con el popup de logout.
+          F17: oculto en MAND (cierre del día es automático vía sweeper). */}
+      {!isMand && onFinalizarTurno && (
         <button onClick={onFinalizarTurno} disabled={finalizandoTurno}
           className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
           style={{ backgroundColor: COLORS.greenDark }}>
@@ -652,8 +674,9 @@ function BarraEstado({
         </button>
       )}
 
-      {/* F4: cierre masivo con popup de pendientes — solo cargos puede_cerrar_turno. */}
-      {esJefeTurno && (
+      {/* F4: cierre masivo con popup de pendientes — solo cargos puede_cerrar_turno.
+          F17: oculto en MAND (sweeper automático en lugar de cierre manual). */}
+      {!isMand && esJefeTurno && (
         <button onClick={onCerrarMasivo}
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
           style={{ backgroundColor: COLORS.blueDeep }}>
@@ -1016,10 +1039,13 @@ export default function App() {
   // F4: hook para botón "Finalizar Turno" del header.
   const { finalizar: finalizarTurno, loading: finalizandoTurno } = useFinalizarTurno();
   const [pendientesModal, setPendientesModal] = useState(null);
-  // F10: incrementa este contador tras un cierre masivo exitoso. SalaDeMandoGrid lo
-  // observa via prop `refreshKey` y refetcha la lista de días pendientes (sino tendría
-  // que esperar al polling de 5min para enterarse).
-  const [pendientesRefreshKey, setPendientesRefreshKey] = useState(0);
+  // F17: estado lifted desde SalaDeMandoGrid para que el botón "Guardar" del header sepa
+  // si hay diff pendiente y dispare la batch via ref. mandSaveRef.current es la fn que
+  // el child registra al montar (registerSaveHandler).
+  const [mandDirty, setMandDirty] = useState(false);
+  const [mandGuardando, setMandGuardando] = useState(false);
+  const mandSaveRef = useRef(null);
+  const registerMandSave = useCallback((fn) => { mandSaveRef.current = fn; }, []);
 
   const showToast = useCallback((message, type = "success") => {
     setToast({ message, type, key: Date.now() });
@@ -1223,8 +1249,8 @@ export default function App() {
         await registrosHook.getActivos({ planta_id: sesion.planta_id, bitacora_id: activeBitacora });
       }
       setPendientesModal(null);
-      // F10: notificar al SalaDeMandoGrid (si está montado) para que refetche pendientes.
-      setPendientesRefreshKey((k) => k + 1);
+      // F17: ya no avisamos a SalaDeMandoGrid — la grilla MAND solo muestra HOY y no
+      // depende de la lista de días pendientes (eliminada en F16/F17).
       const totalCerrados = (r.resumen || []).reduce((acc, x) => acc + (x.registros_cerrados || 0), 0);
       showToast(`Cierre masivo: ${totalCerrados} registro(s) cerrado(s), ${r.finalizados.length} ingeniero(s) finalizado(s)`);
     } catch (e) {
@@ -1346,18 +1372,22 @@ export default function App() {
               filtroTurno={filtroTurno} setFiltroTurno={setFiltroTurno}
               tiposEvento={tiposEvento}
               onAddRegistro={handleAddRegistro}
+              mandDirty={mandDirty}
+              mandGuardando={mandGuardando}
+              onGuardarMand={() => mandSaveRef.current?.()}
             />
           )}
 
           {bitacoraActiva?.codigo === 'MAND' ? (
             <SalaDeMandoGrid
               bitacora={bitacoraActiva}
-              tiposEvento={tiposEvento}
               plantaId={sesion?.planta_id}
               puedeCrear={puedeCrear}
               showToast={(m) => showToast(m)}
               onError={(m) => showToast(m, 'error')}
-              refreshKey={pendientesRefreshKey}
+              onDirtyChange={setMandDirty}
+              onGuardandoChange={setMandGuardando}
+              registerSaveHandler={registerMandSave}
             />
           ) : bitacoraActiva?.codigo === 'DISP' ? (
             <DisponibilidadDashboard
