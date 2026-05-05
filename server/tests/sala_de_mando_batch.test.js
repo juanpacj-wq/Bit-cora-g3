@@ -238,6 +238,56 @@ test('7. POST /api/cierre/bitacora con MAND → 400 con motivo específico', asy
   assert.equal(data.error, 'mand_cierre_individual_no_permitido');
 });
 
+test('9. T1 regression — registro con fecha_evento UTC del día siguiente (22:30 Bogotá HOY) aparece en grilla del día Bogotá', async () => {
+  // F19.A: GET /api/sala-de-mando antes filtraba con CAST(fecha_evento AS DATE) = @fecha
+  // (UTC), por lo que entre 19:00 y 23:59 Bogotá los recién insertados (cuyo fecha_evento
+  // ya pertenecía al día UTC siguiente) aparecían fuera de la grilla → grilla vacía. La
+  // query ahora usa CAST(DATEADD(HOUR, -5, fecha_evento) AS DATE). Este test inserta
+  // explícitamente un registro con fecha_evento = HOY 22:30 Bogotá (= MAÑANA 03:30 UTC) y
+  // verifica que la grilla del día Bogotá actual lo incluye, sin importar la hora del run.
+  await cleanMand();
+  const db = await getDB();
+
+  const tipos = await db.request()
+    .input('mand', sql.Int, MAND_BITACORA_ID)
+    .query(`
+      SELECT tipo_evento_id, notificar_dashboard_tipo
+      FROM lov_bit.tipo_evento
+      WHERE bitacora_id = @mand AND notificar_dashboard_tipo = 'AUTH'
+    `);
+  const authTipoEventoId = tipos.recordset[0]?.tipo_evento_id;
+  assert.ok(authTipoEventoId, 'tipo_evento_id AUTH MAND debe existir');
+
+  const fechaEvento22h30Bogota = new Date(`${HOY}T22:30:00-05:00`);
+  // Sanity: el ISO UTC debe ser día siguiente (cruce de medianoche UTC).
+  assert.notEqual(fechaEvento22h30Bogota.toISOString().slice(0, 10), HOY,
+    'fecha_evento UTC debe pertenecer al día siguiente para ejercer el bug T1');
+
+  await db.request()
+    .input('mand', sql.Int, MAND_BITACORA_ID)
+    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('fecha_evento', sql.DateTime2, fechaEvento22h30Bogota)
+    .input('te', sql.Int, authTipoEventoId)
+    .input('campos_extra', sql.NVarChar(sql.MAX), JSON.stringify({ periodo: 23, valor_mw: 87.5, funcionariocnd: 'Madrugador' }))
+    .input('detalle', sql.NVarChar(sql.MAX), `${TEST_TAG} t1-regression`)
+    .input('creado_por', sql.Int, ctx.usuarios.jdt.usuario_id)
+    .query(`
+      INSERT INTO bitacora.registro_activo
+        (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+         estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
+      VALUES (@mand, @p, @fecha_evento, 2, @detalle, @campos_extra, @te,
+              'borrador', '[]', '[]', '[]', @creado_por)
+    `);
+
+  const { status, data } = await call('GET', `/api/sala-de-mando?planta_id=${PLANTA_ID}&fecha=${HOY}`, {
+    sesion_id: ctx.sesiones.jdt,
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.ok(data.AUTH, 'respuesta debe incluir bloque AUTH');
+  // P23 → índice 22.
+  assert.equal(data.AUTH.valores[22], 87.5, `AUTH P23 debe valer 87.5 — bug T1 reaparecido si null. valores=${JSON.stringify(data.AUTH.valores)}`);
+});
+
 test('8. /cierre-diario manual → 200 closed:true; segundo intento → 200 skipped', async () => {
   await cleanMand();
   // Primero metemos al menos 1 registro hoy para que el cierre genere CIET.
@@ -283,4 +333,55 @@ test('8. /cierre-diario manual → 200 closed:true; segundo intento → 200 skip
     .query(`SELECT registros_cerrados FROM bitacora.mand_cierre_log WHERE planta_id=@p AND fecha_cerrada=@f`);
   assert.equal(log.recordset.length, 1);
   assert.ok(log.recordset[0].registros_cerrados >= 1);
+});
+
+test('10. F21.C — CIET emitido por cierre-diario tiene campos_extra.fecha_cerrada en formato YYYY-MM-DD día Bogotá', async () => {
+  // F19.C: registrarCierreMand antes serializaba fecha_cerrada con .toISOString().slice(0,10),
+  // que entre 19:00 y 23:59 Bogotá emitía el día UTC siguiente. Ahora usa fechaBogotaStr
+  // (offset puro -5h). Este test ejerce el flujo completo (insert MAND → cierre-diario)
+  // y valida la forma del JSON resultante.
+  await cleanMand();
+  const setup = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', detalle: `${TEST_TAG} ciet-fecha`, funcionariocnd: 'Y',
+        periodos: [{ periodo: 14, valor_mw: 70 }],
+      }],
+    },
+  });
+  assert.equal(setup.status, 200, JSON.stringify(setup.data));
+
+  const cierre = await call('POST', '/api/sala-de-mando/cierre-diario', {
+    sesion_id: ctx.sesiones.jdt,
+    body: { fecha: HOY, planta_id: PLANTA_ID },
+  });
+  assert.equal(cierre.status, 200, JSON.stringify(cierre.data));
+  assert.equal(cierre.data.closed, true);
+
+  const db = await getDB();
+  const ciet = await db.request()
+    .input('p', sql.VarChar(10), PLANTA_ID)
+    .query(`
+      SELECT TOP 1 ra.registro_id, ra.campos_extra
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+      WHERE b.codigo = 'CIET' AND ra.planta_id = @p
+        AND JSON_VALUE(ra.campos_extra, '$.motivo') = 'mand-sweeper-diario'
+      ORDER BY ra.registro_id DESC
+    `);
+  assert.equal(ciet.recordset.length, 1, 'el cierre debe emitir 1 CIET con motivo mand-sweeper-diario');
+
+  const camposExtra = JSON.parse(ciet.recordset[0].campos_extra);
+  assert.match(camposExtra.fecha_cerrada, /^\d{4}-\d{2}-\d{2}$/,
+    `fecha_cerrada debe ser YYYY-MM-DD (got ${camposExtra.fecha_cerrada})`);
+  assert.equal(camposExtra.fecha_cerrada, HOY,
+    `fecha_cerrada (${camposExtra.fecha_cerrada}) debe matchear día Bogotá actual (${HOY}) — bug T3 reaparecido si difiere por 1 día`);
+
+  // Cleanup: borrar el CIET emitido para no acumular leftover entre runs (no tiene TEST_TAG en
+  // detalle porque registrarCierreMand lo deja NULL).
+  await db.request()
+    .input('rid', sql.Int, ciet.recordset[0].registro_id)
+    .query(`DELETE FROM bitacora.registro_activo WHERE registro_id = @rid`);
 });
