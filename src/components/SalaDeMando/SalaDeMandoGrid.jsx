@@ -1,298 +1,363 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { LayoutGrid, Save, AlertTriangle, ChevronLeft, ChevronRight } from 'lucide-react';
+import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import { LayoutGrid, AlertTriangle } from 'lucide-react';
 import { useSalaDeMando } from '../../hooks/useSalaDeMando';
-import { getTodayBogota } from '../../utils/fecha';
+import { getTodayBogota, horaBogota } from '../../utils/fecha';
 
 const TIPOS = [
-  { key: 'AUTH',   label: 'Autorización', tipoEventoNombre: 'Autorización', color: '#1e40af', cancelMsg: 'Autorización cancelada' },
-  { key: 'PRUEBA', label: 'Pruebas',      tipoEventoNombre: 'Pruebas',      color: '#9333ea', cancelMsg: 'Prueba cancelada' },
-  { key: 'REDESP', label: 'Redespacho',   tipoEventoNombre: 'Redespacho',   color: '#0d9488', cancelMsg: 'Redespacho cancelado' },
+  { key: 'AUTH',   label: 'Autorización', color: '#1e40af' },
+  { key: 'PRUEBA', label: 'Pruebas',      color: '#9333ea' },
+  { key: 'REDESP', label: 'Redespacho',   color: '#0d9488' },
 ];
+const TIPO_KEYS = TIPOS.map((t) => t.key);
 
-function diasDesde(fecha, hoy) {
-  // Ambos 'YYYY-MM-DD'. Devuelve número de días entre hoy y fecha (positivo = pasado).
-  const a = new Date(fecha + 'T00:00:00Z');
-  const b = new Date(hoy + 'T00:00:00Z');
-  return Math.round((b.getTime() - a.getTime()) / (24 * 3600 * 1000));
+const MOTIVO_MSG = {
+  fecha_no_es_hoy: 'La fecha no es hoy. Recargá la página.',
+  tipo_invalido: 'Tipo de fila no reconocido',
+  periodos_invalido: 'Lista de periodos inválida',
+  periodo_fuera_rango: 'Periodo fuera de rango (1-24)',
+  valor_mw_invalido: 'Valor numérico inválido',
+  periodo_bloqueado: 'Periodo anterior al actual — solo se pueden registrar redespachos del periodo actual en adelante',
+  funcionariocnd_requerido: 'Funcionario CND es requerido para Autorización',
+};
+
+// El server devuelve `valores` como Array(24) indexado 0..23 (P1=valores[0]). Lo paso a un
+// objeto {1..24: number|null} para que diff y multi-select trabajen con periodos directos.
+function buildBuffer(g) {
+  const buf = {};
+  for (const t of TIPO_KEYS) {
+    const f = g?.[t] || {};
+    const arr = Array.isArray(f.valores) ? f.valores : Array(24).fill(null);
+    const valores = {};
+    for (let p = 1; p <= 24; p++) valores[p] = arr[p - 1] ?? null;
+    buf[t] = {
+      valores,
+      detalle: f.detalle || '',
+      funcionariocnd: f.funcionariocnd || '',
+    };
+  }
+  return buf;
 }
 
-function labelFecha(fecha, hoy, registrosBorrador) {
-  const dias = diasDesde(fecha, hoy);
-  let suffix;
-  if (dias === 0) suffix = '(Hoy)';
-  else if (dias === 1) suffix = '(Ayer)';
-  else if (dias > 1) suffix = `(hace ${dias} días)`;
-  else suffix = `(en ${-dias} día${-dias === 1 ? '' : 's'})`;
-  const cnt = registrosBorrador != null
-    ? ` — ${registrosBorrador} borrador${registrosBorrador === 1 ? '' : 'es'}`
-    : '';
-  return `Día: ${fecha} ${suffix}${cnt}`;
+function cloneBuffer(buf) {
+  const out = {};
+  for (const t of TIPO_KEYS) {
+    out[t] = {
+      valores: { ...buf[t].valores },
+      detalle: buf[t].detalle,
+      funcionariocnd: buf[t].funcionariocnd,
+    };
+  }
+  return out;
 }
 
-// F6: grilla 3×24 de Sala de Mando. Cada celda numérica es editable; al perder foco
-// (onBlur) se decide POST/PUT/DELETE según el delta. Detalle y FuncionarioCND son por fila
-// y, al cambiar, se propagan a todos los registros existentes de esa fila.
-// F10: la grilla pagina entre días con borradores sin cerrar. El default al montar es el
-// día más antiguo pendiente (forzar al JdT a cerrarlos en orden cronológico). Indicador
-// arriba muestra la fecha activa con label tipificado y botones de navegación.
-export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, puedeCrear, showToast, onError, refreshKey }) {
-  const { getGrilla, getDiasPendientes, crearCelda, actualizarCelda, eliminarCelda, loading } = useSalaDeMando();
-  const [grilla, setGrilla] = useState(null);
-  const [editFila, setEditFila] = useState({}); // { AUTH: { detalle, funcionariocnd }, ... }
-  const [today, setToday] = useState(() => getTodayBogota());
-  const [fechasPendientes, setFechasPendientes] = useState([]); // [{fecha, registros_borrador}, ...]
-  const [fechaSeleccionada, setFechaSeleccionada] = useState(null);
-  const [pendientesInicializadas, setPendientesInicializadas] = useState(false);
-
-  const tipoEventoIdByNombre = useMemo(() => {
-    const m = new Map();
-    for (const t of (tiposEvento || [])) m.set(t.nombre, t.tipo_evento_id);
-    return m;
-  }, [tiposEvento]);
-
-  // Carga (o refresca) la lista de fechas pendientes. Si es la primera carga, además fija
-  // la fecha seleccionada al día más antiguo (o today si no hay pendientes).
-  const refreshPendientes = useCallback(async () => {
-    if (!plantaId) return;
-    try {
-      const dias = await getDiasPendientes(plantaId);
-      setFechasPendientes(dias);
-      if (!pendientesInicializadas) {
-        const def = dias.length > 0 ? dias[0].fecha : getTodayBogota();
-        setFechaSeleccionada(def);
-        setPendientesInicializadas(true);
-      }
-    } catch (e) {
-      onError?.(e.message);
+function diffBuffer(snap, buf) {
+  const filas = [];
+  for (const tipo of TIPO_KEYS) {
+    const periodosCambiados = [];
+    for (let p = 1; p <= 24; p++) {
+      const a = snap[tipo].valores[p];
+      const b = buf[tipo].valores[p];
+      if (a !== b) periodosCambiados.push({ periodo: p, valor_mw: b });
     }
-  }, [plantaId, getDiasPendientes, pendientesInicializadas, onError]);
-
-  useEffect(() => { refreshPendientes(); }, [refreshPendientes]);
-
-  // F10: refresh externo (e.g. tras handleConfirmMasivo en BitacorasGecelca3) — incrementa
-  // refreshKey y la grilla refetcha pendientes inmediatamente sin esperar al polling.
-  useEffect(() => {
-    if (refreshKey == null) return;
-    refreshPendientes();
-  }, [refreshKey, refreshPendientes]);
-
-  // Polling cada 5 min de pendientes. Útil si otro JdT cierra desde otra pestaña.
-  useEffect(() => {
-    if (!plantaId) return;
-    const i = setInterval(() => { refreshPendientes(); }, 5 * 60_000);
-    return () => clearInterval(i);
-  }, [plantaId, refreshPendientes]);
-
-  // Watcher de medianoche: cada 60s detecta cambio de día (TZ Bogotá) y, si la grilla
-  // está mostrando el viejo today, la salta al nuevo. Refresca pendientes también.
-  useEffect(() => {
-    const i = setInterval(() => {
-      const t = getTodayBogota();
-      if (t !== today) {
-        setToday(t);
-        if (fechaSeleccionada === today) setFechaSeleccionada(t);
-        refreshPendientes();
-      }
-    }, 60_000);
-    return () => clearInterval(i);
-  }, [today, fechaSeleccionada, refreshPendientes]);
-
-  // Auto-skip si la fecha seleccionada se cierra externamente y deja de aparecer en
-  // fechasPendientes (y tampoco es today).
-  const fechasNavegables = useMemo(() => {
-    const set = new Set(fechasPendientes.map((d) => d.fecha));
-    set.add(today);
-    return Array.from(set).sort();
-  }, [fechasPendientes, today]);
-
-  useEffect(() => {
-    if (!fechaSeleccionada) return;
-    if (!fechasNavegables.includes(fechaSeleccionada)) {
-      // saltar al primer pendiente (más antiguo) o today
-      setFechaSeleccionada(fechasNavegables[0] || today);
+    const detalleCambio = (snap[tipo].detalle || '') !== (buf[tipo].detalle || '');
+    const funcCambio = (snap[tipo].funcionariocnd || '') !== (buf[tipo].funcionariocnd || '');
+    if (periodosCambiados.length > 0 || detalleCambio || funcCambio) {
+      filas.push({
+        tipo,
+        detalle: buf[tipo].detalle ? buf[tipo].detalle : null,
+        funcionariocnd: tipo === 'AUTH' ? (buf[tipo].funcionariocnd || null) : null,
+        periodos: periodosCambiados,
+      });
     }
-  }, [fechasNavegables, fechaSeleccionada, today]);
+  }
+  return filas;
+}
+
+// F17: grilla 3×24 de Sala de Mando con buffer en memoria + batch save. F10 (paginación
+// entre días) eliminada — la grilla solo muestra HOY y el cierre es automático vía
+// sweeper diario (F16). Multi-select estilo Excel + lock REDESP por periodo actual.
+export default function SalaDeMandoGrid({
+  bitacora, plantaId, puedeCrear, showToast, onError,
+  onDirtyChange, onGuardandoChange, registerSaveHandler,
+}) {
+  const { getGrilla, guardarBatch } = useSalaDeMando();
+  const [snapshot, setSnapshot] = useState(null);
+  const [buffer, setBuffer] = useState(null);
+  const [seleccion, setSeleccion] = useState({ tipo: null, periodos: new Set() });
+  const [anchorPeriodo, setAnchorPeriodo] = useState(null);
+  const [dragging, setDragging] = useState(false);
+  const [periodoActual, setPeriodoActual] = useState(() => Math.floor(horaBogota()) + 1);
+  const [guardando, setGuardando] = useState(false);
+  const [errores, setErrores] = useState([]);
+  // Strings parciales mientras el input tiene foco — preserva "10." y otros estados intermedios
+  // hasta que el blur parsea y commitea al buffer.
+  const [editing, setEditing] = useState({});
+  const [fechaCargada, setFechaCargada] = useState(null);
+  const tableRef = useRef(null);
+  const guardarRef = useRef(null);
 
   const refresh = useCallback(async () => {
-    if (!plantaId || !fechaSeleccionada) return;
+    if (!plantaId) return;
+    const fecha = getTodayBogota();
     try {
-      const g = await getGrilla(plantaId, fechaSeleccionada);
-      setGrilla(g);
-      // sincronizar el form de fila con lo que vino del server
-      const next = {};
-      for (const t of TIPOS) {
-        const f = g[t.key] || {};
-        next[t.key] = { detalle: f.detalle || '', funcionariocnd: f.funcionariocnd || '' };
-      }
-      setEditFila(next);
+      const g = await getGrilla(plantaId, fecha);
+      const buf = buildBuffer(g);
+      setSnapshot(buf);
+      setBuffer(cloneBuffer(buf));
+      setFechaCargada(fecha);
+      setEditing({});
+      setErrores([]);
     } catch (e) {
       onError?.(e.message);
     }
-  }, [getGrilla, plantaId, fechaSeleccionada, onError]);
+  }, [getGrilla, plantaId, onError]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const handleCellBlur = async (tipoKey, periodo, oldValor, ev) => {
+  // Watcher cada 60s: actualiza periodo actual (lock REDESP) + detecta cambio de día
+  // Bogotá. Si cruzó medianoche, refetch (vendrá vacía porque el sweeper habrá cerrado).
+  useEffect(() => {
+    const i = setInterval(() => {
+      setPeriodoActual(Math.floor(horaBogota()) + 1);
+      const t = getTodayBogota();
+      if (fechaCargada && t !== fechaCargada) refresh();
+    }, 60_000);
+    return () => clearInterval(i);
+  }, [fechaCargada, refresh]);
+
+  const filasDiff = useMemo(() => {
+    if (!snapshot || !buffer) return [];
+    return diffBuffer(snapshot, buffer);
+  }, [snapshot, buffer]);
+  const dirty = filasDiff.length > 0;
+
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => { onGuardandoChange?.(guardando); }, [guardando, onGuardandoChange]);
+
+  useEffect(() => {
+    if (bitacora?.codigo !== 'MAND') return;
+    const handler = (e) => {
+      if (dirty) { e.preventDefault(); e.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [dirty, bitacora]);
+
+  const guardar = useCallback(async () => {
+    if (!buffer || !snapshot) return;
+    const filas = diffBuffer(snapshot, buffer);
+    if (filas.length === 0) return;
+    setGuardando(true);
+    try {
+      const r = await guardarBatch({ planta_id: plantaId, fecha: getTodayBogota(), filas });
+      const res = r?.resumen || { creados: 0, actualizados: 0, eliminados: 0 };
+      showToast?.(`Guardado: ${res.creados} nuevos, ${res.actualizados} actualizados, ${res.eliminados} eliminados`);
+      setErrores([]);
+      await refresh();
+    } catch (e) {
+      if (Array.isArray(e?.errores)) {
+        setErrores(e.errores);
+        onError?.('Hay errores en el formulario. Corregí las celdas resaltadas.');
+      } else {
+        onError?.(e.message);
+      }
+    } finally {
+      setGuardando(false);
+    }
+  }, [buffer, snapshot, guardarBatch, plantaId, showToast, onError, refresh]);
+
+  useEffect(() => { guardarRef.current = guardar; }, [guardar]);
+  useEffect(() => {
+    registerSaveHandler?.(() => guardarRef.current?.());
+    return () => registerSaveHandler?.(null);
+  }, [registerSaveHandler]);
+
+  const isLocked = useCallback(
+    (tipo, periodo) => tipo === 'REDESP' && periodo < periodoActual,
+    [periodoActual]
+  );
+
+  // Multi-select: shift expande desde anchor, ctrl/meta togglea, click solo arranca drag.
+  // Cross-tipo: clickear otra fila descarta la selección y arranca una nueva en esa fila.
+  const handleMouseDown = (tipo, periodo, e) => {
     if (!puedeCrear) return;
-    const raw = ev.target.value.trim();
-    const newValor = raw === '' ? null : parseFloat(raw);
-    if (raw !== '' && Number.isNaN(newValor)) { onError?.('Valor inválido'); return; }
-    if (newValor === oldValor) return;
-
-    const tipoMeta = TIPOS.find((t) => t.key === tipoKey);
-    const tipoEventoId = tipoEventoIdByNombre.get(tipoMeta.tipoEventoNombre);
-    if (!tipoEventoId) { onError?.(`No se encontró tipo de evento ${tipoMeta.tipoEventoNombre}`); return; }
-
-    const filaForm = editFila[tipoKey] || {};
-    const detalle = filaForm.detalle || null;
-    const funcionariocnd = filaForm.funcionariocnd || null;
-
-    // F6: validación funcionariocnd para Autorización (también lo valida el server, pero
-    // adelantamos para UX).
-    if (tipoKey === 'AUTH' && newValor != null && (!funcionariocnd || funcionariocnd.trim() === '')) {
-      onError?.('Funcionario CND es requerido para Autorización');
-      ev.target.value = oldValor ?? '';
-      return;
-    }
-
-    const fila = grilla?.[tipoKey] || {};
-    const registroId = fila.registros?.[periodo];
-
-    try {
-      if (registroId && newValor != null) {
-        // PUT
-        await actualizarCelda(registroId, { valor_mw: newValor, detalle, funcionariocnd, periodo });
-      } else if (registroId && newValor == null) {
-        // F7: vaciar celda → DELETE. Backend hace hard-delete de registro_activo y soft-delete
-        // (`activa=0`) sobre la fila correspondiente de evento_dashboard. Volver a llenar la
-        // celda hace POST → upsertEventoDashboard reactiva la fila preservando evento_id.
-        await eliminarCelda(registroId);
-        showToast?.(`${tipoMeta.cancelMsg} (P${periodo})`);
-      } else if (!registroId && newValor != null) {
-        // POST
-        const r = await crearCelda({
-          bitacora_id: bitacora.bitacora_id,
-          planta_id: plantaId,
-          tipo_evento_id: tipoEventoId,
-          periodo,
-          valor_mw: newValor,
-          detalle,
-          funcionariocnd,
-          fecha: fechaSeleccionada,
-        });
-        if (r?.registro?.registro_id) showToast?.(`${tipoMeta.label} P${periodo}: registro ${r.registro.registro_id}`);
-      }
-      await refresh();
-      // F10: el conteo de borradores del día puede haber cambiado (creación/eliminación).
-      await refreshPendientes();
-    } catch (e) {
-      onError?.(e.message);
-      ev.target.value = oldValor ?? '';
+    if (isLocked(tipo, periodo)) return;
+    if (e.shiftKey && seleccion.tipo === tipo && anchorPeriodo != null) {
+      const lo = Math.min(anchorPeriodo, periodo);
+      const hi = Math.max(anchorPeriodo, periodo);
+      const periodos = new Set();
+      for (let p = lo; p <= hi; p++) periodos.add(p);
+      setSeleccion({ tipo, periodos });
+    } else if ((e.ctrlKey || e.metaKey) && seleccion.tipo === tipo) {
+      const next = new Set(seleccion.periodos);
+      if (next.has(periodo)) next.delete(periodo); else next.add(periodo);
+      setSeleccion({ tipo, periodos: next });
+      setAnchorPeriodo(periodo);
+    } else {
+      setSeleccion({ tipo, periodos: new Set([periodo]) });
+      setAnchorPeriodo(periodo);
+      setDragging(true);
     }
   };
 
-  // F6: al cambiar detalle/funcionariocnd de una fila, propagar a todos los registros
-  // existentes (PUT). Esto mantiene los valores compartidos por fila consistentes.
-  const handleFilaSave = async (tipoKey) => {
-    const fila = grilla?.[tipoKey] || {};
-    const ids = Object.values(fila.registros || {});
-    if (ids.length === 0) {
-      showToast?.('Sin celdas para propagar');
-      return;
-    }
-    const filaForm = editFila[tipoKey] || {};
-    const detalle = filaForm.detalle || null;
-    const funcionariocnd = filaForm.funcionariocnd || null;
-    if (tipoKey === 'AUTH' && (!funcionariocnd || funcionariocnd.trim() === '')) {
-      onError?.('Funcionario CND es requerido para Autorización');
-      return;
-    }
-    try {
-      // Actualizamos todos los registros en serie (volumen bajo: máx 24 por fila).
-      for (const [periodoStr, rid] of Object.entries(fila.registros)) {
-        await actualizarCelda(rid, {
-          detalle,
-          funcionariocnd,
-          periodo: parseInt(periodoStr, 10),
-        });
+  const handleMouseEnter = (tipo, periodo) => {
+    if (!dragging || seleccion.tipo !== tipo || anchorPeriodo == null) return;
+    const lo = Math.min(anchorPeriodo, periodo);
+    const hi = Math.max(anchorPeriodo, periodo);
+    const periodos = new Set();
+    for (let p = lo; p <= hi; p++) periodos.add(p);
+    setSeleccion({ tipo, periodos });
+  };
+
+  useEffect(() => {
+    const onUp = () => setDragging(false);
+    const onKey = (e) => {
+      if (e.key === 'Escape' && seleccion.periodos.size > 0) {
+        setSeleccion({ tipo: null, periodos: new Set() });
+        setAnchorPeriodo(null);
       }
-      showToast?.(`${tipoKey}: detalle/funcionario propagado a ${ids.length} celdas`);
-      await refresh();
-    } catch (e) {
-      onError?.(e.message);
+    };
+    const onDocMouseDown = (e) => {
+      if (!tableRef.current) return;
+      if (!tableRef.current.contains(e.target) && seleccion.periodos.size > 0) {
+        setSeleccion({ tipo: null, periodos: new Set() });
+        setAnchorPeriodo(null);
+      }
+    };
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('mousedown', onDocMouseDown);
+    return () => {
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('mousedown', onDocMouseDown);
+    };
+  }, [seleccion]);
+
+  const setCellValor = (tipo, periodo, valor) => {
+    setBuffer((b) => ({
+      ...b,
+      [tipo]: { ...b[tipo], valores: { ...b[tipo].valores, [periodo]: valor } },
+    }));
+  };
+
+  const handleInputChange = (tipo, periodo, raw) => {
+    setEditing((s) => ({ ...s, [tipo]: { ...(s[tipo] || {}), [periodo]: raw } }));
+  };
+
+  const commitInput = (tipo, periodo, raw) => {
+    setEditing((s) => {
+      if (!s[tipo]) return s;
+      const tNext = { ...s[tipo] };
+      delete tNext[periodo];
+      return { ...s, [tipo]: tNext };
+    });
+    if (raw === '' || raw == null) {
+      setCellValor(tipo, periodo, null);
+      return;
+    }
+    const n = parseFloat(raw);
+    if (Number.isNaN(n)) { onError?.('Valor inválido'); return; }
+    setCellValor(tipo, periodo, n);
+  };
+
+  const handleInputKeyDown = (tipo, periodo, e) => {
+    if (e.key === 'Enter' && seleccion.tipo === tipo && seleccion.periodos.size > 1 && seleccion.periodos.has(periodo)) {
+      const raw = e.target.value.trim();
+      const valor = raw === '' ? null : parseFloat(raw);
+      if (raw !== '' && Number.isNaN(valor)) {
+        onError?.('Valor inválido'); e.preventDefault(); return;
+      }
+      setBuffer((b) => {
+        const next = { ...b, [tipo]: { ...b[tipo], valores: { ...b[tipo].valores } } };
+        for (const p of seleccion.periodos) {
+          if (isLocked(tipo, p)) continue;
+          next[tipo].valores[p] = valor;
+        }
+        return next;
+      });
+      setEditing((s) => {
+        if (!s[tipo]) return s;
+        const tNext = { ...s[tipo] };
+        for (const p of seleccion.periodos) delete tNext[p];
+        return { ...s, [tipo]: tNext };
+      });
+      e.preventDefault();
     }
   };
 
-  if (!grilla || !fechaSeleccionada) {
+  const errorPorCelda = useMemo(() => {
+    const m = new Map();
+    for (const err of errores) {
+      if (err?.periodo != null && err?.tipo) m.set(`${err.tipo}-${err.periodo}`, err);
+    }
+    return m;
+  }, [errores]);
+  const erroresFila = useMemo(() => {
+    const m = new Map();
+    for (const err of errores) {
+      if (err?.periodo == null && err?.tipo) m.set(err.tipo, err);
+    }
+    return m;
+  }, [errores]);
+  const errorGlobal = useMemo(
+    () => errores.find((e) => !e?.tipo && e?.motivo) || null,
+    [errores]
+  );
+
+  if (!buffer || !snapshot) {
     return <div className="flex-1 flex items-center justify-center text-gray-400">Cargando Sala de Mando…</div>;
   }
 
-  // F10: paginación entre días con borradores. fechasNavegables es la unión de pendientes
-  // y today, deduplicada y ordenada asc. Los botones avanzan/retroceden por esa lista.
-  const idx = fechasNavegables.indexOf(fechaSeleccionada);
-  const irAnterior = () => idx > 0 && setFechaSeleccionada(fechasNavegables[idx - 1]);
-  const irSiguiente = () => idx >= 0 && idx < fechasNavegables.length - 1 && setFechaSeleccionada(fechasNavegables[idx + 1]);
-  const conteoActual = fechasPendientes.find((d) => d.fecha === fechaSeleccionada)?.registros_borrador
-    ?? (fechaSeleccionada === today ? 0 : null);
-  const labelActual = labelFecha(fechaSeleccionada, today, conteoActual);
-  const totalPendientes = fechasPendientes.length;
-
   return (
     <div className="flex-1 overflow-auto px-6 py-4">
-      {/* F10: indicador de fecha activa con paginación. Thin bar sobre la tabla. */}
-      <div className="bg-white rounded-xl border border-gray-200 mb-3 px-3 py-2 flex items-center gap-3 flex-wrap">
-        <button
-          onClick={irAnterior}
-          disabled={idx <= 0}
-          title="Día anterior pendiente"
-          className="p-1.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed"
-        >
-          <ChevronLeft size={16} />
-        </button>
-        <select
-          value={fechaSeleccionada}
-          onChange={(e) => setFechaSeleccionada(e.target.value)}
-          className="px-3 py-1.5 rounded border border-gray-200 text-sm font-medium text-gray-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-400 min-w-64"
-        >
-          {fechasNavegables.map((f) => {
-            const cnt = fechasPendientes.find((d) => d.fecha === f)?.registros_borrador
-              ?? (f === today ? 0 : null);
-            return <option key={f} value={f}>{labelFecha(f, today, cnt)}</option>;
-          })}
-        </select>
-        <button
-          onClick={irSiguiente}
-          disabled={idx < 0 || idx >= fechasNavegables.length - 1}
-          title="Día siguiente"
-          className="p-1.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed"
-        >
-          <ChevronRight size={16} />
-        </button>
-        <span className="text-xs text-gray-500 ml-auto">
-          {totalPendientes > 0
-            ? `${totalPendientes} día${totalPendientes === 1 ? '' : 's'} con borradores sin cerrar`
-            : 'Sin días pendientes'}
-        </span>
-      </div>
+      {errorGlobal?.motivo === 'fecha_no_es_hoy' && (
+        <div className="bg-red-100 border border-red-300 rounded-xl px-4 py-3 mb-3 flex items-center gap-2 text-sm text-red-900">
+          <AlertTriangle size={16} />
+          <span className="font-semibold">{MOTIVO_MSG.fecha_no_es_hoy}</span>
+        </div>
+      )}
+      {errores.length > 0 && (
+        <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-red-800 mb-2">
+            <AlertTriangle size={16} />
+            Corregí estos errores antes de guardar
+          </div>
+          <ul className="text-xs text-red-700 list-disc pl-5 space-y-1">
+            {errores.map((e, i) => (
+              <li key={i}>
+                {e?.tipo ? `[${e.tipo}${e?.periodo ? ` P${e.periodo}` : ''}] ` : ''}
+                {e?.mensaje || MOTIVO_MSG[e?.motivo] || e?.motivo || 'Error desconocido'}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
-      <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
-        <table className="w-full text-sm">
+      <div ref={tableRef} className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+        <table className="w-full text-sm select-none">
           <thead className="bg-gray-50 border-b border-gray-200">
             <tr>
               <th className="sticky left-0 bg-gray-50 px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider min-w-32">Evento</th>
               <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider min-w-48">Detalle / Comentario</th>
               <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider min-w-40">Funcionario CND</th>
-              {Array.from({ length: 24 }, (_, i) => (
-                <th key={i} className="px-2 py-2 text-center text-xs font-semibold text-gray-500 min-w-16">P{i + 1}</th>
-              ))}
-              <th className="px-3 py-2 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Acciones</th>
+              {Array.from({ length: 24 }, (_, i) => {
+                const p = i + 1;
+                const isCur = p === periodoActual;
+                return (
+                  <th key={i} className={`px-2 py-2 text-center text-xs font-semibold min-w-16 ${isCur ? 'bg-emerald-100 text-emerald-700' : 'text-gray-500'}`}>
+                    P{p}
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
             {TIPOS.map((t) => {
-              const fila = grilla[t.key] || {};
-              const filaForm = editFila[t.key] || {};
+              const fila = buffer[t.key];
               const requireFuncionario = t.key === 'AUTH';
+              const errFila = erroresFila.get(t.key);
+              const funcMissing = errFila?.motivo === 'funcionariocnd_requerido';
               return (
                 <tr key={t.key} className="border-b border-gray-100">
                   <td className="sticky left-0 bg-white px-3 py-2 font-semibold" style={{ color: t.color }}>
@@ -304,8 +369,8 @@ export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, puede
                   <td className="px-3 py-2">
                     <input
                       type="text"
-                      value={filaForm.detalle ?? ''}
-                      onChange={(e) => setEditFila((s) => ({ ...s, [t.key]: { ...s[t.key], detalle: e.target.value } }))}
+                      value={fila.detalle ?? ''}
+                      onChange={(e) => setBuffer((b) => ({ ...b, [t.key]: { ...b[t.key], detalle: e.target.value } }))}
                       placeholder="Comentario"
                       disabled={!puedeCrear}
                       className="w-full px-2 py-1 rounded border border-gray-200 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-gray-50"
@@ -314,44 +379,58 @@ export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, puede
                   <td className="px-3 py-2">
                     <input
                       type="text"
-                      value={filaForm.funcionariocnd ?? ''}
-                      onChange={(e) => setEditFila((s) => ({ ...s, [t.key]: { ...s[t.key], funcionariocnd: e.target.value } }))}
-                      placeholder={requireFuncionario ? 'Requerido…' : 'Opcional…'}
-                      disabled={!puedeCrear}
-                      className={`w-full px-2 py-1 rounded border text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-gray-50 ${
-                        requireFuncionario && !filaForm.funcionariocnd ? 'border-amber-300' : 'border-gray-200'
-                      }`}
+                      value={t.key === 'AUTH' ? (fila.funcionariocnd ?? '') : ''}
+                      onChange={(e) => {
+                        if (t.key === 'AUTH') {
+                          setBuffer((b) => ({ ...b, [t.key]: { ...b[t.key], funcionariocnd: e.target.value } }));
+                        }
+                      }}
+                      placeholder={t.key === 'AUTH' ? 'Requerido…' : 'No aplica'}
+                      disabled={!puedeCrear || t.key !== 'AUTH'}
+                      title={funcMissing ? MOTIVO_MSG.funcionariocnd_requerido : undefined}
+                      className={`w-full px-2 py-1 rounded border text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 ${
+                        funcMissing
+                          ? 'border-red-500'
+                          : (requireFuncionario && !fila.funcionariocnd ? 'border-amber-300' : 'border-gray-200')
+                      } ${t.key !== 'AUTH' ? 'bg-gray-100 cursor-not-allowed text-gray-400' : ''}`}
                     />
                   </td>
                   {Array.from({ length: 24 }, (_, i) => {
                     const periodo = i + 1;
-                    const valor = fila.valores?.[i];
+                    const valorBuf = fila.valores[periodo];
+                    const editStr = editing[t.key]?.[periodo];
+                    const display = editStr !== undefined ? editStr : (valorBuf == null ? '' : String(valorBuf));
+                    const locked = isLocked(t.key, periodo);
+                    const selected = seleccion.tipo === t.key && seleccion.periodos.has(periodo);
+                    const errCelda = errorPorCelda.get(`${t.key}-${periodo}`);
                     return (
-                      <td key={i} className="px-1 py-1">
+                      <td
+                        key={i}
+                        className={`px-1 py-1 ${selected ? 'bg-emerald-50' : ''}`}
+                        onMouseDown={(e) => handleMouseDown(t.key, periodo, e)}
+                        onMouseEnter={() => handleMouseEnter(t.key, periodo)}
+                      >
                         <input
                           type="number"
                           step="0.01"
-                          defaultValue={valor ?? ''}
-                          onBlur={(e) => handleCellBlur(t.key, periodo, valor, e)}
-                          disabled={!puedeCrear || loading}
-                          className="w-16 px-1 py-1 rounded border border-gray-200 text-sm text-center focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-gray-50"
+                          value={display}
+                          onChange={(e) => handleInputChange(t.key, periodo, e.target.value)}
+                          onBlur={(e) => commitInput(t.key, periodo, e.target.value)}
+                          onKeyDown={(e) => handleInputKeyDown(t.key, periodo, e)}
+                          disabled={!puedeCrear || locked}
+                          title={
+                            locked ? 'Solo se pueden registrar redespachos para el periodo actual o posteriores'
+                            : errCelda ? (errCelda.mensaje || MOTIVO_MSG[errCelda.motivo] || errCelda.motivo)
+                            : undefined
+                          }
+                          style={selected ? { outline: `2px solid ${t.color}`, outlineOffset: '-2px' } : undefined}
+                          className={`w-16 px-1 py-1 rounded border text-sm text-center focus:outline-none focus:ring-1 focus:ring-emerald-400 ${
+                            errCelda ? 'border-red-500' : 'border-gray-200'
+                          } ${locked ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'disabled:bg-gray-50'}`}
                         />
                       </td>
                     );
                   })}
-                  <td className="px-3 py-2 text-center">
-                    {puedeCrear && (
-                      <button
-                        onClick={() => handleFilaSave(t.key)}
-                        disabled={loading}
-                        title="Propagar detalle y funcionario a las celdas existentes"
-                        className="p-1.5 rounded text-white text-xs disabled:opacity-50"
-                        style={{ backgroundColor: t.color }}
-                      >
-                        <Save size={14} />
-                      </button>
-                    )}
-                  </td>
                 </tr>
               );
             })}
@@ -368,7 +447,10 @@ export default function SalaDeMandoGrid({ bitacora, tiposEvento, plantaId, puede
 
       <div className="mt-4 text-xs text-gray-400 flex items-center gap-2">
         <LayoutGrid size={14} />
-        <span>Fecha: {fechaSeleccionada} — vaciar una celda elimina ese registro y su evento de dashboard.</span>
+        <span>
+          Fecha: {fechaCargada} (Hoy) · Periodo actual: P{periodoActual}.
+          {' '}Multi-select: Shift/Ctrl/arrastre + Enter replica · Esc limpia.
+        </span>
       </div>
     </div>
   );
