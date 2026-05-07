@@ -361,8 +361,9 @@ export async function initDB() {
   `);
 
   // F2: cerrada_en distingue logout explícito (activa=0 + cerrada_en=NULL) del cierre por
-  // sweeper de F4 (activa=0 + cerrada_en=GETDATE()). Hoy todavía nadie escribe esta columna;
-  // se añade idempotente para que F4 la consuma sin migración adicional.
+  // sweeper de F4 (activa=0 + cerrada_en=SYSUTCDATETIME()). Hoy todavía nadie escribe esta columna;
+  // se añade idempotente para que F4 la consuma sin migración adicional. Convención TZ post F19:
+  // siempre SYSUTCDATETIME() — ver §7.10 de BIT-MODBD-2026-001.md.
   await db.request().batch(`
     IF COL_LENGTH('bitacora.sesion_activa', 'cerrada_en') IS NULL
       ALTER TABLE bitacora.sesion_activa ADD cerrada_en DATETIME2 NULL;
@@ -1120,6 +1121,65 @@ export async function initDB() {
       registros_cerrados  INT          NOT NULL,
       CONSTRAINT PK_mand_cierre_log PRIMARY KEY (fecha_cerrada, planta_id)
     );
+  `);
+
+  // ---------- F22.D1 — columnas calculadas Bogotá para inspección humana en SSMS ----------
+  // No persistidas (DATEADD virtual, costo cero al INSERT). Aplicaciones siguen leyendo
+  // las columnas UTC (sin sufijo); las *_bogota son solo para SSMS / Azure Data Studio.
+  // Cada ADD <col> se gateaba con IF NOT EXISTS contra sys.columns → idempotente sin necesidad
+  // del flag migracion_aplicada. El flag se setea al final como audit trail.
+  // Documentado en BIT-MODBD-2026-001.md §4.5 + §7.10. Convención TZ: BD UTC, presentación Bogotá.
+  await db.request().batch(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.registro_activo') AND name='fecha_evento_bogota')
+      ALTER TABLE bitacora.registro_activo ADD fecha_evento_bogota AS DATEADD(HOUR, -5, fecha_evento);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.registro_activo') AND name='creado_en_bogota')
+      ALTER TABLE bitacora.registro_activo ADD creado_en_bogota AS DATEADD(HOUR, -5, creado_en);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.registro_activo') AND name='modificado_en_bogota')
+      ALTER TABLE bitacora.registro_activo ADD modificado_en_bogota AS DATEADD(HOUR, -5, modificado_en);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.registro_activo') AND name='fecha_fin_estado_bogota')
+      ALTER TABLE bitacora.registro_activo ADD fecha_fin_estado_bogota AS DATEADD(HOUR, -5, fecha_fin_estado);
+
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.registro_historico') AND name='fecha_evento_bogota')
+      ALTER TABLE bitacora.registro_historico ADD fecha_evento_bogota AS DATEADD(HOUR, -5, fecha_evento);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.registro_historico') AND name='creado_en_bogota')
+      ALTER TABLE bitacora.registro_historico ADD creado_en_bogota AS DATEADD(HOUR, -5, creado_en);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.registro_historico') AND name='modificado_en_bogota')
+      ALTER TABLE bitacora.registro_historico ADD modificado_en_bogota AS DATEADD(HOUR, -5, modificado_en);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.registro_historico') AND name='cerrado_en_bogota')
+      ALTER TABLE bitacora.registro_historico ADD cerrado_en_bogota AS DATEADD(HOUR, -5, cerrado_en);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.registro_historico') AND name='fecha_fin_estado_bogota')
+      ALTER TABLE bitacora.registro_historico ADD fecha_fin_estado_bogota AS DATEADD(HOUR, -5, fecha_fin_estado);
+
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.evento_dashboard') AND name='creado_en_bogota')
+      ALTER TABLE bitacora.evento_dashboard ADD creado_en_bogota AS DATEADD(HOUR, -5, creado_en);
+
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.disponibilidad_dashboard') AND name='fecha_inicio_estado_bogota')
+      ALTER TABLE bitacora.disponibilidad_dashboard ADD fecha_inicio_estado_bogota AS DATEADD(HOUR, -5, fecha_inicio_estado);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.disponibilidad_dashboard') AND name='modificado_en_bogota')
+      ALTER TABLE bitacora.disponibilidad_dashboard ADD modificado_en_bogota AS DATEADD(HOUR, -5, modificado_en);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.disponibilidad_dashboard') AND name='actualizado_en_bogota')
+      ALTER TABLE bitacora.disponibilidad_dashboard ADD actualizado_en_bogota AS DATEADD(HOUR, -5, actualizado_en);
+
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_activa') AND name='inicio_sesion_bogota')
+      ALTER TABLE bitacora.sesion_activa ADD inicio_sesion_bogota AS DATEADD(HOUR, -5, inicio_sesion);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_activa') AND name='ultima_actividad_bogota')
+      ALTER TABLE bitacora.sesion_activa ADD ultima_actividad_bogota AS DATEADD(HOUR, -5, ultima_actividad);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_activa') AND name='cerrada_en_bogota')
+      ALTER TABLE bitacora.sesion_activa ADD cerrada_en_bogota AS DATEADD(HOUR, -5, cerrada_en);
+
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_bitacora') AND name='abierta_en_bogota')
+      ALTER TABLE bitacora.sesion_bitacora ADD abierta_en_bogota AS DATEADD(HOUR, -5, abierta_en);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_bitacora') AND name='finalizada_en_bogota')
+      ALTER TABLE bitacora.sesion_bitacora ADD finalizada_en_bogota AS DATEADD(HOUR, -5, finalizada_en);
+
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.mand_cierre_log') AND name='cerrado_en_bogota')
+      ALTER TABLE bitacora.mand_cierre_log ADD cerrado_en_bogota AS DATEADD(HOUR, -5, cerrado_en);
+
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.migracion_aplicada') AND name='aplicada_en_bogota')
+      ALTER TABLE bitacora.migracion_aplicada ADD aplicada_en_bogota AS DATEADD(HOUR, -5, aplicada_en);
+
+    IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F22.D1')
+      INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F22.D1');
   `);
 
   // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de
