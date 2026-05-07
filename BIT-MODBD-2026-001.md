@@ -5,7 +5,7 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 1.3 |
+| Versión | 1.4 |
 | Fecha | Mayo 2026 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
@@ -28,9 +28,11 @@
 3. [Sesiones activas (esquema `bitacora`)](#3-sesiones-activas-esquema-bitacora)
 4. [Registros de bitácora (esquema `bitacora`)](#4-registros-de-bitácora-esquema-bitacora)
    - 4.4 [Tablas auxiliares de migración y cierre MAND](#44-tablas-auxiliares-de-migración-y-cierre-mand)
+   - 4.5 [Columnas calculadas Bogotá (F22)](#45-columnas-calculadas-bogotá-f22)
 5. [Integración con el Dashboard (esquema `bitacora`)](#5-integración-con-el-dashboard-esquema-bitacora)
 6. [Vistas útiles](#6-vistas-útiles)
 7. [Notas de diseño](#7-notas-de-diseño)
+   - 7.10 [Convención de zonas horarias (F19+F20+F21+F22)](#710-convención-de-zonas-horarias-f19f20f21f22)
 8. [Historial de versiones](#8-historial-de-versiones)
 
 ---
@@ -538,6 +540,53 @@ Idempotencia primaria del sweeper diario MAND (`server/utils/mand-sweeper.js::ce
 - `registros_cerrados` = cuántos registros borrador se movieron a histórico. Sirve para auditoría operacional (¿el día N tuvo uso? ¿cuánto?).
 - El sweeper también hace early return `{ skipped: true, reason: 'no_records' }` (sin INSERT al log) si no hay registros borrador para `(fecha, planta)`. Esto evita que un día sin uso aparezca en el log y bloquee re-procesos legítimos. Trade-off aceptado: si pasado un tiempo aparecen registros para ese día y se gatilla el cron, el sweeper sí cerrará correctamente porque no hay fila previa en el log.
 
+### 4.5 Columnas calculadas Bogotá (F22)
+
+Para que las consultas humanas directas en SSMS muestren hora Bogotá sin ceremonias, cada tabla operativa expone columnas calculadas no-persistidas con sufijo `_bogota`. Aplicaciones siguen leyendo las columnas UTC (sin sufijo); las `_bogota` son solo para inspección humana.
+
+```sql
+ALTER TABLE bitacora.registro_activo
+  ADD fecha_evento_bogota   AS DATEADD(HOUR, -5, fecha_evento),
+      creado_en_bogota      AS DATEADD(HOUR, -5, creado_en),
+      modificado_en_bogota  AS DATEADD(HOUR, -5, modificado_en),
+      fecha_fin_estado_bogota AS DATEADD(HOUR, -5, fecha_fin_estado);
+
+ALTER TABLE bitacora.registro_historico
+  ADD fecha_evento_bogota   AS DATEADD(HOUR, -5, fecha_evento),
+      creado_en_bogota      AS DATEADD(HOUR, -5, creado_en),
+      modificado_en_bogota  AS DATEADD(HOUR, -5, modificado_en),
+      cerrado_en_bogota     AS DATEADD(HOUR, -5, cerrado_en),
+      fecha_fin_estado_bogota AS DATEADD(HOUR, -5, fecha_fin_estado);
+
+ALTER TABLE bitacora.evento_dashboard
+  ADD creado_en_bogota AS DATEADD(HOUR, -5, creado_en);
+
+ALTER TABLE bitacora.disponibilidad_dashboard
+  ADD fecha_inicio_estado_bogota AS DATEADD(HOUR, -5, fecha_inicio_estado),
+      modificado_en_bogota       AS DATEADD(HOUR, -5, modificado_en),
+      actualizado_en_bogota      AS DATEADD(HOUR, -5, actualizado_en);
+
+ALTER TABLE bitacora.sesion_activa
+  ADD inicio_sesion_bogota    AS DATEADD(HOUR, -5, inicio_sesion),
+      ultima_actividad_bogota AS DATEADD(HOUR, -5, ultima_actividad);
+
+ALTER TABLE bitacora.sesion_bitacora
+  ADD abierta_en_bogota    AS DATEADD(HOUR, -5, abierta_en),
+      finalizada_en_bogota AS DATEADD(HOUR, -5, finalizada_en);
+
+ALTER TABLE bitacora.mand_cierre_log
+  ADD cerrado_en_bogota AS DATEADD(HOUR, -5, cerrado_en);
+
+ALTER TABLE bitacora.migracion_aplicada
+  ADD aplicada_en_bogota AS DATEADD(HOUR, -5, aplicada_en);
+```
+
+Las columnas calculadas son **virtuales** — no ocupan espacio, se calculan al SELECT. No son indexables sin marcarlas `PERSISTED`, pero como solo se usan para inspección humana, no es necesario.
+
+**Implementación operativa:** la migración aplica en `server/db.js::initDB()` con flag `'F22.D1'` en `bitacora.migracion_aplicada`. Las DDLs son idempotentes — cada `ADD <col>` se gateaba con `IF NOT EXISTS (SELECT 1 FROM sys.columns ...)`.
+
+**Consumidores con `SELECT *`:** las columnas calculadas aparecen automáticamente en `SELECT *`. Cualquier handler que dependa de la posición o el shape exacto del recordset rompería. Auditoría (F22): los flujos transaccionales usan listas explícitas de columnas (forzado por F18 en MAND y F12+F14 en DISP); los `SELECT *` residuales en `server.js` operan vía nombre de propiedad (`row.fecha_evento`) sin sensibilidad a posición/shape.
+
 ---
 
 ## 5. Integración con el Dashboard (esquema `bitacora`)
@@ -776,6 +825,40 @@ La bitácora MAND también rompe varias invariantes del modelo general — disti
 - **`evento_dashboard` soft-delete en cierre:** al cerrar el día, las filas en `evento_dashboard` cuyo `registro_origen_id` apunta a registros que se mueven al histórico se marcan `activa=0`. El dashboard productivo deja de verlas inmediatamente.
 - **Permisos:** `puede_ver=1` y `puede_crear=1` solo para cargos 1 (JdT) y 2 (IngOp). Otros cargos no ven la bitácora en el sidebar.
 
+### 7.10 Convención de zonas horarias (F19+F20+F21+F22)
+
+La BD guarda **todas las columnas DATETIME2 en UTC**, pobladas por `SYSUTCDATETIME()`. Toda conversión a hora Bogotá ocurre explícitamente en presentación o en comparación dentro de queries. La aplicación opera para usuarios en Colombia: el render frontend usa siempre `timeZone: 'America/Bogota'` explícito (no la TZ del navegador).
+
+**Reglas operativas:**
+
+- INSERTs y UPDATEs DEFAULT usan `SYSUTCDATETIME()`. `GETDATE()` está prohibido en `Bit-cora-g3/server/` salvo que esté documentado por qué.
+- Comparaciones de fecha del día Bogotá usan `CAST(DATEADD(HOUR, -5, columna_utc) AS DATE) = @fecha_bogota` (Colombia UTC−5 sin DST). Patrón en `mand-sweeper.js::cerrarDiaMand`, `GET /api/sala-de-mando` (post F19) y handlers similares.
+- Sweep TTL de sesiones (`db.js`) usa `SYSUTCDATETIME()` (post F19) — antes era `GETDATE()` con desfase si el SQL host no estaba en UTC.
+- Helpers JS canónicos:
+  - **Frontend** (`src/utils/fecha.js`): `getTodayBogota`, `horaBogota`, `shiftDate` con `Intl.DateTimeFormat('America/Bogota')`.
+  - **Backend** (`server/utils/turno.js`): `colombiaParts`, `getTurnoColombia`, `turnoFromPeriodo`, `ventanaTurno`, `periodoFromFechaBogota`, `fechaBogotaStr`, `fechaBogotaIso`. Offset puro `-5h` con `getUTC*()`.
+  - **Backend** (`server/utils/mand-sweeper.js::todayBogota`): patrón offset puro idéntico, archivo-local.
+- Antipatrones prohibidos:
+  - `new Date(date.toLocaleString('…', { timeZone: 'America/Bogota' }))` — `new Date(string)` re-interpreta el string en TZ del navegador/host.
+  - `date.getTimezoneOffset()` para "normalizar a UTC" — depende del host.
+  - `.toLocaleString(...)` / `.toLocaleDateString(...)` SIN `timeZone: 'America/Bogota'` explícito.
+  - `getHours()`/`getDate()`/`getMonth()` directamente sobre `new Date()` sin offset previo.
+  - `GETDATE()` en columnas DATETIME2 nuevas o en queries que comparan "hoy" — siempre `SYSUTCDATETIME()` con `DATEADD(HOUR, -5, …)` para Bogotá.
+- Inputs `<input type="datetime-local">` interpretan lo tipeado como hora Bogotá. Frontend convierte a UTC antes de POST con offset `-05:00` apendido (patrón `toIsoFromLocal` / `toDatetimeLocal` en `Disponibilidad/CambiarEstadoModal.jsx` post F20).
+- CIET `campos_extra.fecha_cerrada` es fecha Bogotá (`YYYY-MM-DD` día Bogotá), `fecha_revertida` es ISO con sufijo `-05:00` Bogotá. CIETs históricos pre-F19 quedan en UTC — distinguir por fecha de creación si auditás cruces históricos.
+
+**Vistas/columnas compat para SSMS** (F22):
+
+Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufijo `_bogota` que aplican `DATEADD(HOUR, -5, …)`. No persistidas, costo cero al INSERT, aparecen en `SELECT *` automáticamente. Lista completa en §4.5.
+
+**Snippets SSMS** viven en `Bit-cora-g3/sql/snippets/`. Incluye templates para queries ad-hoc Bogotá (filtrar por día, agregar por hora, inspeccionar CIETs).
+
+**Deuda documentada:**
+
+- **T4 cierre cronológico**: `server.js:~1739-1747` ordena `registro_activo` por `fecha_evento ASC` (UTC). Edge case poco probable: dos turnos solapados podrían ordenarse mal. Se mantiene la implementación actual; si se manifiesta en producción, agregar `ORDER BY DATEADD(HOUR, -5, fecha_evento) ASC`.
+- **Tests de componentes RTL**: `HistoricoTable`, `EstadoActualCard`, `BarraEstado`, `SalaDeMandoGrid` no tienen tests automáticos de render con TZ override. Smoke manual con DevTools cubre el gap hoy.
+- **CI matrix con GH Actions**: el repo no tiene CI configurado. F21 dejó tests corriendo localmente (`npm test`). Cuando se agregue GH Actions, configurar matriz `TZ=UTC,America/Bogota,Asia/Tokyo` para detectar regresiones por uso accidental de `getHours()`/`getTimezoneOffset()` sin TZ explícito.
+
 ---
 
 ## 8. Historial de versiones
@@ -786,6 +869,7 @@ La bitácora MAND también rompe varias invariantes del modelo general — disti
 | 1.1 | 2026-04-18 | Roles por rol (JdTs, Jefes, Ingenieros) migrados a snapshots JSON (`*_snapshot NVARCHAR(MAX) NOT NULL`). `creado_por` queda como único FK vivo a `lov_bit.usuario` en tablas transaccionales. Se añade TTL de 5 min sobre `sesion_activa.ultima_actividad`, sweep de arranque y endpoint `/api/auth/resume`. Vista `v_historico_busqueda` reescrita sin JOINs por rol. |
 | 1.2 | 2026-04-29 | F12+F13+F14 (Disponibilidad como mini-dashboard). Columna `fecha_fin_estado DATETIME2 NULL` en `registro_activo` y `registro_historico` (DISP only). Filtered unique index `UQ_disp_vigente_por_planta` (4.3). Tabla nueva `bitacora.disponibilidad_dashboard` (5.2) — separada de `evento_dashboard`. `turno` se vuelve nullable (DISP graba NULL). Sección 7.8 documenta las invariantes que DISP rompe deliberadamente. **Fuera del alcance de v1.2:** F2/F4/F5/F9 ya estaban incorporados al modelo en parches previos sin bumpear esta versión — la `autorizacion_dashboard` se renombró a `evento_dashboard` con columna `tipo` (F5) y la vista compat se eliminó (F9); la columna `cerrada_en` de `sesion_activa` y la tabla `sesion_bitacora` (F2) viven en código pero no estaban reflejadas acá. |
 | 1.3 | 2026-05-04 | F16+F17+F18 (Sala de Mando con batch save y cierre automático fin de día). Sección 2.3.2 nueva — usuario `SISTEMA` (autor automático para CIETs de procesos cron). Sección 4.4 nueva con dos tablas auxiliares: `bitacora.migracion_aplicada` (flag genérico de migraciones one-time) y `bitacora.mand_cierre_log` (idempotencia del sweeper diario MAND). Sección 7.9 nueva — políticas MAND (no acepta cierre individual/masivo, batch save atómico vía `POST /api/sala-de-mando/guardar`, lock REDESP por hora actual, funcionariocnd condicional por tipo, CIET con autor SISTEMA y snapshots agregados del día). El endpoint `GET /api/sala-de-mando/dias-pendientes` (F10) fue eliminado en F16. |
+| 1.4 | 2026-05-05 | F19+F20+F21+F22 (corrección de fechas — convención TZ formalizada). Sección 7.10 nueva con la convención (BD en UTC, presentación Bogotá explícito), antipatrones prohibidos, helpers canónicos. Sección 4.5 nueva con columnas calculadas `*_bogota` para inspección humana en SSMS, aplicadas vía migración idempotente F22.D1 en `db.js::initDB()`. Bugs corregidos en F19: T1 (`GET /api/sala-de-mando` con `DATEADD(HOUR, -5, fecha_evento)`), T2 (sweep TTL `db.js` con `SYSUTCDATETIME()`), T3 (CIET `fecha_cerrada` y `fecha_revertida` en hora Bogotá). T4 (cierre cronológico edge case) queda como deuda documentada. F20 corrigió formatters frontend (T5/T6/T7) con `timeZone: 'America/Bogota'` explícito en `BitacorasGecelca3.jsx`, `HistoricoTable.jsx` y `Disponibilidad/CambiarEstadoModal.jsx`. F21 agregó tests de helpers (`server/tests/fechas_bogota.test.js`). |
 
 ---
 
