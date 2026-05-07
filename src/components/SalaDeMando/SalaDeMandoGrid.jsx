@@ -50,17 +50,26 @@ function cloneBuffer(buf) {
   return out;
 }
 
-function diffBuffer(snap, buf) {
+function diffBuffer(snap, buf, periodoActual) {
   const filas = [];
   for (const tipo of TIPO_KEYS) {
+    const detalleCambio = (snap[tipo].detalle || '') !== (buf[tipo].detalle || '');
+    const funcCambio = (snap[tipo].funcionariocnd || '') !== (buf[tipo].funcionariocnd || '');
+    const propagarMetadata = detalleCambio || funcCambio;
+
     const periodosCambiados = [];
     for (let p = 1; p <= 24; p++) {
       const a = snap[tipo].valores[p];
       const b = buf[tipo].valores[p];
-      if (a !== b) periodosCambiados.push({ periodo: p, valor_mw: b });
+      if (a !== b) {
+        periodosCambiados.push({ periodo: p, valor_mw: b });
+      } else if (propagarMetadata && b != null) {
+        // REDESP en periodo < periodoActual está bloqueado por el backend; omitirlo
+        // evita que un cambio de detalle haga rebotar el batch con 'periodo_bloqueado'.
+        if (tipo === 'REDESP' && p < periodoActual) continue;
+        periodosCambiados.push({ periodo: p, valor_mw: b });
+      }
     }
-    const detalleCambio = (snap[tipo].detalle || '') !== (buf[tipo].detalle || '');
-    const funcCambio = (snap[tipo].funcionariocnd || '') !== (buf[tipo].funcionariocnd || '');
     if (periodosCambiados.length > 0 || detalleCambio || funcCambio) {
       filas.push({
         tipo,
@@ -137,8 +146,8 @@ export default function SalaDeMandoGrid({
 
   const filasDiff = useMemo(() => {
     if (!snapshot || !buffer) return [];
-    return diffBuffer(snapshot, buffer);
-  }, [snapshot, buffer]);
+    return diffBuffer(snapshot, buffer, periodoActual);
+  }, [snapshot, buffer, periodoActual]);
   const dirty = filasDiff.length > 0;
 
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
@@ -155,7 +164,7 @@ export default function SalaDeMandoGrid({
 
   const guardar = useCallback(async () => {
     if (!buffer || !snapshot) return;
-    const filas = diffBuffer(snapshot, buffer);
+    const filas = diffBuffer(snapshot, buffer, periodoActual);
     if (filas.length === 0) return;
     setGuardando(true);
     try {
@@ -174,7 +183,7 @@ export default function SalaDeMandoGrid({
     } finally {
       setGuardando(false);
     }
-  }, [buffer, snapshot, guardarBatch, plantaId, refresh]);
+  }, [buffer, snapshot, guardarBatch, plantaId, refresh, periodoActual]);
 
   useEffect(() => { guardarRef.current = guardar; }, [guardar]);
   useEffect(() => {
