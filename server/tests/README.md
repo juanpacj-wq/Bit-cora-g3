@@ -55,10 +55,10 @@ TZ=UTC npm test
 | D3 | Sin tests E2E con Playwright TZ override del navegador | Baja | Costo alto, beneficio marginal mientras todos los operadores estén en Bogotá (decisión C1=A en `preguntasfecha.md`). |
 | D4 | **RESUELTO 2026-05-13** — `auth_reactivate.test.js` reescrito para usar `/api/eventos-dashboard?tipo=AUTH` (GET) y `/api/eventos-dashboard/:id` (DELETE). Endpoints legacy `/api/autorizaciones*` siguen vivos con warn deprecado; remover en próxima fase si nada más los usa. | — | — |
 | D5 | **RESUELTO 2026-05-13** — A5/B2 ahora usan `fecha_evento` UTC determinística (2026-05-10). El root cause real (descubierto durante el fix) era que `TEST_TAG` contenía `[brackets]` interpretados por SQL Server como wildcards de conjunto en LIKE; `cleanupTestRegistros` nunca limpiaba registros tagged y los asserts con `LIKE %TEST_TAG%` fallaban silenciosamente. Fix: `TEST_TAG` sin corchetes en `helpers.js` + cleanup de `mand_cierre_log` con guard `fecha_cerrada >= 2026-05-01`. | — | — |
-| D6 | `auth_middleware.test.js` 7/9 (cierre Ing. Operación / JdT) fallan a veces | Baja | Aparentemente dependiente del orden — investigar timing del setup de permisos. |
+| D6 | **RESUELTO 2026-05-13** — los 2 fails crónicos (cierre Ing. Operación / JdT con DISP) eran tests obsoletos: F13.3 hizo DISP `bitacora_no_cerrable` (422), pero los asserts esperaban 200. Fix: cambia `bitacora_id` a `CALDERA` (bitácora normal cerrable) y agrega `beforeEach()` que limpia DISP entre tests para no acoplar la regla RN-11 "no consecutivos iguales" entre casos. Suite serial (`npm test`) ahora 76/76 verde. | — | — |
 | D7 | Sin fake clock en server-side flow | Alta para test exhaustivo, baja para regresión actual | Refactor del server para inyectar `clock` o usar TZ-agnostic helpers en todas las queries. |
 
-Las fallas D4-D6 son pre-existentes a F19+F20+F21 (verificadas en baseline `git stash` durante F20). F21 NO introduce regresiones nuevas; el conteo total de fails con suite completa post-F21 sigue siendo 9 (mismo que baseline).
+Las fallas D4-D6 estaban pre-existentes a F19+F20+F21 y fueron cerradas en branch `chore/cleanup-2026-05` (2026-05-13). Suite serial (`npm test`) ahora 76/76 verde. Las fallas en runs paralelos (`node --test tests/*.test.js`) persisten por race condition de `initDB()` concurrente entre workers — usar siempre `npm test` (`--test-concurrency=1`) o pasar archivos explícitos en serie.
 
 ## Tests del frontend (root)
 

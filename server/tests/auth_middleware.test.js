@@ -1,4 +1,4 @@
-import { test, before, after } from 'node:test';
+import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
@@ -23,6 +23,13 @@ async function cleanDispGec3() {
 before(async () => {
   ctx = await setupSessions();
   await cleanDispGec3();
+});
+
+// D6: cada test arranca con DISP limpio para que la regla "no consecutivos iguales" (RN-11)
+// no acople tests entre sí. before() global se mantiene — crea sesiones MERGE y no hace
+// falta repetirlo.
+beforeEach(async () => {
+  if (ctx) await cleanDispGec3();
 });
 
 after(async () => {
@@ -107,9 +114,13 @@ test('POST /api/registros Gerente devuelve 403', async () => {
 
 test('POST /api/cierre/bitacora Ing. Operación devuelve 200 (puede_cerrar_turno=1)', async () => {
   const { sesiones, bitByCodigo } = ctx;
+  // D6: DISP no es cerrable (F13.3 — endpoint devuelve 422). Usamos CALDERA (bitácora
+  // normal) para ejercitar la rama "puede_cerrar_turno=1 ⇒ pasa el middleware y llega
+  // al business logic". No requiere registros activos previos: el endpoint emite el
+  // CIET de cierre incluso si el SELECT oldest viene vacío.
   const { status } = await call('POST', '/api/cierre/bitacora', {
     sesion_id: sesiones.ingOp,
-    body: { bitacora_id: bitByCodigo.DISP, planta_id: PLANTA_ID },
+    body: { bitacora_id: bitByCodigo.CALDERA, planta_id: PLANTA_ID },
   });
   assert.equal(status, 200);
 });
@@ -125,9 +136,10 @@ test('POST /api/cierre/bitacora Ing. Químico devuelve 403', async () => {
 
 test('POST /api/cierre/bitacora JdT devuelve 200', async () => {
   const { sesiones, bitByCodigo } = ctx;
+  // D6: idem comentario arriba — usamos CALDERA porque DISP devuelve 422 (no cerrable).
   const { status } = await call('POST', '/api/cierre/bitacora', {
     sesion_id: sesiones.jdt,
-    body: { bitacora_id: bitByCodigo.DISP, planta_id: PLANTA_ID },
+    body: { bitacora_id: bitByCodigo.CALDERA, planta_id: PLANTA_ID },
   });
   assert.equal(status, 200);
 });
