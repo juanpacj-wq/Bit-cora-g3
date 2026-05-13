@@ -163,8 +163,11 @@ test('A4. /api/cierre/masivo NO mueve el vigente DISP al histórico', async () =
 });
 
 test('A5. /api/cierre/masivo SÍ mueve registros de bitácoras normales (CALDERA)', async () => {
-  const dia = new Date();
-  dia.setHours(8, 0, 0, 0);
+  // D5: fecha fija UTC explícita (09:00 Bogotá del 2026-05-10, dentro de turno 1).
+  // Evita que `new Date(); setHours(8)` dependa del TZ del host y de la hora actual:
+  // si el runtime estuviera en T2 (noche) o en madrugada, el día Bogotá derivado del
+  // registro podía caer fuera de la ventana del turno calculada por el endpoint.
+  const dia = new Date('2026-05-10T14:00:00Z');
   await insertActivoDirecto({
     bitacora_id: CALDERA_ID,
     tipo_evento_id: CALDERA_TIPO_EVENTO_ID,
@@ -217,10 +220,13 @@ test('B1. creado_en de un nuevo registro está en zona consistente con UTC del c
 
 test('B2. cerrado_en y fecha_cierre_operativo del histórico están en zona consistente', async () => {
   const db = await getDB();
+  // D5: fecha fija UTC (08:00 Bogotá del 2026-05-10, también dentro de turno 1). El cierre
+  // se ejecuta AHORA (SYSUTCDATETIME del servidor); fecha_cierre_operativo refleja el día
+  // Bogotá actual del cierre, no el fecha_evento — el assert dinámico de abajo sigue válido.
   await insertActivoDirecto({
     bitacora_id: CALDERA_ID,
     tipo_evento_id: CALDERA_TIPO_EVENTO_ID,
-    fecha_evento: new Date(Date.now() - HOUR),
+    fecha_evento: new Date('2026-05-10T13:00:00Z'),
     turno: 1,
     detalle: `${TEST_TAG} caldera-B2`,
   });

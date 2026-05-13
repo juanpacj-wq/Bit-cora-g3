@@ -54,7 +54,7 @@ TZ=UTC npm test
 | D2 | Sin CI matrix en GH Actions (3 TZ jobs) | Media | El repo no tiene `.github/workflows/`. Se documenta como deuda; cuando se monte CI, agregar TZ matrix. |
 | D3 | Sin tests E2E con Playwright TZ override del navegador | Baja | Costo alto, beneficio marginal mientras todos los operadores estén en Bogotá (decisión C1=A en `preguntasfecha.md`). |
 | D4 | **RESUELTO 2026-05-13** — `auth_reactivate.test.js` reescrito para usar `/api/eventos-dashboard?tipo=AUTH` (GET) y `/api/eventos-dashboard/:id` (DELETE). Endpoints legacy `/api/autorizaciones*` siguen vivos con warn deprecado; remover en próxima fase si nada más los usa. | — | — |
-| D5 | `cierre_y_fechas.test.js` A5/B2 fallan por leftover `mand_cierre_log` o estado de prev runs | Media | Hardener cleanup en `before` global. |
+| D5 | **RESUELTO 2026-05-13** — A5/B2 ahora usan `fecha_evento` UTC determinística (2026-05-10). El root cause real (descubierto durante el fix) era que `TEST_TAG` contenía `[brackets]` interpretados por SQL Server como wildcards de conjunto en LIKE; `cleanupTestRegistros` nunca limpiaba registros tagged y los asserts con `LIKE %TEST_TAG%` fallaban silenciosamente. Fix: `TEST_TAG` sin corchetes en `helpers.js` + cleanup de `mand_cierre_log` con guard `fecha_cerrada >= 2026-05-01`. | — | — |
 | D6 | `auth_middleware.test.js` 7/9 (cierre Ing. Operación / JdT) fallan a veces | Baja | Aparentemente dependiente del orden — investigar timing del setup de permisos. |
 | D7 | Sin fake clock en server-side flow | Alta para test exhaustivo, baja para regresión actual | Refactor del server para inyectar `clock` o usar TZ-agnostic helpers en todas las queries. |
 
