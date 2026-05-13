@@ -10,6 +10,7 @@ import {
   Search, Filter, FileText,
   Activity, Flame, Droplets, Zap, Gauge, Cpu, FlaskConical, Leaf,
   Settings, FileCheck, Edit3, Eye, XCircle, Check, Users, History,
+  User, LayoutDashboard,
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 import CierrePendientesModal from "./components/CierrePendientesModal";
@@ -251,108 +252,220 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center"
-      style={{ background: `linear-gradient(135deg, ${COLORS.blueDeepest} 0%, ${COLORS.blueDeep} 40%, ${COLORS.blueDark} 100%)` }}>
-      <div className="bg-white rounded-3xl shadow-2xl p-10 max-w-md w-full mx-4">
-        <div className="text-center mb-8">
-          <img src="/G3 blanco.png" alt="Gecelca3" className="h-16 mx-auto mb-4" onError={(e) => { e.target.style.display = "none"; }} />
-          <h1 className="text-2xl font-bold" style={{ color: COLORS.blueDeep }}>Bitácoras de Planta</h1>
-          <p className="text-gray-500 text-sm mt-1">Sistema de Registro Operativo — Gecelca3</p>
+    <div className="min-h-screen relative flex items-center justify-center p-3 sm:p-4 overflow-hidden"
+      style={{ background: "linear-gradient(135deg, #f5f7fa 0%, #eef2f7 50%, #e2eaf3 100%)" }}>
+
+      {/* Decorativos sutiles sobre fondo claro */}
+      <div className="absolute -top-24 -left-24 w-80 h-80 rounded-full blur-3xl opacity-25 pointer-events-none"
+        style={{ backgroundColor: COLORS.greenPrimary }} />
+      <div className="absolute -bottom-32 -right-20 w-96 h-96 rounded-full blur-3xl opacity-20 pointer-events-none"
+        style={{ backgroundColor: COLORS.blueDark }} />
+      <div className="absolute top-1/3 left-1/4 w-40 h-40 rounded-full blur-3xl opacity-10 pointer-events-none"
+        style={{ backgroundColor: COLORS.blueDeep }} />
+
+      {/* Card principal */}
+      <div className="relative w-full max-w-5xl max-h-full bg-white rounded-3xl shadow-2xl overflow-hidden flex flex-col lg:flex-row ring-1 ring-black/5">
+
+        {/* PANEL IZQUIERDO — Form */}
+        <div className="flex-1 flex flex-col justify-center px-8 py-7 lg:px-12 lg:py-9">
+          <div className="text-center mb-5">
+            <img src="/gecelca3-logo.png" alt="Gecelca3" className="h-11 mx-auto mb-3"
+              onError={(e) => { e.target.style.display = "none"; }} />
+            {paso === "credenciales" ? (
+              <>
+                <h1 className="text-3xl font-bold tracking-tight" style={{ color: COLORS.blueDark }}>INICIAR SESION</h1>
+                <p className="text-sm mt-1.5" style={{ color: COLORS.grayText }}>
+                  Bitácoras de Planta — Sistema de Registro Operativo
+                </p>
+              </>
+            ) : (
+              <>
+                <h1 className="text-2xl font-bold" style={{ color: COLORS.blueDeep }}>Bitácoras de Planta</h1>
+                <p className="text-sm mt-1" style={{ color: COLORS.grayText }}>
+                  {paso === "planta" ? "Selecciona tu planta de operación" : "Selecciona tu cargo"}
+                </p>
+              </>
+            )}
+          </div>
+
+          {paso === "credenciales" && (
+            <form onSubmit={handleLogin} className="space-y-4 max-w-sm mx-auto w-full">
+              <div className="relative">
+                <User size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                  style={{ color: COLORS.grayText }} />
+                <input
+                  type="text" required placeholder="Usuario"
+                  autoComplete="username" autoCapitalize="off" autoCorrect="off" spellCheck="false"
+                  value={username} onChange={(e) => setUsername(e.target.value.trim().toLowerCase())}
+                  className="w-full pl-10 pr-4 py-3 rounded-xl border focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none text-sm transition-all"
+                  style={{ backgroundColor: COLORS.grayLight, borderColor: COLORS.grayBorder }}
+                />
+              </div>
+              <div className="relative">
+                <Lock size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                  style={{ color: COLORS.grayText }} />
+                <input
+                  type="password" required placeholder="Contraseña"
+                  value={password} onChange={(e) => setPassword(e.target.value)}
+                  className="w-full pl-10 pr-4 py-3 rounded-xl border focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none text-sm transition-all"
+                  style={{ backgroundColor: COLORS.grayLight, borderColor: COLORS.grayBorder }}
+                />
+              </div>
+
+              <div className="pt-2 flex justify-center">
+                <button
+                  type="submit" disabled={auth.loading}
+                  className="px-10 py-3 rounded-xl text-white font-semibold shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all disabled:opacity-60 disabled:hover:translate-y-0"
+                  style={{ background: `linear-gradient(135deg, ${COLORS.greenPrimary} 0%, ${COLORS.greenDark} 100%)` }}
+                >
+                  {auth.loading ? "Validando..." : "Iniciar sesión"}
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3 pt-3">
+                <span className="flex-1 h-px" style={{ backgroundColor: COLORS.grayBorder }} />
+                <span className="text-xs font-semibold" style={{ color: COLORS.grayText }}>
+                  <strong style={{ color: COLORS.blueDeep }}>O continúa</strong> con
+                </span>
+                <span className="flex-1 h-px" style={{ backgroundColor: COLORS.grayBorder }} />
+              </div>
+
+              <span title="Próximamente — usar credenciales por ahora" className="inline-block w-full">
+                <button
+                  type="button" disabled
+                  className="w-full flex items-center justify-center gap-3 py-3 rounded-xl border bg-white opacity-50 cursor-not-allowed"
+                  style={{ borderColor: COLORS.grayBorder }}
+                  aria-label="Iniciar sesión con Microsoft (próximamente)"
+                >
+                  <svg width="18" height="18" viewBox="0 0 23 23" aria-hidden="true">
+                    <rect x="1" y="1" width="10" height="10" fill="#F25022" />
+                    <rect x="12" y="1" width="10" height="10" fill="#7FBA00" />
+                    <rect x="1" y="12" width="10" height="10" fill="#00A4EF" />
+                    <rect x="12" y="12" width="10" height="10" fill="#FFB900" />
+                  </svg>
+                  <span className="text-sm" style={{ color: COLORS.blueDeep }}>
+                    Iniciar sesión con <strong>Microsoft</strong>
+                  </span>
+                </button>
+              </span>
+            </form>
+          )}
+
+          {paso === "planta" && (
+            <div className="max-w-sm mx-auto w-full">
+              <div className="flex items-center gap-2 mb-3 flex-wrap">
+                <span className="text-xs" style={{ color: COLORS.grayText }}>Hola,</span>
+                <span className="text-xs font-semibold px-2 py-0.5 rounded-md text-white" style={{ backgroundColor: COLORS.greenDark }}>
+                  {auth.user?.nombre_completo}
+                </span>
+              </div>
+              <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-gray-400">
+                {plantas.map((p) => (
+                  <button
+                    key={p.planta_id}
+                    onClick={() => { setPlantaSel(p.planta_id); setPaso("cargo"); }}
+                    className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left bg-white"
+                  >
+                    <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-sm flex-shrink-0"
+                      style={{ backgroundColor: COLORS.greenDark }}>
+                      {p.planta_id}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-semibold text-gray-900 group-hover:text-emerald-700 transition-colors">{p.nombre}</div>
+                      <div className="text-xs text-gray-500 mt-0.5">Planta de generación</div>
+                    </div>
+                    <LogIn size={20} className="text-gray-300 group-hover:text-emerald-500 transition-colors flex-shrink-0" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {paso === "cargo" && (
+            <div className="max-w-sm mx-auto w-full">
+              <div className="flex items-center gap-2 mb-3 flex-wrap">
+                <button onClick={() => setPaso("planta")} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 transition-colors">
+                  ← Cambiar planta
+                </button>
+                <span className="text-xs font-semibold px-2 py-0.5 rounded-md text-white" style={{ backgroundColor: COLORS.greenDark }}>
+                  {plantas.find((p) => p.planta_id === plantaSel)?.nombre}
+                </span>
+              </div>
+              <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-gray-400">
+                {cargos.map((c) => (
+                  <button
+                    key={c.cargo_id}
+                    onClick={() => handleSelectCargo(c)}
+                    className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left bg-white"
+                  >
+                    <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0"
+                      style={{ backgroundColor: c.puede_cerrar_turno ? COLORS.greenDark : COLORS.blueDark }}>
+                      {iniciales(c.nombre)}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-semibold text-gray-900 group-hover:text-emerald-700 transition-colors">{c.nombre}</div>
+                      <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-medium"
+                          style={{
+                            backgroundColor: c.puede_cerrar_turno ? "#e6f4ea" : "#e8f0fe",
+                            color: c.puede_cerrar_turno ? COLORS.greenDark : COLORS.blueDark,
+                          }}>
+                          {c.solo_lectura ? "Solo lectura" : "Operativo"}
+                        </span>
+                      </div>
+                    </div>
+                    <LogIn size={20} className="text-gray-300 group-hover:text-emerald-500 transition-colors flex-shrink-0" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
-        {paso === "credenciales" && (
-          <form onSubmit={handleLogin} className="space-y-4">
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Inicia sesión</p>
-            <input
-              type="text" required placeholder="Usuario (ej. ofedullo)"
-              autoComplete="username" autoCapitalize="off" autoCorrect="off" spellCheck="false"
-              value={username} onChange={(e) => setUsername(e.target.value.trim().toLowerCase())}
-              className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none text-sm"
-            />
-            <input
-              type="password" required placeholder="Contraseña"
-              value={password} onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none text-sm"
-            />
-            <button
-              type="submit" disabled={auth.loading}
-              className="w-full py-3 rounded-xl text-white font-semibold shadow-sm hover:shadow-md transition-all disabled:opacity-60"
-              style={{ backgroundColor: COLORS.greenPrimary }}
-            >
-              {auth.loading ? "Validando..." : "Iniciar sesión"}
-            </button>
-          </form>
-        )}
+        {/* PANEL DERECHO — Hero (oculto en móvil) */}
+        <div className="hidden lg:flex lg:w-[45%] relative items-center justify-center p-8 overflow-hidden"
+          style={{ background: `linear-gradient(135deg, ${COLORS.blueDeepest} 0%, ${COLORS.blueDark} 100%)` }}>
 
-        {paso === "planta" && (
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 mb-4">
-              <span className="text-xs text-gray-500">Hola,</span>
-              <span className="text-xs font-semibold px-2 py-0.5 rounded-md text-white" style={{ backgroundColor: COLORS.greenDark }}>
-                {auth.user?.nombre_completo}
-              </span>
+          {/* Patrón decorativo: círculos translúcidos */}
+          <div className="absolute -top-16 -right-16 w-64 h-64 rounded-full opacity-20"
+            style={{ backgroundColor: COLORS.greenPrimary }} />
+          <div className="absolute -bottom-20 -left-12 w-72 h-72 rounded-full opacity-10 bg-white" />
+          <div className="absolute top-10 left-10 w-3 h-3 rounded-full bg-white opacity-40" />
+          <div className="absolute bottom-16 right-20 w-2 h-2 rounded-full bg-white opacity-50" />
+
+          {/* Foto de la planta enmarcada */}
+          <div className="relative w-full max-w-sm">
+            <div className="relative rounded-3xl overflow-hidden shadow-2xl ring-1 ring-white/20">
+              <img src="/planta-gecelca3.jpg" alt="Planta Gecelca3"
+                className="w-full h-[460px] object-cover"
+                onError={(e) => { e.target.style.display = "none"; }} />
+              <div className="absolute inset-0 pointer-events-none"
+                style={{ background: `linear-gradient(180deg, transparent 60%, ${COLORS.blueDeepest}33 100%)` }} />
             </div>
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Selecciona tu planta</p>
-            {plantas.map((p) => (
-              <button
-                key={p.planta_id}
-                onClick={() => { setPlantaSel(p.planta_id); setPaso("cargo"); }}
-                className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left"
-              >
-                <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-sm flex-shrink-0"
-                  style={{ backgroundColor: COLORS.greenDark }}>
-                  {p.planta_id}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-semibold text-gray-900 group-hover:text-emerald-700 transition-colors">{p.nombre}</div>
-                  <div className="text-xs text-gray-500 mt-0.5">Planta de generación</div>
-                </div>
-                <LogIn size={20} className="text-gray-300 group-hover:text-emerald-500 transition-colors flex-shrink-0" />
-              </button>
-            ))}
-          </div>
-        )}
 
-        {paso === "cargo" && (
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 mb-4">
-              <button onClick={() => setPaso("planta")} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 transition-colors">
-                ← Cambiar planta
-              </button>
-              <span className="text-xs font-semibold px-2 py-0.5 rounded-md text-white" style={{ backgroundColor: COLORS.greenDark }}>
-                {plantas.find((p) => p.planta_id === plantaSel)?.nombre}
-              </span>
+            {/* Badge Zap (acento verde, equivalente al rayo amarillo del reference) */}
+            <div className="absolute -left-6 bottom-12 w-16 h-16 rounded-full bg-white flex items-center justify-center shadow-xl ring-4"
+              style={{ boxShadow: "0 12px 32px rgba(49,163,84,0.4)" }}>
+              <div className="w-12 h-12 rounded-full flex items-center justify-center"
+                style={{ background: `linear-gradient(135deg, ${COLORS.greenPrimary} 0%, ${COLORS.greenDark} 100%)` }}>
+                <Zap size={22} className="text-white fill-white" />
+              </div>
             </div>
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Selecciona tu cargo</p>
-            {cargos.map((c) => (
-              <button
-                key={c.cargo_id}
-                onClick={() => handleSelectCargo(c)}
-                className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left"
-              >
-                <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0"
-                  style={{ backgroundColor: c.puede_cerrar_turno ? COLORS.greenDark : COLORS.blueDark }}>
-                  {iniciales(c.nombre)}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-semibold text-gray-900 group-hover:text-emerald-700 transition-colors">{c.nombre}</div>
-                  <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-medium"
-                      style={{
-                        backgroundColor: c.puede_cerrar_turno ? "#e6f4ea" : "#e8f0fe",
-                        color: c.puede_cerrar_turno ? COLORS.greenDark : COLORS.blueDark,
-                      }}>
-                      {c.solo_lectura ? "Solo lectura" : "Operativo"}
-                    </span>
-                  </div>
-                </div>
-                <LogIn size={20} className="text-gray-300 group-hover:text-emerald-500 transition-colors flex-shrink-0" />
-              </button>
-            ))}
-          </div>
-        )}
 
-        <p className="text-center text-xs text-gray-400 mt-8">Sistema conectado a backend de bitácoras</p>
+            {/* Caption flotante */}
+            <div className="absolute top-4 right-4 px-3 py-1.5 rounded-full backdrop-blur-md bg-white/15 border border-white/25">
+              <span className="text-[11px] font-semibold tracking-wider text-white uppercase">Gecelca3</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Pill decorativa "dashboard" */}
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 inline-flex items-center gap-2 px-5 py-2 rounded-full text-white shadow-xl select-none"
+        style={{ backgroundColor: COLORS.blueDeepest, border: `1px solid ${COLORS.blueDark}` }}
+        aria-hidden="true">
+        <LayoutDashboard size={15} style={{ color: COLORS.greenPrimary }} />
+        <span className="text-sm font-semibold">dashboard</span>
       </div>
     </div>
   );
