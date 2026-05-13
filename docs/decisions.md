@@ -204,7 +204,31 @@ Decisiones destiladas de las fases F1–F22. Formato corto: Contexto / Decisión
 
 ---
 
-## D-021 — Roadmap ejecutado: F1–F22
+## D-021 — Categorías del TabBar hardcoded en frontend
+
+**Fecha:** 2026-05-13
+
+**Contexto:** el TabBar agrupa bitácoras por categoría (hoy: "Operación 24h" agrupa DISP y MAND). La constante `CATEGORIAS` vive en `src/BitacorasGecelca3.jsx`, junto con el componente `CategoriaTab` que la renderiza como botón con flyout portal.
+
+**Decisión:** mantener `CATEGORIAS` hardcoded en frontend. NO migrar a tabla `lov_bit.categoria` + columna `categoria_codigo` en `lov_bit.bitacora` por ahora.
+
+**Consecuencias:** una sola categoría, dos bitácoras agrupadas, cambio esperado "una vez al año o menos". Migrar a BD por algo que no cambia es sobreingeniería. Si en fases futuras aparecen >3 categorías o la lista cambia con frecuencia, migrar a `lov_bit.categoria` (codigo, nombre, nombre_corto, icono, orden) + FK opcional `lov_bit.bitacora.categoria_codigo`. Mientras tanto, cambio de categoría requiere redeploy del frontend.
+
+---
+
+## D-022 — Bitácoras sin badge numérico hardcoded en frontend
+
+**Fecha:** 2026-05-13
+
+**Contexto:** el TabBar muestra un badge con el count de registros pendientes por bitácora. DISP no tiene noción de "pendiente" — es estado vigente, no count de registros activos — por eso el badge se omite.
+
+**Decisión:** mantener `SIN_BADGE_CODIGOS = new Set(['DISP'])` hardcoded en `src/BitacorasGecelca3.jsx`. NO migrar a flag `mostrar_badge BIT NOT NULL DEFAULT 1` en `lov_bit.bitacora`.
+
+**Consecuencias:** misma lógica que D-021 — una bitácora especial con una mecánica especial. Si en futuro otra bitácora entra en la misma categoría (count semánticamente vacío), agregar al `Set`. Si la lista crece a >3 entradas, migrar a flag en BD.
+
+---
+
+## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
 |---|---|---|

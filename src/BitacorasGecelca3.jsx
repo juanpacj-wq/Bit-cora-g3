@@ -4,13 +4,14 @@
 // ============================================================
 
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   LogIn, LogOut, Clock, Plus, Save, Trash2, Lock, CheckCircle2,
   AlertTriangle, X, ChevronDown, ChevronLeft, ChevronRight, Calendar,
   Search, Filter, FileText,
   Activity, Flame, Droplets, Zap, Gauge, Cpu, FlaskConical, Leaf,
   Settings, FileCheck, Edit3, Eye, XCircle, Check, Users, History,
-  User, LayoutDashboard,
+  User, LayoutDashboard, MonitorCog,
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 import CierrePendientesModal from "./components/CierrePendientesModal";
@@ -36,7 +37,7 @@ const COLORS = {
 
 const ICON_MAP = {
   Activity, Settings, Flame, Droplets, Gauge, Zap, Cpu,
-  FlaskConical, Leaf, FileCheck,
+  FlaskConical, Leaf, FileCheck, MonitorCog,
 };
 
 // F20: presentación + entrada de fecha en hora Bogotá explícita, independiente del navegador.
@@ -609,16 +610,43 @@ function nivelCarga(count) {
   return "nulo";
 }
 
-function BitacoraTabs({ bitacoras, activeId, onSelect, registrosPorBitacora }) {
+// Categorías de bitácoras: agrupan en un solo botón fijo a la izquierda con flyout en hover.
+// Hardcoded en frontend porque hoy solo hay una categoría; cuando aparezca otra, mover a BD
+// (lov_bit.bitacora.categoria_codigo + lov_bit.categoria).
+const CATEGORIAS = [
+  {
+    codigo: 'SALA_DE_MANDOS',
+    nombre: 'Operación 24h',
+    nombreCorto: '24h',
+    icono: 'MonitorCog',
+    bitacora_codigos: ['DISP', 'MAND'],
+  },
+];
+
+// Bitácoras que NO muestran badge numérico. DISP por su naturaleza (siempre 1 estado activo,
+// el count no aporta señal de "sin cerrar").
+const SIN_BADGE_CODIGOS = new Set(['DISP']);
+
+function BitacoraTabs({ bitacoras, categorias, activeId, onSelect, registrosPorBitacora }) {
   const registerNode = useFlipReorder(bitacoras, "bitacora_id");
   return (
     <div className="bg-white border-b border-gray-200 px-4 overflow-x-auto">
       <div className="flex gap-1 min-w-max py-2">
+        {categorias?.map((cat) => (
+          <CategoriaTab
+            key={cat.codigo}
+            categoria={cat}
+            activeId={activeId}
+            onSelect={onSelect}
+            registrosPorBitacora={registrosPorBitacora}
+          />
+        ))}
         {bitacoras.map((b) => {
           const isActive = b.bitacora_id === activeId;
           const IconComp = ICON_MAP[b.icono] || FileText;
           const count = registrosPorBitacora[b.bitacora_id] || 0;
           const nivel = nivelCarga(count);
+          const showBadge = !SIN_BADGE_CODIGOS.has(b.codigo);
 
           let baseClass = "text-gray-600 hover:bg-gray-100 hover:text-gray-900";
           let baseStyle = {};
@@ -655,14 +683,182 @@ function BitacoraTabs({ bitacoras, activeId, onSelect, registrosPorBitacora }) {
               <IconComp size={16} />
               <span className="hidden lg:inline">{b.nombre}</span>
               <span className="lg:hidden">{b.codigo}</span>
-              <span className={`ml-1 min-w-5 h-5 flex items-center justify-center rounded-full text-xs font-bold ${badgeClass}`}>
-                {count}
-              </span>
+              {showBadge && (
+                <span className={`ml-1 min-w-5 h-5 flex items-center justify-center rounded-full text-xs font-bold ${badgeClass}`}>
+                  {count}
+                </span>
+              )}
             </button>
           );
         })}
       </div>
     </div>
+  );
+}
+
+// Botón de categoría con flyout. El flyout se monta en document.body via Portal porque
+// el contenedor padre tiene overflow-x-auto, lo que clipea cualquier popover absolute.
+function CategoriaTab({ categoria, activeId, onSelect, registrosPorBitacora }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const buttonRef = useRef(null);
+  const openTimer = useRef(null);
+  const closeTimer = useRef(null);
+
+  const open = () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    openTimer.current = setTimeout(() => setIsOpen(true), 80);
+  };
+  const close = () => {
+    if (openTimer.current) clearTimeout(openTimer.current);
+    closeTimer.current = setTimeout(() => setIsOpen(false), 150);
+  };
+
+  // Posiciona el flyout debajo del botón cuando se abre.
+  useEffect(() => {
+    if (!isOpen || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setPosition({ top: rect.bottom + 4, left: rect.left });
+  }, [isOpen]);
+
+  // Cerrar con Esc, click afuera, scroll o resize.
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e) => { if (e.key === 'Escape') setIsOpen(false); };
+    const onClickOutside = (e) => {
+      const btn = buttonRef.current;
+      const flyout = document.getElementById(`flyout-${categoria.codigo}`);
+      if (btn?.contains(e.target)) return;
+      if (flyout?.contains(e.target)) return;
+      setIsOpen(false);
+    };
+    const onScrollOrResize = () => setIsOpen(false);
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onClickOutside);
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onClickOutside);
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
+  }, [isOpen, categoria.codigo]);
+
+  // Limpia timers al desmontar.
+  useEffect(() => () => {
+    if (openTimer.current) clearTimeout(openTimer.current);
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+  }, []);
+
+  const algunaActiva = categoria.bitacoras.some((b) => b.bitacora_id === activeId);
+  const maxNivel = categoria.bitacoras.reduce((acc, b) => {
+    const n = nivelCarga(registrosPorBitacora[b.bitacora_id] || 0);
+    if (acc === 'alto') return acc;
+    if (n === 'alto') return 'alto';
+    if (n === 'medio') return 'medio';
+    return acc;
+  }, 'nulo');
+
+  const Icon = ICON_MAP[categoria.icono] || FileText;
+
+  let dotColor = null;
+  if (maxNivel === 'alto') dotColor = COLORS.red;
+  else if (maxNivel === 'medio') dotColor = COLORS.yellow;
+
+  let baseClass = "text-gray-600 hover:bg-gray-100 hover:text-gray-900";
+  if (algunaActiva) {
+    baseClass = "text-gray-900 bg-gray-50 ring-1 ring-gray-300";
+  } else if (maxNivel === 'alto') {
+    baseClass = "text-red-800 bg-red-50 hover:bg-red-100 ring-1 ring-red-200";
+  } else if (maxNivel === 'medio') {
+    baseClass = "text-amber-800 bg-amber-50 hover:bg-amber-100 ring-1 ring-amber-200";
+  }
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={() => setIsOpen((o) => !o)}
+        onMouseEnter={open}
+        onMouseLeave={close}
+        aria-haspopup="true"
+        aria-expanded={isOpen}
+        className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap ${baseClass}`}
+      >
+        {dotColor && (
+          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: dotColor }} />
+        )}
+        <Icon size={16} />
+        <span className="hidden lg:inline">{categoria.nombre}</span>
+        <span className="lg:hidden">{categoria.nombreCorto}</span>
+        <ChevronDown
+          size={14}
+          className={`transition-transform ${isOpen ? 'rotate-180' : ''}`}
+        />
+      </button>
+
+      {isOpen && createPortal(
+        <div
+          id={`flyout-${categoria.codigo}`}
+          role="menu"
+          onMouseEnter={open}
+          onMouseLeave={close}
+          className="bg-white rounded-xl shadow-lg border border-gray-200 py-2 min-w-[240px]"
+          style={{ position: 'fixed', top: position.top, left: position.left, zIndex: 50 }}
+        >
+          {categoria.bitacoras.map((b) => {
+            const isActive = b.bitacora_id === activeId;
+            const IconHija = ICON_MAP[b.icono] || FileText;
+            const count = registrosPorBitacora[b.bitacora_id] || 0;
+            const nivel = nivelCarga(count);
+            const showBadge = !SIN_BADGE_CODIGOS.has(b.codigo);
+
+            let itemClass = "text-gray-700 hover:bg-gray-100";
+            let itemStyle = {};
+            if (isActive) {
+              itemClass = "text-white";
+              itemStyle = { backgroundColor: COLORS.blueDark };
+            }
+
+            let dotColorItem = null;
+            if (nivel === 'alto') dotColorItem = isActive ? '#fff' : COLORS.red;
+            else if (nivel === 'medio') dotColorItem = isActive ? '#fff' : COLORS.yellow;
+
+            let badgeClass = "bg-gray-200 text-gray-600";
+            if (isActive) badgeClass = "bg-white/20 text-white";
+            else if (nivel === 'alto') badgeClass = "bg-red-200 text-red-900";
+            else if (nivel === 'medio') badgeClass = "bg-amber-200 text-amber-900";
+
+            return (
+              <button
+                key={b.bitacora_id}
+                type="button"
+                role="menuitem"
+                onClick={() => { onSelect(b.bitacora_id); setIsOpen(false); }}
+                className={`w-full flex items-center gap-2 px-4 py-2 text-sm font-medium ${itemClass}`}
+                style={itemStyle}
+              >
+                {dotColorItem ? (
+                  <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: dotColorItem }} />
+                ) : (
+                  <span className="w-2 flex-shrink-0" />
+                )}
+                <IconHija size={16} />
+                <span className="flex-1 text-left">{b.nombre}</span>
+                {showBadge && (
+                  <span className={`min-w-5 h-5 flex items-center justify-center rounded-full text-xs font-bold ${badgeClass}`}>
+                    {count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>,
+        document.body
+      )}
+    </>
   );
 }
 
@@ -1212,20 +1408,40 @@ export default function App() {
   const sesion = auth.sesion;
   const user = auth.user;
 
-  const bitacorasPermitidas = useMemo(() => {
+  // Las bitácoras visibles se separan en (a) categorías agrupadas en un solo botón fijo
+  // a la izquierda y (b) bitácoras "sueltas" que siguen siendo tabs reordenables por count.
+  const { categorias: categoriasVisibles, bitacorasSueltas } = useMemo(() => {
     const base = catalogos.permisos.length
       ? (() => {
           const map = new Map(catalogos.permisos.map((p) => [p.bitacora_id, p]));
           return catalogos.bitacoras.filter((b) => map.get(b.bitacora_id)?.puede_ver);
         })()
       : catalogos.bitacoras;
-    return [...base].sort((a, b) => {
-      const ca = registrosPorBitacora[a.bitacora_id] || 0;
-      const cb = registrosPorBitacora[b.bitacora_id] || 0;
-      if (cb !== ca) return cb - ca;
-      return (a.orden ?? 0) - (b.orden ?? 0);
-    });
+
+    const codigosCategorizados = new Set(CATEGORIAS.flatMap((c) => c.bitacora_codigos));
+
+    const cats = CATEGORIAS.map((c) => ({
+      ...c,
+      bitacoras: base.filter((b) => c.bitacora_codigos.includes(b.codigo)),
+    })).filter((c) => c.bitacoras.length > 0);
+
+    const sueltas = base
+      .filter((b) => !codigosCategorizados.has(b.codigo))
+      .sort((a, b) => {
+        const ca = registrosPorBitacora[a.bitacora_id] || 0;
+        const cb = registrosPorBitacora[b.bitacora_id] || 0;
+        if (cb !== ca) return cb - ca;
+        return (a.orden ?? 0) - (b.orden ?? 0);
+      });
+
+    return { categorias: cats, bitacorasSueltas: sueltas };
   }, [catalogos.bitacoras, catalogos.permisos, registrosPorBitacora]);
+
+  // Lista plana usada por el resto del código (selección inicial, lookup por id, etc.).
+  const bitacorasPermitidas = useMemo(
+    () => [...categoriasVisibles.flatMap((c) => c.bitacoras), ...bitacorasSueltas],
+    [categoriasVisibles, bitacorasSueltas]
+  );
 
   const cargoNombre = catalogos.cargos.find((c) => c.cargo_id === sesion?.cargo_id)?.nombre || "";
   const plantaNombre = catalogos.plantas.find((p) => p.planta_id === sesion?.planta_id)?.nombre || sesion?.planta_id || "";
@@ -1508,7 +1724,8 @@ export default function App() {
       ) : (
         <>
           <BitacoraTabs
-            bitacoras={bitacorasPermitidas}
+            bitacoras={bitacorasSueltas}
+            categorias={categoriasVisibles}
             activeId={activeBitacora}
             onSelect={(id) => { setActiveBitacora(id); setFiltroTexto(""); setFiltroTipo(""); setDraftLocal(null); }}
             registrosPorBitacora={registrosPorBitacora}
