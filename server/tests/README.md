@@ -60,6 +60,23 @@ TZ=UTC npm test
 
 Las fallas D4-D6 estaban pre-existentes a F19+F20+F21 y fueron cerradas en branch `chore/cleanup-2026-05` (2026-05-13). Suite serial (`npm test`) ahora 76/76 verde. Las fallas en runs paralelos (`node --test tests/*.test.js`) persisten por race condition de `initDB()` concurrente entre workers — usar siempre `npm test` (`--test-concurrency=1`) o pasar archivos explícitos en serie.
 
+## Si los tests dejan la BD sucia
+
+Cuando una corrida se aborta antes de `after()` (Ctrl+C, panic, kill -9) o cuando un `cleanupTestRegistros` parcial deja CIETs huérfanos con `detalle=NULL` (caso de `registrarEventoCierre`), las tablas test pueden acumular leftover. Para barrer manualmente:
+
+```bash
+cd Bit-cora-g3/server
+npm run test:reset-db
+```
+
+El script (`tests/reset-db.js`) tiene una **whitelist hardcoded de usernames test** (`test_jdt`, `test_ingop`, `test_gerente`, `test_ingquim`) y solo borra filas:
+- creadas por esos usuarios (`creado_por IN (whitelist_ids)`), o
+- tagueadas con `TEST_TAG` (`detalle LIKE 'TEST-RUN-%'`).
+
+Adicionalmente limpia `mand_cierre_log` solo para `planta_id='GEC3' AND fecha_cerrada >= '2026-05-01'`. **Jamás toca filas de usuarios reales** — validado contra inserción de fila con `creado_por=emunoz` (sobrevive el reset).
+
+Idempotente, sin prompt, exit code 0/1 — apto para CI o scripting.
+
 ## Tests del frontend (root)
 
 `Bit-cora-g3/package.json` agrega `npm test` con vitest (F21.D). Cubren `src/utils/fecha.js` y la convención canónica `Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Bogota' })` + offset `-05:00` que viven inline en `BitacorasGecelca3.jsx` y `CambiarEstadoModal.jsx`. Si el patrón cambia en el callsite, el test rompe y obliga a re-auditar.
