@@ -25,7 +25,7 @@ TZ=UTC npm test
 |---|---|
 | `fechas_bogota.test.js` | F21.A: helpers `turno.js` (`periodoFromFechaBogota`, `fechaBogotaStr`, `fechaBogotaIso`, `turnoFromPeriodo`, `ventanaTurno`, `getTurnoColombia`) — unit + sub-procesos con TZ alterno. |
 | `auth_middleware.test.js` | Middleware de sesión + permisos por cargo. |
-| `auth_reactivate.test.js` | Reactivación de autorizaciones (deprecado post F18 — leak conocido, ver §Deuda). |
+| `auth_reactivate.test.js` | Reactivación de eventos AUTH en `evento_dashboard` (GET + DELETE canónicos). Reescrito en D4. |
 | `disponibilidad.test.js` | F12-F14: bitácora DISP (vigente, histórico, deshacer, edit, permisos). |
 | `cierre_y_fechas.test.js` | F13.3: regresiones bug A (cierre arrastraba DISP) y bug B (`creado_en` consistente UTC). |
 | `sala_de_mando_batch.test.js` | F16-F17: batch save MAND + cierre-diario + F21.B regresión T1 (madrugada Bogotá) + F21.C CIET fecha_cerrada Bogotá. |
@@ -53,7 +53,7 @@ TZ=UTC npm test
 | D1 | Sin tests de componentes con RTL (`HistoricoTable`, `EstadoActualCard`, `BarraEstado`, `SalaDeMandoGrid`) | Media | F22 si queda tiempo. Hoy se cubre solo `utils/fecha.js` vía vitest. |
 | D2 | Sin CI matrix en GH Actions (3 TZ jobs) | Media | El repo no tiene `.github/workflows/`. Se documenta como deuda; cuando se monte CI, agregar TZ matrix. |
 | D3 | Sin tests E2E con Playwright TZ override del navegador | Baja | Costo alto, beneficio marginal mientras todos los operadores estén en Bogotá (decisión C1=A en `preguntasfecha.md`). |
-| D4 | `auth_reactivate.test.js` falla post F18 (endpoints `/api/autorizaciones*` quedaron deprecados) | Media | Reescribir o quitar; los tests apuntan a un endpoint con shim de warn. |
+| D4 | **RESUELTO 2026-05-13** — `auth_reactivate.test.js` reescrito para usar `/api/eventos-dashboard?tipo=AUTH` (GET) y `/api/eventos-dashboard/:id` (DELETE). Endpoints legacy `/api/autorizaciones*` siguen vivos con warn deprecado; remover en próxima fase si nada más los usa. | — | — |
 | D5 | `cierre_y_fechas.test.js` A5/B2 fallan por leftover `mand_cierre_log` o estado de prev runs | Media | Hardener cleanup en `before` global. |
 | D6 | `auth_middleware.test.js` 7/9 (cierre Ing. Operación / JdT) fallan a veces | Baja | Aparentemente dependiente del orden — investigar timing del setup de permisos. |
 | D7 | Sin fake clock en server-side flow | Alta para test exhaustivo, baja para regresión actual | Refactor del server para inyectar `clock` o usar TZ-agnostic helpers en todas las queries. |
