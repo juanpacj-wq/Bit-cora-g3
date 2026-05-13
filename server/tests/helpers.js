@@ -5,7 +5,10 @@ import { hashPassword } from '../utils/password.js';
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3002';
 export const PLANTA_ID = 'GEC3';
 
-export const TEST_TAG = `[TEST-RUN-${Date.now()}]`;
+// D5: sin corchetes [...]. SQL Server interpreta [ y ] como wildcards de conjunto en LIKE,
+// con corchetes el patrón '%[TEST-RUN-N]%' NO matchea el literal '[TEST-RUN-N]' — el
+// cleanup quedaba inerte y los asserts con LIKE TEST_TAG fallaban silenciosamente.
+export const TEST_TAG = `TEST-RUN-${Date.now()}`;
 
 export async function call(method, path, { body, sesion_id } = {}) {
   const headers = {};
@@ -123,12 +126,16 @@ export async function cleanupTestRegistros() {
       -- por TEST_TAG en detalle para no acumular leftover entre runs.
       DELETE FROM bitacora.registro_historico WHERE detalle LIKE @tag;
     `);
-  // F16: limpia mand_cierre_log para la planta de test. El log no tiene un campo "tag";
-  // borrar por planta_id es seguro porque la BD de tests usa GEC3 dedicado.
+  // F16 + D5: limpia mand_cierre_log para la planta de test. El log no tiene un campo "tag";
+  // borrar por (planta_id, fecha_cerrada >= 2026-05-01) cubre fechas determinísticas usadas
+  // en cierre_y_fechas.test.js (D5) y cualquier futuro día Bogotá donde el sweeper haya
+  // disparado durante el run. El rango guarda contra borrar mand_cierre_log histórico previo
+  // a este branch (no debería existir en GEC3, pero queda como safety net).
   await db.request()
     .input('planta', sql.VarChar(10), PLANTA_ID)
     .query(`
-      DELETE FROM bitacora.mand_cierre_log WHERE planta_id = @planta;
+      DELETE FROM bitacora.mand_cierre_log
+      WHERE planta_id = @planta AND fecha_cerrada >= '2026-05-01';
     `);
   // F16: limpia evento_dashboard MAND remanente (los soft-deleted ya quedan así, pero por
   // si algun test deja filas activas tras un fallo).
