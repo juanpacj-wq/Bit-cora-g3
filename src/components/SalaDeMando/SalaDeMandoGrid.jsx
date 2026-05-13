@@ -82,7 +82,7 @@ function diffBuffer(snap, buf, periodoActual) {
   return filas;
 }
 
-// F17: grilla 3×24 de Sala de Mando con buffer en memoria + batch save. F10 (paginación
+// F17: grilla 3×24 de Operación 24h (MAND) con buffer en memoria + batch save. F10 (paginación
 // entre días) eliminada — la grilla solo muestra HOY y el cierre es automático vía
 // sweeper diario (F16). Multi-select estilo Excel + lock REDESP por periodo actual.
 export default function SalaDeMandoGrid({
@@ -325,7 +325,7 @@ export default function SalaDeMandoGrid({
   );
 
   if (!buffer || !snapshot) {
-    return <div className="flex-1 flex items-center justify-center text-gray-400">Cargando Sala de Mando…</div>;
+    return <div className="flex-1 flex items-center justify-center text-gray-400">Cargando Operación 24h…</div>;
   }
 
   return (
@@ -460,7 +460,7 @@ export default function SalaDeMandoGrid({
       {!puedeCrear && (
         <div className="mt-3 flex items-center gap-2 text-xs text-gray-500">
           <AlertTriangle size={14} />
-          <span>Solo Jefe de Turno e Ingeniero de Operación pueden editar Sala de Mando.</span>
+          <span>Solo Jefe de Turno e Ingeniero de Operación pueden editar Operación 24h.</span>
         </div>
       )}
 

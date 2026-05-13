@@ -811,7 +811,7 @@ La bitácora DISP rompe deliberadamente varias invariantes del modelo general po
 - **`disponibilidad_dashboard` (5.2) vive aparte de `evento_dashboard` (5.1):** no comparten UNIQUE ni schema. Mezclarlas obligaría a hacer `periodo` nullable en `evento_dashboard` y romper la UNIQUE existente — preferimos dos tablas con semánticas claras.
 - **Permisos diferenciados:** `puede_ver=1` para todos los cargos (es información operativa de interés universal); `puede_crear=1` solo para JdT (1) e IngOp (2). Frontend gatea botones; backend rechaza con 403 desde `hasPermisoBitacora`.
 
-### 7.9 Sala de Mando con batch save y cierre automático (F16+F17)
+### 7.9 Operación 24h con batch save y cierre automático (F16+F17)
 
 La bitácora MAND también rompe varias invariantes del modelo general — distintas a las de DISP:
 

@@ -72,7 +72,7 @@ Bit-cora-g3/
 
 Dos bitácoras tienen UI propia (resto usa `GrillaRegistros` genérica):
 
-- **MAND** (Sala de Mando) — `SalaDeMandoGrid.jsx`. Grilla 24p × 3 tipos × 2 plantas. Batch save atómico via `POST /api/sala-de-mando/guardar`. Cierre automático fin de día via sweeper diario. Solo HOY editable. NO acepta cierre individual ni masivo.
+- **MAND** (Operación 24h) — `SalaDeMandoGrid.jsx`. Grilla 24p × 3 tipos × 2 plantas. Batch save atómico via `POST /api/sala-de-mando/guardar`. Cierre automático fin de día via sweeper diario. Solo HOY editable. NO acepta cierre individual ni masivo.
 - **DISP** (Disponibilidad) — `DisponibilidadDashboard.jsx`. Mini-dashboard con tabs GEC3/GEC32, counter live "tiempo en estado", historial paginado. Sin cierre de turno. 1 vigente por planta (filtered unique index). Cierre automático cuando llega nuevo evento.
 
 Las demás (CIET, AUTOR, etc.) usan `GrillaRegistros.jsx` con filtros F11.

@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { api } from './useApi';
 
-// F17: hook para Sala de Mando. La grilla pasó a un modelo buffer-en-memoria + batch save,
+// F17: hook para Operación 24h (MAND). La grilla pasó a un modelo buffer-en-memoria + batch save,
 // así que solo expone GET grilla + POST batch. Las operaciones celda-por-celda (POST/PUT/DELETE)
 // fueron eliminadas — todo va por `guardarBatch` contra `/api/sala-de-mando/guardar`.
 export function useSalaDeMando() {

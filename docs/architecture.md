@@ -149,7 +149,7 @@ El header con controles (`Buscar`, `Todos los tipos`, `+ Nuevo Registro`, `Final
 
 ## Mecánica por bitácora
 
-### MAND (Sala de Mando)
+### MAND (Operación 24h)
 
 **Diferenciadora:** grilla 24 periodos × 3 tipos × 2 plantas con batch save atómico. NO acepta cierre individual ni masivo — se cierra automáticamente vía sweeper diario.
 
