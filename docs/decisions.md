@@ -213,7 +213,7 @@ Decisiones destiladas de las fases F1–F22. Formato corto: Contexto / Decisión
 | F3 | Bitácora CIET (auditoría auto) | Ejecutada |
 | F4 | Cierre cronológico por turno | Ejecutada |
 | F5 | Renombrar contrato → `evento_dashboard` | Ejecutada |
-| F6 | Bitácora MAND (Sala de Mando) inicial | Ejecutada |
+| F6 | Bitácora MAND (Operación 24h) inicial | Ejecutada |
 | F7 | Cancelar autorización vaciando celda | Ejecutada |
 | F8 | Dashboard consume `evento_dashboard` | Ejecutada |
 | F9 | Limpieza vista compat + heartbeat/resume | Ejecutada |

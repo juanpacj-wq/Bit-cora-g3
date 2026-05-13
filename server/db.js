@@ -658,7 +658,7 @@ export async function initDB() {
       ('Autorizaciones',                'AUTH',     'FileCheck',    1, @auth, 9, 0),
       ('Química',                       'QUIM',     'FlaskConical', 0, NULL, 10, 1),
       ('Cierres y Finalizaciones',      'CIET',     'LogOut',       0, NULL, 11, 1),
-      ('Sala de Mando',                 'MAND',     'LayoutGrid',   1, @mand,12, 1)
+      ('Operación 24h',                 'MAND',     'LayoutGrid',   1, @mand,12, 1)
     ) AS s(nombre, codigo, icono, formulario_especial, definicion_campos, orden, activa)
       ON t.codigo = s.codigo
     WHEN MATCHED THEN UPDATE SET
@@ -1025,7 +1025,7 @@ export async function initDB() {
     `);
   }
 
-  // ---------- F16.A — Sala de Mando: backend batch + cierre automático ----------
+  // ---------- F16.A — Operación 24h (MAND): backend batch + cierre automático ----------
   // F16.A0: tabla flag para marcar migraciones one-time aplicadas. Sirve para que F16.A1
   // (TRUNCATE selectivo MAND) y F16.A2 (limpieza funcionariocnd) corran solo una vez
   // aunque initDB() vuelva a ejecutarse.
