@@ -260,5 +260,5 @@ Decisiones destiladas de las fases F1–F22. Formato corto: Contexto / Decisión
 ## Próximas decisiones pendientes
 
 - **F15**: definir cómo el dashboard productivo va a renderizar el badge de disponibilidad por planta. Ver `dashboard-gen-gec3/docs/decisions.md` cuando se aborde.
-- **T3** (CIET `fecha_cerrada` en UTC vs Bogotá): pendiente decisión en B5 de `preguntasfecha.md` original. Por ahora UTC.
+- **T3 (CIET `fecha_cerrada`): CERRADO 2026-05-13 — formato Bogotá.** El sweeper diario corre a 23:59:59 hora Bogotá (= 04:59 UTC del día siguiente); registrar `fecha_cerrada` en UTC desfasaría el día operativo (un cierre del 2026-05-13 23:59 Bogotá quedaría como 2026-05-14 04:59 UTC). Implementación: `server/utils/ciet.js:184-186` usa `fechaBogotaStr(fecha)` desde F19. Este es el único campo de la BD que NO es UTC; documentado como excepción justificada al patrón global "BD en UTC, presentación con offset Bogotá" (D-020).
 - **T4** (cierre cronológico ORDER BY UTC): deuda documentada, edge case poco probable.
