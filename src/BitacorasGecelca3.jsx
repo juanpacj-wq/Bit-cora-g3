@@ -479,20 +479,44 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
 function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista }) {
   const [reloj, setReloj] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef(null);
+  const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
+  const buttonRef = useRef(null);
 
   useEffect(() => {
     const i = setInterval(() => setReloj(new Date()), 30000);
     return () => clearInterval(i);
   }, []);
 
+  // Posicionar el popup respecto al botón cuando se abre.
+  useEffect(() => {
+    if (!menuOpen || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+  }, [menuOpen]);
+
+  // Cerrar con Esc, click afuera, scroll o resize. El popup vive en document.body via
+  // Portal (igual que CategoriaTab), por eso el contains() también revisa el portal.
   useEffect(() => {
     if (!menuOpen) return;
-    const onDocMouseDown = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+    const onKey = (e) => { if (e.key === 'Escape') setMenuOpen(false); };
+    const onClickOutside = (e) => {
+      const btn = buttonRef.current;
+      const popup = document.getElementById('header-users-popup');
+      if (btn?.contains(e.target)) return;
+      if (popup?.contains(e.target)) return;
+      setMenuOpen(false);
     };
-    document.addEventListener('mousedown', onDocMouseDown);
-    return () => document.removeEventListener('mousedown', onDocMouseDown);
+    const onScrollOrResize = () => setMenuOpen(false);
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onClickOutside);
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onClickOutside);
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
   }, [menuOpen]);
 
   const fechaStr = RELOJ_FECHA_FMT.format(reloj);
@@ -535,8 +559,9 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
             </span>
           </button>
         )}
-        <div className="relative" ref={menuRef}>
+        <div className="relative">
           <button
+            ref={buttonRef}
             onClick={() => setMenuOpen((v) => !v)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors"
             title="Usuarios conectados"
@@ -546,10 +571,19 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
             <Users size={18} />
             <span className="text-sm font-semibold">{activos.length}</span>
           </button>
-          {menuOpen && (
+          {menuOpen && createPortal(
             <div
+              id="header-users-popup"
               role="menu"
-              className="absolute right-0 top-full mt-2 w-80 max-h-96 overflow-auto bg-white text-gray-800 rounded-xl shadow-xl border border-gray-200 z-20"
+              className="bg-white text-gray-800 rounded-xl shadow-xl border border-gray-200 overflow-y-auto"
+              style={{
+                position: 'fixed',
+                top: menuPos.top,
+                right: menuPos.right,
+                width: '20rem',
+                maxHeight: '70vh',
+                zIndex: 50,
+              }}
             >
               <div className="px-4 py-2 border-b border-gray-100 text-xs uppercase tracking-wide text-gray-500">
                 Conectados ({activos.length})
@@ -578,7 +612,8 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
                   ))}
                 </ul>
               )}
-            </div>
+            </div>,
+            document.body
           )}
         </div>
 
