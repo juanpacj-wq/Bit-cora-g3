@@ -44,17 +44,24 @@ export function useAuth() {
     }
   }, []);
 
-  const logout = useCallback(async () => {
-    const sid = sesionRef.current?.sesion_id;
-    if (sid) {
-      try { await api.post('/api/auth/logout', { sesion_id: sid }, { skipAuth: true }); } catch {}
-    }
+  // Cleanup de cliente sin tocar BD. La sesion_activa queda con activa=1 (igual que cerrar
+  // pestaña), respetando D-003. Si el mismo usuario vuelve a entrar con la misma planta+cargo,
+  // /api/auth/select-context reutiliza la sesion_id existente (UPDLOCK+UPDATE).
+  const logoutLocal = useCallback(() => {
     userRef.current = null;
     sesionRef.current = null;
     persistAuth(null, null);
     setUser(null);
     setSesion(null);
   }, []);
+
+  const logout = useCallback(async () => {
+    const sid = sesionRef.current?.sesion_id;
+    if (sid) {
+      try { await api.post('/api/auth/logout', { sesion_id: sid }, { skipAuth: true }); } catch {}
+    }
+    logoutLocal();
+  }, [logoutLocal]);
 
   useEffect(() => {
     setUnauthorizedHandler(() => { logout(); });
@@ -91,5 +98,5 @@ export function useAuth() {
     } finally { setLoading(false); }
   }, []);
 
-  return { user, sesion, loading, error, ready, login, selectContext, logout };
+  return { user, sesion, loading, error, ready, login, selectContext, logout, logoutLocal };
 }
