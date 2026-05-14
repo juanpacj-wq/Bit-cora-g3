@@ -855,7 +855,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 
 **Deuda documentada:**
 
-- **T4 cierre cronológico**: `server.js:~1739-1747` ordena `registro_activo` por `fecha_evento ASC` (UTC). Edge case poco probable: dos turnos solapados podrían ordenarse mal. Se mantiene la implementación actual; si se manifiesta en producción, agregar `ORDER BY DATEADD(HOUR, -5, fecha_evento) ASC`.
+- **T4 cierre cronológico (RESUELTO 2026-05-13)**: `server.js:1741` (cierre individual) y `:1840` (cierre masivo) usan `ORDER BY fecha_evento ASC, registro_id ASC`. El tiebreaker `registro_id ASC` garantiza determinismo cuando dos registros tienen `fecha_evento` idéntica (posible en batch insert). Test de regresión: `server/tests/fechas_bogota.test.js::C5`. La sugerencia original de usar `DATEADD(HOUR, -5, fecha_evento)` no aplica — Colombia no tiene DST y la ordenación por UTC es equivalente a la ordenación por Bogotá para registros del mismo offset.
 - **Tests de componentes RTL**: `HistoricoTable`, `EstadoActualCard`, `BarraEstado`, `SalaDeMandoGrid` no tienen tests automáticos de render con TZ override. Smoke manual con DevTools cubre el gap hoy.
 - **CI matrix con GH Actions**: el repo no tiene CI configurado. F21 dejó tests corriendo localmente (`npm test`). Cuando se agregue GH Actions, configurar matriz `TZ=UTC,America/Bogota,Asia/Tokyo` para detectar regresiones por uso accidental de `getHours()`/`getTimezoneOffset()` sin TZ explícito.
 

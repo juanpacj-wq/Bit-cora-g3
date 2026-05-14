@@ -1,11 +1,18 @@
 // F21: tests TZ-agnósticos de los helpers Bogotá en utils/turno.js. Cubren las grietas
 // que F19 cerró (T1 madrugada, T3 fecha_cerrada Bogotá) a nivel unitario — sin DB ni HTTP.
 // Los helpers usan offset puro -5h con getUTC*() y NO dependen de process.env.TZ del host.
+//
+// T4 (2026-05-13): se agrega al final un describe integration con DB para validar el
+// tiebreaker `, registro_id ASC` en el SELECT TOP 1 de cierre cronológico. No es TZ-puro,
+// pero conceptualmente pertenece a la serie de regresiones cierre cronológico junto con T1.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import sql from 'mssql';
+import { getDB } from '../db.js';
+import { setupSessions, cleanupTestRegistros, PLANTA_ID, TEST_TAG } from './helpers.js';
 import {
   getTurnoColombia,
   turnoFromPeriodo,
@@ -163,4 +170,85 @@ describe('F21.A — helpers TZ-agnósticos en sub-proceso (UTC, Bogotá, Tokyo, 
       assert.deepEqual(got, EXPECTED);
     });
   }
+});
+
+// T4 (2026-05-13) — regresión: el SELECT TOP 1 del cierre cronológico
+// (server.js:1741 cierre individual y :1840 cierre masivo) ordenaba sólo por fecha_evento
+// ASC. Dos registros con fecha_evento idéntica (posible en batch insert con un mismo
+// SYSUTCDATETIME() o en seeds) producían orden no-determinístico en SQL Server.
+// Tiebreaker aplicado: `ORDER BY fecha_evento ASC, registro_id ASC`. Este test inserta
+// 3 registros CALDERA con la misma fecha_evento y verifica que el SELECT TOP 1 con el
+// mismo predicado del endpoint retorna determinísticamente el de menor registro_id.
+describe('T4 — tiebreaker registro_id ASC en cierre cronológico', () => {
+  test('C5: SELECT TOP 1 con fecha_evento idéntica retorna el menor registro_id', async () => {
+    const ctx = await setupSessions();
+    const CALDERA = ctx.bitByCodigo.CALDERA;
+    assert.ok(CALDERA, 'CALDERA bitacora_id debe existir');
+
+    const db = await getDB();
+    const tipoEv = (await db.request()
+      .input('b', sql.Int, CALDERA)
+      .query(`SELECT TOP 1 tipo_evento_id FROM lov_bit.tipo_evento WHERE bitacora_id=@b`)
+    ).recordset[0].tipo_evento_id;
+
+    // Setup: clean CALDERA tagged.
+    await db.request()
+      .input('b', sql.Int, CALDERA)
+      .input('p', sql.VarChar(10), PLANTA_ID)
+      .query(`
+        DELETE FROM bitacora.registro_activo WHERE bitacora_id=@b AND planta_id=@p;
+        DELETE FROM bitacora.registro_historico WHERE bitacora_id=@b AND planta_id=@p;
+      `);
+
+    const fechaEvento = new Date('2026-05-10T14:00:00Z');
+    async function insertCaldera(suffix) {
+      const r = await db.request()
+        .input('b', sql.Int, CALDERA)
+        .input('p', sql.VarChar(10), PLANTA_ID)
+        .input('fe', sql.DateTime2, fechaEvento)
+        .input('t', sql.TinyInt, 1)
+        .input('d', sql.NVarChar(sql.MAX), `${TEST_TAG} C5-${suffix}`)
+        .input('te', sql.Int, tipoEv)
+        .input('cp', sql.Int, ctx.usuarios.jdt.usuario_id)
+        .query(`
+          INSERT INTO bitacora.registro_activo
+            (bitacora_id, planta_id, fecha_evento, turno, detalle, tipo_evento_id, estado,
+             ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
+          OUTPUT INSERTED.registro_id
+          VALUES (@b, @p, @fe, @t, @d, @te, 'borrador', '[]', '[]', '[]', @cp);
+        `);
+      return r.recordset[0].registro_id;
+    }
+    const idA = await insertCaldera('A');
+    const idB = await insertCaldera('B');
+    const idC = await insertCaldera('C');
+    assert.ok(idA < idB && idB < idC, `IDs deben ser ASC por IDENTITY: ${idA}, ${idB}, ${idC}`);
+
+    // Predicado idéntico al de server.js:1741 / :1840 (post-tiebreaker).
+    const r = await db.request()
+      .input('b', sql.Int, CALDERA)
+      .input('p', sql.VarChar(10), PLANTA_ID)
+      .query(`
+        SELECT TOP 1 registro_id, fecha_evento, turno
+        FROM bitacora.registro_activo
+        WHERE bitacora_id = @b AND planta_id = @p AND estado = 'borrador'
+        ORDER BY fecha_evento ASC, registro_id ASC
+      `);
+    assert.equal(r.recordset.length, 1);
+    assert.equal(
+      r.recordset[0].registro_id,
+      idA,
+      `Tiebreaker registro_id ASC debe retornar idA=${idA}, obtuvo ${r.recordset[0].registro_id}`
+    );
+
+    // Cleanup.
+    await cleanupTestRegistros();
+    await db.request()
+      .input('b', sql.Int, CALDERA)
+      .input('p', sql.VarChar(10), PLANTA_ID)
+      .query(`
+        DELETE FROM bitacora.registro_activo WHERE bitacora_id=@b AND planta_id=@p;
+        DELETE FROM bitacora.registro_historico WHERE bitacora_id=@b AND planta_id=@p;
+      `);
+  });
 });

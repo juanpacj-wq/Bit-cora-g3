@@ -1738,7 +1738,7 @@ const server = http.createServer(async (req, res) => {
             SELECT TOP 1 fecha_evento, turno
             FROM bitacora.registro_activo WITH (UPDLOCK, HOLDLOCK)
             WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador'
-            ORDER BY fecha_evento ASC
+            ORDER BY fecha_evento ASC, registro_id ASC
           `);
 
         let registros_cerrados = 0;
@@ -1837,7 +1837,7 @@ const server = http.createServer(async (req, res) => {
               SELECT TOP 1 fecha_evento, turno
               FROM bitacora.registro_activo WITH (UPDLOCK, HOLDLOCK)
               WHERE bitacora_id = @bitacora_id AND planta_id = @planta_id AND estado = 'borrador'
-              ORDER BY fecha_evento ASC
+              ORDER BY fecha_evento ASC, registro_id ASC
             `);
 
           let registros_cerrados = 0;
