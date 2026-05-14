@@ -1203,6 +1203,25 @@ export async function initDB() {
     LEFT JOIN lov_bit.usuario autor ON autor.usuario_id = h.creado_por;
   `);
 
+  // Invariante singleton de flags de usuario (BIT-RF-2026-001.md §3 + §6.5):
+  //   * Sólo username='emunoz' (Ernesto Muñoz) tiene es_jefe_planta=1.
+  //   * Sólo username='ofedullo' (Omar Fedullo) tiene es_jdt_default=1.
+  // Defensa en profundidad: aunque seedPersonal() ya re-aplica los flags del JSON,
+  // este bloque corrige divergencias en filas FUERA del JSON (cuentas test, manuales)
+  // y blinda contra ediciones por SSMS. La limpieza one-off vive en
+  // sql/snippets/limpiar_test_user_flags.sql. Cross-ref D-023 en docs/decisions.md.
+  await db.request().batch(`
+    BEGIN TRAN;
+      UPDATE lov_bit.usuario
+         SET es_jefe_planta = 0
+       WHERE es_jefe_planta = 1 AND username <> 'emunoz';
+
+      UPDATE lov_bit.usuario
+         SET es_jdt_default = 0
+       WHERE es_jdt_default = 1 AND username <> 'ofedullo';
+    COMMIT;
+  `);
+
   console.log('[DB] Conexión OK');
 }
 
