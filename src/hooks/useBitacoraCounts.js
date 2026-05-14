@@ -14,9 +14,18 @@ export function useBitacoraCounts(ready, sesionId, plantaId) {
     unmountedRef.current = false;
     retryRef.current = 0;
 
-    api.get(`/api/bitacora/counts?planta_id=${encodeURIComponent(plantaId)}`)
-      .then(({ counts: c }) => { if (!unmountedRef.current) setCounts(c || {}); })
-      .catch(() => {});
+    const refetchSnapshot = () => {
+      api.get(`/api/bitacora/counts?planta_id=${encodeURIComponent(plantaId)}`)
+        .then(({ counts: c }) => { if (!unmountedRef.current) setCounts(c || {}); })
+        .catch(() => {});
+    };
+
+    refetchSnapshot();
+
+    // Fallback redundante al WS: cuando una mutación local de bitácora ocurre, el cliente
+    // emite `bitacora:counts-refresh` y refetchamos por HTTP. Garantiza que el badge se
+    // actualice instantáneamente aunque la conexión WS esté caída o el broadcast se pierda.
+    window.addEventListener('bitacora:counts-refresh', refetchSnapshot);
 
     const connect = () => {
       if (unmountedRef.current) return;
@@ -47,6 +56,7 @@ export function useBitacoraCounts(ready, sesionId, plantaId) {
 
     return () => {
       unmountedRef.current = true;
+      window.removeEventListener('bitacora:counts-refresh', refetchSnapshot);
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       try { wsRef.current?.close(); } catch {}
     };
