@@ -228,6 +228,18 @@ Decisiones destiladas de las fases F1–F22. Formato corto: Contexto / Decisión
 
 ---
 
+## D-023 — Invariante singleton para `es_jefe_planta` / `es_jdt_default` reforzado en `initDB()`
+
+**Fecha:** 2026-05-14
+
+**Contexto:** `BIT-RF-2026-001.md` §3 y §6.5 establecen que `es_jefe_planta=1` corresponde a un único usuario (hoy Ernesto Muñoz, `username='emunoz'`) y `es_jdt_default=1` a otro único usuario (hoy Omar Fedullo, `username='ofedullo'`). En testeo se observó que cuentas auxiliares (`test_gerente`, `test_jdt`) habían quedado con esos flags en `1`, contaminando `jefes_snapshot` (D-001 no filtra por sesión) y `jdts_snapshot` (vía fallback). La spec era correcta; la data divergió.
+
+**Decisión:** además de la limpieza one-off (`sql/snippets/limpiar_test_user_flags.sql`), agregar en `initDB()` un bloque idempotente envuelto en `BEGIN TRAN/COMMIT` que asegura el invariante en cada arranque. Sigue el patrón `IF NOT EXISTS`/idempotencia ya usado para `SISTEMA` (D-015) y `seedPersonal()`.
+
+**Consecuencias:** ediciones manuales en BD o seeds futuros mal escritos quedan corregidos al próximo levantamiento del backend. La verdad sobre quién tiene los flags vive ahora en dos lugares coherentes: `server/data/personal-2026.json` (`es_jefe_planta`/`es_jdt_default` por usuario) y este bloque defensivo. Si se cambia el titular de Ernesto o de Omar, hay que actualizar AMBOS: el JSON (cambia el flag del nuevo + del anterior) y este bloque (cambia el `username` excluido del UPDATE). Documentado como gotcha al evolucionar el sistema.
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
