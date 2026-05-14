@@ -16,7 +16,12 @@ export function useSalaDeMando() {
   const guardarBatch = useCallback(async ({ planta_id, fecha, filas }) => {
     setLoading(true); setError(null);
     try {
-      return await api.post('/api/sala-de-mando/guardar', { planta_id, fecha, filas });
+      const r = await api.post('/api/sala-de-mando/guardar', { planta_id, fecha, filas });
+      // Aviso al consumidor de counts (useBitacoraCounts) que refresque inmediatamente.
+      // Fallback redundante al broadcast WS — garantiza que el badge MAND se actualice
+      // sin esperar al snapshot del WebSocket.
+      window.dispatchEvent(new CustomEvent('bitacora:counts-refresh'));
+      return r;
     } catch (e) {
       setError(e.message);
       throw e;
