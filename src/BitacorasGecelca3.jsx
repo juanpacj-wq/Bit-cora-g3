@@ -1654,6 +1654,9 @@ export default function App() {
 
   // F4: popup defensivo en logout — pregunta si quiere finalizar antes de salir.
   // 3 opciones: Sí, finalizar y salir / No, salir directo / Cancelar.
+  // "Salir sin finalizar" hace solo cleanup local (D-003): sesion_activa.activa=1 queda
+  // como antes (equivalente a cerrar pestaña). "Sí, finalizar y salir" finaliza turno
+  // y dispara logout backend (activa=0).
   const handleLogout = useCallback(() => {
     setModal({
       title: 'Cerrar sesión',
@@ -1662,8 +1665,8 @@ export default function App() {
       confirmColor: 'green',
       icon: LogOut,
       secondaryLabel: 'No, salir sin finalizar',
-      onSecondary: async () => {
-        await auth.logout();
+      onSecondary: () => {
+        auth.logoutLocal();
         setModal(null);
         setActiveBitacora(null);
         setDraftLocal(null);
