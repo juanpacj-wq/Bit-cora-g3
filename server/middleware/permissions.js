@@ -40,3 +40,12 @@ export async function canEditarRegistro(sesion, registro) {
 export function puedeVerConformacion(/* sesion */) {
   return true;
 }
+
+// conformacion-turno-2026-05 (Q4 extra): trigger manual del snapshot reservado a cargos
+// responsables — JdT/IngOp (puede_cerrar_turno=1) o Jefe de Planta (es_jefe_planta=1).
+export function puedeTriggerConformacion(sesion) {
+  if (!sesion) return false;
+  if (sesion.puede_cerrar_turno) return true;
+  if (sesion.es_jefe_planta) return true;
+  return false;
+}
