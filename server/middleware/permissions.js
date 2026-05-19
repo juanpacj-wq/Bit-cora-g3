@@ -33,3 +33,10 @@ export async function canEditarRegistro(sesion, registro) {
   if (puedeCerrarTurno(sesion)) return true;
   return hasPermisoBitacora(sesion, registro.bitacora_id, 'puede_crear');
 }
+
+// conformacion-turno-2026-05 (Q4=e): la conformación de turno es información operativa
+// pública dentro de la app — cualquier cargo con sesión válida puede consultarla. Helper
+// agregado como gancho futuro si más adelante se quiere restringir (ej. solo Gerente/JdT).
+export function puedeVerConformacion(/* sesion */) {
+  return true;
+}

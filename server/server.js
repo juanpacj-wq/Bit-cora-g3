@@ -9,7 +9,7 @@ import { verifyPassword } from './utils/password.js';
 import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
 import { getTurnoColombia, periodoFromFechaBogota, turnoFromPeriodo, ventanaTurno } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
-import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro } from './middleware/permissions.js';
+import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro, puedeVerConformacion } from './middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
 import {
   findEventoDashboard, upsertEventoDashboard, hasNotificarDashboard,
@@ -2511,6 +2511,57 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 404, { error: 'Evento no encontrado' });
       }
       return sendJSON(res, 200, { ok: true });
+    }
+
+    // conformacion-turno-2026-05 (Q4=e): consulta de la conformación de turno (sin UI en W1).
+    // Auth requerida; cualquier cargo con sesión activa puede ver (puedeVerConformacion=true).
+    if (pathname === '/api/conformacion-turno' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      if (!puedeVerConformacion(sesion)) return sendJSON(res, 403, { error: 'No autorizado' });
+
+      const fecha = url.searchParams.get('fecha');
+      const turno = parseInt(url.searchParams.get('turno'), 10);
+      const planta_id = url.searchParams.get('planta_id');
+
+      if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+        return sendJSON(res, 400, { error: 'fecha es requerida en formato YYYY-MM-DD (Bogotá)' });
+      }
+      if (![1, 2].includes(turno)) {
+        return sendJSON(res, 400, { error: 'turno debe ser 1 o 2' });
+      }
+      if (!planta_id || !['GEC3', 'GEC32'].includes(planta_id)) {
+        return sendJSON(res, 400, { error: 'planta_id debe ser GEC3 o GEC32' });
+      }
+
+      const db = await getDB();
+      const r = await db.request()
+        .input('fecha', sql.Date, fecha)
+        .input('turno', sql.TinyInt, turno)
+        .input('planta_id', sql.VarChar(10), planta_id)
+        .query(`
+          SELECT
+            fecha_operativa, planta_id, turno,
+            usuario_id, usuario_nombre,
+            cargo_id, cargo_nombre,
+            inicio_sesion, fin_sesion,
+            inicio_sesion_bogota, fin_sesion_bogota,
+            duracion_min, fin_inferido,
+            snapshot_en, snapshot_en_bogota
+          FROM bitacora.conformacion_turno
+          WHERE fecha_operativa = @fecha
+            AND turno = @turno
+            AND planta_id = @planta_id
+          ORDER BY inicio_sesion ASC
+        `);
+
+      return sendJSON(res, 200, {
+        fecha_operativa: fecha,
+        planta_id,
+        turno,
+        filas: r.recordset,
+        total: r.recordset.length,
+      });
     }
 
     sendJSON(res, 404, { error: 'Not Found' });
