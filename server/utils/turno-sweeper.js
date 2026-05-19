@@ -1,6 +1,7 @@
 import sql from 'mssql';
-import { ventanaTurno } from './turno.js';
+import { ventanaTurno, fechaBogotaStr } from './turno.js';
 import { registrarEventoCierre } from './ciet.js';
+import { buildConformacionSnapshot, persistConformacionSnapshot } from './conformacion-snapshot.js';
 
 const INTERVAL_MS = 60_000;
 
@@ -69,6 +70,37 @@ export async function sweepTurnosVencidos(pool) {
     } catch (err) {
       try { await transaction.rollback(); } catch {}
       console.error(`[turno-sweeper] error finalizando sesion ${row.sesion_id}:`, err.message);
+    }
+  }
+
+  // Q3=d conformacion-turno-2026-05: tras finalizar las sesion_bitacora del turno vencido,
+  // recopilar (planta, turno, fecha_operativa) únicos y disparar el snapshot de conformación.
+  // Cada conformación en su propio error boundary — fallo en una no rompe las demás ni
+  // afecta el cierre de sesion_bitacora ya commiteado arriba. PK natural en conformacion_turno
+  // garantiza idempotencia frente a ticks repetidos del sweeper.
+  const conformacionesAEjecutar = new Map();
+  for (const { row } of porSesion.values()) {
+    const { inicio } = ventanaTurno(row.turno, row.abierta_en);
+    const fechaOperativa = fechaBogotaStr(inicio);
+    const key = `${row.planta_id}|${row.turno}|${fechaOperativa}`;
+    if (!conformacionesAEjecutar.has(key)) {
+      conformacionesAEjecutar.set(key, {
+        planta_id: row.planta_id,
+        turno: row.turno,
+        fecha_operativa: fechaOperativa,
+      });
+    }
+  }
+
+  for (const args of conformacionesAEjecutar.values()) {
+    try {
+      const filas = await buildConformacionSnapshot(pool, args);
+      const { insertadas, skipped } = await persistConformacionSnapshot(pool, filas);
+      if (insertadas > 0 || skipped > 0) {
+        console.log(`[turno-sweeper] conformacion ${args.planta_id} T${args.turno} ${args.fecha_operativa}: insertadas=${insertadas}, skipped=${skipped}`);
+      }
+    } catch (err) {
+      console.error(`[turno-sweeper] error conformacion ${args.planta_id} T${args.turno} ${args.fecha_operativa}:`, err.message);
     }
   }
 
