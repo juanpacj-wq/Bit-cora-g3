@@ -5,17 +5,29 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 1.4 |
-| Fecha | Mayo 2026 |
+| Versión | 1.5 |
+| Fecha | 2026-05-18 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
 
 > **Convenciones:** las tablas de catálogos viven en `lov_bit`; las tablas operativas en `bitacora`. Los campos JSON usan `NVARCHAR(MAX)` y se validan en la capa de aplicación.
 
+> **Cambios v1.5 (2026-05-18) — sincronización con BD productiva:**
+> - Cierre del gap doc↔código detectado al cruzar `INFORMATION_SCHEMA` real con `server/db.js`. Las DDLs de §2 y §3 se alinearon a lo que efectivamente crea `initDB()` post-migraciones F2/F3/F5/F6/F9/v2.
+> - `lov_bit.cargo`: agregada `puede_cerrar_turno BIT NOT NULL DEFAULT 0`. Cargo "Jefe de Turno" renombrado a "Ingeniero Jefe de Turno" (migración v2). `puede_cerrar_turno=1` en *Ingeniero Jefe de Turno* y *Ingeniero de Operación*.
+> - `lov_bit.usuario`: agregada `username VARCHAR(50) NOT NULL` con `UQ_usuario_username`. `email` pasa a `NULL`. Hash de contraseña migra de plaintext a `bcrypt` (migración v2 con backfill).
+> - `lov_bit.bitacora`: agregada `oculta BIT NOT NULL DEFAULT 0` (toggle de visibilidad en UI sin desactivar la bitácora).
+> - `lov_bit.tipo_evento`: agregada `notificar_dashboard_tipo VARCHAR(10) NULL CHECK IN ('AUTH','REDESP','PRUEBA')` (F6). Reemplaza al flag JSON `notificar_dashboard:true` que vivía en `lov_bit.bitacora.definicion_campos`. Decisión de qué `tipo` escribir en `evento_dashboard` ahora vive en la fila del `tipo_evento`, no en el JSON de la bitácora.
+> - `bitacora.sesion_activa`: agregada `cerrada_en DATETIME2 NULL` (F2 — distingue logout explícito del cierre por sweeper de turno F4). El **sweep TTL de arranque fue eliminado en F9** — el modelo post-F2 mantiene la sesión activa hasta logout o sweeper de turno; la columna `ultima_actividad` sigue actualizándose pero ya no se rechazan requests por TTL ni se purgan filas al arranque.
+> - `bitacora.registro_activo` / `registro_historico`: `detalle NVARCHAR(MAX)` pasa a `NULL` (F3 — CIETs no usan `detalle`, MAND tampoco siempre).
+> - **Nueva §4.6**: DDL formal de `bitacora.sesion_bitacora` (F2 — trackea participación de un login en cada bitácora). Estaba en código pero ausente del MD; era referenciada desde §4.5, §7.4 y §7.9 sin DDL propio.
+> - §5.1 `evento_dashboard`: corregido el `UNIQUE` a 4 columnas `(planta_id, fecha, periodo, tipo)` (era 3 en v1.4 — F5 lo extendió a 4 para permitir AUTH/REDESP/PRUEBA coexistentes por celda 24h).
+> - §5.1: la **vista compat `bitacora.autorizacion_dashboard` sigue viva** — el doc v1.4 afirmaba que F9 la eliminó, pero `db.js::initDB()` la recrea idempotentemente en cada arranque. Marcada como deuda; ningún consumidor activo la usa hoy.
+
 > **Cambios v1.1 (2026-04-18):**
 > - `registro_activo`, `registro_historico` y `autorizacion_dashboard` sustituyen las columnas FK por rol (`ingeniero_id`, `jdt_turno_id`, `jefe_id`, `jdt_id`) por **snapshots JSON** (`ingenieros_snapshot`, `jdts_snapshot`, `jefes_snapshot`) que preservan la lista completa de usuarios con ese rol al momento del registro. Único FK vivo a `lov_bit.usuario` en estas tablas: `creado_por` (autor).
-> - `sesion_activa` adopta un **TTL de 5 min** sobre `ultima_actividad`: sesiones ociosas o huérfanas se rechazan en el middleware y se limpian en el arranque.
+> - `sesion_activa` adopta un **TTL de 5 min** sobre `ultima_actividad`: sesiones ociosas o huérfanas se rechazan en el middleware y se limpian en el arranque. _(Histórico — este TTL fue eliminado en F9. Ver §7.4 vigente.)_
 > - Nuevo endpoint `POST /api/auth/resume` y contrato `sendBeacon` para distinguir recarga de cierre de pestaña (detalles en BIT-RF-2026-001, sección 4.1).
 
 ---
@@ -29,6 +41,7 @@
 4. [Registros de bitácora (esquema `bitacora`)](#4-registros-de-bitácora-esquema-bitacora)
    - 4.4 [Tablas auxiliares de migración y cierre MAND](#44-tablas-auxiliares-de-migración-y-cierre-mand)
    - 4.5 [Columnas calculadas Bogotá (F22)](#45-columnas-calculadas-bogotá-f22)
+   - 4.6 [`sesion_bitacora` — participación por bitácora (F2)](#46-sesion_bitacora--participación-por-bitácora-f2)
 5. [Integración con el Dashboard (esquema `bitacora`)](#5-integración-con-el-dashboard-esquema-bitacora)
 6. [Vistas útiles](#6-vistas-útiles)
 7. [Notas de diseño](#7-notas-de-diseño)
@@ -44,7 +57,7 @@ El modelo se divide en dos esquemas y cuatro bloques lógicos:
 | Bloque | Esquema | Contenido |
 |---|---|---|
 | Catálogos | `lov_bit` | Plantas, cargos, usuarios, bitácoras, tipos de evento, permisos |
-| Sesiones | `bitacora` | Sesiones activas con TTL; punto de consulta para snapshots de rol |
+| Sesiones | `bitacora` | Sesiones activas (logout o cierre por sweeper de turno); punto de consulta para snapshots de rol |
 | Registros | `bitacora` | Tabla activa (día en curso, editable) e histórica (inmutable) |
 | Dashboard | `bitacora` | Autorizaciones horarias expuestas al Dashboard vía API REST |
 
@@ -92,44 +105,65 @@ INSERT INTO lov_bit.planta (planta_id, nombre) VALUES
 
 ```sql
 -- Roles seleccionables tras login.
--- solo_lectura = 1 para Gerente de Producción.
+-- solo_lectura       = 1 para Gerente de Producción (solo consulta, no escribe).
+-- puede_cerrar_turno = 1 para Ingeniero Jefe de Turno e Ingeniero de Operación
+--                      (mismo poder operativo, roles distintos en UI y snapshots).
 CREATE TABLE lov_bit.cargo (
-    cargo_id        INT           IDENTITY(1,1) PRIMARY KEY,
-    nombre          VARCHAR(100)  NOT NULL,
-    solo_lectura    BIT           NOT NULL DEFAULT 0
+    cargo_id           INT           IDENTITY(1,1) PRIMARY KEY,
+    nombre             VARCHAR(100)  NOT NULL,
+    solo_lectura       BIT           NOT NULL DEFAULT 0,
+    puede_cerrar_turno BIT           NOT NULL DEFAULT 0
 );
 
-INSERT INTO lov_bit.cargo (nombre, solo_lectura) VALUES
-    ('Jefe de Turno', 0),                -- cargo_id = 1
-    ('Ingeniero de Operación', 0),       -- cargo_id = 2
-    ('Ingeniero de Planta de Agua', 0),  -- cargo_id = 3
-    ('Gerente de Producción', 1);        -- cargo_id = 4
+-- Cargos definitivos según LISTADO DE PERSONAL 2026 (migración v2 hizo el rename
+-- de "Jefe de Turno" → "Ingeniero Jefe de Turno" + cableó puede_cerrar_turno).
+-- El catálogo real incluye además personal operativo de planta no listado aquí
+-- (Operador Tablero, Operador Maquinaria Pesada, etc.) con ambos flags en 0.
+INSERT INTO lov_bit.cargo (nombre, solo_lectura, puede_cerrar_turno) VALUES
+    ('Ingeniero Jefe de Turno',     0, 1),  -- cargo_id = 1 (ex "Jefe de Turno")
+    ('Ingeniero de Operación',      0, 1),  -- cargo_id = 2
+    ('Ingeniero de Planta de Agua', 0, 0),  -- cargo_id = 3
+    ('Gerente de Producción',       1, 0);  -- cargo_id = 4
 ```
+
+**Semántica de `puede_cerrar_turno`:** se valida en el middleware de cierre (RF). Los dos cargos que pueden cerrar comparten permisos operativos; lo que los distingue es la **identidad** (snapshots `jdts_snapshot` vs `ingenieros_snapshot`), no el permiso. Ver §2.3.1 sobre `es_jdt_default`.
 
 ### 2.3 Usuarios
 
 ```sql
--- Login simple por ahora. Keycloak en fase posterior.
--- es_jefe_planta = 1 solo para Ernesto Muñoz (jefe global).
--- es_jdt_default = 1 solo para Omar Fedullo (JdT fallback).
+-- Login por username + PIN/contraseña. Keycloak queda fuera del scope actual.
+-- username        = identificador único (se usa en JWT y en logs).
+-- email           = opcional (NULL para usuarios sin correo corporativo, p.ej. SISTEMA).
+-- password_hash   = bcrypt post-migración v2 (antes plaintext con default '1234').
+-- es_jefe_planta  = 1 solo para Ernesto Muñoz (jefe global).
+-- es_jdt_default  = 1 solo para Omar Fedullo (JdT fallback — ver 2.3.1).
 CREATE TABLE lov_bit.usuario (
     usuario_id      INT           IDENTITY(1,1) PRIMARY KEY,
     nombre_completo VARCHAR(200)  NOT NULL,
-    email           VARCHAR(200)  NOT NULL UNIQUE,
-    password_hash   VARCHAR(200)  NOT NULL DEFAULT '1234',
+    username        VARCHAR(50)   NOT NULL,
+    email           VARCHAR(200)  NULL,
+    password_hash   VARCHAR(200)  NOT NULL,
     es_jefe_planta  BIT           NOT NULL DEFAULT 0,
     es_jdt_default  BIT           NOT NULL DEFAULT 0,
     activo          BIT           NOT NULL DEFAULT 1
 );
 
-INSERT INTO lov_bit.usuario (nombre_completo, email, es_jefe_planta, es_jdt_default) VALUES
-    ('Ernesto Muñoz', 'ernesto.munoz@gecelca.com', 1, 0),
-    ('Omar Fedullo',  'omar.fedullo@gecelca.com',  0, 1);
+CREATE UNIQUE INDEX UQ_usuario_username ON lov_bit.usuario(username);
+
+INSERT INTO lov_bit.usuario (nombre_completo, username, email, es_jefe_planta, es_jdt_default) VALUES
+    ('Ernesto Muñoz', 'ernesto.munoz', 'ernesto.munoz@gecelca.com', 1, 0),
+    ('Omar Fedullo',  'omar.fedullo',  'omar.fedullo@gecelca.com',  0, 1);
 ```
+
+**Notas:**
+
+- **`username` reemplaza al `email` como identificador de login** (migración v2). El backfill mapeó los emails pre-existentes a la parte local del correo. `email` queda como dato de contacto opcional, sin UNIQUE.
+- **`password_hash` con bcrypt** desde v2. La migración rehashea contraseñas plaintext detectadas al primer arranque post-upgrade. El default plaintext `'1234'` del legacy ya no existe — usuarios nuevos requieren hash explícito.
+- El antiguo `UNIQUE(email)` se removió en v2.
 
 #### 2.3.1 Semántica de `es_jdt_default`
 
-`es_jdt_default` **no es un flag de rol ni de permiso**: es un **fallback de identidad** que se usa para poblar `jdts_snapshot` (y `/api/catalogos/jdt-actual`) cuando no hay ningún usuario del cargo *Ingeniero Jefe de Turno* con sesión activa dentro del TTL (5 min). Reglas:
+`es_jdt_default` **no es un flag de rol ni de permiso**: es un **fallback de identidad** que se usa para poblar `jdts_snapshot` (y `/api/catalogos/jdt-actual`) cuando no hay ningún usuario del cargo *Ingeniero Jefe de Turno* con `sesion_activa.activa=1` en la planta. Post-F9 no hay filtro TTL — basta una sesión viva (sin `cerrada_en` y sin haber sido cerrada por logout/sweeper). Reglas:
 
 - Se asigna a **un único usuario global** por diseño (hoy: Omar Fedullo). No se expande a más usuarios.
 - Si se setea a `1` en N usuarios, `snapshotJDTs()` devolverá a los N como fallback (lista, sin prioridad ni filtro por planta). Esto ensucia el audit trail, no lo mejora.
@@ -164,6 +198,9 @@ Si en el futuro se agregan más procesos automáticos (cron jobs adicionales, in
 -- definicion_campos: JSON que describe campos extra del formulario.
 -- El frontend lee este JSON y renderiza dinámicamente.
 -- Para agregar una bitácora nueva: solo INSERT aquí.
+-- activa = 0 elimina la bitácora del sistema (no creable, no consultable).
+-- oculta = 1 la oculta del sidebar pero sigue creable vía API y visible en histórico
+--          (útil para bitácoras que se usan vía batch como MAND).
 CREATE TABLE lov_bit.bitacora (
     bitacora_id         INT             IDENTITY(1,1) PRIMARY KEY,
     nombre              VARCHAR(100)    NOT NULL,
@@ -172,7 +209,8 @@ CREATE TABLE lov_bit.bitacora (
     formulario_especial BIT             NOT NULL DEFAULT 0,
     definicion_campos   NVARCHAR(MAX)   NULL,
     orden               INT             NOT NULL DEFAULT 0,
-    activa              BIT             NOT NULL DEFAULT 1
+    activa              BIT             NOT NULL DEFAULT 1,
+    oculta              BIT             NOT NULL DEFAULT 0
 );
 
 -- Bitácoras iniciales
@@ -181,10 +219,10 @@ INSERT INTO lov_bit.bitacora
 VALUES
     ('Disponibilidad', 'DISP', 'Activity', 1,
      '[{"campo":"evento","tipo":"select",
-       "opciones":["Disponible","Indisponible","En Reserva"],
+       "opciones":["En Servicio","En Reserva","Indisponible","Mantenimiento"],
        "requerido":true},
       {"campo":"codigo","tipo":"auto",
-       "regla":{"Disponible":1,"En Reserva":0,"Indisponible":-1}}]',
+       "regla":{"En Servicio":1,"En Reserva":0,"Indisponible":-1,"Mantenimiento":-1}}]',
      1),
     ('Sincronización',              'SINC', 'Settings',     0, NULL, 2),
     ('Caldera',                     'CAL',  'Flame',        0, NULL, 3),
@@ -218,16 +256,37 @@ INSERT INTO lov_bit.bitacora (nombre, codigo, formulario_especial, definicion_ca
 ```sql
 -- Cada bitácora tiene su catálogo propio de tipos.
 -- es_default = 1 marca 'Evento General' como preseleccionado.
+-- notificar_dashboard_tipo (F6): si != NULL, al INSERT/UPDATE del registro se hace UPSERT
+--   en bitacora.evento_dashboard con este valor en la columna `tipo`. NULL = no notifica.
+--   Reemplaza al flag JSON `notificar_dashboard:true` que vivía en `bitacora.definicion_campos`.
 CREATE TABLE lov_bit.tipo_evento (
-    tipo_evento_id  INT           IDENTITY(1,1) PRIMARY KEY,
-    bitacora_id     INT           NOT NULL
+    tipo_evento_id           INT           IDENTITY(1,1) PRIMARY KEY,
+    bitacora_id              INT           NOT NULL
         REFERENCES lov_bit.bitacora(bitacora_id),
-    nombre          VARCHAR(100)  NOT NULL,
-    es_default      BIT           NOT NULL DEFAULT 0,
-    orden           INT           NOT NULL DEFAULT 0
+    nombre                   VARCHAR(100)  NOT NULL,
+    es_default               BIT           NOT NULL DEFAULT 0,
+    orden                    INT           NOT NULL DEFAULT 0,
+    notificar_dashboard_tipo VARCHAR(10)   NULL
+        CONSTRAINT CK_te_notificar_dashboard_tipo
+        CHECK (notificar_dashboard_tipo IN ('AUTH','REDESP','PRUEBA'))
 );
 
 CREATE INDEX IX_tipo_evento_bit ON lov_bit.tipo_evento(bitacora_id);
+
+-- Cableado MAND: cada tipo del Operación 24h se mapea a su `tipo` en evento_dashboard.
+-- Los tipos de DISP, AUTH (de la bitácora vieja) y de las bitácoras técnicas
+-- quedan con notificar_dashboard_tipo = NULL (no escriben en evento_dashboard).
+UPDATE te SET notificar_dashboard_tipo = 'AUTH'
+FROM lov_bit.tipo_evento te JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+WHERE b.codigo = 'MAND' AND te.nombre = 'Autorización';
+
+UPDATE te SET notificar_dashboard_tipo = 'PRUEBA'
+FROM lov_bit.tipo_evento te JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+WHERE b.codigo = 'MAND' AND te.nombre = 'Pruebas';
+
+UPDATE te SET notificar_dashboard_tipo = 'REDESP'
+FROM lov_bit.tipo_evento te JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+WHERE b.codigo = 'MAND' AND te.nombre = 'Redespacho';
 
 -- 'Evento General' para TODAS las bitácoras
 INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, es_default, orden)
@@ -282,10 +341,13 @@ SELECT 4, bitacora_id, 1, 0 FROM lov_bit.bitacora;
 
 ```sql
 -- Resuelve: quién es JdT en turno y qué ingenieros están en turno.
--- activa = 0 al cerrar sesión o al disparar el beacon de pagehide.
--- TTL: una sesión con ultima_actividad fuera de 5 min se considera
--- caducada aunque activa=1 (se rechaza en el middleware).
--- Heartbeat cada 60 s y cada request autenticado refresca ultima_actividad.
+-- activa     = 0 al cerrar sesión o al finalizar el turno por el sweeper de F4.
+-- cerrada_en (F2): distingue logout explícito (activa=0 + cerrada_en=NULL legacy o
+--                  cerrada_en=ts cuando el frontend manda LOGOUT) del cierre por
+--                  sweeper de turno (activa=0 + cerrada_en=ts SYSUTCDATETIME()).
+-- ultima_actividad: heartbeat de 60s y cada request autenticado lo refresca.
+--                   Sigue actualizándose para inspección operativa, pero post-F9 ya
+--                   NO se rechaza el request por TTL ni se purga la sesión al arranque.
 CREATE TABLE bitacora.sesion_activa (
     sesion_id         INT           IDENTITY(1,1) PRIMARY KEY,
     usuario_id        INT           NOT NULL
@@ -295,35 +357,34 @@ CREATE TABLE bitacora.sesion_activa (
     cargo_id          INT           NOT NULL
         REFERENCES lov_bit.cargo(cargo_id),
     turno             TINYINT       NOT NULL CHECK (turno IN (1, 2)),
-    inicio_sesion     DATETIME2     NOT NULL DEFAULT GETDATE(),
-    ultima_actividad  DATETIME2     NOT NULL DEFAULT GETDATE(),
-    activa            BIT           NOT NULL DEFAULT 1
+    inicio_sesion     DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    ultima_actividad  DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    activa            BIT           NOT NULL DEFAULT 1,
+    cerrada_en        DATETIME2     NULL
 );
 
 CREATE INDEX IX_sesion_lookup
     ON bitacora.sesion_activa(activa, planta_id, cargo_id)
-    INCLUDE (usuario_id, turno, inicio_sesion, ultima_actividad);
+    INCLUDE (usuario_id, turno, inicio_sesion);
 ```
 
-**Sweep de arranque** — `initDB()` ejecuta al levantar el backend:
+**Cambio de modelo post-F9:** el sweep TTL de arranque y el rechazo `401` por `ultima_actividad < -5min` **fueron eliminados**. El modelo vigente mantiene la sesión activa hasta que ocurra una de:
 
-```sql
-UPDATE bitacora.sesion_activa
-SET activa = 0
-WHERE activa = 1
-  AND ultima_actividad < DATEADD(MINUTE, -5, GETDATE());
-```
+1. **Logout explícito** del usuario (frontend POST `/api/auth/logout` o beacon de `pagehide`).
+2. **Cierre por sweeper de turno** (F4 — `server/utils/turno-sweeper.js`): finaliza la sesión y emite CIET cuando se agota la ventana del turno.
+3. **Reinicio del proceso**: las sesiones quedan huérfanas hasta logout manual; ya no se barren al arranque.
 
-**Resolución del JdT actual** (con filtro TTL):
+La columna `ultima_actividad` se sigue refrescando con heartbeat para visibilidad operativa, pero **no es un gate de autenticación**.
+
+**Resolución del JdT actual** (sin filtro TTL post-F9):
 
 ```sql
 SELECT TOP 1 u.usuario_id, u.nombre_completo
 FROM bitacora.sesion_activa s
 JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
 WHERE s.activa = 1
-  AND s.cargo_id = (SELECT cargo_id FROM lov_bit.cargo WHERE nombre = 'Jefe de Turno')
+  AND s.cargo_id = (SELECT cargo_id FROM lov_bit.cargo WHERE nombre = 'Ingeniero Jefe de Turno')
   AND s.planta_id = @planta
-  AND s.ultima_actividad > DATEADD(MINUTE, -5, GETDATE())
 ORDER BY s.inicio_sesion DESC;
 -- Si 0 filas → SELECT ... FROM lov_bit.usuario WHERE es_jdt_default = 1 AND activo = 1;
 ```
@@ -349,7 +410,7 @@ CREATE TABLE bitacora.registro_activo (
     -- === INPUTS MANUALES (3) ===
     fecha_evento   DATETIME2       NOT NULL,
     turno          TINYINT         NOT NULL CHECK (turno IN (1, 2)),
-    detalle        NVARCHAR(MAX)   NOT NULL,
+    detalle        NVARCHAR(MAX)   NULL,  -- F3: pasa a nullable; CIETs y MAND no siempre requieren detalle
 
     -- === CAMPO DINÁMICO (bitácoras especiales) ===
     campos_extra   NVARCHAR(MAX)   NULL,  -- JSON
@@ -397,9 +458,9 @@ Si no hay usuarios para un rol, se escribe la cadena `"[]"` — **nunca `NULL`**
 
 | Snapshot | Criterio |
 |---|---|
-| `jdts_snapshot` | `sesion_activa.activa=1` y dentro de TTL, `cargo.nombre='Jefe de Turno'`, `u.activo=1`. Si la lista queda vacía, fallback a `usuario.es_jdt_default=1 AND activo=1` |
+| `jdts_snapshot` | `sesion_activa.activa=1`, `cargo.nombre='Ingeniero Jefe de Turno'`, `u.activo=1`. Si la lista queda vacía, fallback a `usuario.es_jdt_default=1 AND activo=1` |
 | `jefes_snapshot` | `usuario.es_jefe_planta=1 AND activo=1` (lista estable independiente de sesión) |
-| `ingenieros_snapshot` | `sesion_activa.activa=1` y TTL válido, cuyo cargo tenga `cargo_bitacora_permiso.puede_crear=1` para la `bitacora_id`, excluyendo los cargos "Jefe de Turno" y "Gerente de Producción" |
+| `ingenieros_snapshot` | `sesion_activa.activa=1`, cuyo cargo tenga `cargo_bitacora_permiso.puede_crear=1` para la `bitacora_id`, excluyendo los cargos "Ingeniero Jefe de Turno" y "Gerente de Producción" |
 
 **Columna `fecha_fin_estado` (F12, DISP only):**
 
@@ -423,8 +484,8 @@ CREATE TABLE bitacora.registro_historico (
     bitacora_id    INT             NOT NULL,
     planta_id      VARCHAR(10)     NOT NULL,
     fecha_evento   DATETIME2       NOT NULL,
-    turno          TINYINT         NOT NULL,
-    detalle        NVARCHAR(MAX)   NOT NULL,
+    turno          TINYINT         NULL,  -- F12: NULL para DISP, INT 1|2 para el resto
+    detalle        NVARCHAR(MAX)   NULL,  -- F3: pasa a nullable (mismo cambio que §4.1)
     campos_extra   NVARCHAR(MAX)   NULL,
     tipo_evento_id INT             NOT NULL,
 
@@ -587,13 +648,49 @@ Las columnas calculadas son **virtuales** — no ocupan espacio, se calculan al 
 
 **Consumidores con `SELECT *`:** las columnas calculadas aparecen automáticamente en `SELECT *`. Cualquier handler que dependa de la posición o el shape exacto del recordset rompería. Auditoría (F22): los flujos transaccionales usan listas explícitas de columnas (forzado por F18 en MAND y F12+F14 en DISP); los `SELECT *` residuales en `server.js` operan vía nombre de propiedad (`row.fecha_evento`) sin sensibilidad a posición/shape.
 
+### 4.6 `sesion_bitacora` — participación por bitácora (F2)
+
+Trackea la **participación de un login en cada bitácora individual**, desacoplado de la sesión global. `abierta_en` se setea al entrar a la vista de la bitácora; `finalizada_en` cuando el usuario clickea "Finalizar turno" en esa bitácora, o cuando el sweeper de turno (F4) lo hace en su nombre al agotarse la ventana del turno.
+
+```sql
+-- F2: una fila por (sesion_id, bitacora_id). Reabrir tras finalizar es UPSERT
+-- (UPDATE finalizada_en = NULL + abierta_en = SYSUTCDATETIME() vía MERGE).
+CREATE TABLE bitacora.sesion_bitacora (
+    sesion_bitacora_id INT       IDENTITY(1,1) PRIMARY KEY,
+    sesion_id          INT       NOT NULL
+        REFERENCES bitacora.sesion_activa(sesion_id),
+    bitacora_id        INT       NOT NULL
+        REFERENCES lov_bit.bitacora(bitacora_id),
+    abierta_en         DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    finalizada_en      DATETIME2 NULL,
+    CONSTRAINT UQ_sesion_bitacora UNIQUE (sesion_id, bitacora_id)
+);
+
+-- Índice filtrado: acelera lookups del sweeper F4 y de "¿quién está en qué bitácora?".
+CREATE INDEX IX_sesion_bit_finalizada
+    ON bitacora.sesion_bitacora(finalizada_en)
+    WHERE finalizada_en IS NULL;
+```
+
+**Invariantes:**
+
+- Una sola fila por par `(sesion_id, bitacora_id)` — el UNIQUE garantiza que reabrir la misma bitácora con la misma sesión no duplica filas; el MERGE actualiza `finalizada_en = NULL` y refresca `abierta_en`.
+- `finalizada_en IS NULL` = participación viva. El listado de "ingenieros con bitácora X abierta para planta Y" filtra por este predicado (ver `server/server.js` `GET /api/sala-de-mando/ingenieros-en-bitacora`).
+- El sweeper de turno (`server/utils/turno-sweeper.js`) cierra todas las `sesion_bitacora` activas cuya `sesion_activa.turno` ya terminó (ventana de 12 h, ver §7.5), en transacción por sesión + emisión de CIET de finalización.
+
+**Endpoints relevantes:**
+
+- `POST /api/sala-de-mando/abrir-bitacora`: UPSERT del par (sesion, bitácora).
+- `POST /api/sala-de-mando/finalizar-bitacora`: marca `finalizada_en = SYSUTCDATETIME()` para la bitácora actual del usuario.
+- `POST /api/sala-de-mando/finalizar-turno`: finaliza **todas** las bitácoras del usuario logueado (no solo del login actual: si el usuario rotó por varias sesiones, las cierra todas).
+
 ---
 
 ## 5. Integración con el Dashboard (esquema `bitacora`)
 
 El esquema expone dos tablas-puente independientes hacia el Dashboard de Generación:
 
-- **5.1 `evento_dashboard`** — eventos por hora/periodo (AUTH, REDESP, PRUEBA) emitidos desde MAND. Reemplaza la tabla v1.0 `autorizacion_dashboard` (renombrada en F5; vista compat eliminada en F9).
+- **5.1 `evento_dashboard`** — eventos por hora/periodo (AUTH, REDESP, PRUEBA) emitidos desde MAND. Reemplaza la tabla v1.0 `autorizacion_dashboard` (renombrada en F5; vista compat `autorizacion_dashboard` sigue creándose idempotentemente en `initDB()` — F9 planeaba eliminarla pero el bloque DROP+CREATE quedó vivo. Sin consumidores activos al 2026-05-18).
 - **5.2 `disponibilidad_dashboard`** (F12) — estado vigente por planta (DISP). Separada deliberadamente: DISP no tiene periodo ni semántica horaria.
 
 ### 5.1 `evento_dashboard` (eventos por periodo, MAND)
@@ -601,41 +698,61 @@ El esquema expone dos tablas-puente independientes hacia el Dashboard de Generac
 Las autorizaciones son registros de la bitácora AUTH que disparan automáticamente una fila en esta tabla. El Dashboard la consume vía REST para suprimir la desviación en periodos autorizados.
 
 ```sql
--- Tabla puente: bitácora AUTH -> Dashboard de Generación
--- Se INSERT automáticamente al crear registro en AUTH.
--- Dashboard: GET /api/autorizaciones?planta_id=GEC32&fecha=2026-04-13
-CREATE TABLE bitacora.autorizacion_dashboard (
-    autorizacion_id     INT           IDENTITY(1,1) PRIMARY KEY,
+-- Tabla puente: Bitácora (MAND + AUTH histórica) -> Dashboard de Generación.
+-- Se INSERT/UPSERT al crear o editar un registro cuyo tipo_evento tenga
+-- notificar_dashboard_tipo != NULL (F6). El `tipo` AUTH/REDESP/PRUEBA viaja en
+-- la fila — múltiples tipos pueden coexistir para la misma (planta, fecha, periodo).
+-- Dashboard: GET /api/eventos-dashboard?planta_id=GEC32&fecha=2026-04-13
+CREATE TABLE bitacora.evento_dashboard (
+    evento_id           INT           IDENTITY(1,1) PRIMARY KEY,
     registro_origen_id  INT           NOT NULL,
     planta_id           VARCHAR(10)   NOT NULL
         REFERENCES lov_bit.planta(planta_id),
     fecha               DATE          NOT NULL,
     periodo             TINYINT       NOT NULL
         CHECK (periodo BETWEEN 1 AND 24),
-    valor_autorizado_mw FLOAT         NOT NULL,
+    valor_mw            FLOAT         NOT NULL,
 
     jdts_snapshot       NVARCHAR(MAX) NOT NULL,   -- JSON array
     jefes_snapshot      NVARCHAR(MAX) NOT NULL,   -- JSON array
 
+    tipo                VARCHAR(10)   NOT NULL DEFAULT 'AUTH'
+        CHECK (tipo IN ('AUTH','REDESP','PRUEBA')),
     activa              BIT           NOT NULL DEFAULT 1,
-    creado_en           DATETIME2     NOT NULL DEFAULT GETDATE(),
+    creado_en           DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
 
-    CONSTRAINT UQ_auth_planta_fecha_periodo
-        UNIQUE (planta_id, fecha, periodo)
+    CONSTRAINT UQ_evento_planta_fecha_periodo_tipo
+        UNIQUE (planta_id, fecha, periodo, tipo)
 );
 
-CREATE INDEX IX_auth_lookup
-    ON bitacora.autorizacion_dashboard(planta_id, fecha, activa);
+CREATE INDEX IX_evento_lookup
+    ON bitacora.evento_dashboard(planta_id, fecha, activa);
 ```
+
+**Historia del nombre:** la tabla se llamó `autorizacion_dashboard` con columnas `autorizacion_id` y `valor_autorizado_mw` hasta F5 (2026), que la renombró a `evento_dashboard` y agregó la columna `tipo` para soportar REDESP y PRUEBA además de AUTH. El `UNIQUE` viejo de 3 columnas se reemplazó por uno de 4 que incluye `tipo` (deploys con UQ_auth_planta_fecha_periodo lo migran idempotente en `initDB()`).
 
 **Flujo:**
 
-1. El JdT crea un registro en la bitácora AUTH con `periodo`, `valor_autorizado_mw` y `planta`.
-2. El backend detecta `notificar_dashboard=true` en `definicion_campos` y genera los snapshots.
-3. Se ejecuta `upsertAutorizacion` (ver `server/utils/notificador.js`): INSERT nuevo o, si existe una fila con `activa=0` para `(planta_id, fecha, periodo)`, UPDATE reactivándola con el nuevo valor. Si la fila existente está con `activa=1`, la API retorna `HTTP 409`.
-4. El Dashboard consulta el endpoint y suprime la alerta de desviación para ese periodo.
+1. El JdT (vía MAND batch save o AUTH manual) crea un registro cuyo `tipo_evento.notificar_dashboard_tipo` != NULL.
+2. El backend genera los snapshots y resuelve el `tipo` desde la fila del `tipo_evento` (no del JSON de la bitácora — F6).
+3. Se ejecuta `upsertEventoDashboard` (`server/utils/notificador.js`): INSERT nuevo o, si existe una fila con `activa=0` para `(planta_id, fecha, periodo, tipo)`, UPDATE reactivándola con el nuevo valor.
+4. El Dashboard consulta `/api/eventos-dashboard` y suprime la alerta de desviación para ese periodo.
 
 El Dashboard debe **parsear `jdts_snapshot` y `jefes_snapshot` como JSON**: ya no son `INT` como en versiones previas del modelo.
+
+**Vista compat `bitacora.autorizacion_dashboard` (deuda viva):**
+
+Para preservar el shape legacy (`autorizacion_id`, `valor_autorizado_mw`) de consumidores anteriores a F5, `initDB()` recrea idempotentemente una **vista** filtrada por `tipo='AUTH'`:
+
+```sql
+CREATE VIEW bitacora.autorizacion_dashboard AS
+  SELECT evento_id AS autorizacion_id, registro_origen_id, planta_id, fecha, periodo,
+         valor_mw AS valor_autorizado_mw, jdts_snapshot, jefes_snapshot, activa, creado_en
+  FROM bitacora.evento_dashboard
+  WHERE tipo = 'AUTH';
+```
+
+**Estado real al 2026-05-18:** la vista sigue creándose en cada arranque (`server/db.js`) pero **ningún consumidor activo la usa** — el Dashboard ya consume `/api/eventos-dashboard`. F9 originalmente planeaba eliminarla; el bloque DROP+CREATE quedó en el código. Pendiente: borrar el bloque o ratificarla como contrato externo si algún tercero la lee.
 
 ### 5.2 `disponibilidad_dashboard` (estado vigente por planta, DISP)
 
@@ -646,7 +763,8 @@ CREATE TABLE bitacora.disponibilidad_dashboard (
   planta_id              VARCHAR(10) PRIMARY KEY
       REFERENCES lov_bit.planta(planta_id),
   evento                 VARCHAR(20) NOT NULL
-      CHECK (evento IN ('Disponible','Indisponible','En Reserva')),
+      CONSTRAINT CK_disp_dashboard_evento
+      CHECK (evento IN ('En Servicio','En Reserva','Indisponible','Mantenimiento')),
   codigo                 SMALLINT    NOT NULL CHECK (codigo IN (-1, 0, 1)),
   fecha_inicio_estado    DATETIME2   NOT NULL,
   registro_activo_id     INT         NOT NULL,
@@ -668,7 +786,8 @@ CREATE TABLE bitacora.disponibilidad_dashboard (
   - `PUT /api/registros/:id` (rama DISP) — RF-056.
   - `POST /api/disponibilidad/deshacer` — RF-057. Si el deshacer no encuentra histórico, se hace `DELETE` (la planta vuelve al empty state — vigente null).
 - `modificado_por`/`modificado_en` se setean al editor cuando es un PUT; se limpian a NULL en POST y deshacer (el autor original vive en `registro_activo.creado_por`).
-- `codigo` deriva del `evento` con la regla fija `Disponible:1 / 'En Reserva':0 / Indisponible:-1`.
+- `codigo` deriva del `evento` con la regla fija `'En Servicio':1 / 'En Reserva':0 / Indisponible:-1 / Mantenimiento:-1` (ver D-024). `Indisponible` y `Mantenimiento` **comparten `codigo=-1`**: el código numérico es la métrica agregable de "horas de indisponibilidad" (reporte XM); el discriminador semántico vive en el string `evento` (Indisponible = salida forzada; Mantenimiento = consignación / salida planeada).
+- Migración idempotente en `initDB()` (db.js): si la BD trae el CHECK viejo, se dropa por nombre, se reemplazan los strings `'Disponible'` → `'En Servicio'` en la tabla y en `campos_extra` JSON de `registro_activo`/`registro_historico` con `JSON_MODIFY`, y se agrega el nuevo CHECK nombrado `CK_disp_dashboard_evento`.
 
 **Diferencias con `evento_dashboard` (5.1):**
 
@@ -685,22 +804,23 @@ CREATE TABLE bitacora.disponibilidad_dashboard (
 
 ## 6. Vistas útiles
 
-### 6.1 Ingenieros en turno (con filtro TTL)
+### 6.1 Ingenieros en turno
 
 ```sql
+-- Post-F9: sin filtro TTL. activa=1 es el único gate.
 CREATE OR ALTER VIEW bitacora.v_ingenieros_en_turno AS
 SELECT s.planta_id, s.turno, u.usuario_id, u.nombre_completo,
        c.nombre AS cargo, s.inicio_sesion, s.ultima_actividad
 FROM bitacora.sesion_activa s
 JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
 JOIN lov_bit.cargo c   ON c.cargo_id   = s.cargo_id
-WHERE s.activa = 1
-  AND s.ultima_actividad > DATEADD(MINUTE, -5, GETDATE());
+WHERE s.activa = 1;
 ```
 
 ### 6.2 JdT actual por planta
 
 ```sql
+-- Post-F9: sin filtro TTL. Cargo renombrado a "Ingeniero Jefe de Turno" en v2.
 CREATE OR ALTER VIEW bitacora.v_jdt_actual AS
 SELECT DISTINCT s.planta_id,
     FIRST_VALUE(s.usuario_id) OVER (
@@ -712,9 +832,8 @@ SELECT DISTINCT s.planta_id,
 FROM bitacora.sesion_activa s
 JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
 WHERE s.activa = 1
-  AND s.ultima_actividad > DATEADD(MINUTE, -5, GETDATE())
   AND s.cargo_id = (SELECT cargo_id FROM lov_bit.cargo
-                     WHERE nombre = 'Jefe de Turno');
+                     WHERE nombre = 'Ingeniero Jefe de Turno');
 ```
 
 ### 6.3 Búsqueda unificada en históricos (sin JOINs a `usuario` por rol)
@@ -771,13 +890,14 @@ Los nombres humanos de los roles se resuelven **del lado del cliente** parseando
 - Si un catálogo cambia (renombrar usuario, desactivar), los registros históricos no se rompen: guardan `nombre_completo` embebido.
 - Los JOINs por rol desaparecen de la vista de búsqueda. El parseo ocurre en cliente.
 
-### 7.4 Sesiones con TTL y reanudación
+### 7.4 Modelo de sesión (post-F9)
 
-- La columna `ultima_actividad` **no es informativa**: el middleware de autenticación rechaza (`401`) cualquier request cuya sesión tenga `ultima_actividad < DATEADD(MINUTE, -5, GETDATE())`, incluso si `activa=1`.
-- Cada request autenticado hace un `UPDATE ... SET ultima_actividad = GETDATE()` en *fire-and-forget*.
-- El cliente mantiene vivas las sesiones con un heartbeat a `POST /api/auth/heartbeat` cada 60 s.
-- `initDB()` incluye un sweep al arranque que desactiva sesiones fuera del TTL, previniendo acumulación de filas huérfanas tras caídas del proceso.
-- `POST /api/auth/resume` reactiva una sesión (`activa=1`, `ultima_actividad=GETDATE()`) siempre que esté dentro del TTL. Es el endpoint que el cliente invoca al **recargar la página** (F5), distinguiendo así la recarga del **cierre de pestaña** (que no reanuda).
+- La sesión vive hasta que ocurra **una** de tres cosas: logout explícito, cierre por sweeper de turno (F4 — `turno-sweeper.js`), o reinicio del proceso (las filas quedan con `activa=1` huérfanas y se cierran manualmente).
+- **No hay gate TTL.** El middleware solo verifica `activa=1`. El sweep TTL al arranque y el rechazo `401` por `ultima_actividad < -5min` fueron eliminados en F9.
+- `ultima_actividad` se sigue refrescando con cada request autenticado y con un heartbeat de 60s a `POST /api/auth/heartbeat`, exclusivamente para **visibilidad operativa** (¿quién está activo ahora?).
+- `cerrada_en` distingue logout explícito del cierre por sweeper: la migración F4 leerá esta columna en CIETs futuros.
+- `POST /api/auth/resume` sigue existiendo para reanudar sesiones tras recarga de pestaña (F5 del navegador), pero ya no depende del TTL — basta que `activa=1`.
+- **Limpieza operativa:** sesiones huérfanas se purgan con `cleanupTestRegistros` (helpers de test) o `UPDATE ... SET activa=0` manual. No hay job automático.
 
 ### 7.5 Turnos
 
@@ -833,7 +953,7 @@ La BD guarda **todas las columnas DATETIME2 en UTC**, pobladas por `SYSUTCDATETI
 
 - INSERTs y UPDATEs DEFAULT usan `SYSUTCDATETIME()`. `GETDATE()` está prohibido en `Bit-cora-g3/server/` salvo que esté documentado por qué.
 - Comparaciones de fecha del día Bogotá usan `CAST(DATEADD(HOUR, -5, columna_utc) AS DATE) = @fecha_bogota` (Colombia UTC−5 sin DST). Patrón en `mand-sweeper.js::cerrarDiaMand`, `GET /api/sala-de-mando` (post F19) y handlers similares.
-- Sweep TTL de sesiones (`db.js`) usa `SYSUTCDATETIME()` (post F19) — antes era `GETDATE()` con desfase si el SQL host no estaba en UTC.
+- ~~Sweep TTL de sesiones (`db.js`) usa `SYSUTCDATETIME()` (post F19) — antes era `GETDATE()` con desfase si el SQL host no estaba en UTC.~~ _(Obsoleto: el sweep TTL fue eliminado en F9. Nota preservada para auditoría histórica.)_
 - Helpers JS canónicos:
   - **Frontend** (`src/utils/fecha.js`): `getTodayBogota`, `horaBogota`, `shiftDate` con `Intl.DateTimeFormat('America/Bogota')`.
   - **Backend** (`server/utils/turno.js`): `colombiaParts`, `getTurnoColombia`, `turnoFromPeriodo`, `ventanaTurno`, `periodoFromFechaBogota`, `fechaBogotaStr`, `fechaBogotaIso`. Offset puro `-5h` con `getUTC*()`.
@@ -870,6 +990,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 | 1.2 | 2026-04-29 | F12+F13+F14 (Disponibilidad como mini-dashboard). Columna `fecha_fin_estado DATETIME2 NULL` en `registro_activo` y `registro_historico` (DISP only). Filtered unique index `UQ_disp_vigente_por_planta` (4.3). Tabla nueva `bitacora.disponibilidad_dashboard` (5.2) — separada de `evento_dashboard`. `turno` se vuelve nullable (DISP graba NULL). Sección 7.8 documenta las invariantes que DISP rompe deliberadamente. **Fuera del alcance de v1.2:** F2/F4/F5/F9 ya estaban incorporados al modelo en parches previos sin bumpear esta versión — la `autorizacion_dashboard` se renombró a `evento_dashboard` con columna `tipo` (F5) y la vista compat se eliminó (F9); la columna `cerrada_en` de `sesion_activa` y la tabla `sesion_bitacora` (F2) viven en código pero no estaban reflejadas acá. |
 | 1.3 | 2026-05-04 | F16+F17+F18 (Sala de Mando con batch save y cierre automático fin de día). Sección 2.3.2 nueva — usuario `SISTEMA` (autor automático para CIETs de procesos cron). Sección 4.4 nueva con dos tablas auxiliares: `bitacora.migracion_aplicada` (flag genérico de migraciones one-time) y `bitacora.mand_cierre_log` (idempotencia del sweeper diario MAND). Sección 7.9 nueva — políticas MAND (no acepta cierre individual/masivo, batch save atómico vía `POST /api/sala-de-mando/guardar`, lock REDESP por hora actual, funcionariocnd condicional por tipo, CIET con autor SISTEMA y snapshots agregados del día). El endpoint `GET /api/sala-de-mando/dias-pendientes` (F10) fue eliminado en F16. |
 | 1.4 | 2026-05-05 | F19+F20+F21+F22 (corrección de fechas — convención TZ formalizada). Sección 7.10 nueva con la convención (BD en UTC, presentación Bogotá explícito), antipatrones prohibidos, helpers canónicos. Sección 4.5 nueva con columnas calculadas `*_bogota` para inspección humana en SSMS, aplicadas vía migración idempotente F22.D1 en `db.js::initDB()`. Bugs corregidos en F19: T1 (`GET /api/sala-de-mando` con `DATEADD(HOUR, -5, fecha_evento)`), T2 (sweep TTL `db.js` con `SYSUTCDATETIME()`), T3 (CIET `fecha_cerrada` y `fecha_revertida` en hora Bogotá). T4 (cierre cronológico edge case) queda como deuda documentada. F20 corrigió formatters frontend (T5/T6/T7) con `timeZone: 'America/Bogota'` explícito en `BitacorasGecelca3.jsx`, `HistoricoTable.jsx` y `Disponibilidad/CambiarEstadoModal.jsx`. F21 agregó tests de helpers (`server/tests/fechas_bogota.test.js`). |
+| 1.5 | 2026-05-18 | Sincronización doc↔BD productiva tras auditoría de `INFORMATION_SCHEMA` + `sys.indexes` + `sys.foreign_keys`. **Catálogos:** `lov_bit.cargo.puede_cerrar_turno` agregado al DDL (estaba en §2.3.1 sin DDL); cargo "Jefe de Turno" renombrado a "Ingeniero Jefe de Turno" (migración v2). `lov_bit.usuario.username NOT NULL` con `UQ_usuario_username` (reemplaza email como identificador de login); `email` pasa a NULL; `password_hash` migra a bcrypt. `lov_bit.bitacora.oculta` (toggle de sidebar). `lov_bit.tipo_evento.notificar_dashboard_tipo VARCHAR(10) CHECK IN ('AUTH','REDESP','PRUEBA')` (F6) reemplaza al flag JSON `notificar_dashboard:true`. **Sesiones:** `bitacora.sesion_activa.cerrada_en` (F2). **Sweep TTL eliminado en F9** — el modelo post-F2 mantiene la sesión hasta logout o sweeper de turno; §3 y §7.4 actualizadas. **Nueva §4.6 `sesion_bitacora`** (F2 — DDL formal que estaba en código pero ausente del MD). **Registros:** `detalle` pasa a NULL en §4.1 y §4.2 (F3). **Dashboard:** §5.1 UQ corregido a 4 columnas `(planta_id, fecha, periodo, tipo)`; vista compat `autorizacion_dashboard` documentada como deuda viva (el doc v1.4 afirmaba que F9 la eliminó, pero `db.js` la recrea). |
 
 ---
 
