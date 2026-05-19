@@ -5,13 +5,19 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 1.5 |
-| Fecha | 2026-05-18 |
+| Versión | 1.6 |
+| Fecha | 2026-05-19 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
 
 > **Convenciones:** las tablas de catálogos viven en `lov_bit`; las tablas operativas en `bitacora`. Los campos JSON usan `NVARCHAR(MAX)` y se validan en la capa de aplicación.
+
+> **Cambios v1.6 (2026-05-19) — Conformación de turno:**
+> - **Nueva §4.7** con DDL de `bitacora.conformacion_turno` (PK compuesta `(fecha_operativa, planta_id, turno, usuario_id)`, FKs a usuario/planta/cargo, índice `IX_conformacion_turno_lookup`, 3 columnas `*_bogota` calculadas vía bloque F22.D2 separado).
+> - **§3 `sesion_activa`**: `cerrada_en` ahora se pobla en `POST /api/auth/logout` (fix retro: la columna existía desde F2 pero nunca se escribía). El caso "logout no llamado" usa `ventanaTurno().fin` como aproximación con `fin_inferido=1`.
+> - **Filtro semántico del builder**: una sesión cuenta para el turno X si arrancó dentro de la ventana de X (`inicio_sesion >= ventana_inicio AND inicio_sesion < ventana_fin`). Decisión derivada de D-003 + observación de datos productivos (sesiones eternas + limbo producían duraciones absurdas).
+> - Sin cambios al invariante D-003 — sesión sigue persistente hasta logout o sweeper de turno.
 
 > **Cambios v1.5 (2026-05-18) — sincronización con BD productiva:**
 > - Cierre del gap doc↔código detectado al cruzar `INFORMATION_SCHEMA` real con `server/db.js`. Las DDLs de §2 y §3 se alinearon a lo que efectivamente crea `initDB()` post-migraciones F2/F3/F5/F6/F9/v2.
@@ -42,6 +48,7 @@
    - 4.4 [Tablas auxiliares de migración y cierre MAND](#44-tablas-auxiliares-de-migración-y-cierre-mand)
    - 4.5 [Columnas calculadas Bogotá (F22)](#45-columnas-calculadas-bogotá-f22)
    - 4.6 [`sesion_bitacora` — participación por bitácora (F2)](#46-sesion_bitacora--participación-por-bitácora-f2)
+   - 4.7 [`conformacion_turno` — snapshot histórico por turno-planta](#47-conformacion_turno--snapshot-histórico-por-turno-planta)
 5. [Integración con el Dashboard (esquema `bitacora`)](#5-integración-con-el-dashboard-esquema-bitacora)
 6. [Vistas útiles](#6-vistas-útiles)
 7. [Notas de diseño](#7-notas-de-diseño)
@@ -686,6 +693,66 @@ CREATE INDEX IX_sesion_bit_finalizada
 
 ---
 
+### 4.7 `conformacion_turno` — snapshot histórico por turno-planta
+
+Tabla snapshot inmutable que captura, al cierre de cada turno (T1/T2 por planta GEC3/GEC32), una fila por usuario que participó. Cierra el objetivo de negocio del módulo (registro auditable de quién operó en cada turno).
+
+```sql
+-- Q1+Q2 conformacion-turno-2026-05: una fila por (fecha_operativa, planta_id, turno, usuario_id).
+-- Agregada (re-logins del mismo usuario en el mismo turno colapsan). Inmutable post-snapshot.
+CREATE TABLE bitacora.conformacion_turno (
+    fecha_operativa  DATE          NOT NULL,
+    planta_id        VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+    turno            TINYINT       NOT NULL CHECK (turno IN (1, 2)),
+    usuario_id       INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+    usuario_nombre   VARCHAR(200)  NOT NULL,
+    cargo_id         INT           NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+    cargo_nombre     VARCHAR(100)  NOT NULL,
+    inicio_sesion    DATETIME2     NOT NULL,
+    fin_sesion       DATETIME2     NOT NULL,
+    duracion_min     INT           NOT NULL,
+    fin_inferido     BIT           NOT NULL CONSTRAINT DF_conformacion_fin_inferido DEFAULT 0,
+    snapshot_en      DATETIME2     NOT NULL CONSTRAINT DF_conformacion_snapshot_en  DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT PK_conformacion_turno PRIMARY KEY (fecha_operativa, planta_id, turno, usuario_id)
+);
+
+CREATE INDEX IX_conformacion_turno_lookup
+    ON bitacora.conformacion_turno(planta_id, fecha_operativa, turno)
+    INCLUDE (usuario_id, usuario_nombre, cargo_nombre);
+
+-- Columnas Bogotá calculadas (F22.D2) — virtuales, costo cero al INSERT.
+ALTER TABLE bitacora.conformacion_turno ADD inicio_sesion_bogota AS DATEADD(HOUR, -5, inicio_sesion);
+ALTER TABLE bitacora.conformacion_turno ADD fin_sesion_bogota    AS DATEADD(HOUR, -5, fin_sesion);
+ALTER TABLE bitacora.conformacion_turno ADD snapshot_en_bogota   AS DATEADD(HOUR, -5, snapshot_en);
+```
+
+**Semántica y reglas de poblado:**
+
+- **`fecha_operativa`** = fecha Bogotá del **inicio** del turno. Para T2 (que cruza medianoche) se usa el día del inicio (18:00 Bogotá), no el del fin (05:59 del día siguiente).
+- **Filtro del builder** (`server/utils/conformacion-snapshot.js::buildConformacionSnapshot`): una sesión cuenta para el turno X si `sa.inicio_sesion BETWEEN ventana_inicio AND ventana_fin` del turno X (intervalo medio-abierto). Derivación: el modelo `sesion_activa.turno` se fija al login (D-003), por lo que "ser del turno X" = "haber arrancado en la ventana de X". El intento inicial de filtrar por solape produjo duraciones absurdas en BD productiva (jefes con sesiones eternas + sesiones limbo).
+- **`fin_sesion`**:
+  - Logout explícito → `cerrada_en` directo, `fin_inferido=0`.
+  - Sin logout (sweeper cierra `sesion_bitacora` pero D-003 deja `sesion_activa.activa=1`) → `fin_efectivo = ventana_fin`, `fin_inferido=1`.
+- **`duracion_min`** = `SUM(DATEDIFF(MINUTE, inicio_efectivo, fin_efectivo))` agregando todos los logins del mismo usuario en el mismo turno.
+
+**Trigger híbrido (Q3=d):**
+
+1. **`server/utils/turno-sweeper.js` (F4)** extendido: tras finalizar `sesion_bitacora` por agotamiento del turno, recopila `(planta, turno, fecha_operativa)` únicos y dispara `buildConformacionSnapshot` + `persistConformacionSnapshot` en transacciones aisladas (try/catch por conformación; un fallo no rompe los demás ni el cierre ya commiteado).
+2. **Catchup en `server/db.js::initDB()`** al arranque: detecta `(planta, turno, fecha_operativa)` de los últimos 7 días Bogotá sin snapshot, filtra "ventana ya cerró" en JS (`ventanaTurno().fin < now`), y persiste. Resiliencia ante crashes del server al cambio de turno.
+
+PK natural rechaza duplicados → idempotente entre runs concurrentes y entre sweeper/catchup/trigger admin.
+
+**Endpoints expuestos:**
+
+- `GET /api/conformacion-turno?fecha=YYYY-MM-DD&turno=1|2&planta_id=GEC3|GEC32` — auth requerida, abierto a cualquier rol con sesión (`puedeVerConformacion`). Devuelve `{ fecha_operativa, planta_id, turno, filas: [...], total }` con columnas UTC + `*_bogota`.
+- `POST /api/conformacion-turno/trigger` (body `{fecha_operativa, planta_id, turno}`) — gated por `puedeTriggerConformacion` (`puede_cerrar_turno=1` o `es_jefe_planta=1`). Por defecto rechaza turnos cuya ventana no cerró (400); `?force=true` permite bypass para QA y recovery (response incluye `force: true`). Idempotente; response incluye `insertadas`, `skipped`, `disparado_por` para audit.
+
+**Inmutabilidad:** las filas NO se actualizan post-INSERT. Si un usuario revierte un logout o el sweeper se re-ejecuta sobre el mismo turno, la PK rechaza y el conteo de `skipped` aumenta.
+
+**Cross-ref:** ADR [[D-025]] documenta la decisión completa, incluido el pivot del filtro del builder. La columna `fin_inferido` se mantiene contra la Q5 pura (que era "sin columna extra") porque cuesta 1 byte y deja auditoría disponible sin migración futura.
+
+---
+
 ## 5. Integración con el Dashboard (esquema `bitacora`)
 
 El esquema expone dos tablas-puente independientes hacia el Dashboard de Generación:
@@ -991,6 +1058,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 | 1.3 | 2026-05-04 | F16+F17+F18 (Sala de Mando con batch save y cierre automático fin de día). Sección 2.3.2 nueva — usuario `SISTEMA` (autor automático para CIETs de procesos cron). Sección 4.4 nueva con dos tablas auxiliares: `bitacora.migracion_aplicada` (flag genérico de migraciones one-time) y `bitacora.mand_cierre_log` (idempotencia del sweeper diario MAND). Sección 7.9 nueva — políticas MAND (no acepta cierre individual/masivo, batch save atómico vía `POST /api/sala-de-mando/guardar`, lock REDESP por hora actual, funcionariocnd condicional por tipo, CIET con autor SISTEMA y snapshots agregados del día). El endpoint `GET /api/sala-de-mando/dias-pendientes` (F10) fue eliminado en F16. |
 | 1.4 | 2026-05-05 | F19+F20+F21+F22 (corrección de fechas — convención TZ formalizada). Sección 7.10 nueva con la convención (BD en UTC, presentación Bogotá explícito), antipatrones prohibidos, helpers canónicos. Sección 4.5 nueva con columnas calculadas `*_bogota` para inspección humana en SSMS, aplicadas vía migración idempotente F22.D1 en `db.js::initDB()`. Bugs corregidos en F19: T1 (`GET /api/sala-de-mando` con `DATEADD(HOUR, -5, fecha_evento)`), T2 (sweep TTL `db.js` con `SYSUTCDATETIME()`), T3 (CIET `fecha_cerrada` y `fecha_revertida` en hora Bogotá). T4 (cierre cronológico edge case) queda como deuda documentada. F20 corrigió formatters frontend (T5/T6/T7) con `timeZone: 'America/Bogota'` explícito en `BitacorasGecelca3.jsx`, `HistoricoTable.jsx` y `Disponibilidad/CambiarEstadoModal.jsx`. F21 agregó tests de helpers (`server/tests/fechas_bogota.test.js`). |
 | 1.5 | 2026-05-18 | Sincronización doc↔BD productiva tras auditoría de `INFORMATION_SCHEMA` + `sys.indexes` + `sys.foreign_keys`. **Catálogos:** `lov_bit.cargo.puede_cerrar_turno` agregado al DDL (estaba en §2.3.1 sin DDL); cargo "Jefe de Turno" renombrado a "Ingeniero Jefe de Turno" (migración v2). `lov_bit.usuario.username NOT NULL` con `UQ_usuario_username` (reemplaza email como identificador de login); `email` pasa a NULL; `password_hash` migra a bcrypt. `lov_bit.bitacora.oculta` (toggle de sidebar). `lov_bit.tipo_evento.notificar_dashboard_tipo VARCHAR(10) CHECK IN ('AUTH','REDESP','PRUEBA')` (F6) reemplaza al flag JSON `notificar_dashboard:true`. **Sesiones:** `bitacora.sesion_activa.cerrada_en` (F2). **Sweep TTL eliminado en F9** — el modelo post-F2 mantiene la sesión hasta logout o sweeper de turno; §3 y §7.4 actualizadas. **Nueva §4.6 `sesion_bitacora`** (F2 — DDL formal que estaba en código pero ausente del MD). **Registros:** `detalle` pasa a NULL en §4.1 y §4.2 (F3). **Dashboard:** §5.1 UQ corregido a 4 columnas `(planta_id, fecha, periodo, tipo)`; vista compat `autorizacion_dashboard` documentada como deuda viva (el doc v1.4 afirmaba que F9 la eliminó, pero `db.js` la recrea). |
+| 1.6 | 2026-05-19 | Conformación de turno (D-025). **Nueva §4.7** con DDL de `bitacora.conformacion_turno` (PK compuesta, FKs a usuario/planta/cargo, índice de lookup, columnas `*_bogota` calculadas vía F22.D2). Trigger híbrido: `turno-sweeper.js` extendido + catchup en `initDB()` para los últimos 7 días Bogotá. Endpoints `GET /api/conformacion-turno` y `POST /api/conformacion-turno/trigger`. **Fix retro:** `POST /api/auth/logout` ahora pobla `sesion_activa.cerrada_en = SYSUTCDATETIME()` (era deuda F2 nunca cerrada). **Filtro semántico del builder:** una sesión cuenta para el turno X si arrancó dentro de la ventana de X (derivación de D-003). Cobertura backend: 14 tests dirigidos en `conformacion_turno.test.js`. |
 
 ---
 

@@ -366,10 +366,12 @@ export async function initDB() {
         INCLUDE (usuario_id, turno, inicio_sesion);
   `);
 
-  // F2: cerrada_en distingue logout explícito (activa=0 + cerrada_en=NULL) del cierre por
-  // sweeper de F4 (activa=0 + cerrada_en=SYSUTCDATETIME()). Hoy todavía nadie escribe esta columna;
-  // se añade idempotente para que F4 la consuma sin migración adicional. Convención TZ post F19:
-  // siempre SYSUTCDATETIME() — ver §7.10 de BIT-MODBD-2026-001.md.
+  // F2: cerrada_en distingue logout explícito (activa=0 + cerrada_en=SYSUTCDATETIME()) del
+  // cierre por sweeper de F4 (activa=0 + cerrada_en=NULL legacy, hoy el sweeper sigue sin
+  // tocar sesion_activa por D-003). El builder de conformacion_turno (D-025) usa cerrada_en
+  // como hora de salida cuando hay logout explícito; si NULL, cae a ventanaTurno().fin con
+  // fin_inferido=1. Convención TZ post F19: siempre SYSUTCDATETIME() — ver §7.10 de
+  // BIT-MODBD-2026-001.md.
   await db.request().batch(`
     IF COL_LENGTH('bitacora.sesion_activa', 'cerrada_en') IS NULL
       ALTER TABLE bitacora.sesion_activa ADD cerrada_en DATETIME2 NULL;

@@ -273,6 +273,45 @@ Razón de la vista en vez de query inline: encapsula la unión `activo + histór
 
 ---
 
+## D-025 — Conformación de turno (snapshot histórico de usuarios por turno-planta)
+
+**Fecha:** 2026-05-19
+
+**Contexto:** el repo declara como objetivo de negocio el registro auditable de los usuarios que ingresaron a la app durante un turno (T1/T2 por planta GEC3/GEC32), con cargo, hora de entrada y hora de salida. Hasta este flujo, los datos crudos existían en `sesion_activa` + `sesion_bitacora` pero (a) `sesion_activa.cerrada_en` nunca se llenaba en logout (deuda operativa desde F2), (b) no había vista/tabla agregada por turno, (c) no había endpoint ni UI para consultar la información.
+
+**Decisión:**
+
+1. **Modelo de persistencia (Q1=b):** tabla `bitacora.conformacion_turno` con PK compuesta `(fecha_operativa, planta_id, turno, usuario_id)`. Una fila por usuario por turno por planta. Columnas: `usuario_nombre`, `cargo_id`, `cargo_nombre`, `inicio_sesion`, `fin_sesion`, `duracion_min`, `fin_inferido BIT`, `snapshot_en`. Columnas calculadas `*_bogota` aplicadas en bloque F22.D2 separado (F22.D1 ya marcado aplicado). Inmutable post-snapshot. Patrón idempotente en `initDB()` siguiendo `mand_cierre_log`.
+
+2. **Granularidad (Q2=a):** agregada por (turno, usuario). Re-logins del mismo usuario en el mismo turno colapsan en una fila con `MIN(inicio_sesion)`, `MAX(fin_efectivo)`, `SUM(duracion)`. Auditoría granular sigue disponible vía `sesion_activa` cruda si se necesita.
+
+3. **Filtro semántico del builder (pivot post-implementación):** una sesión cuenta para el turno X si **arrancó dentro de la ventana de X** (`sa.inicio_sesion >= ventana_inicio AND sa.inicio_sesion < ventana_fin`). La alternativa "sesiones que solapan" — explorada inicialmente — incluía sesiones eternas (jefes que nunca cierran sesión por D-003) y sesiones limbo (`activa=0 + cerrada_en=NULL` de cleanups), produciendo duraciones absurdas (>100 días). El modelo `sesion_activa.turno` se fija al login: una sesión es "del turno X" si y solo si arrancó en X.
+
+4. **Trigger híbrido (Q3=d):**
+   - `server/utils/turno-sweeper.js` (F4) extendido: tras cerrar `sesion_bitacora` por agotamiento, recopila `(planta_id, turno, fecha_operativa)` únicos y dispara `buildConformacionSnapshot` + `persistConformacionSnapshot` en loops aislados con `try/catch` por conformación.
+   - Catchup en `server/db.js::initDB()` al arranque recupera turnos cerrados de los últimos 7 días Bogotá sin snapshot. Filtro de "ventana ya cerró" en JS (`ventanaTurno().fin < ahora`) más legible que un CASE SQL anidado.
+   - Idempotencia natural vía PK.
+
+5. **Visualización (Q4=e + extra):** solo backend en W1. Dos endpoints:
+   - `GET /api/conformacion-turno?fecha=&turno=&planta_id=` — abierto a cualquier rol con sesión (`puedeVerConformacion=true`, gancho futuro para restringir).
+   - `POST /api/conformacion-turno/trigger` — dispara snapshot manual; gated por `puedeTriggerConformacion` (`puede_cerrar_turno=1` o `es_jefe_planta=1`). Por defecto rechaza turnos cuya ventana no cerró; `?force=true` permite bypass marcando `force=true` en response.
+
+6. **Logout no llamado (Q5=c):** si `cerrada_en IS NULL` al snapshot, el builder usa `fin_sesion = ventanaTurno(turno).fin` (UTC del fin de la ventana Bogotá) y setea `fin_inferido=1`. Aproxima ligeramente por arriba pero permite duración usable. La columna `fin_inferido` (deliberadamente conservada contra la Q5 pura, 1 byte) permite auditoría futura sin migración.
+
+7. **Logout explícito (fix retro):** `POST /api/auth/logout` ahora pobla `sesion_activa.cerrada_en = SYSUTCDATETIME()` (era deuda operativa F2 nunca cerrada). El builder usa ese timestamp directamente — `fin_inferido=0`.
+
+**Invariante preservado (cross-ref [[D-003]]):** `sesion_activa.activa=1` sigue siendo indefinida hasta logout explícito o sweeper de turno. Conformación se construye SOBRE la sesión viva, NO la reemplaza ni introduce TTL. Cualquier propuesta futura de TTL debe respetar este invariante.
+
+**Consecuencias:**
+- Nueva tabla `bitacora.conformacion_turno` (DDL en `server/db.js::initDB()`, sigue patrón idempotente).
+- Sweeper `turno-sweeper.js` gana responsabilidad de snapshot. Sin cambio de comportamiento sobre `sesion_bitacora`.
+- `BIT-MODBD-2026-001.md` v1.6 nueva sección §4.7.
+- Cobertura backend: 14 tests dirigidos en `server/tests/conformacion_turno.test.js`.
+- **Deuda residual:** las ~50 filas que el catchup escribió antes del pivot del filtro (commit `e1d88da`) contienen sumas con la lógica vieja. Greenfield W1 sin consumers → recomendado `DELETE FROM bitacora.conformacion_turno` para que el próximo arranque rellene con la lógica correcta.
+- W10 (Lock de pantalla, roadmap) se construye sobre este foundation sin tocar `sesion_activa`; la mitigación regulatoria "operador no presente al firmar" se cumple via W10, NO via TTL.
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
