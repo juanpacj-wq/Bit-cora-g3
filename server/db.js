@@ -46,10 +46,14 @@ export async function getDB() {
 // Se cachea al final de initDB() y lo consume mand-sweeper.js + el endpoint de cierre manual.
 export let USUARIO_SISTEMA_ID = null;
 
-// JSON definitions EXACTAMENTE como en BIT-MODBD-2026-001
+// JSON definitions EXACTAMENTE como en BIT-MODBD-2026-001.
+// D-024 (2026-05-15): rebrand de estados DISP. "Disponible" → "En Servicio" + nuevo estado
+// "Mantenimiento". Indisponible y Mantenimiento comparten codigo=-1; se distinguen por el
+// string `evento` (Indisponible = salida forzada; Mantenimiento = consignación / salida
+// planeada). Esto preserva la métrica numérica "horas de indisponibilidad" = sum(codigo=-1).
 const DISP_JSON = JSON.stringify([
-  { campo: 'evento', tipo: 'select', opciones: ['Disponible', 'Indisponible', 'En Reserva'], requerido: true },
-  { campo: 'codigo', tipo: 'auto', regla: { Disponible: 1, 'En Reserva': 0, Indisponible: -1 } },
+  { campo: 'evento', tipo: 'select', opciones: ['En Servicio', 'En Reserva', 'Indisponible', 'Mantenimiento'], requerido: true },
+  { campo: 'codigo', tipo: 'auto', regla: { 'En Servicio': 1, 'En Reserva': 0, Indisponible: -1, Mantenimiento: -1 } },
 ]);
 
 const AUTH_JSON = JSON.stringify([
@@ -940,7 +944,8 @@ export async function initDB() {
     IF OBJECT_ID('bitacora.disponibilidad_dashboard', 'U') IS NULL
     CREATE TABLE bitacora.disponibilidad_dashboard (
       planta_id              VARCHAR(10) PRIMARY KEY REFERENCES lov_bit.planta(planta_id),
-      evento                 VARCHAR(20) NOT NULL CHECK (evento IN ('Disponible','Indisponible','En Reserva')),
+      evento                 VARCHAR(20) NOT NULL CONSTRAINT CK_disp_dashboard_evento
+        CHECK (evento IN ('En Servicio','En Reserva','Indisponible','Mantenimiento')),
       codigo                 SMALLINT NOT NULL CHECK (codigo IN (-1, 0, 1)),
       fecha_inicio_estado    DATETIME2 NOT NULL,
       registro_activo_id     INT NOT NULL,
@@ -950,6 +955,55 @@ export async function initDB() {
       modificado_en          DATETIME2 NULL,
       actualizado_en         DATETIME2 NOT NULL CONSTRAINT DF_dispdash_act DEFAULT SYSUTCDATETIME()
     );
+  `);
+
+  // D-024 (2026-05-15): migración idempotente del modelo de estados DISP.
+  //
+  // Rebrand "Disponible" → "En Servicio" + alta del nuevo estado "Mantenimiento" (que
+  // comparte codigo=-1 con Indisponible y se distingue por el string `evento`).
+  //
+  // Tres pasos atómicos:
+  //   (a) Drop del CHECK viejo (anónimo en BDs creadas antes de F22/D-024). Lo buscamos
+  //       por definición — el `IS_REPLICATED=0` filtra system constraints. Si la BD ya
+  //       trae el nuevo CHECK nombrado (BD nueva o re-init), el drop es no-op.
+  //   (b) UPDATE de datos: rename 'Disponible' → 'En Servicio' en la tabla dashboard y
+  //       dentro del JSON campos_extra de registro_activo + registro_historico para DISP.
+  //       Usa JSON_MODIFY (SQL Server 2016+; el repo requiere 2019+).
+  //   (c) Add del nuevo CHECK nombrado si aún no existe. Para BDs nuevas el CREATE TABLE
+  //       ya lo creó; para BDs viejas el (a) lo dropeó y este paso lo recrea.
+  await db.request().batch(`
+    DECLARE @ck_viejo SYSNAME;
+    SELECT @ck_viejo = cc.name
+      FROM sys.check_constraints cc
+      JOIN sys.tables  t ON t.object_id  = cc.parent_object_id
+      JOIN sys.schemas s ON s.schema_id  = t.schema_id
+      WHERE s.name = 'bitacora'
+        AND t.name = 'disponibilidad_dashboard'
+        AND cc.name <> 'CK_disp_dashboard_evento'
+        AND cc.definition LIKE '%Disponible%';
+    IF @ck_viejo IS NOT NULL
+      EXEC('ALTER TABLE bitacora.disponibilidad_dashboard DROP CONSTRAINT ' + @ck_viejo);
+
+    UPDATE bitacora.disponibilidad_dashboard
+      SET evento = 'En Servicio'
+      WHERE evento = 'Disponible';
+
+    UPDATE bitacora.registro_activo
+      SET campos_extra = JSON_MODIFY(campos_extra, '$.evento', 'En Servicio')
+      WHERE bitacora_id = ${DISP_BITACORA_ID}
+        AND JSON_VALUE(campos_extra, '$.evento') = 'Disponible';
+
+    UPDATE bitacora.registro_historico
+      SET campos_extra = JSON_MODIFY(campos_extra, '$.evento', 'En Servicio')
+      WHERE bitacora_id = ${DISP_BITACORA_ID}
+        AND JSON_VALUE(campos_extra, '$.evento') = 'Disponible';
+
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.check_constraints WHERE name = 'CK_disp_dashboard_evento'
+    )
+      ALTER TABLE bitacora.disponibilidad_dashboard
+        ADD CONSTRAINT CK_disp_dashboard_evento
+        CHECK (evento IN ('En Servicio','En Reserva','Indisponible','Mantenimiento'));
   `);
 
   // F12.A3: filtered unique index = segunda barrera (después del UPDLOCK del POST) contra
@@ -991,6 +1045,44 @@ export async function initDB() {
     JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
     WHERE s.activa = 1
       AND s.cargo_id = (SELECT cargo_id FROM lov_bit.cargo WHERE nombre = 'Ingeniero Jefe de Turno');
+  `);
+
+  // D-024 (2026-05-15): vista cimiento para métricas DISP por planta.
+  // Normaliza activo + histórico en un único set de intervalos [fecha_inicio_estado, fecha_fin_estado)
+  // por (planta, evento). El vigente (`fecha_fin_estado IS NULL`) representa "abierto hasta ahora";
+  // los consumidores deben coalescer a NOW al sumar duración.
+  //
+  // Para DISP el invariante del backend es `fecha_evento = fecha_inicio_estado` (ver POST DISP
+  // rama en server.js — se hace .input('fecha_evento', sql.DateTime2, fechaInicio)), por lo que
+  // usamos `fecha_evento` como inicio sin re-parsear el JSON.
+  //
+  // El endpoint GET /api/disponibilidad/metricas consume esta vista para agregar tiempos por
+  // estado en una ventana arbitraria [desde, hasta].
+  await db.request().batch(`
+    CREATE OR ALTER VIEW bitacora.v_disp_intervalos AS
+    SELECT
+      r.planta_id,
+      JSON_VALUE(r.campos_extra, '$.evento') AS evento,
+      TRY_CAST(JSON_VALUE(r.campos_extra, '$.codigo') AS SMALLINT) AS codigo,
+      r.fecha_evento     AS fecha_inicio_estado,
+      r.fecha_fin_estado AS fecha_fin_estado,
+      r.creado_por,
+      r.registro_id
+    FROM bitacora.registro_activo r
+    INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
+    WHERE b.codigo = 'DISP'
+    UNION ALL
+    SELECT
+      h.planta_id,
+      JSON_VALUE(h.campos_extra, '$.evento') AS evento,
+      TRY_CAST(JSON_VALUE(h.campos_extra, '$.codigo') AS SMALLINT) AS codigo,
+      h.fecha_evento     AS fecha_inicio_estado,
+      h.fecha_fin_estado AS fecha_fin_estado,
+      h.creado_por,
+      h.registro_id
+    FROM bitacora.registro_historico h
+    INNER JOIN lov_bit.bitacora b ON b.bitacora_id = h.bitacora_id
+    WHERE b.codigo = 'DISP';
   `);
 
   // F13.3: migración de DEFAULTs GETDATE() → SYSUTCDATETIME() para columnas DATETIME2.

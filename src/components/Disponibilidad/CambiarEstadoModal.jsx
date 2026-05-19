@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, AlertTriangle, Save } from 'lucide-react';
-import { ESTADOS, PLANTAS, NEUTRAL, BRAND } from './colores';
+import { ESTADOS, ESTADO_HINTS, PLANTAS, NEUTRAL, BRAND } from './colores';
 
-const CODIGO_POR_EVENTO = { Disponible: 1, 'En Reserva': 0, Indisponible: -1 };
+// D-024: Indisponible y Mantenimiento comparten codigo=-1; el `evento` string discrimina.
+const CODIGO_POR_EVENTO = { 'En Servicio': 1, 'En Reserva': 0, Indisponible: -1, Mantenimiento: -1 };
 
 // F20: input `datetime-local` interpreta el valor tipeado como hora Bogotá; el frontend
 // convierte a UTC apendiendo -05:00 fijo (Colombia sin DST) antes de enviar al server.
@@ -154,9 +155,16 @@ export default function CambiarEstadoModal({
               style={{ borderColor: NEUTRAL.hairline }}
             >
               {ESTADOS.map((s) => (
-                <option key={s} value={s}>{s}</option>
+                <option key={s} value={s}>
+                  {ESTADO_HINTS[s] ? `${s} — ${ESTADO_HINTS[s]}` : s}
+                </option>
               ))}
             </select>
+            {ESTADO_HINTS[evento] && (
+              <p className="text-[11px] mt-1" style={{ color: NEUTRAL.fgTer }}>
+                {ESTADO_HINTS[evento]}
+              </p>
+            )}
           </Field>
 
           <Field label="Fecha y hora del evento">

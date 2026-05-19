@@ -7,7 +7,7 @@ import { setupSessions, cleanupTestRegistros, call, makeRegistroPayload, firstTi
 let ctx;
 
 // F12: limpiar DISP antes para no arrastrar residuo de runs anteriores (la nueva regla
-// "no consecutivos iguales" hace que un Disponible viejo en activo bloquee el primer test).
+// "no consecutivos iguales" hace que un En Servicio viejo en activo bloquee el primer test).
 async function cleanDispGec3() {
   const db = await getDB();
   await db.request()
@@ -39,7 +39,7 @@ after(async () => {
 
 // F12: DISP rechaza el mismo evento consecutivo. Cada test que POSTea DISP usa un evento
 // distinto al del test anterior para evitar 409 mismo_estado entre tests del mismo run.
-const DISP_DISPONIBLE = { campos_extra: { evento: 'Disponible' } };
+const DISP_EN_SERVICIO = { campos_extra: { evento: 'En Servicio' } };
 const DISP_INDISPONIBLE = { campos_extra: { evento: 'Indisponible' } };
 const DISP_RESERVA = { campos_extra: { evento: 'En Reserva' } };
 
@@ -47,7 +47,7 @@ test('POST /api/registros sin header devuelve 401', async () => {
   const { sesiones, bitByCodigo } = ctx;
   const tipo_evento_id = await firstTipoEvento(bitByCodigo.DISP);
   const { status } = await call('POST', '/api/registros', {
-    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_DISPONIBLE }),
+    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_EN_SERVICIO }),
   });
   assert.equal(status, 401);
   // sesiones solo se usa para que setup corra antes del assert
@@ -69,7 +69,7 @@ test('POST /api/registros Ing. Operación a DISP devuelve 201 (permisos iguales 
   const tipo_evento_id = await firstTipoEvento(bitByCodigo.DISP);
   const { status, data } = await call('POST', '/api/registros', {
     sesion_id: sesiones.ingOp,
-    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_DISPONIBLE }),
+    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_EN_SERVICIO }),
   });
   assert.equal(status, 201, JSON.stringify(data));
 });
@@ -107,7 +107,7 @@ test('POST /api/registros Gerente devuelve 403', async () => {
   const tipo_evento_id = await firstTipoEvento(bitByCodigo.DISP);
   const { status } = await call('POST', '/api/registros', {
     sesion_id: sesiones.gerente,
-    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_DISPONIBLE }),
+    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_EN_SERVICIO }),
   });
   assert.equal(status, 403);
 });

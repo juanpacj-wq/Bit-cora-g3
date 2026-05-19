@@ -98,7 +98,7 @@ test('A1. /api/cierre/preview-masivo NO lista DISP', async () => {
     fecha_evento: new Date(Date.now() - 24 * HOUR),
     turno: null,
     detalle: `${TEST_TAG} disp-A1`,
-    campos_extra: { evento: 'Disponible', fecha_inicio_estado: new Date(Date.now() - 24 * HOUR).toISOString() },
+    campos_extra: { evento: 'En Servicio', fecha_inicio_estado: new Date(Date.now() - 24 * HOUR).toISOString() },
   });
 
   const { status, data } = await call('GET', `/api/cierre/preview-masivo?planta_id=${PLANTA_ID}`, {

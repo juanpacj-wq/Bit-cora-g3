@@ -22,7 +22,7 @@ NO hay GEC4, GEC1, GEC2. Cualquier referencia a otras es error de un agente conf
 | Código | Nombre | `formulario_especial` | UI | Notas |
 |---|---|---|---|---|
 | `MAND` | Operación 24h (anteriormente "Sala de Mando") | 1 | `SalaDeMandoGrid.jsx` | Grilla 24p × 3 tipos × 2 plantas. Batch save. No tiene cierre individual ni masivo (sweeper diario). Solo HOY editable. |
-| `DISP` | Disponibilidad | 1 | `DisponibilidadDashboard.jsx` | Mini-dashboard con tabs GEC3/GEC32. Sin cierre de turno. 1 vigente por planta. |
+| `DISP` | Disponibilidad | 1 | `DisponibilidadDashboard.jsx` | Mini-dashboard con tabs GEC3/GEC32. Sin cierre de turno. 1 vigente por planta. 4 estados (D-024): `En Servicio` (`1`, verde), `En Reserva` (`0`, azul), `Indisponible` (`-1`, rojo, salida forzada), `Mantenimiento` (`-1`, amarillo, consignación). `Indisponible` y `Mantenimiento` comparten `codigo=-1`; el discriminador es el string `evento`. |
 | `CIET` | Cierres y Finalizaciones | 0 | Solo histórico | Auditoría automática. Nadie tiene `puede_crear=1`. Tipos: Finalización de turno, Cierre de turno, Deshacer disponibilidad. |
 | `AUTOR` / similar | Autorizaciones (genérica histórica) | 0 | `GrillaRegistros` genérica | Bitácora estándar. |
 | (otras) | bitácoras operativas | 0 | `GrillaRegistros` genérica | Con filtros F11 (fecha+turno). |
@@ -62,15 +62,18 @@ Para DISP: TODOS los cargos tienen `puede_ver=1`; solo 1 y 2 tienen `puede_crear
 
 ## Estados de Disponibilidad (DISP)
 
-3 estados, definidos en JSON de `definicion_campos` y persistidos en `registro_activo.campos_extra.evento`:
+4 estados (D-024, 2026-05-15), definidos en JSON de `definicion_campos` y persistidos en `registro_activo.campos_extra.evento`:
 
-| Estado | `codigo` | Color paleta |
-|---|---|---|
-| `Disponible` | 1 | Verde |
-| `En Reserva` | 0 | Amarillo |
-| `Indisponible` | -1 | Rojo |
+| Estado | `codigo` | Color paleta | Semántica |
+|---|---|---|---|
+| `En Servicio` | 1 | Verde | Disponible y generando |
+| `En Reserva` | 0 | Azul | Disponible, no generando |
+| `Indisponible` | -1 | Rojo | Salida forzada — imposible generar |
+| `Mantenimiento` | -1 | Amarillo | Consignación / salida planeada |
 
-No se permiten estados consecutivos iguales (409 `mismo_estado`).
+`Indisponible` y `Mantenimiento` comparten `codigo=-1` por diseño (alineación con métrica XM de "horas de indisponibilidad" = `SUM(codigo=-1)`). El discriminador semántico es el string `evento`.
+
+No se permiten estados consecutivos iguales por `evento` (409 `mismo_estado`). Por lo tanto la secuencia `Indisponible → Mantenimiento` (o viceversa) **es válida** — distinto `evento` aunque mismo `codigo`.
 
 ---
 

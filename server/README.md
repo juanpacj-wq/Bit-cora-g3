@@ -86,6 +86,13 @@ Al arrancar, `initDB()` crea esquemas, tablas, índices, vistas y datos semilla 
 | GET | `/api/autorizaciones/:planta_id/:fecha/:periodo` | Lookup específico |
 | DELETE | `/api/autorizaciones/:id` | Soft-delete (`activa=0`) |
 
+### Disponibilidad (DISP)
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/api/disponibilidad?planta_id=&historial_limit=&historial_offset=` | Vigente + historial paginado |
+| POST | `/api/disponibilidad/deshacer` | Revierte el último cambio (restaura el último histórico) |
+| GET | `/api/disponibilidad/metricas?planta_id=&desde=&hasta=` | **D-024** — tiempo por estado + acumulados (`disponible`, `no_disponible`) en `[desde, hasta]`. Cimiento SQL: vista `bitacora.v_disp_intervalos`. |
+
 ## Sesión y autenticación
 
 - Header obligatorio `X-Sesion-Id: <sesion_id>` en cada request no-`skipAuth`.
