@@ -140,7 +140,7 @@ Decisiones destiladas de las fases F1–F22. Formato corto: Contexto / Decisión
 
 **Decisión:** `server/utils/mand-sweeper.js` corre `setInterval` cada 60s, detecta cambio de día Bogotá, y cierra el día anterior moviendo registros a `registro_historico`. Idempotencia vía `bitacora.mand_cierre_log` (PK `fecha_cerrada, planta_id`). Catch-up al reinicio del server.
 
-**Consecuencias:** `POST /api/cierre/bitacora` devuelve 400 para MAND (front oculta botón, back defensa en profundidad). `GET /api/sala-de-mando/dias-pendientes` eliminado. MAND solo muestra HOY; no hay paginación entre días. F10 (paginación) queda explícitamente obsoleta — `prompts/F10.md` marcado `[OBSOLETO POR F17]`.
+**Consecuencias:** `POST /api/cierre/bitacora` devuelve 400 para MAND (front oculta los tres botones de cierre del header — "Finalizar Turno", "Cerrar Turno" individual y "Cerrar Masivo" — quedando solo "Guardar"; back defensa en profundidad). `GET /api/sala-de-mando/dias-pendientes` eliminado. MAND solo muestra HOY; no hay paginación entre días. F10 (paginación) queda explícitamente obsoleta — `prompts/F10.md` marcado `[OBSOLETO POR F17]`. Ajuste 2026-05-15: el botón "Cerrar Turno" individual quedó sin gate `!isMand` al rebrand y se agregó.
 
 ---
 
@@ -208,7 +208,7 @@ Decisiones destiladas de las fases F1–F22. Formato corto: Contexto / Decisión
 
 **Fecha:** 2026-05-13
 
-**Contexto:** el TabBar agrupa bitácoras por categoría (hoy: "Operación 24h" agrupa DISP y MAND). La constante `CATEGORIAS` vive en `src/BitacorasGecelca3.jsx`, junto con el componente `CategoriaTab` que la renderiza como botón con flyout portal.
+**Contexto:** el TabBar agrupa bitácoras por categoría (hoy: "Sala de Mando" agrupa DISP y MAND). La constante `CATEGORIAS` vive en `src/BitacorasGecelca3.jsx`, junto con el componente `CategoriaTab` que la renderiza como botón con flyout portal. Importante: el nombre de la categoría (menú desplegable) es "Sala de Mando"; el nombre "Operación 24h" corresponde a la bitácora MAND individual (la grilla AUTH/PRUEBA/REDESP), no a la categoría.
 
 **Decisión:** mantener `CATEGORIAS` hardcoded en frontend. NO migrar a tabla `lov_bit.categoria` + columna `categoria_codigo` en `lov_bit.bitacora` por ahora.
 
@@ -237,6 +237,39 @@ Decisiones destiladas de las fases F1–F22. Formato corto: Contexto / Decisión
 **Decisión:** además de la limpieza one-off (`sql/snippets/limpiar_test_user_flags.sql`), agregar en `initDB()` un bloque idempotente envuelto en `BEGIN TRAN/COMMIT` que asegura el invariante en cada arranque. Sigue el patrón `IF NOT EXISTS`/idempotencia ya usado para `SISTEMA` (D-015) y `seedPersonal()`.
 
 **Consecuencias:** ediciones manuales en BD o seeds futuros mal escritos quedan corregidos al próximo levantamiento del backend. La verdad sobre quién tiene los flags vive ahora en dos lugares coherentes: `server/data/personal-2026.json` (`es_jefe_planta`/`es_jdt_default` por usuario) y este bloque defensivo. Si se cambia el titular de Ernesto o de Omar, hay que actualizar AMBOS: el JSON (cambia el flag del nuevo + del anterior) y este bloque (cambia el `username` excluido del UPDATE). Documentado como gotcha al evolucionar el sistema.
+
+---
+
+## D-024 — DISP: modelo de 4 estados con discriminador por string `evento`
+
+**Fecha:** 2026-05-15
+
+**Contexto:** los tres estados originales de DISP (`Disponible` / `En Reserva` / `Indisponible`) mezclaban dos conceptos distintos dentro de "Disponible": (a) la planta está disponible y generando vs. (b) la planta está disponible pero fuera de servicio. Además, la familia de eventos `codigo=-1` no distinguía entre salida forzada (lo que reporta XM como "horas de indisponibilidad") y consignación programada (mantenimiento planeado), aunque operacionalmente son flujos distintos.
+
+**Decisión:** rebrand a 4 estados:
+
+| `evento` | `codigo` | Significado | Color UI |
+|---|---|---|---|
+| `En Servicio` | `1` | Disponible y generando | Verde |
+| `En Reserva` | `0` | Disponible, no generando | Azul |
+| `Indisponible` | `-1` | Salida forzada — imposible generar | Rojo |
+| `Mantenimiento` | `-1` | Consignación / salida planeada | Amarillo |
+
+`Indisponible` y `Mantenimiento` **comparten `codigo=-1`** intencionalmente: el campo numérico es la métrica agregable de "horas de indisponibilidad" que se reporta a XM (= `SUM(codigo=-1)` ponderado por duración). El discriminador semántico/visual vive en el string `evento`. **No se introdujo columna nueva** porque ya existe esa información en el `evento`; agregar `subtipo_indisponible` duplicaría datos sin beneficio.
+
+Migración idempotente en `initDB()` (`server/db.js`): drop del CHECK viejo (anónimo) por nombre detectado en `sys.check_constraints`, UPDATE in-place `'Disponible'` → `'En Servicio'` en `disponibilidad_dashboard.evento` y en `campos_extra` JSON de `registro_activo` + `registro_historico` con `JSON_MODIFY`, y ADD del nuevo CHECK nombrado `CK_disp_dashboard_evento` con los 4 strings nuevos.
+
+**Consecuencias:** (a) cualquier consumidor del badge en `dashboard-gen-gec3` (F15 pendiente) que pinte color por evento debe leer el string, no el código (dos eventos comparten `-1`); el contrato cross-repo en `docs/interfaces-cross-repo.md` lo documenta explícitamente. (b) Reporte XM = `SUM(codigo=-1)` sigue funcionando sin cambio porque ambos casos contribuyen al total de horas no-disponibles. (c) Toda capa que use `ESTADO_COLORS` (frontend) o `DISP_EVENTOS_VALIDOS` (backend) lee desde la fuente única — los 4 estados se mantienen sincronizados con la BD. (d) El componente `TiempoEnEstado.jsx` se reescribió en paralelo con un formato más operativo (años/meses/d/hr/min/s, plural correcto, omite ceros excepto segundos, sin semanas).
+
+**Extensión 2026-05-15 (mismo PR de D-024) — cimiento de métricas para el futuro dashboard:**
+
+Para que el dashboard productivo (F15+) pueda mostrar indicadores históricos (tiempo en servicio, tiempo en reserva, tiempo indisponible, tiempo en mantenimiento, y los dos acumulados `disponible` y `no_disponible`), el backend agrega:
+
+- **Vista SQL** `bitacora.v_disp_intervalos` — normaliza `registro_activo` ∪ `registro_historico` (DISP) en intervalos `(planta_id, evento, codigo, fecha_inicio_estado, fecha_fin_estado)`. El vigente tiene `fecha_fin_estado IS NULL`. Aprovecha el invariante `fecha_evento = fecha_inicio_estado` que el backend mantiene en POST/PUT DISP (no re-parsea JSON). Creada con `CREATE OR ALTER VIEW` en `initDB()`, así cada arranque la deja sincronizada.
+- **Endpoint** `GET /api/disponibilidad/metricas?planta_id=&desde=&hasta=` — agrega `SUM(DATEDIFF_BIG(MILLISECOND, intersección con [desde,hasta]))` agrupado por `evento`. Defaults: `desde` = primer intervalo de la planta, `hasta` = `SYSUTCDATETIME()`. Devuelve `tiempo_ms` por estado + `acumulados_ms.disponible` (= servicio+reserva) y `acumulados_ms.no_disponible` (= indisponible+mantenimiento). Permiso: `puede_ver` en DISP. Contrato detallado en `PORTAL GENERACIÓN/docs/interfaces-cross-repo.md`.
+- **Tests**: `server/tests/disponibilidad.test.js` casos 16–18 (con históricos+vigente, ventana acotada, planta sin registros).
+
+Razón de la vista en vez de query inline: encapsula la unión `activo + histórico` y la extracción JSON (`JSON_VALUE` en `campos_extra`). Cualquier indicador futuro (uptime semanal, MTBF, % por turno) se construye sobre `v_disp_intervalos` sin duplicar lógica de "qué cuenta como un intervalo DISP".
 
 ---
 

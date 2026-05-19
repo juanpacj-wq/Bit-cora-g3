@@ -1,10 +1,10 @@
 import React from 'react';
-import { CheckCircle2, Clock, XCircle, Edit3, RefreshCw, Undo2 } from 'lucide-react';
+import { CheckCircle2, Clock, XCircle, Wrench, Edit3, RefreshCw, Undo2 } from 'lucide-react';
 import TiempoEnEstado from './TiempoEnEstado';
 import PlantaToggle from './PlantaToggle';
 import { ESTADO_COLORS, NEUTRAL } from './colores';
 
-const ICONS = { CheckCircle2, Clock, XCircle };
+const ICONS = { CheckCircle2, Clock, XCircle, Wrench };
 
 // F20: render Bogotá explícito — `fecha_inicio_estado` es un instante UTC en BD.
 const FECHA_CORTA_FMT = new Intl.DateTimeFormat('es-CO', {
@@ -103,7 +103,7 @@ export default function EstadoActualCard({
           </span>
         </Field>
 
-        <Field label="En estado">
+        <Field label="Tiempo en estado">
           <TiempoEnEstado
             fechaInicio={vigente?.fecha_inicio_estado}
             className="font-mono font-semibold tabular-nums"

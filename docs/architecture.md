@@ -92,6 +92,7 @@ Bit-cora-g3/server/
 | `POST /api/cierre/masivo` | Cierra todas las bitácoras del turno (`b.codigo NOT IN ('DISP','MAND')`). |
 | `GET /api/disponibilidad?planta_id=` | Vista mini-dashboard DISP (vigente + historial paginado). |
 | `POST /api/disponibilidad/deshacer` | Borra vigente + restaura último histórico. Emite CIET 'Deshacer disponibilidad' con audit completo. |
+| `GET /api/disponibilidad/metricas?planta_id=&desde=&hasta=` | **D-024** — tiempo agregado por estado + acumulados (`disponible`, `no_disponible`) en una ventana. Cimiento del futuro dashboard. Lee de la vista `bitacora.v_disp_intervalos`. |
 | `GET /api/sala-de-mando?planta_id=&fecha=` | Grilla MAND del día (siempre hoy). |
 | `POST /api/sala-de-mando/guardar` | **Batch atómico**. Body `{planta_id, fecha, filas:[{tipo, detalle, funcionariocnd, periodos:[{periodo, valor_mw}]}]}`. Transacción única. (F16) |
 | `POST /api/sala-de-mando/cierre-diario` | Trigger manual del sweeper (tests, recovery). Requiere `puede_cerrar_turno`. |
@@ -123,7 +124,7 @@ Bit-cora-g3/src/
 │   │   ├── TiempoEnEstado.jsx     Counter live (setInterval 1s)
 │   │   └── colores.js             Paleta de estados DISP
 │   ├── historicos/HistoricoTable.jsx
-│   └── BarraEstado.jsx            Filtros F11 (fecha+turno) — NO se renderiza para MAND/DISP
+│   └── BarraEstado.jsx            Filtros F11 (fecha+turno) — NO se renderiza para DISP. En MAND se renderiza pero oculta filtros/cierres (la grilla solo muestra HOY) y muestra contador "X registros" sincronizado con el badge.
 └── hooks/
     ├── useAuth.js                 Login, logout, sesión persistente
     ├── useBitacoraSesion.js       POST /api/bitacora/abrir al montar
@@ -143,7 +144,17 @@ En `BitacorasGecelca3.jsx`:
  <GrillaRegistros ... />}
 ```
 
-El header con controles (`Buscar`, `Todos los tipos`, `+ Nuevo Registro`, `Finalizar Turno`, `Cerrar Masivo`) se renderiza condicionalmente: `bitacora?.codigo !== 'MAND'`. En MAND, el botón "+ Nuevo Registro" se reemplaza por "Guardar" (controlado por `hayCambios` lift-up del child).
+El header con controles (`Buscar`, `Todos los tipos`, `+ Nuevo Registro`, `Finalizar Turno`, `Cerrar Turno`, `Cerrar Masivo`) se renderiza condicionalmente: `bitacora?.codigo !== 'MAND'`. **En MAND, el único botón de acción del header es "Guardar"** (controlado por `hayCambios` lift-up del child). Todos los cierres están ocultos porque MAND se cierra automáticamente al fin del día vía sweeper (`server/utils/mand-sweeper.js`); el backend además rechaza `POST /api/cierre/bitacora` con `400 mand_cierre_individual_no_permitido`.
+
+### Popup "Usuarios activos" (Header)
+
+Botón con contador en la barra superior; abre un popup portal (id `header-users-popup`) con:
+
+- Cabecera fija (`Conectados (N)` + contador de coincidencias cuando hay filtro).
+- Buscador por nombre (`autoFocus`, case-insensitive sobre `nombre_completo`).
+- Lista scrolleable acotada a `max-h: 22rem` (≈ 6 filas) — el resto se ve con la rueda del mouse o la barra del propio `<ul>`.
+
+El popup se cierra con: Esc, click fuera (botón y popup quedan excluidos por `contains`), `resize`, y `scroll` de la página (listener en captura). Cuando el listener de scroll dispara, **se filtra el evento si su `target` es el `<ul>` del popup o un descendiente** — sin ese filtro, mover la rueda dentro del listado o arrastrar su barra de scroll cerraba el popup (regresión documentada). Ver `Header` en `src/BitacorasGecelca3.jsx`.
 
 ---
 
@@ -160,6 +171,7 @@ El header con controles (`Buscar`, `Todos los tipos`, `+ Nuevo Registro`, `Final
 3. Diff(snapshot, buffer) determina si el botón "Guardar" está habilitado.
 4. Click "Guardar" → `POST /api/sala-de-mando/guardar` con solo el diff → re-fetch → reset snapshot+buffer.
 5. `beforeunload` confirm si hay cambios pendientes.
+6. Tras `guardarBatch` ok, el hook emite `bitacora:counts-refresh` (CustomEvent en `window`). Consumidores: `useBitacoraCounts` refetchea `/api/bitacora/counts` (badge del tab), y `BitacorasGecelca3` refetchea `/api/registros/activos` para la bitácora activa (sincroniza el contador "X registros" de `BarraEstado` con el badge).
 
 **Backend atómico (`POST /api/sala-de-mando/guardar`):**
 
@@ -220,11 +232,11 @@ Todo en una transacción única. Si algo falla, rollback completo. Devuelve `{ r
 
 **Flujo transaccional POST DISP (`POST /api/registros` rama DISP):**
 
-1. Validar input (planta ∈ {GEC3,GEC32}, evento ∈ {Disponible,Indisponible,En Reserva}, fecha ≤ now).
+1. Validar input (planta ∈ {GEC3,GEC32}, evento ∈ {En Servicio, En Reserva, Indisponible, Mantenimiento}, fecha ≤ now).
 2. SELECT vigente con `UPDLOCK, HOLDLOCK`.
 3. Si existe vigente: validar `evento != vigente.evento` (409 mismo_estado) y `fecha_inicio_estado > vigente.fecha_inicio_estado` (409 fecha_anterior).
 4. Si existe vigente: UPDATE `fecha_fin_estado = nuevo.fecha_inicio_estado`, INSERT a histórico, DELETE de activo.
-5. INSERT nuevo en `registro_activo` con `fecha_fin_estado=NULL`, `codigo` derivado (`Disponible:1, En Reserva:0, Indisponible:-1`).
+5. INSERT nuevo en `registro_activo` con `fecha_fin_estado=NULL`, `codigo` derivado (`En Servicio:1, En Reserva:0, Indisponible:-1, Mantenimiento:-1`). Ver D-024 — los 4 estados están en el enum; `Indisponible` y `Mantenimiento` comparten `codigo=-1` y se distinguen por el string `evento`.
 6. UPSERT (MERGE) en `disponibilidad_dashboard` por `planta_id`.
 7. Commit.
 
@@ -248,8 +260,8 @@ Todo en una transacción única. Si algo falla, rollback completo. Devuelve `{ r
 **Frontend:**
 
 - `DisponibilidadDashboard.jsx`: tabs/toggle GEC3↔GEC32 con animación slide horizontal 250ms. Polling 30s para capturar cambios de otros usuarios.
-- `EstadoActualCard.jsx`: paleta por estado (`Disponible` verde, `En Reserva` amarillo, `Indisponible` rojo). Fade-out/in al cambiar planta.
-- `TiempoEnEstado.jsx`: counter live `setInterval(1000ms)`. Formato adaptativo según rango (`<1h`: `Wm Vs`; `<1d`: `Zh Wm Vs`; `<7d`: `Yd Zh Wm Vs`; `>=7d`: `Xs Yd Zh Wm`).
+- `EstadoActualCard.jsx`: paleta por estado (D-024) — `En Servicio` verde + `CheckCircle2`, `En Reserva` azul + `Clock`, `Indisponible` rojo + `XCircle`, `Mantenimiento` amarillo + `Wrench`. Fade-out/in al cambiar planta.
+- `TiempoEnEstado.jsx`: counter live `setInterval(1000ms)`. Formato fijo (D-024): unidades `años, meses, d, hr, min, s`. Plural correcto en `años`/`meses`; abreviaturas invariantes. Omite unidades con valor 0 **excepto segundos** (siempre presentes). Aproximaciones `1 año = 365.25 d`, `1 mes = 30.44 d`. Sin semanas.
 - `HistorialList.jsx`: paginación "Ver más" (+20 vía `historial_offset`).
 - `CambiarEstadoModal.jsx`: 3 modos (crear / editar / deshacer-confirm). Manejo de 409 con popups reactivos.
 - `sessionStorage('disponibilidad.plantaSeleccionada')`: persiste el toggle entre tabs.

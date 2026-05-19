@@ -27,11 +27,15 @@ import { startMandSweeper, stopMandSweeper, cerrarDiaMand } from './utils/mand-s
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
 
-// F12: catálogo cerrado de estados DISP. El código auto se deriva (Disponible:1,
-// 'En Reserva':0, Indisponible:-1) — coincide con la regla en lov_bit.bitacora.definicion_campos
-// pero la duplicamos en código porque la rama DISP no pasa por validateCamposExtra.
-const DISP_EVENTOS_VALIDOS = ['Disponible', 'En Reserva', 'Indisponible'];
-const DISP_CODIGO_POR_EVENTO = { Disponible: 1, 'En Reserva': 0, Indisponible: -1 };
+// F12 / D-024: catálogo cerrado de estados DISP. Coincide con la regla en
+// lov_bit.bitacora.definicion_campos (db.js DISP_JSON) — duplicada acá porque la rama
+// DISP no pasa por validateCamposExtra.
+//
+// Indisponible y Mantenimiento comparten codigo=-1 a propósito: el código numérico es la
+// métrica agregable de "horas de indisponibilidad" (reporte XM); el string `evento` es el
+// discriminador semántico (salida forzada vs. consignación / mantenimiento planeado).
+const DISP_EVENTOS_VALIDOS = ['En Servicio', 'En Reserva', 'Indisponible', 'Mantenimiento'];
+const DISP_CODIGO_POR_EVENTO = { 'En Servicio': 1, 'En Reserva': 0, Indisponible: -1, Mantenimiento: -1 };
 
 function parseExtra(raw) {
   if (raw == null) return {};
@@ -2017,6 +2021,126 @@ const server = http.createServer(async (req, res) => {
         vigente,
         historial,
         historial_total: histTotal.recordset[0].total,
+      });
+    }
+
+    // D-024 (2026-05-15): GET /api/disponibilidad/metricas?planta_id=&desde=&hasta=
+    //
+    // Devuelve, para una ventana [desde, hasta] (UTC ISO; default = primer registro DISP
+    // de la planta a SYSUTCDATETIME()), la duración acumulada en ms por evento + dos
+    // acumulados pre-computados para el dashboard:
+    //   - disponible       = En Servicio + En Reserva
+    //   - no_disponible    = Indisponible + Mantenimiento
+    //
+    // Suma DATEDIFF_BIG(ms, ...) sobre la intersección de cada intervalo de
+    // bitacora.v_disp_intervalos con [desde, hasta]. El vigente (`fecha_fin_estado IS NULL`)
+    // se trunca a SYSUTCDATETIME() (que se devuelve como `ahora` para que el cliente sepa
+    // qué reloj usó el server). Permiso: puede_ver en DISP (todos los cargos).
+    if (pathname === '/api/disponibilidad/metricas' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      const planta_id = url.searchParams.get('planta_id');
+      if (!planta_id) return sendJSON(res, 400, { error: 'planta_id es requerido' });
+
+      const db = await getDB();
+      const plantaCheck = await db.request()
+        .input('p', sql.VarChar(10), planta_id)
+        .query(`SELECT 1 AS ok FROM lov_bit.planta WHERE planta_id=@p AND activa=1`);
+      if (!plantaCheck.recordset[0]) {
+        return sendJSON(res, 400, { error: 'planta_id no es operativa' });
+      }
+
+      const dispRow = await db.request().query(`SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='DISP'`);
+      const dispBitacoraId = dispRow.recordset[0]?.bitacora_id;
+      if (!dispBitacoraId) return sendJSON(res, 500, { error: 'bitácora DISP no configurada' });
+      if (!(await hasPermisoBitacora(sesion, dispBitacoraId, 'puede_ver'))) {
+        return sendJSON(res, 403, { error: 'Sin permiso para ver Disponibilidad' });
+      }
+
+      // Defaults: desde = inicio del primer intervalo registrado para la planta; hasta = NOW UTC.
+      const desdeRaw = url.searchParams.get('desde');
+      const hastaRaw = url.searchParams.get('hasta');
+      let desde = desdeRaw ? new Date(desdeRaw) : null;
+      let hasta = hastaRaw ? new Date(hastaRaw) : null;
+      if (desdeRaw && Number.isNaN(desde.getTime())) {
+        return sendJSON(res, 400, { error: 'desde inválido (ISO 8601 requerido)' });
+      }
+      if (hastaRaw && Number.isNaN(hasta.getTime())) {
+        return sendJSON(res, 400, { error: 'hasta inválido (ISO 8601 requerido)' });
+      }
+      if (!hasta) hasta = new Date();
+      if (!desde) {
+        const minRow = await db.request()
+          .input('p', sql.VarChar(10), planta_id)
+          .query(`SELECT MIN(fecha_inicio_estado) AS d FROM bitacora.v_disp_intervalos WHERE planta_id=@p`);
+        desde = minRow.recordset[0]?.d ? new Date(minRow.recordset[0].d) : null;
+      }
+      if (!desde) {
+        // No hay registros DISP para la planta — todo en 0.
+        return sendJSON(res, 200, {
+          planta_id,
+          desde: null,
+          hasta: hasta.toISOString(),
+          ahora: hasta.toISOString(),
+          tiempo_ms: { 'En Servicio': 0, 'En Reserva': 0, Indisponible: 0, Mantenimiento: 0 },
+          acumulados_ms: { disponible: 0, no_disponible: 0 },
+          total_ms: 0,
+        });
+      }
+      if (desde.getTime() > hasta.getTime()) {
+        return sendJSON(res, 400, { error: 'desde debe ser <= hasta' });
+      }
+
+      // Intersección de [fecha_inicio_estado, COALESCE(fecha_fin_estado, NOW)] con [@desde, @hasta]
+      // por intervalo; suma de duraciones en ms agrupada por evento.
+      const ahoraDb = await db.request().query(`SELECT SYSUTCDATETIME() AS ahora`);
+      const ahora = ahoraDb.recordset[0].ahora;
+
+      const aggReq = db.request()
+        .input('p', sql.VarChar(10), planta_id)
+        .input('desde', sql.DateTime2, desde)
+        .input('hasta', sql.DateTime2, hasta)
+        .input('ahora', sql.DateTime2, ahora);
+      const aggRes = await aggReq.query(`
+        SELECT
+          evento,
+          SUM(
+            DATEDIFF_BIG(
+              MILLISECOND,
+              CASE WHEN fecha_inicio_estado < @desde THEN @desde ELSE fecha_inicio_estado END,
+              CASE
+                WHEN COALESCE(fecha_fin_estado, @ahora) > @hasta THEN @hasta
+                ELSE COALESCE(fecha_fin_estado, @ahora)
+              END
+            )
+          ) AS tiempo_ms
+        FROM bitacora.v_disp_intervalos
+        WHERE planta_id = @p
+          AND fecha_inicio_estado < @hasta
+          AND COALESCE(fecha_fin_estado, @ahora) > @desde
+        GROUP BY evento
+      `);
+
+      const tiempo_ms = { 'En Servicio': 0, 'En Reserva': 0, Indisponible: 0, Mantenimiento: 0 };
+      for (const row of aggRes.recordset) {
+        if (row.evento && row.evento in tiempo_ms) {
+          tiempo_ms[row.evento] = Number(row.tiempo_ms) || 0;
+        }
+      }
+      const acumulados_ms = {
+        disponible:    tiempo_ms['En Servicio']  + tiempo_ms['En Reserva'],
+        no_disponible: tiempo_ms.Indisponible    + tiempo_ms.Mantenimiento,
+      };
+      const total_ms = acumulados_ms.disponible + acumulados_ms.no_disponible;
+
+      return sendJSON(res, 200, {
+        planta_id,
+        desde: desde.toISOString(),
+        hasta: hasta.toISOString(),
+        ahora: new Date(ahora).toISOString(),
+        tiempo_ms,
+        acumulados_ms,
+        total_ms,
       });
     }
 

@@ -480,6 +480,7 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
   const [reloj, setReloj] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
+  const [filtroUsuarios, setFiltroUsuarios] = useState('');
   const buttonRef = useRef(null);
 
   useEffect(() => {
@@ -494,8 +495,15 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
     setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
   }, [menuOpen]);
 
-  // Cerrar con Esc, click afuera, scroll o resize. El popup vive en document.body via
-  // Portal (igual que CategoriaTab), por eso el contains() también revisa el portal.
+  // Limpiar filtro al cerrar para no mostrar búsqueda vieja al reabrir.
+  useEffect(() => { if (!menuOpen) setFiltroUsuarios(''); }, [menuOpen]);
+
+  // Cerrar con Esc, click afuera, scroll de la página o resize. El popup vive en
+  // document.body via Portal (igual que CategoriaTab), por eso el contains() también
+  // revisa el portal. IMPORTANTE: el listener de scroll usa captura para detectar scroll
+  // de cualquier contenedor de la página; filtramos scroll que ocurre dentro del propio
+  // popup (su `<ul>` con overflow-y-auto) para no cerrarlo al usar la rueda o arrastrar
+  // la barra lateral del listado de usuarios.
   useEffect(() => {
     if (!menuOpen) return;
     const onKey = (e) => { if (e.key === 'Escape') setMenuOpen(false); };
@@ -506,22 +514,32 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
       if (popup?.contains(e.target)) return;
       setMenuOpen(false);
     };
-    const onScrollOrResize = () => setMenuOpen(false);
+    const onScroll = (e) => {
+      const popup = document.getElementById('header-users-popup');
+      if (popup && e.target && (popup === e.target || popup.contains(e.target))) return;
+      setMenuOpen(false);
+    };
+    const onResize = () => setMenuOpen(false);
     document.addEventListener('keydown', onKey);
     document.addEventListener('mousedown', onClickOutside);
-    window.addEventListener('scroll', onScrollOrResize, true);
-    window.addEventListener('resize', onScrollOrResize);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
     return () => {
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('mousedown', onClickOutside);
-      window.removeEventListener('scroll', onScrollOrResize, true);
-      window.removeEventListener('resize', onScrollOrResize);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
     };
   }, [menuOpen]);
 
   const fechaStr = RELOJ_FECHA_FMT.format(reloj);
   const horaStr = RELOJ_HORA_FMT.format(reloj);
   const activos = usuariosActivos || [];
+  const activosFiltrados = useMemo(() => {
+    const q = filtroUsuarios.trim().toLowerCase();
+    if (!q) return activos;
+    return activos.filter((u) => (u.nombre_completo || '').toLowerCase().includes(q));
+  }, [activos, filtroUsuarios]);
 
   return (
     <header className="text-white px-6 py-3 flex items-center justify-between shadow-lg relative z-10"
@@ -572,27 +590,49 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
             <span className="text-sm font-semibold">{activos.length}</span>
           </button>
           {menuOpen && createPortal(
+            // Layout: header + search FIJOS arriba (no scrollean), `<ul>` scrolleable abajo
+            // acotado a ~6 filas (≈ 22rem). El scroll vive en el `<ul>` para que el
+            // listener captura del Header (`onScroll`) lo filtre y no cierre el popup.
             <div
               id="header-users-popup"
               role="menu"
-              className="bg-white text-gray-800 rounded-xl shadow-xl border border-gray-200 overflow-y-auto"
+              className="bg-white text-gray-800 rounded-xl shadow-xl border border-gray-200 flex flex-col overflow-hidden"
               style={{
                 position: 'fixed',
                 top: menuPos.top,
                 right: menuPos.right,
                 width: '20rem',
-                maxHeight: '70vh',
                 zIndex: 50,
               }}
             >
-              <div className="px-4 py-2 border-b border-gray-100 text-xs uppercase tracking-wide text-gray-500">
-                Conectados ({activos.length})
+              <div className="px-4 py-2 border-b border-gray-100 text-xs uppercase tracking-wide text-gray-500 flex items-center justify-between">
+                <span>Conectados ({activos.length})</span>
+                {filtroUsuarios && (
+                  <span className="text-[10px] normal-case tracking-normal text-gray-400">
+                    {activosFiltrados.length} coincidencia{activosFiltrados.length === 1 ? '' : 's'}
+                  </span>
+                )}
+              </div>
+              <div className="px-3 py-2 border-b border-gray-100">
+                <div className="relative">
+                  <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                  <input
+                    type="text"
+                    autoFocus
+                    placeholder="Buscar por nombre…"
+                    value={filtroUsuarios}
+                    onChange={(e) => setFiltroUsuarios(e.target.value)}
+                    className="w-full pl-8 pr-2 py-1.5 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent"
+                  />
+                </div>
               </div>
               {activos.length === 0 ? (
                 <div className="px-4 py-6 text-sm text-gray-400 text-center">Nadie más conectado</div>
+              ) : activosFiltrados.length === 0 ? (
+                <div className="px-4 py-6 text-sm text-gray-400 text-center">Sin coincidencias para "{filtroUsuarios}"</div>
               ) : (
-                <ul className="divide-y divide-gray-100">
-                  {activos.map((u) => (
+                <ul className="overflow-y-auto divide-y divide-gray-100" style={{ maxHeight: '22rem' }}>
+                  {activosFiltrados.map((u) => (
                     <li key={u.sesion_id} className="px-4 py-2.5 flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-sm font-semibold truncate">
@@ -648,11 +688,14 @@ function nivelCarga(count) {
 // Categorías de bitácoras: agrupan en un solo botón fijo a la izquierda con flyout en hover.
 // Hardcoded en frontend porque hoy solo hay una categoría; cuando aparezca otra, mover a BD
 // (lov_bit.bitacora.categoria_codigo + lov_bit.categoria).
+// El `nombre` es el del menú desplegable (categoría que agrupa Disponibilidad + Operación 24h).
+// NO confundir con `b.nombre` de la bitácora MAND, que sigue siendo "Operación 24h" (el nombre
+// de la grilla individual).
 const CATEGORIAS = [
   {
     codigo: 'SALA_DE_MANDOS',
-    nombre: 'Operación 24h',
-    nombreCorto: '24h',
+    nombre: 'Sala de Mando',
+    nombreCorto: 'Sala',
     icono: 'MonitorCog',
     bitacora_codigos: ['DISP', 'MAND'],
   },
@@ -1048,7 +1091,11 @@ function BarraEstado({
         </button>
       )}
 
-      {esJefeTurno && borradores + cerrados > 0 && (
+      {/* "Cerrar Turno" individual: oculto en MAND. El cierre del día MAND es automático
+          vía sweeper diario (`server/utils/mand-sweeper.js`); el backend ya rechaza el
+          intento con 400 `mand_cierre_individual_no_permitido` (defensa en profundidad).
+          En la pestaña Operación 24h, el único botón de acción del header es "Guardar". */}
+      {!isMand && esJefeTurno && borradores + cerrados > 0 && (
         <button onClick={onCerrarTurno}
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
           style={{ backgroundColor: COLORS.blueDark }}>
@@ -1506,6 +1553,19 @@ export default function App() {
     registrosHook.getActivos({ planta_id: sesion.planta_id, bitacora_id: activeBitacora }).catch((e) => showToast(e.message, "error"));
     setDraftLocal(null);
   }, [activeBitacora, sesion?.planta_id, registrosHook.getActivos, showToast]);
+
+  // El batch save MAND (useSalaDeMando) emite `bitacora:counts-refresh` para que el badge del
+  // tab refresque. Reusamos el mismo evento para refetchear `registrosDeBitacora` y así
+  // mantener sincronizados el badge superior y el "X registros" de BarraEstado en la pestaña
+  // Operación 24h cuando se crean filas nuevas en la grilla AUTH/PRUEBA/REDESP.
+  useEffect(() => {
+    if (!activeBitacora || !sesion?.planta_id) return;
+    const handler = () => {
+      registrosHook.getActivos({ planta_id: sesion.planta_id, bitacora_id: activeBitacora }).catch(() => {});
+    };
+    window.addEventListener('bitacora:counts-refresh', handler);
+    return () => window.removeEventListener('bitacora:counts-refresh', handler);
+  }, [activeBitacora, sesion?.planta_id, registrosHook.getActivos]);
 
   const registrosDeBitacora = useMemo(() => {
     const lista = registrosHook.registros.filter((r) => r.bitacora_id === activeBitacora);
