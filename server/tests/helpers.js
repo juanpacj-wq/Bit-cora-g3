@@ -152,6 +152,12 @@ export async function cleanupTestRegistros() {
     UPDATE bitacora.sesion_activa SET activa = 0
     WHERE usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE username IN (${usernames}))
   `);
+  // conformacion-turno-2026-05: snapshots seedeados por los tests E2E/builder. Limpiar por
+  // usuario_id porque la PK incluye fecha/planta/turno y los tests usan fechas históricas.
+  await db.request().query(`
+    DELETE FROM bitacora.conformacion_turno
+    WHERE usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE username IN (${usernames}))
+  `);
 }
 
 export function makeRegistroPayload({ bitacora_id, planta_id = PLANTA_ID, tipo_evento_id, extra = {} }) {
