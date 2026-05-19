@@ -1215,6 +1215,38 @@ export async function initDB() {
     );
   `);
 
+  // Q1+Q2 conformacion-turno-2026-05: snapshot al cierre de turno (T1/T2 por planta).
+  // 1 fila por (fecha_operativa, planta_id, turno, usuario_id) — agregada. PK garantiza
+  // idempotencia. Inmutable post-snapshot. fin_inferido=1 cuando el builder cae a
+  // ventanaTurno().fin (logout no llamado, Q5); =0 cuando viene de sesion_activa.cerrada_en.
+  await db.request().batch(`
+    IF OBJECT_ID('bitacora.conformacion_turno', 'U') IS NULL
+    CREATE TABLE bitacora.conformacion_turno (
+      fecha_operativa  DATE          NOT NULL,
+      planta_id        VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+      turno            TINYINT       NOT NULL CHECK (turno IN (1, 2)),
+      usuario_id       INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+      usuario_nombre   VARCHAR(200)  NOT NULL,
+      cargo_id         INT           NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+      cargo_nombre     VARCHAR(100)  NOT NULL,
+      inicio_sesion    DATETIME2     NOT NULL,
+      fin_sesion       DATETIME2     NOT NULL,
+      duracion_min     INT           NOT NULL,
+      fin_inferido     BIT           NOT NULL CONSTRAINT DF_conformacion_fin_inferido DEFAULT 0,
+      snapshot_en      DATETIME2     NOT NULL CONSTRAINT DF_conformacion_snapshot_en DEFAULT SYSUTCDATETIME(),
+      CONSTRAINT PK_conformacion_turno PRIMARY KEY (fecha_operativa, planta_id, turno, usuario_id)
+    );
+  `);
+
+  await db.request().batch(`
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes
+                   WHERE name='IX_conformacion_turno_lookup'
+                     AND object_id=OBJECT_ID('bitacora.conformacion_turno'))
+      CREATE INDEX IX_conformacion_turno_lookup
+        ON bitacora.conformacion_turno(planta_id, fecha_operativa, turno)
+        INCLUDE (usuario_id, usuario_nombre, cargo_nombre);
+  `);
+
   // ---------- F22.D1 — columnas calculadas Bogotá para inspección humana en SSMS ----------
   // No persistidas (DATEADD virtual, costo cero al INSERT). Aplicaciones siguen leyendo
   // las columnas UTC (sin sufijo); las *_bogota son solo para SSMS / Azure Data Studio.
@@ -1272,6 +1304,24 @@ export async function initDB() {
 
     IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F22.D1')
       INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F22.D1');
+  `);
+
+  // ---------- F22.D2 — columnas Bogotá para conformacion_turno (mismo patrón que F22.D1) ----------
+  // Bloque separado para trazabilidad: F22.D1 ya quedó marcado como aplicado; estas columnas
+  // pertenecen a una tabla creada después (Q1 del flujo conformacion-turno-2026-05).
+  await db.request().batch(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns
+                   WHERE object_id=OBJECT_ID('bitacora.conformacion_turno') AND name='inicio_sesion_bogota')
+      ALTER TABLE bitacora.conformacion_turno ADD inicio_sesion_bogota AS DATEADD(HOUR, -5, inicio_sesion);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns
+                   WHERE object_id=OBJECT_ID('bitacora.conformacion_turno') AND name='fin_sesion_bogota')
+      ALTER TABLE bitacora.conformacion_turno ADD fin_sesion_bogota AS DATEADD(HOUR, -5, fin_sesion);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns
+                   WHERE object_id=OBJECT_ID('bitacora.conformacion_turno') AND name='snapshot_en_bogota')
+      ALTER TABLE bitacora.conformacion_turno ADD snapshot_en_bogota AS DATEADD(HOUR, -5, snapshot_en);
+
+    IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F22.D2')
+      INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F22.D2');
   `);
 
   // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de
