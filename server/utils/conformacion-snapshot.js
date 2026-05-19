@@ -23,11 +23,9 @@ export async function buildConformacionSnapshot(pool, { fecha_operativa, planta_
         SELECT
           sa.usuario_id,
           sa.cargo_id,
-          CASE WHEN sa.inicio_sesion < @ventana_inicio THEN @ventana_inicio
-               ELSE sa.inicio_sesion END AS inicio_efectivo,
+          sa.inicio_sesion AS inicio_efectivo,
           CASE
             WHEN sa.cerrada_en IS NOT NULL AND sa.cerrada_en < @ventana_fin THEN sa.cerrada_en
-            WHEN sa.cerrada_en IS NOT NULL AND sa.cerrada_en >= @ventana_fin THEN @ventana_fin
             ELSE @ventana_fin
           END AS fin_efectivo,
           CASE
@@ -37,8 +35,12 @@ export async function buildConformacionSnapshot(pool, { fecha_operativa, planta_
         FROM bitacora.sesion_activa sa
         WHERE sa.planta_id = @planta_id
           AND sa.turno = @turno
+          -- D-003: el turno se fija al login. Una sesión cuenta para la conformación
+          -- del turno X si arrancó DENTRO de la ventana de X. Filtrar por solape
+          -- (sesiones de hace meses con activa=1/cerrada_en=NULL) producía sumas
+          -- absurdas en testing real contra BD productiva.
+          AND sa.inicio_sesion >= @ventana_inicio
           AND sa.inicio_sesion < @ventana_fin
-          AND (sa.cerrada_en IS NULL OR sa.cerrada_en > @ventana_inicio)
       )
       SELECT
         st.usuario_id,
