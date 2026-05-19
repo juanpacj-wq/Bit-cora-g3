@@ -77,6 +77,10 @@ Dos bitácoras tienen UI propia (resto usa `GrillaRegistros` genérica):
 
 Las demás (CIET, AUTOR, etc.) usan `GrillaRegistros.jsx` con filtros F11.
 
+## Conformación de turno
+
+Al cierre de cada turno (T1/T2 por planta GEC3/GEC32) se escribe snapshot inmutable a `bitacora.conformacion_turno` con quién operó: usuario, cargo, inicio/fin de sesión, duración. Trigger híbrido: `turno-sweeper.js` (F4) extendido + catchup al arranque (últimos 7 días Bogotá). Endpoints `GET /api/conformacion-turno` (cualquier rol) y `POST /api/conformacion-turno/trigger` (gated JdT/IngOp/Jefe Planta). Builder filtra sesiones cuyo `inicio_sesion` cae dentro de la ventana del turno — D-003 fija el turno al login. Ver D-025 y BIT-MODBD §4.7.
+
 ## Convenciones críticas (no obvias)
 
 1. **TTL sesión: ninguno** (post F2). `sesion_activa.activa=1` hasta logout explícito. No usar `ultima_actividad > NOW - 5min` para validar — esa columna existe pero no rige TTL ya.
