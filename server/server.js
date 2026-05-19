@@ -169,7 +169,10 @@ const server = http.createServer(async (req, res) => {
       const db = await getDB();
       await db.request()
         .input('sesion_id', sql.Int, sesion_id)
-        .query(`UPDATE bitacora.sesion_activa SET activa = 0 WHERE sesion_id = @sesion_id`);
+        .query(`UPDATE bitacora.sesion_activa
+                SET activa = 0,
+                    cerrada_en = SYSUTCDATETIME()
+                WHERE sesion_id = @sesion_id`);
       broadcastUsuariosActivos().catch(() => {});
       return sendJSON(res, 200, { ok: true });
     }

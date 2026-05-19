@@ -151,3 +151,29 @@ test('POST /api/cierre/bitacora sin header devuelve 401', async () => {
   });
   assert.equal(status, 401);
 });
+
+// Último test del archivo a propósito: cierra sesiones.gerente y no debe correr antes que
+// los tests que la usan (POST /api/registros Gerente devuelve 403, línea 105).
+test('POST /api/auth/logout pobla cerrada_en además de activa=0', async () => {
+  const { sesiones } = ctx;
+  const sesion_id = sesiones.gerente;
+  const db = await getDB();
+
+  const pre = await db.request()
+    .input('sid', sql.Int, sesion_id)
+    .query('SELECT activa, cerrada_en FROM bitacora.sesion_activa WHERE sesion_id = @sid');
+  assert.equal(pre.recordset[0].activa, true, 'precondicion: sesion activa');
+  assert.equal(pre.recordset[0].cerrada_en, null, 'precondicion: cerrada_en NULL antes del logout');
+
+  const { status, data } = await call('POST', '/api/auth/logout', { body: { sesion_id } });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.ok, true);
+
+  const post = await db.request()
+    .input('sid', sql.Int, sesion_id)
+    .query('SELECT activa, cerrada_en FROM bitacora.sesion_activa WHERE sesion_id = @sid');
+  assert.equal(post.recordset[0].activa, false, 'activa debe quedar en 0');
+  assert.ok(post.recordset[0].cerrada_en instanceof Date, 'cerrada_en debe ser timestamp');
+  const ageMs = Date.now() - post.recordset[0].cerrada_en.getTime();
+  assert.ok(ageMs >= 0 && ageMs < 60_000, `cerrada_en debe ser reciente (age=${ageMs}ms)`);
+});
