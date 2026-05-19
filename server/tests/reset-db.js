@@ -112,6 +112,13 @@ async function main() {
   `);
   counts.sesion_activa_desactivadas = r.rowsAffected[0];
 
+  // 7. conformacion_turno: snapshots seedeados por tests dirigidos del builder/endpoints.
+  r = await db.request().query(`
+    DELETE FROM bitacora.conformacion_turno
+    WHERE usuario_id IN (${idList});
+  `);
+  counts.conformacion_turno = r.rowsAffected[0];
+
   console.log('[reset-db] Resumen:');
   for (const [k, v] of Object.entries(counts)) {
     console.log(`  ${k.padEnd(30)} ${v}`);
