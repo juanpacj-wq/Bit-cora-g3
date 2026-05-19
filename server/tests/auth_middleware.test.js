@@ -174,6 +174,10 @@ test('POST /api/auth/logout pobla cerrada_en además de activa=0', async () => {
     .query('SELECT activa, cerrada_en FROM bitacora.sesion_activa WHERE sesion_id = @sid');
   assert.equal(post.recordset[0].activa, false, 'activa debe quedar en 0');
   assert.ok(post.recordset[0].cerrada_en instanceof Date, 'cerrada_en debe ser timestamp');
+  // Tolerar clock skew entre SQL Server (SYSUTCDATETIME()) y Date.now() del cliente node:
+  // observé hasta -100ms en runs reales — el reloj SQL puede ir levemente adelantado. La
+  // intención del assert es "es un timestamp del momento del logout, no de 2020 ni 2099";
+  // 60s en cualquier dirección es ventana suficiente para esa intención.
   const ageMs = Date.now() - post.recordset[0].cerrada_en.getTime();
-  assert.ok(ageMs >= 0 && ageMs < 60_000, `cerrada_en debe ser reciente (age=${ageMs}ms)`);
+  assert.ok(Math.abs(ageMs) < 60_000, `cerrada_en debe ser reciente (age=${ageMs}ms)`);
 });
