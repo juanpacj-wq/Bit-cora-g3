@@ -9,7 +9,8 @@ import { verifyPassword } from './utils/password.js';
 import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
 import { getTurnoColombia, periodoFromFechaBogota, turnoFromPeriodo, ventanaTurno } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
-import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro, puedeVerConformacion } from './middleware/permissions.js';
+import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro, puedeVerConformacion, puedeTriggerConformacion } from './middleware/permissions.js';
+import { buildConformacionSnapshot, persistConformacionSnapshot } from './utils/conformacion-snapshot.js';
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
 import {
   findEventoDashboard, upsertEventoDashboard, hasNotificarDashboard,
@@ -2562,6 +2563,59 @@ const server = http.createServer(async (req, res) => {
         filas: r.recordset,
         total: r.recordset.length,
       });
+    }
+
+    // conformacion-turno-2026-05 (Q4 extra): trigger manual del snapshot (QA + recovery).
+    // Permisos restrictivos vía puedeTriggerConformacion. Por defecto rechaza turnos cuya
+    // ventana no cerró — bypass con ?force=true (snapshot puede ser incompleto).
+    // Idempotencia natural vía PK de conformacion_turno.
+    if (pathname === '/api/conformacion-turno/trigger' && method === 'POST') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      if (!puedeTriggerConformacion(sesion)) {
+        return sendJSON(res, 403, { error: 'Solo Ingeniero Jefe de Turno, Ingeniero de Operación o Jefe de Planta pueden disparar el snapshot manual' });
+      }
+
+      const body = await parseBody(req);
+      const { fecha_operativa, planta_id, turno } = body || {};
+
+      if (!fecha_operativa || !/^\d{4}-\d{2}-\d{2}$/.test(fecha_operativa)) {
+        return sendJSON(res, 400, { error: 'fecha_operativa requerida en formato YYYY-MM-DD (Bogotá)' });
+      }
+      if (![1, 2].includes(turno)) {
+        return sendJSON(res, 400, { error: 'turno debe ser 1 o 2' });
+      }
+      if (!planta_id || !['GEC3', 'GEC32'].includes(planta_id)) {
+        return sendJSON(res, 400, { error: 'planta_id debe ser GEC3 o GEC32' });
+      }
+
+      const forceQuery = url.searchParams.get('force') === 'true';
+      // Mediodía Bogotá para evitar el shift -5h de colombiaParts con string 'YYYY-MM-DD'
+      // (mismo patrón que conformacion-snapshot.js::fechaRefBogotaMediodia).
+      const fechaRef = new Date(`${fecha_operativa}T12:00:00.000-05:00`);
+      const { fin: ventanaFin } = ventanaTurno(turno, fechaRef);
+      if (!forceQuery && new Date() < ventanaFin) {
+        return sendJSON(res, 400, {
+          error: 'La ventana del turno aún no cerró. Use ?force=true si querés disparar sobre un turno en curso (snapshot puede ser incompleto).',
+          ventana_fin: ventanaFin.toISOString(),
+        });
+      }
+
+      try {
+        const db = await getDB();
+        const filas = await buildConformacionSnapshot(db, { fecha_operativa, planta_id, turno });
+        const { insertadas, skipped } = await persistConformacionSnapshot(db, filas);
+        return sendJSON(res, 200, {
+          fecha_operativa, planta_id, turno,
+          insertadas, skipped,
+          filas_resultado: filas.length,
+          force: forceQuery,
+          disparado_por: { usuario_id: sesion.usuario_id, nombre: sesion.nombre_completo },
+        });
+      } catch (err) {
+        console.error('[POST /api/conformacion-turno/trigger]', err);
+        return sendJSON(res, 500, { error: 'Fallo interno', detalle: err.message });
+      }
     }
 
     sendJSON(res, 404, { error: 'Not Found' });
