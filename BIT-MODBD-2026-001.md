@@ -5,13 +5,21 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 1.6 |
-| Fecha | 2026-05-19 |
+| Versión | 1.7 |
+| Fecha | 2026-05-20 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
 
 > **Convenciones:** las tablas de catálogos viven en `lov_bit`; las tablas operativas en `bitacora`. Los campos JSON usan `NVARCHAR(MAX)` y se validan en la capa de aplicación.
+
+> **Cambios v1.7 (2026-05-20) — Migración ER DISP (D-026):**
+> - **Nueva §4.8** con DDL de `bitacora.disponibilidad_estado` (PK `disponibilidad_id`, columnas tipadas, filtered unique index `UQ_disp_estado_vigente_por_planta`, columnas Bogotá calculadas, vista `v_disponibilidad_estado` con acumulados via window functions). Reemplaza el storage DISP que vivía en `registro_activo` / `registro_historico` con datos clave embebidos en `campos_extra` JSON.
+> - **§5.2 `disponibilidad_dashboard`** ahora es una VIEW sobre `disponibilidad_estado` (filtra `fecha_fin_estado IS NULL`). Preserva shape para el endpoint `GET /api/eventos-dashboard?tipo=DISP` (F15). Mapea `disponibilidad_id → registro_activo_id` y `jefes_planta_snapshot → jefes_snapshot` por compat.
+> - **§7.8** marcada como referencia histórica — DISP ya NO rompe los invariantes ahí listados; vive en su propia tabla con su propio modelo.
+> - **Vista `v_disp_intervalos` dropeada** (F26.A1) — la nueva tabla ya es plana, no requiere normalización extra. Las métricas (`GET /api/disponibilidad/metricas`) ahora suman `DATEDIFF_BIG` directamente sobre `disponibilidad_estado`.
+> - **Cleanup**: rows DISP eliminados de `registro_activo`/`registro_historico` por el bloque idempotente F26.A1. La columna `fecha_fin_estado` en esas tablas queda como no-op para otras bitácoras (no se borra para evitar churn de schema).
+> - **Contrato HTTP preservado**: POST/PUT/GET/deshacer DISP devuelven shape byte-a-byte idéntico — el frontend y el cross-repo no requieren cambios.
 
 > **Cambios v1.6 (2026-05-19) — Conformación de turno:**
 > - **Nueva §4.7** con DDL de `bitacora.conformacion_turno` (PK compuesta `(fecha_operativa, planta_id, turno, usuario_id)`, FKs a usuario/planta/cargo, índice `IX_conformacion_turno_lookup`, 3 columnas `*_bogota` calculadas vía bloque F22.D2 separado).
@@ -49,6 +57,7 @@
    - 4.5 [Columnas calculadas Bogotá (F22)](#45-columnas-calculadas-bogotá-f22)
    - 4.6 [`sesion_bitacora` — participación por bitácora (F2)](#46-sesion_bitacora--participación-por-bitácora-f2)
    - 4.7 [`conformacion_turno` — snapshot histórico por turno-planta](#47-conformacion_turno--snapshot-histórico-por-turno-planta)
+   - 4.8 [`disponibilidad_estado` — máquina de estados DISP (D-026)](#48-disponibilidad_estado--máquina-de-estados-disp-d-026)
 5. [Integración con el Dashboard (esquema `bitacora`)](#5-integración-con-el-dashboard-esquema-bitacora)
 6. [Vistas útiles](#6-vistas-útiles)
 7. [Notas de diseño](#7-notas-de-diseño)
@@ -753,6 +762,111 @@ PK natural rechaza duplicados → idempotente entre runs concurrentes y entre sw
 
 ---
 
+### 4.8 `disponibilidad_estado` — máquina de estados DISP (D-026)
+
+Tabla dedicada para la bitácora DISP (Disponibilidad). Hasta v1.6, DISP vivía en `registro_activo`/`registro_historico` con los datos clave (`evento`, `codigo`, `fecha_inicio_estado`) embebidos en `campos_extra` JSON — eso obligaba ~10 excepciones documentadas en §7.8. **D-026 (v1.7)** mueve DISP a ER nativo: una sola tabla con columnas tipadas, sin doble escritura, sin filtered index DISP-only sobre tablas genéricas, sin vista intermedia `v_disp_intervalos`.
+
+```sql
+CREATE TABLE bitacora.disponibilidad_estado (
+    disponibilidad_id            INT IDENTITY(1,1) PRIMARY KEY,
+    planta_id                    VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+    estado                       VARCHAR(20)   NOT NULL
+        CONSTRAINT CK_disp_estado_evento
+        CHECK (estado IN ('En Servicio','En Reserva','Indisponible','Mantenimiento')),
+    codigo                       SMALLINT      NOT NULL CHECK (codigo IN (-1, 0, 1)),
+    fecha_inicio_estado          DATETIME2     NOT NULL,
+    fecha_fin_estado             DATETIME2     NULL,          -- NULL = vigente; no-NULL = cerrado
+    detalle                      NVARCHAR(MAX) NULL,
+    jdts_snapshot                NVARCHAR(MAX) NOT NULL DEFAULT '[]',
+    jefes_planta_snapshot        NVARCHAR(MAX) NOT NULL DEFAULT '[]',
+    gerentes_produccion_snapshot NVARCHAR(MAX) NOT NULL DEFAULT '[]',   -- nuevo en D-026
+    ingenieros_snapshot          NVARCHAR(MAX) NOT NULL DEFAULT '[]',
+    creado_por                   INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+    creado_en                    DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    modificado_por               INT           NULL REFERENCES lov_bit.usuario(usuario_id),
+    modificado_en                DATETIME2     NULL
+);
+
+-- 1 vigente por planta (segunda barrera al UPDLOCK del POST).
+CREATE UNIQUE INDEX UQ_disp_estado_vigente_por_planta
+    ON bitacora.disponibilidad_estado(planta_id)
+    WHERE fecha_fin_estado IS NULL;
+
+-- Lookup por planta ordenado DESC (historial paginado, último cerrado).
+CREATE INDEX IX_disp_estado_planta_inicio
+    ON bitacora.disponibilidad_estado(planta_id, fecha_inicio_estado DESC);
+
+-- Columnas Bogotá calculadas (F22.D1 idem). No persistidas; costo cero al INSERT.
+ALTER TABLE bitacora.disponibilidad_estado
+    ADD fecha_inicio_estado_bogota AS DATEADD(HOUR, -5, fecha_inicio_estado);
+ALTER TABLE bitacora.disponibilidad_estado
+    ADD fecha_fin_estado_bogota    AS DATEADD(HOUR, -5, fecha_fin_estado);
+ALTER TABLE bitacora.disponibilidad_estado
+    ADD creado_en_bogota           AS DATEADD(HOUR, -5, creado_en);
+ALTER TABLE bitacora.disponibilidad_estado
+    ADD modificado_en_bogota       AS DATEADD(HOUR, -5, modificado_en);
+```
+
+**Vista derivada de acumulados (window functions):**
+
+```sql
+CREATE VIEW bitacora.v_disponibilidad_estado AS
+WITH base AS (
+    SELECT *,
+        CAST(DATEDIFF_BIG(MILLISECOND, fecha_inicio_estado,
+                          COALESCE(fecha_fin_estado, SYSUTCDATETIME())) AS BIGINT) / 3600000.0
+            AS horas_intervalo
+    FROM bitacora.disponibilidad_estado
+)
+SELECT
+    disponibilidad_id,
+    planta_id                                                                AS planta,
+    codigo                                                                   AS codigo_estado,
+    estado, detalle,
+    fecha_inicio_estado                                                      AS fecha,
+    fecha_fin_estado,
+    creado_en                                                                AS fecha_creacion,
+    SUM(CASE WHEN estado='En Servicio'   THEN horas_intervalo ELSE 0 END)
+        OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)              AS horas_en_servicio,
+    SUM(CASE WHEN estado='Indisponible'  THEN horas_intervalo ELSE 0 END)
+        OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)              AS horas_en_indisponible,
+    SUM(CASE WHEN estado='Mantenimiento' THEN horas_intervalo ELSE 0 END)
+        OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)              AS horas_en_mantenimiento,
+    SUM(CASE WHEN estado='En Reserva'    THEN horas_intervalo ELSE 0 END)
+        OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)              AS horas_en_reserva,
+    jefes_planta_snapshot, gerentes_produccion_snapshot,
+    jdts_snapshot, ingenieros_snapshot,
+    creado_por, modificado_por, modificado_en
+FROM base;
+```
+
+El vigente (sin `fecha_fin_estado`) se trunca a `SYSUTCDATETIME()` al calcular `horas_intervalo` — los consumidores que necesiten conocer el reloj usado deben leer el endpoint `/api/disponibilidad/metricas` que devuelve `ahora` explícito.
+
+**Invariantes:**
+
+- **1 vigente por planta** garantizado por `UQ_disp_estado_vigente_por_planta` (filtered unique). El POST agarra `UPDLOCK+HOLDLOCK` sobre el row vigente como serialización defensiva en concurrencia.
+- **No estados consecutivos iguales**: validado en backend (POST → 409 `mismo_estado`; PUT → 409 `mismo_estado_que_anterior` mirando el último cerrado N-1).
+- **Cronología sin gap**: cuando un POST cierra el vigente, `fecha_fin_estado` del cerrado = `fecha_inicio_estado` del nuevo (regla preservada de D-011). PUT que cambia `fecha_inicio_estado` del vigente actualiza `N-1.fecha_fin_estado` para mantener el invariante.
+- **Inmutabilidad post-cierre**: solo el vigente (`fecha_fin_estado IS NULL`) es editable vía PUT. Los cerrados son immutables (excepto el side-effect cronológico D-011 sobre `fecha_fin_estado`).
+
+**Flujos transaccionales (sin doble escritura):**
+
+1. **POST /api/registros** (rama DISP) — RF-055. `findVigente` → si hay y estado distinto, `cerrarVigente` (UPDATE `fecha_fin_estado`); snapshots; `insertNuevoEstado` (INSERT con OUTPUT INSERTED.*). Devuelve `{ registro, vigente_anterior_movido_id }` con `registro.registro_id = disponibilidad_id` y `campos_extra` reconstruido como JSON string para compat con el shape legacy del frontend.
+2. **PUT /api/registros/:id** (rama DISP) — RF-056. Peek a `disponibilidad_estado` por id; si match → `actualizarVigente` (UPDATE en sitio). Si `fecha_inicio_estado` cambió, `cerrarVigente` del N-1 con la nueva fecha (cronología sin gap, D-011).
+3. **POST /api/disponibilidad/deshacer** — RF-057. `findVigente` → `eliminarPorId` (DELETE físico); `findUltimoCerrado` → `restaurarComoVigente` (UPDATE `fecha_fin_estado=NULL`). El row del N-1 NO se mueve entre tablas; vuelve a vigente in-place. Si no hay N-1, la planta queda sin vigente (la vista compat §5.2 devuelve 0 filas — empty state).
+
+**Migración idempotente (F26.A1):**
+
+`db.js::initDB()` ejecuta el bloque F26.A1 una sola vez (gateado por flag en `bitacora.migracion_aplicada`). Dentro de una transacción única: crea la tabla + índices + columnas Bogotá + vista `v_disponibilidad_estado`, hace backfill desde `registro_activo` ∪ `registro_historico` (mapea `JSON_VALUE(campos_extra,'$.evento') → estado`, `CAST(... AS SMALLINT) → codigo`, `fecha_evento → fecha_inicio_estado`), valida conteo de origen vs. destino con `THROW 50001` si no coincide, hace DELETE de rows DISP en `registro_activo`/`registro_historico`, dropea `UQ_disp_vigente_por_planta` y `v_disp_intervalos` y la vieja `disponibilidad_dashboard` (tabla), crea la vista compat `disponibilidad_dashboard` (§5.2), inserta el flag F26.A1. Ante cualquier fallo: rollback completo → flag no se setea → próximo arranque reintenta. Bloques previos que tocaban `disponibilidad_dashboard` como tabla (F12.A7, D-024, F22.D1) se gatearon con `IF EXISTS sys.tables` para no fallar tras la migración.
+
+**Cross-ref:** ADR [[D-026]] documenta la decisión completa. §5.2 describe la vista compat para cross-repo. §7.8 queda como referencia histórica de las invariantes que DISP rompía pre-D-026.
+
+---
+
 ## 5. Integración con el Dashboard (esquema `bitacora`)
 
 El esquema expone dos tablas-puente independientes hacia el Dashboard de Generación:
@@ -821,9 +935,11 @@ CREATE VIEW bitacora.autorizacion_dashboard AS
 
 **Estado real al 2026-05-18:** la vista sigue creándose en cada arranque (`server/db.js`) pero **ningún consumidor activo la usa** — el Dashboard ya consume `/api/eventos-dashboard`. F9 originalmente planeaba eliminarla; el bloque DROP+CREATE quedó en el código. Pendiente: borrar el bloque o ratificarla como contrato externo si algún tercero la lee.
 
-### 5.2 `disponibilidad_dashboard` (estado vigente por planta, DISP)
+### 5.2 `disponibilidad_dashboard` (vista — estado vigente por planta, DISP)
 
-Cimiento cross-app para que F15 (futuro) muestre un badge de disponibilidad por planta en `dashboard-gen-gec3`. Se mantiene **una fila por planta** sincronizada con el vigente real en `registro_activo` mediante UPSERT atómico.
+Cimiento cross-app para que F15 (futuro) muestre un badge de disponibilidad por planta en `dashboard-gen-gec3`. **Una fila por planta** con el estado vigente.
+
+> **Cambio v1.7 (D-026):** `disponibilidad_dashboard` ahora es una VIEW sobre `bitacora.disponibilidad_estado` (§4.8), no una tabla puente. El shape se preserva byte-a-byte para no romper el endpoint cross-repo `GET /api/eventos-dashboard?tipo=DISP` (F15 pendiente). Cualquier consumidor SQL directo (no hay ninguno hoy) sigue funcionando — la vista mapea `disponibilidad_id → registro_activo_id` y `jefes_planta_snapshot → jefes_snapshot`, y deriva `actualizado_en` como `COALESCE(modificado_en, creado_en)`. Filtra implícitamente `fecha_fin_estado IS NULL` (solo vigentes). El DDL de la tabla original queda como referencia histórica más abajo.
 
 ```sql
 CREATE TABLE bitacora.disponibilidad_dashboard (
@@ -988,6 +1104,8 @@ Los nombres humanos de los roles se resuelven **del lado del cliente** parseando
 
 ### 7.8 Disponibilidad como mini-dashboard (F12)
 
+> **Nota v1.7 (D-026):** esta sección queda como referencia histórica de F12–F14. DISP ya NO rompe los invariantes listados — vive en su propia tabla `bitacora.disponibilidad_estado` (§4.8). El refactor preservó el contrato HTTP, por lo que el comportamiento observable de los endpoints, el frontend y el cross-repo no cambió. Las descripciones abajo (turno NULL, filtered index DISP-only, etc.) reflejan el modelo F12 original, no el modelo post-D-026.
+
 La bitácora DISP rompe deliberadamente varias invariantes del modelo general porque su semántica operativa es distinta (estado vigente único por planta, sin ciclo de turno):
 
 - **No usa cierre de turno:** los registros se cierran automáticamente cuando llega un evento posterior (UPDATE `fecha_fin_estado` + INSERT en histórico + DELETE del activo, todo en transacción).
@@ -1059,6 +1177,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 | 1.4 | 2026-05-05 | F19+F20+F21+F22 (corrección de fechas — convención TZ formalizada). Sección 7.10 nueva con la convención (BD en UTC, presentación Bogotá explícito), antipatrones prohibidos, helpers canónicos. Sección 4.5 nueva con columnas calculadas `*_bogota` para inspección humana en SSMS, aplicadas vía migración idempotente F22.D1 en `db.js::initDB()`. Bugs corregidos en F19: T1 (`GET /api/sala-de-mando` con `DATEADD(HOUR, -5, fecha_evento)`), T2 (sweep TTL `db.js` con `SYSUTCDATETIME()`), T3 (CIET `fecha_cerrada` y `fecha_revertida` en hora Bogotá). T4 (cierre cronológico edge case) queda como deuda documentada. F20 corrigió formatters frontend (T5/T6/T7) con `timeZone: 'America/Bogota'` explícito en `BitacorasGecelca3.jsx`, `HistoricoTable.jsx` y `Disponibilidad/CambiarEstadoModal.jsx`. F21 agregó tests de helpers (`server/tests/fechas_bogota.test.js`). |
 | 1.5 | 2026-05-18 | Sincronización doc↔BD productiva tras auditoría de `INFORMATION_SCHEMA` + `sys.indexes` + `sys.foreign_keys`. **Catálogos:** `lov_bit.cargo.puede_cerrar_turno` agregado al DDL (estaba en §2.3.1 sin DDL); cargo "Jefe de Turno" renombrado a "Ingeniero Jefe de Turno" (migración v2). `lov_bit.usuario.username NOT NULL` con `UQ_usuario_username` (reemplaza email como identificador de login); `email` pasa a NULL; `password_hash` migra a bcrypt. `lov_bit.bitacora.oculta` (toggle de sidebar). `lov_bit.tipo_evento.notificar_dashboard_tipo VARCHAR(10) CHECK IN ('AUTH','REDESP','PRUEBA')` (F6) reemplaza al flag JSON `notificar_dashboard:true`. **Sesiones:** `bitacora.sesion_activa.cerrada_en` (F2). **Sweep TTL eliminado en F9** — el modelo post-F2 mantiene la sesión hasta logout o sweeper de turno; §3 y §7.4 actualizadas. **Nueva §4.6 `sesion_bitacora`** (F2 — DDL formal que estaba en código pero ausente del MD). **Registros:** `detalle` pasa a NULL en §4.1 y §4.2 (F3). **Dashboard:** §5.1 UQ corregido a 4 columnas `(planta_id, fecha, periodo, tipo)`; vista compat `autorizacion_dashboard` documentada como deuda viva (el doc v1.4 afirmaba que F9 la eliminó, pero `db.js` la recrea). |
 | 1.6 | 2026-05-19 | Conformación de turno (D-025). **Nueva §4.7** con DDL de `bitacora.conformacion_turno` (PK compuesta, FKs a usuario/planta/cargo, índice de lookup, columnas `*_bogota` calculadas vía F22.D2). Trigger híbrido: `turno-sweeper.js` extendido + catchup en `initDB()` para los últimos 7 días Bogotá. Endpoints `GET /api/conformacion-turno` y `POST /api/conformacion-turno/trigger`. **Fix retro:** `POST /api/auth/logout` ahora pobla `sesion_activa.cerrada_en = SYSUTCDATETIME()` (era deuda F2 nunca cerrada). **Filtro semántico del builder:** una sesión cuenta para el turno X si arrancó dentro de la ventana de X (derivación de D-003). Cobertura backend: 14 tests dirigidos en `conformacion_turno.test.js`. |
+| 1.7 | 2026-05-20 | Migración ER DISP (D-026). **Nueva §4.8** con DDL de `bitacora.disponibilidad_estado` (PK `disponibilidad_id`, columnas tipadas `estado`/`codigo`/`fecha_inicio_estado`/`fecha_fin_estado`, snapshot adicional `gerentes_produccion_snapshot`, filtered unique index `UQ_disp_estado_vigente_por_planta`, columnas Bogotá) + vista `v_disponibilidad_estado` (acumulados via window functions). §5.2 actualizada — `disponibilidad_dashboard` ahora es VIEW del vigente sobre la nueva tabla (preserva shape: `disponibilidad_id → registro_activo_id`, `jefes_planta_snapshot → jefes_snapshot`). §7.8 marcada como histórica. Vista `v_disp_intervalos` dropeada (las métricas suman `DATEDIFF_BIG` directo sobre la nueva tabla). Migración idempotente F26.A1 hace backfill + DELETE de rows DISP en `registro_activo`/`registro_historico`. Contratos HTTP y shape de response preservados (los tests existentes que validan via HTTP siguen verdes). |
 
 ---
 

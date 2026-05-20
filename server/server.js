@@ -14,9 +14,14 @@ import { buildConformacionSnapshot, persistConformacionSnapshot } from './utils/
 import { validateCamposExtra, computeCamposAuto } from './utils/campos.js';
 import {
   findEventoDashboard, upsertEventoDashboard, hasNotificarDashboard,
-  findDisponibilidadDashboard, upsertDisponibilidadDashboard, deleteDisponibilidadDashboard,
+  // D-026: DISP storage migró a `bitacora.disponibilidad_estado`. Los helpers viejos
+  // (find/upsert/deleteDisponibilidadDashboard) fueron reemplazados por los siguientes.
+  findVigente, findUltimoCerrado, insertNuevoEstado, cerrarVigente, actualizarVigente,
+  eliminarPorId, restaurarComoVigente, getEstadoCompleto, getMetricas,
 } from './utils/notificador.js';
-import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from './utils/snapshots.js';
+import {
+  snapshotJDTs, snapshotJefes, snapshotIngenieros, snapshotGerentesProduccion,
+} from './utils/snapshots.js';
 import { registrarEventoCierre, registrarDeshacerDisponibilidad } from './utils/ciet.js';
 import { attachWSS, broadcastUsuariosActivos } from './utils/ws-usuarios-activos.js';
 import { attachWSConteoBitacoras, broadcastConteoBitacoras } from './utils/ws-conteo-bitacoras.js';
@@ -42,6 +47,50 @@ function parseExtra(raw) {
   if (raw == null) return {};
   if (typeof raw !== 'string') return raw;
   try { return JSON.parse(raw); } catch { return null; }
+}
+
+// D-026: cache lazy del bitacora_id de DISP. Lo necesitamos para devolver shape compat
+// (registro.bitacora_id) cuando el handler tomó la fila de disponibilidad_estado y no del
+// peek por body.bitacora_id.
+let _dispBitacoraId = null;
+async function getDispBitacoraId(db) {
+  if (_dispBitacoraId != null) return _dispBitacoraId;
+  const r = await db.request().query(`SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='DISP'`);
+  _dispBitacoraId = r.recordset[0]?.bitacora_id ?? null;
+  return _dispBitacoraId;
+}
+
+// D-026: traduce una fila de `bitacora.disponibilidad_estado` al shape que el frontend ya
+// consume (legacy de `registro_activo` + `campos_extra` JSON). Mantener byte-a-byte salvo
+// `bitacora_id` (que no estaba en el row de activo pero el handler ya lo conocía por body).
+function mapDispRowToLegacyShape(row, bitacoraId) {
+  const fechaInicio = row.fecha_inicio_estado instanceof Date
+    ? row.fecha_inicio_estado
+    : new Date(row.fecha_inicio_estado);
+  return {
+    registro_id: row.disponibilidad_id,
+    bitacora_id: bitacoraId,
+    planta_id: row.planta_id,
+    fecha_evento: row.fecha_inicio_estado,
+    turno: null,
+    detalle: row.detalle,
+    campos_extra: JSON.stringify({
+      evento: row.estado,
+      codigo: row.codigo,
+      fecha_inicio_estado: fechaInicio.toISOString(),
+    }),
+    tipo_evento_id: null,
+    estado: 'borrador',
+    ingenieros_snapshot: row.ingenieros_snapshot,
+    jdts_snapshot: row.jdts_snapshot,
+    // El frontend lee 'jefes_snapshot'; en la tabla nueva la columna es 'jefes_planta_snapshot'.
+    jefes_snapshot: row.jefes_planta_snapshot,
+    creado_por: row.creado_por,
+    creado_en: row.creado_en,
+    modificado_por: row.modificado_por,
+    modificado_en: row.modificado_en,
+    fecha_fin_estado: row.fecha_fin_estado,
+  };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -578,6 +627,8 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (bitacoraCodigo === 'DISP') {
+        // D-026: DISP migró a `bitacora.disponibilidad_estado` (tabla ER nativa). Mismo
+        // shape de request/response que antes, pero el storage es la tabla dedicada.
         if (!(await hasPermisoBitacora(sesion, bitacora_id, 'puede_crear'))) {
           return sendJSON(res, 403, { error: 'Sin permiso para crear en esta bitácora' });
         }
@@ -611,47 +662,27 @@ const server = http.createServer(async (req, res) => {
         }
         const codigoVal = DISP_CODIGO_POR_EVENTO[evento];
 
-        const teRes = await db.request()
-          .input('bid', sql.Int, bitacora_id)
-          .query(`
-            SELECT tipo_evento_id FROM lov_bit.tipo_evento
-            WHERE bitacora_id = @bid AND nombre = 'Cambio de Disponibilidad'
-          `);
-        const dispTipoEventoId = teRes.recordset[0]?.tipo_evento_id;
-        if (!dispTipoEventoId) {
-          return sendJSON(res, 500, { error: "Tipo 'Cambio de Disponibilidad' no encontrado" });
-        }
-
         const transaction = new sql.Transaction(db);
         await transaction.begin();
         try {
-          // UPDLOCK+HOLDLOCK: serializa POSTs concurrentes a la misma planta. El filtered
-          // unique index UQ_disp_vigente_por_planta es la segunda barrera defensiva.
-          const vigenteRes = await new sql.Request(transaction)
-            .input('bid', sql.Int, bitacora_id)
-            .input('p', sql.VarChar(10), planta_id)
-            .query(`
-              SELECT TOP 1 registro_id, fecha_evento, campos_extra
-              FROM bitacora.registro_activo WITH (UPDLOCK, HOLDLOCK)
-              WHERE bitacora_id = @bid AND planta_id = @p AND fecha_fin_estado IS NULL
-            `);
-          const vigente = vigenteRes.recordset[0];
-
+          // UPDLOCK+HOLDLOCK (dentro de findVigente) serializa POSTs concurrentes a la misma
+          // planta. UQ_disp_estado_vigente_por_planta es la segunda barrera defensiva.
+          const vigente = await findVigente(transaction, { planta_id });
           let vigenteAnteriorMovidoId = null;
-          if (vigente) {
-            const vigCampos = parseExtra(vigente.campos_extra) ?? {};
-            const vigEvento = vigCampos.evento;
-            const vigFechaInicioRaw = vigCampos.fecha_inicio_estado ?? vigente.fecha_evento;
-            const vigFechaInicio = new Date(vigFechaInicioRaw);
 
-            if (evento === vigEvento) {
+          if (vigente) {
+            const vigFechaInicio = vigente.fecha_inicio_estado instanceof Date
+              ? vigente.fecha_inicio_estado
+              : new Date(vigente.fecha_inicio_estado);
+
+            if (evento === vigente.estado) {
               await transaction.rollback();
               return sendJSON(res, 409, {
                 error: 'mismo_estado',
-                mensaje: `${planta_id} ya está en estado ${vigEvento}`,
+                mensaje: `${planta_id} ya está en estado ${vigente.estado}`,
                 vigente: {
-                  registro_id: vigente.registro_id,
-                  evento: vigEvento,
+                  registro_id: vigente.disponibilidad_id,
+                  evento: vigente.estado,
                   fecha_inicio_estado: vigFechaInicio.toISOString(),
                 },
               });
@@ -662,85 +693,43 @@ const server = http.createServer(async (req, res) => {
                 error: 'fecha_anterior_a_vigente',
                 mensaje: `La fecha es anterior o igual al inicio del estado vigente`,
                 vigente: {
-                  registro_id: vigente.registro_id,
-                  evento: vigEvento,
+                  registro_id: vigente.disponibilidad_id,
+                  evento: vigente.estado,
                   fecha_inicio_estado: vigFechaInicio.toISOString(),
                 },
               });
             }
 
-            await new sql.Request(transaction)
-              .input('rid', sql.Int, vigente.registro_id)
-              .input('fechaFin', sql.DateTime2, fechaInicio)
-              .query(`UPDATE bitacora.registro_activo SET fecha_fin_estado=@fechaFin WHERE registro_id=@rid`);
-
-            await new sql.Request(transaction)
-              .input('rid', sql.Int, vigente.registro_id)
-              .input('cerrado_por', sql.Int, sesion.usuario_id)
-              .query(`
-                INSERT INTO bitacora.registro_historico
-                  (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-                   estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-                   modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo,
-                   fecha_fin_estado)
-                SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-                       'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-                       modificado_por, modificado_en, @cerrado_por, SYSUTCDATETIME(), CAST(DATEADD(HOUR, -5, SYSUTCDATETIME()) AS DATE),
-                       fecha_fin_estado
-                FROM bitacora.registro_activo WHERE registro_id = @rid;
-
-                DELETE FROM bitacora.registro_activo WHERE registro_id = @rid;
-              `);
-            vigenteAnteriorMovidoId = vigente.registro_id;
+            await cerrarVigente(transaction, {
+              disponibilidad_id: vigente.disponibilidad_id,
+              fecha_fin: fechaInicio,
+            });
+            vigenteAnteriorMovidoId = vigente.disponibilidad_id;
           }
 
           const reqFactory = () => new sql.Request(transaction);
           const jdts_snapshot = await snapshotJDTs(reqFactory, { planta_id });
-          const jefes_snapshot = await snapshotJefes(reqFactory);
+          const jefes_planta_snapshot = await snapshotJefes(reqFactory);
+          const gerentes_produccion_snapshot = await snapshotGerentesProduccion(reqFactory);
           const ingenieros_snapshot = await snapshotIngenieros(reqFactory, { planta_id });
 
-          const camposFinal = {
-            ...(extra && typeof extra === 'object' ? extra : {}),
-            evento,
-            codigo: codigoVal,
-            fecha_inicio_estado: fechaInicio.toISOString(),
-          };
-
-          const ins = await new sql.Request(transaction)
-            .input('bitacora_id', sql.Int, bitacora_id)
-            .input('planta_id', sql.VarChar(10), planta_id)
-            .input('fecha_evento', sql.DateTime2, fechaInicio)
-            .input('detalle', sql.NVarChar(sql.MAX), detalle ?? null)
-            .input('campos_extra', sql.NVarChar(sql.MAX), JSON.stringify(camposFinal))
-            .input('tipo_evento_id', sql.Int, dispTipoEventoId)
-            .input('ingenieros_snapshot', sql.NVarChar(sql.MAX), ingenieros_snapshot)
-            .input('jdts_snapshot', sql.NVarChar(sql.MAX), jdts_snapshot)
-            .input('jefes_snapshot', sql.NVarChar(sql.MAX), jefes_snapshot)
-            .input('creado_por', sql.Int, sesion.usuario_id)
-            .query(`
-              INSERT INTO bitacora.registro_activo
-                (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-                 estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por,
-                 fecha_fin_estado)
-              OUTPUT INSERTED.*
-              VALUES (@bitacora_id, @planta_id, @fecha_evento, NULL, @detalle, @campos_extra, @tipo_evento_id,
-                      'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por,
-                      NULL)
-            `);
-          const registro = ins.recordset[0];
-
-          await upsertDisponibilidadDashboard(transaction, {
+          const row = await insertNuevoEstado(transaction, {
             planta_id,
-            evento,
+            estado: evento,
             codigo: codigoVal,
             fecha_inicio_estado: fechaInicio,
-            registro_activo_id: registro.registro_id,
+            detalle: detalle ?? null,
             jdts_snapshot,
-            jefes_snapshot,
+            jefes_planta_snapshot,
+            gerentes_produccion_snapshot,
+            ingenieros_snapshot,
+            creado_por: sesion.usuario_id,
           });
 
           await transaction.commit();
           broadcastConteoBitacoras(planta_id).catch(() => {});
+
+          const registro = mapDispRowToLegacyShape(row, bitacora_id);
           return sendJSON(res, 201, { registro, vigente_anterior_movido_id: vigenteAnteriorMovidoId });
         } catch (err) {
           try { await transaction.rollback(); } catch {}
@@ -921,27 +910,32 @@ const server = http.createServer(async (req, res) => {
       const { detalle, turno, fecha_evento, campos_extra, tipo_evento_id } = body;
 
       const db = await getDB();
-      const check = await db.request()
-        .input('registro_id', sql.Int, registro_id)
-        .query(`
-          SELECT ra.registro_id, ra.estado, ra.bitacora_id, ra.planta_id, ra.creado_por,
-                 ra.fecha_evento, ra.fecha_fin_estado, ra.campos_extra, b.codigo AS bitacora_codigo
-          FROM bitacora.registro_activo ra
-          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
-          WHERE ra.registro_id = @registro_id
-        `);
-      if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
-      const reg = check.recordset[0];
 
-      // F12: rama DISP — no usa estado='borrador' como gate (DISP nunca pasa por cierre de
-      // turno). Solo deja editar el vigente (fecha_fin_estado IS NULL); los del histórico
-      // son inmutables como el resto de bitácoras. Permiso = puede_crear en DISP, NO
-      // canEditarRegistro (eso bloquearía multi-planta).
-      if (reg.bitacora_codigo === 'DISP') {
+      // D-026: DISP migró a `bitacora.disponibilidad_estado`. El frontend sigue mandando
+      // PUT /api/registros/:id sin distinguir, así que peek primero contra la tabla nueva.
+      // Si match → rama DISP (return). Si no → fallback al lookup en registro_activo.
+      const dispPeek = await db.request()
+        .input('id', sql.Int, registro_id)
+        .query(`
+          SELECT disponibilidad_id, planta_id, estado, codigo,
+                 fecha_inicio_estado, fecha_fin_estado, detalle,
+                 jdts_snapshot, jefes_planta_snapshot, gerentes_produccion_snapshot, ingenieros_snapshot,
+                 creado_por, creado_en, modificado_por, modificado_en
+          FROM bitacora.disponibilidad_estado
+          WHERE disponibilidad_id = @id
+        `);
+
+      if (dispPeek.recordset[0]) {
+        const reg = dispPeek.recordset[0];
+        const dispBid = await getDispBitacoraId(db);
+
+        // Solo se puede editar el vigente (fecha_fin_estado IS NULL); los cerrados son
+        // inmutables como en el resto de bitácoras (DISP era la excepción D-011 para fecha
+        // del N-1, no para edición del cerrado).
         if (reg.fecha_fin_estado !== null) {
           return sendJSON(res, 422, { error: 'Solo se puede editar el registro vigente de DISP' });
         }
-        if (!(await hasPermisoBitacora(sesion, reg.bitacora_id, 'puede_crear'))) {
+        if (!(await hasPermisoBitacora(sesion, dispBid, 'puede_crear'))) {
           return sendJSON(res, 403, { error: 'Sin permiso para editar registros de Disponibilidad' });
         }
         const { planta_id: bodyPlanta } = body;
@@ -953,9 +947,10 @@ const server = http.createServer(async (req, res) => {
         if (extraIn === null) {
           return sendJSON(res, 400, { error: 'campos_extra inválido (no es JSON)' });
         }
-        const vigCampos = parseExtra(reg.campos_extra) ?? {};
-        const eventoActual = vigCampos.evento;
-        const fechaInicioActual = new Date(vigCampos.fecha_inicio_estado ?? reg.fecha_evento);
+        const eventoActual = reg.estado;
+        const fechaInicioActual = reg.fecha_inicio_estado instanceof Date
+          ? reg.fecha_inicio_estado
+          : new Date(reg.fecha_inicio_estado);
 
         // Aplicar overrides solo cuando vienen explícitos en campos_extra o fecha_evento.
         const eventoNuevo = (extraIn && 'evento' in extraIn) ? extraIn.evento : eventoActual;
@@ -984,109 +979,97 @@ const server = http.createServer(async (req, res) => {
           const eventoCambia = eventoNuevo !== eventoActual;
           const fechaCambia = fechaInicioNueva.getTime() !== fechaInicioActual.getTime();
 
-          // N-1 = el más reciente del histórico de esta planta para DISP. Sirve para validar
-          // que el nuevo evento no repita el anterior y para el side-effect del fecha_fin_estado.
+          // N-1 = último cerrado de esta planta. Sirve para validar que el nuevo evento no
+          // repita el anterior y para el side-effect D-011 sobre N-1.fecha_fin_estado.
           let nMinus1 = null;
           if (eventoCambia || fechaCambia) {
-            const r = await new sql.Request(transaction)
-              .input('bid', sql.Int, reg.bitacora_id)
-              .input('p', sql.VarChar(10), reg.planta_id)
-              .query(`
-                SELECT TOP 1 registro_id, fecha_evento, campos_extra
-                FROM bitacora.registro_historico WITH (UPDLOCK, HOLDLOCK)
-                WHERE bitacora_id = @bid AND planta_id = @p
-                ORDER BY fecha_evento DESC, registro_id DESC
-              `);
-            nMinus1 = r.recordset[0] || null;
+            nMinus1 = await findUltimoCerrado(transaction, { planta_id: reg.planta_id });
           }
 
-          let nMinus1FechaInicio = null;
-          let nMinus1Evento = null;
-          if (nMinus1) {
-            const c = parseExtra(nMinus1.campos_extra) ?? {};
-            nMinus1Evento = c.evento;
-            nMinus1FechaInicio = new Date(c.fecha_inicio_estado ?? nMinus1.fecha_evento);
-          }
-
-          if (eventoCambia && nMinus1 && eventoNuevo === nMinus1Evento) {
+          if (eventoCambia && nMinus1 && eventoNuevo === nMinus1.estado) {
             await transaction.rollback();
             return sendJSON(res, 409, {
               error: 'mismo_estado_que_anterior',
-              mensaje: `El estado anterior ya era ${nMinus1Evento}; no se permite la secuencia ${nMinus1Evento} → ${eventoNuevo}`,
-              n_menos_1: { registro_id: nMinus1.registro_id, evento: nMinus1Evento },
+              mensaje: `El estado anterior ya era ${nMinus1.estado}; no se permite la secuencia ${nMinus1.estado} → ${eventoNuevo}`,
+              n_menos_1: { registro_id: nMinus1.disponibilidad_id, evento: nMinus1.estado },
             });
           }
           if (fechaCambia && nMinus1) {
+            const nMinus1FechaInicio = nMinus1.fecha_inicio_estado instanceof Date
+              ? nMinus1.fecha_inicio_estado
+              : new Date(nMinus1.fecha_inicio_estado);
             if (fechaInicioNueva.getTime() < nMinus1FechaInicio.getTime()) {
               await transaction.rollback();
               return sendJSON(res, 409, {
                 error: 'fecha_anterior_a_n_menos_1',
                 mensaje: 'La nueva fecha es anterior al inicio del estado previo',
                 n_menos_1: {
-                  registro_id: nMinus1.registro_id,
+                  registro_id: nMinus1.disponibilidad_id,
                   fecha_inicio_estado: nMinus1FechaInicio.toISOString(),
                 },
               });
             }
-            // Mantener cronología sin gap: el N-1 cierra exactamente cuando arranca el vigente.
-            await new sql.Request(transaction)
-              .input('rid', sql.Int, nMinus1.registro_id)
-              .input('fechaFin', sql.DateTime2, fechaInicioNueva)
-              .query(`UPDATE bitacora.registro_historico SET fecha_fin_estado=@fechaFin WHERE registro_id=@rid`);
-          }
-
-          const camposFinal = {
-            ...vigCampos,
-            ...(extraIn && typeof extraIn === 'object' ? extraIn : {}),
-            evento: eventoNuevo,
-            codigo: codigoVal,
-            fecha_inicio_estado: fechaInicioNueva.toISOString(),
-          };
-
-          const upd = await new sql.Request(transaction)
-            .input('rid', sql.Int, registro_id)
-            .input('detalle', sql.NVarChar(sql.MAX), detalleNuevo)
-            .input('fecha_evento', sql.DateTime2, fechaInicioNueva)
-            .input('campos_extra', sql.NVarChar(sql.MAX), JSON.stringify(camposFinal))
-            .input('modificado_por', sql.Int, sesion.usuario_id)
-            .query(`
-              UPDATE bitacora.registro_activo
-              SET detalle        = COALESCE(@detalle, detalle),
-                  fecha_evento   = @fecha_evento,
-                  campos_extra   = @campos_extra,
-                  modificado_por = @modificado_por,
-                  modificado_en  = SYSUTCDATETIME()
-              OUTPUT INSERTED.*
-              WHERE registro_id = @rid AND fecha_fin_estado IS NULL
-            `);
-          if (upd.recordset.length === 0) {
-            await transaction.rollback();
-            return sendJSON(res, 409, { error: 'El registro dejó de ser vigente entre lectura y escritura' });
+            // D-011: mantener cronología sin gap — el N-1 cierra exactamente cuando arranca el vigente.
+            await cerrarVigente(transaction, {
+              disponibilidad_id: nMinus1.disponibilidad_id,
+              fecha_fin: fechaInicioNueva,
+            });
           }
 
           // Snapshots vigentes del momento de edición (no preservamos los del POST original).
           const reqFactory = () => new sql.Request(transaction);
           const jdts_snapshot = await snapshotJDTs(reqFactory, { planta_id: reg.planta_id });
-          const jefes_snapshot = await snapshotJefes(reqFactory);
+          const jefes_planta_snapshot = await snapshotJefes(reqFactory);
+          const gerentes_produccion_snapshot = await snapshotGerentesProduccion(reqFactory);
+          const ingenieros_snapshot = await snapshotIngenieros(reqFactory, { planta_id: reg.planta_id });
 
-          await upsertDisponibilidadDashboard(transaction, {
-            planta_id: reg.planta_id,
-            evento: eventoNuevo,
+          await actualizarVigente(transaction, {
+            disponibilidad_id: reg.disponibilidad_id,
+            estado: eventoNuevo,
             codigo: codigoVal,
             fecha_inicio_estado: fechaInicioNueva,
-            registro_activo_id: registro_id,
+            detalle: detalleNuevo,
             jdts_snapshot,
-            jefes_snapshot,
+            jefes_planta_snapshot,
+            gerentes_produccion_snapshot,
+            ingenieros_snapshot,
             modificado_por: sesion.usuario_id,
           });
 
+          // Re-fetch dentro de la transacción para devolver el row actualizado con los
+          // valores definitivos (modificado_en lo seteó SYSUTCDATETIME en el UPDATE).
+          const after = await new sql.Request(transaction)
+            .input('id', sql.Int, reg.disponibilidad_id)
+            .query(`
+              SELECT disponibilidad_id, planta_id, estado, codigo,
+                     fecha_inicio_estado, fecha_fin_estado, detalle,
+                     jdts_snapshot, jefes_planta_snapshot, gerentes_produccion_snapshot, ingenieros_snapshot,
+                     creado_por, creado_en, modificado_por, modificado_en
+              FROM bitacora.disponibilidad_estado WHERE disponibilidad_id=@id
+            `);
+          const actualizado = after.recordset[0];
+
           await transaction.commit();
-          return sendJSON(res, 200, { registro: upd.recordset[0] });
+          return sendJSON(res, 200, { registro: mapDispRowToLegacyShape(actualizado, dispBid) });
         } catch (err) {
           try { await transaction.rollback(); } catch {}
           throw err;
         }
       }
+
+      // No-DISP: lookup tradicional en registro_activo.
+      const check = await db.request()
+        .input('registro_id', sql.Int, registro_id)
+        .query(`
+          SELECT ra.registro_id, ra.estado, ra.bitacora_id, ra.planta_id, ra.creado_por,
+                 ra.fecha_evento, ra.fecha_fin_estado, ra.campos_extra, b.codigo AS bitacora_codigo
+          FROM bitacora.registro_activo ra
+          INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+          WHERE ra.registro_id = @registro_id
+        `);
+      if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
+      const reg = check.recordset[0];
+
 
       if (reg.estado !== 'borrador') {
         return sendJSON(res, 409, { error: 'Solo se pueden editar registros en borrador' });
@@ -1933,8 +1916,10 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true });
     }
 
-    // F12: GET /api/disponibilidad?planta_id=&historial_limit=20&historial_offset=0
+    // F12 / D-026: GET /api/disponibilidad?planta_id=&historial_limit=20&historial_offset=0
     // Vista del mini-dashboard. Permiso: puede_ver=1 en DISP (todos los cargos post-F12.A6).
+    // Storage migrado a `bitacora.disponibilidad_estado` (D-026); la lógica se mudó al helper
+    // `getEstadoCompleto` en notificador.js.
     if (pathname === '/api/disponibilidad' && method === 'GET') {
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
@@ -1944,91 +1929,17 @@ const server = http.createServer(async (req, res) => {
       const historial_offset = Math.max(0, parseInt(url.searchParams.get('historial_offset') || '0', 10));
 
       const db = await getDB();
-      const dispRow = await db.request().query(`SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='DISP'`);
-      const dispBitacoraId = dispRow.recordset[0]?.bitacora_id;
+      const dispBitacoraId = await getDispBitacoraId(db);
       if (!dispBitacoraId) return sendJSON(res, 500, { error: 'bitácora DISP no configurada' });
       if (!(await hasPermisoBitacora(sesion, dispBitacoraId, 'puede_ver'))) {
         return sendJSON(res, 403, { error: 'Sin permiso para ver Disponibilidad' });
       }
 
-      const vigenteRes = await db.request()
-        .input('bid', sql.Int, dispBitacoraId)
-        .input('p', sql.VarChar(10), planta_id)
-        .query(`
-          SELECT ra.registro_id, ra.planta_id, ra.fecha_evento, ra.detalle, ra.campos_extra,
-                 ra.creado_por, ra.creado_en, ra.modificado_por, ra.modificado_en,
-                 ra.ingenieros_snapshot, ra.jdts_snapshot, ra.jefes_snapshot,
-                 autor.nombre_completo AS creado_por_nombre,
-                 modu.nombre_completo  AS modificado_por_nombre
-          FROM bitacora.registro_activo ra
-          LEFT JOIN lov_bit.usuario autor ON autor.usuario_id = ra.creado_por
-          LEFT JOIN lov_bit.usuario modu  ON modu.usuario_id  = ra.modificado_por
-          WHERE ra.bitacora_id = @bid AND ra.planta_id = @p AND ra.fecha_fin_estado IS NULL
-        `);
-      const vigenteRow = vigenteRes.recordset[0] || null;
-      const vigente = vigenteRow ? (() => {
-        const c = parseExtra(vigenteRow.campos_extra) ?? {};
-        return {
-          registro_id: vigenteRow.registro_id,
-          planta_id: vigenteRow.planta_id,
-          evento: c.evento ?? null,
-          codigo: c.codigo ?? null,
-          fecha_inicio_estado: c.fecha_inicio_estado ?? vigenteRow.fecha_evento,
-          detalle: vigenteRow.detalle,
-          creado_por: { usuario_id: vigenteRow.creado_por, nombre_completo: vigenteRow.creado_por_nombre },
-          creado_en: vigenteRow.creado_en,
-          modificado_por: vigenteRow.modificado_por
-            ? { usuario_id: vigenteRow.modificado_por, nombre_completo: vigenteRow.modificado_por_nombre }
-            : null,
-          modificado_en: vigenteRow.modificado_en,
-          ingenieros_snapshot: parseExtra(vigenteRow.ingenieros_snapshot) ?? [],
-          jdts_snapshot: parseExtra(vigenteRow.jdts_snapshot) ?? [],
-          jefes_snapshot: parseExtra(vigenteRow.jefes_snapshot) ?? [],
-        };
-      })() : null;
-
-      const histReq = db.request()
-        .input('bid', sql.Int, dispBitacoraId)
-        .input('p', sql.VarChar(10), planta_id)
-        .input('limit', sql.Int, historial_limit)
-        .input('offset', sql.Int, historial_offset);
-      const histRes = await histReq.query(`
-        SELECT rh.registro_id, rh.fecha_evento, rh.fecha_fin_estado, rh.detalle, rh.campos_extra,
-               rh.creado_por, rh.creado_en,
-               autor.nombre_completo AS creado_por_nombre
-        FROM bitacora.registro_historico rh
-        LEFT JOIN lov_bit.usuario autor ON autor.usuario_id = rh.creado_por
-        WHERE rh.bitacora_id = @bid AND rh.planta_id = @p
-        ORDER BY rh.fecha_evento DESC, rh.registro_id DESC
-        OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
-      `);
-      const histTotal = await db.request()
-        .input('bid', sql.Int, dispBitacoraId)
-        .input('p', sql.VarChar(10), planta_id)
-        .query(`SELECT COUNT(*) AS total FROM bitacora.registro_historico WHERE bitacora_id=@bid AND planta_id=@p`);
-
-      const historial = histRes.recordset.map((row) => {
-        const c = parseExtra(row.campos_extra) ?? {};
-        return {
-          registro_id: row.registro_id,
-          evento: c.evento ?? null,
-          codigo: c.codigo ?? null,
-          fecha_inicio_estado: c.fecha_inicio_estado ?? row.fecha_evento,
-          fecha_fin_estado: row.fecha_fin_estado,
-          detalle: row.detalle,
-          creado_por: { usuario_id: row.creado_por, nombre_completo: row.creado_por_nombre },
-          creado_en: row.creado_en,
-        };
-      });
-
-      return sendJSON(res, 200, {
-        vigente,
-        historial,
-        historial_total: histTotal.recordset[0].total,
-      });
+      const out = await getEstadoCompleto(db, { planta_id, historial_limit, historial_offset });
+      return sendJSON(res, 200, out);
     }
 
-    // D-024 (2026-05-15): GET /api/disponibilidad/metricas?planta_id=&desde=&hasta=
+    // D-024 / D-026: GET /api/disponibilidad/metricas?planta_id=&desde=&hasta=
     //
     // Devuelve, para una ventana [desde, hasta] (UTC ISO; default = primer registro DISP
     // de la planta a SYSUTCDATETIME()), la duración acumulada en ms por evento + dos
@@ -2036,10 +1947,9 @@ const server = http.createServer(async (req, res) => {
     //   - disponible       = En Servicio + En Reserva
     //   - no_disponible    = Indisponible + Mantenimiento
     //
-    // Suma DATEDIFF_BIG(ms, ...) sobre la intersección de cada intervalo de
-    // bitacora.v_disp_intervalos con [desde, hasta]. El vigente (`fecha_fin_estado IS NULL`)
-    // se trunca a SYSUTCDATETIME() (que se devuelve como `ahora` para que el cliente sepa
-    // qué reloj usó el server). Permiso: puede_ver en DISP (todos los cargos).
+    // D-026: la query se mudó al helper `getMetricas` en notificador.js, que ahora suma
+    // DATEDIFF_BIG directo sobre `bitacora.disponibilidad_estado` (la vista intermedia
+    // `v_disp_intervalos` fue dropeada en F26.A1). Shape de respuesta inalterado.
     if (pathname === '/api/disponibilidad/metricas' && method === 'GET') {
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
@@ -2054,103 +1964,36 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 400, { error: 'planta_id no es operativa' });
       }
 
-      const dispRow = await db.request().query(`SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='DISP'`);
-      const dispBitacoraId = dispRow.recordset[0]?.bitacora_id;
+      const dispBitacoraId = await getDispBitacoraId(db);
       if (!dispBitacoraId) return sendJSON(res, 500, { error: 'bitácora DISP no configurada' });
       if (!(await hasPermisoBitacora(sesion, dispBitacoraId, 'puede_ver'))) {
         return sendJSON(res, 403, { error: 'Sin permiso para ver Disponibilidad' });
       }
 
-      // Defaults: desde = inicio del primer intervalo registrado para la planta; hasta = NOW UTC.
       const desdeRaw = url.searchParams.get('desde');
       const hastaRaw = url.searchParams.get('hasta');
-      let desde = desdeRaw ? new Date(desdeRaw) : null;
-      let hasta = hastaRaw ? new Date(hastaRaw) : null;
+      const desde = desdeRaw ? new Date(desdeRaw) : null;
+      const hasta = hastaRaw ? new Date(hastaRaw) : null;
       if (desdeRaw && Number.isNaN(desde.getTime())) {
         return sendJSON(res, 400, { error: 'desde inválido (ISO 8601 requerido)' });
       }
       if (hastaRaw && Number.isNaN(hasta.getTime())) {
         return sendJSON(res, 400, { error: 'hasta inválido (ISO 8601 requerido)' });
       }
-      if (!hasta) hasta = new Date();
-      if (!desde) {
-        const minRow = await db.request()
-          .input('p', sql.VarChar(10), planta_id)
-          .query(`SELECT MIN(fecha_inicio_estado) AS d FROM bitacora.v_disp_intervalos WHERE planta_id=@p`);
-        desde = minRow.recordset[0]?.d ? new Date(minRow.recordset[0].d) : null;
-      }
-      if (!desde) {
-        // No hay registros DISP para la planta — todo en 0.
-        return sendJSON(res, 200, {
-          planta_id,
-          desde: null,
-          hasta: hasta.toISOString(),
-          ahora: hasta.toISOString(),
-          tiempo_ms: { 'En Servicio': 0, 'En Reserva': 0, Indisponible: 0, Mantenimiento: 0 },
-          acumulados_ms: { disponible: 0, no_disponible: 0 },
-          total_ms: 0,
-        });
-      }
-      if (desde.getTime() > hasta.getTime()) {
+      if (desde && hasta && desde.getTime() > hasta.getTime()) {
         return sendJSON(res, 400, { error: 'desde debe ser <= hasta' });
       }
 
-      // Intersección de [fecha_inicio_estado, COALESCE(fecha_fin_estado, NOW)] con [@desde, @hasta]
-      // por intervalo; suma de duraciones en ms agrupada por evento.
-      const ahoraDb = await db.request().query(`SELECT SYSUTCDATETIME() AS ahora`);
-      const ahora = ahoraDb.recordset[0].ahora;
-
-      const aggReq = db.request()
-        .input('p', sql.VarChar(10), planta_id)
-        .input('desde', sql.DateTime2, desde)
-        .input('hasta', sql.DateTime2, hasta)
-        .input('ahora', sql.DateTime2, ahora);
-      const aggRes = await aggReq.query(`
-        SELECT
-          evento,
-          SUM(
-            DATEDIFF_BIG(
-              MILLISECOND,
-              CASE WHEN fecha_inicio_estado < @desde THEN @desde ELSE fecha_inicio_estado END,
-              CASE
-                WHEN COALESCE(fecha_fin_estado, @ahora) > @hasta THEN @hasta
-                ELSE COALESCE(fecha_fin_estado, @ahora)
-              END
-            )
-          ) AS tiempo_ms
-        FROM bitacora.v_disp_intervalos
-        WHERE planta_id = @p
-          AND fecha_inicio_estado < @hasta
-          AND COALESCE(fecha_fin_estado, @ahora) > @desde
-        GROUP BY evento
-      `);
-
-      const tiempo_ms = { 'En Servicio': 0, 'En Reserva': 0, Indisponible: 0, Mantenimiento: 0 };
-      for (const row of aggRes.recordset) {
-        if (row.evento && row.evento in tiempo_ms) {
-          tiempo_ms[row.evento] = Number(row.tiempo_ms) || 0;
-        }
-      }
-      const acumulados_ms = {
-        disponible:    tiempo_ms['En Servicio']  + tiempo_ms['En Reserva'],
-        no_disponible: tiempo_ms.Indisponible    + tiempo_ms.Mantenimiento,
-      };
-      const total_ms = acumulados_ms.disponible + acumulados_ms.no_disponible;
-
-      return sendJSON(res, 200, {
-        planta_id,
-        desde: desde.toISOString(),
-        hasta: hasta.toISOString(),
-        ahora: new Date(ahora).toISOString(),
-        tiempo_ms,
-        acumulados_ms,
-        total_ms,
-      });
+      const out = await getMetricas(db, { planta_id, desde, hasta });
+      return sendJSON(res, 200, out);
     }
 
-    // F12: POST /api/disponibilidad/deshacer { planta_id }
-    // Revierte el último cambio: borra el vigente y restaura el más reciente del histórico
-    // (o vacía dashboard si no hay histórico). Emite CIET 'Deshacer disponibilidad' con audit.
+    // F12 / D-026: POST /api/disponibilidad/deshacer { planta_id }
+    // Revierte el último cambio: borra el vigente y restaura el N-1 (último cerrado) como
+    // vigente — o vacía la planta si no hay N-1. Emite CIET 'Deshacer disponibilidad' con audit.
+    // D-026: storage ahora es `bitacora.disponibilidad_estado`. El vigente se borra con DELETE;
+    // el N-1 se reabre con UPDATE fecha_fin_estado=NULL (`restaurarComoVigente`) — sin mover
+    // filas entre tablas. La vista `disponibilidad_dashboard` queda sincronizada automáticamente.
     if (pathname === '/api/disponibilidad/deshacer' && method === 'POST') {
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
@@ -2158,8 +2001,7 @@ const server = http.createServer(async (req, res) => {
       if (!planta_id) return sendJSON(res, 400, { error: 'planta_id es requerido' });
 
       const db = await getDB();
-      const dispRow = await db.request().query(`SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='DISP'`);
-      const dispBitacoraId = dispRow.recordset[0]?.bitacora_id;
+      const dispBitacoraId = await getDispBitacoraId(db);
       if (!dispBitacoraId) return sendJSON(res, 500, { error: 'bitácora DISP no configurada' });
       if (!(await hasPermisoBitacora(sesion, dispBitacoraId, 'puede_crear'))) {
         return sendJSON(res, 403, { error: 'Sin permiso para deshacer en Disponibilidad' });
@@ -2168,103 +2010,42 @@ const server = http.createServer(async (req, res) => {
       const transaction = new sql.Transaction(db);
       await transaction.begin();
       try {
-        const vigRes = await new sql.Request(transaction)
-          .input('bid', sql.Int, dispBitacoraId)
-          .input('p', sql.VarChar(10), planta_id)
-          .query(`
-            SELECT TOP 1 registro_id, fecha_evento, campos_extra
-            FROM bitacora.registro_activo WITH (UPDLOCK, HOLDLOCK)
-            WHERE bitacora_id = @bid AND planta_id = @p AND fecha_fin_estado IS NULL
-          `);
-        const vigente = vigRes.recordset[0];
+        const vigente = await findVigente(transaction, { planta_id });
         if (!vigente) {
           await transaction.rollback();
           return sendJSON(res, 422, { error: 'sin_vigente', mensaje: `${planta_id} no tiene estado vigente` });
         }
-        const vigCampos = parseExtra(vigente.campos_extra) ?? {};
+        const nMenos1 = await findUltimoCerrado(transaction, { planta_id });
 
-        const histRes = await new sql.Request(transaction)
-          .input('bid', sql.Int, dispBitacoraId)
-          .input('p', sql.VarChar(10), planta_id)
-          .query(`
-            SELECT TOP 1 registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle,
-                   campos_extra, tipo_evento_id, ingenieros_snapshot, jdts_snapshot, jefes_snapshot,
-                   creado_por, creado_en, modificado_por, modificado_en
-            FROM bitacora.registro_historico WITH (UPDLOCK, HOLDLOCK)
-            WHERE bitacora_id = @bid AND planta_id = @p
-            ORDER BY fecha_evento DESC, registro_id DESC
-          `);
-        const ultimoHist = histRes.recordset[0] || null;
-
-        // DELETE el vigente siempre (es el que se está deshaciendo).
-        await new sql.Request(transaction)
-          .input('rid', sql.Int, vigente.registro_id)
-          .query(`DELETE FROM bitacora.registro_activo WHERE registro_id=@rid`);
+        // DELETE el vigente (es el que se está deshaciendo).
+        await eliminarPorId(transaction, { disponibilidad_id: vigente.disponibilidad_id });
 
         let restaurado = null;
-        if (ultimoHist) {
-          // Restaurar el más reciente del histórico al activo, fecha_fin_estado=NULL.
-          // IDENTITY_INSERT preserva el registro_id original — la trazabilidad pasa por el
-          // mismo id desde el POST original hasta el deshacer (sino el audit trail se rompe).
-          const restCampos = parseExtra(ultimoHist.campos_extra) ?? {};
-          // No preservamos registro_id al restaurar (IDENTITY se reasigna). El audit trail
-          // del POST original se preserva en el CIET 'Deshacer disponibilidad' que registra
-          // qué evento+fecha+autor se revertieron — el id del restaurado es secundario.
-          const insRest = await new sql.Request(transaction)
-            .input('bitacora_id', sql.Int, ultimoHist.bitacora_id)
-            .input('planta_id', sql.VarChar(10), ultimoHist.planta_id)
-            .input('fecha_evento', sql.DateTime2, ultimoHist.fecha_evento)
-            .input('turno', sql.TinyInt, ultimoHist.turno)
-            .input('detalle', sql.NVarChar(sql.MAX), ultimoHist.detalle)
-            .input('campos_extra', sql.NVarChar(sql.MAX), ultimoHist.campos_extra)
-            .input('tipo_evento_id', sql.Int, ultimoHist.tipo_evento_id)
-            .input('ingenieros_snapshot', sql.NVarChar(sql.MAX), ultimoHist.ingenieros_snapshot)
-            .input('jdts_snapshot', sql.NVarChar(sql.MAX), ultimoHist.jdts_snapshot)
-            .input('jefes_snapshot', sql.NVarChar(sql.MAX), ultimoHist.jefes_snapshot)
-            .input('creado_por', sql.Int, ultimoHist.creado_por)
-            .input('creado_en', sql.DateTime2, ultimoHist.creado_en)
-            .input('modificado_por', sql.Int, ultimoHist.modificado_por)
-            .input('modificado_en', sql.DateTime2, ultimoHist.modificado_en)
-            .query(`
-              INSERT INTO bitacora.registro_activo
-                (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-                 estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot,
-                 creado_por, creado_en, modificado_por, modificado_en, fecha_fin_estado)
-              OUTPUT INSERTED.*
-              VALUES (@bitacora_id, @planta_id, @fecha_evento, @turno, @detalle, @campos_extra, @tipo_evento_id,
-                      'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot,
-                      @creado_por, @creado_en, @modificado_por, @modificado_en, NULL)
-            `);
-          await new sql.Request(transaction)
-            .input('rid', sql.Int, ultimoHist.registro_id)
-            .query(`DELETE FROM bitacora.registro_historico WHERE registro_id=@rid`);
-
-          restaurado = insRest.recordset[0];
-
-          await upsertDisponibilidadDashboard(transaction, {
-            planta_id,
-            evento: restCampos.evento,
-            codigo: restCampos.codigo,
-            fecha_inicio_estado: new Date(restCampos.fecha_inicio_estado ?? ultimoHist.fecha_evento),
-            registro_activo_id: restaurado.registro_id,
-            jdts_snapshot: ultimoHist.jdts_snapshot,
-            jefes_snapshot: ultimoHist.jefes_snapshot,
-          });
-        } else {
-          // Sin histórico: la planta vuelve al empty state.
-          await deleteDisponibilidadDashboard(transaction, { planta_id });
+        if (nMenos1) {
+          // Reabrir el N-1: fecha_fin_estado=NULL → pasa a vigente. No movemos filas entre
+          // tablas; el row es el mismo, solo cambia su estado en la máquina (cerrado → vigente).
+          await restaurarComoVigente(transaction, { disponibilidad_id: nMenos1.disponibilidad_id });
+          restaurado = {
+            registro_id: nMenos1.disponibilidad_id,
+            evento: nMenos1.estado,
+            codigo: nMenos1.codigo,
+            fecha_inicio_estado: nMenos1.fecha_inicio_estado,
+            fecha_fin_estado: null,
+            detalle: nMenos1.detalle,
+          };
         }
 
         const ciet = await registrarDeshacerDisponibilidad(transaction, {
           sesion,
           planta_id,
-          evento_revertido: vigCampos.evento ?? null,
-          fecha_revertida: vigCampos.fecha_inicio_estado ?? vigente.fecha_evento,
+          evento_revertido: vigente.estado,
+          fecha_revertida: vigente.fecha_inicio_estado,
         });
 
         await transaction.commit();
+        broadcastConteoBitacoras(planta_id).catch(() => {});
         return sendJSON(res, 200, {
-          revertido: { registro_id_eliminado: vigente.registro_id, evento: vigCampos.evento ?? null },
+          revertido: { registro_id_eliminado: vigente.disponibilidad_id, evento: vigente.estado },
           restaurado,
           ciet_registro_id: ciet.registro_id,
         });

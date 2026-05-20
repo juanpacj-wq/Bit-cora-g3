@@ -944,8 +944,11 @@ export async function initDB() {
   // F12.A7: cimiento del mini-dashboard. UPSERT desde POST/PUT/deshacer mantiene 1 fila
   // por planta con el estado vigente. Snapshots viajan con la fila para que F15 renderee
   // el indicador con audit completo sin joins.
+  // D-026 (F26.A1): tras la migración, este objeto pasa a ser VIEW (no tabla). Guardamos
+  // contra cualquier objeto del mismo nombre — no solo tablas — para que el CREATE TABLE no
+  // dispare en arranques post-F26 (la vista ya satisface el nombre).
   await db.request().batch(`
-    IF OBJECT_ID('bitacora.disponibilidad_dashboard', 'U') IS NULL
+    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name='disponibilidad_dashboard' AND schema_id=SCHEMA_ID('bitacora'))
     CREATE TABLE bitacora.disponibilidad_dashboard (
       planta_id              VARCHAR(10) PRIMARY KEY REFERENCES lov_bit.planta(planta_id),
       evento                 VARCHAR(20) NOT NULL CONSTRAINT CK_disp_dashboard_evento
@@ -975,52 +978,77 @@ export async function initDB() {
   //       Usa JSON_MODIFY (SQL Server 2016+; el repo requiere 2019+).
   //   (c) Add del nuevo CHECK nombrado si aún no existe. Para BDs nuevas el CREATE TABLE
   //       ya lo creó; para BDs viejas el (a) lo dropeó y este paso lo recrea.
+  // D-026 (F26.A1): el bloque entero solo aplica si disponibilidad_dashboard sigue siendo
+  // una TABLA. Post-F26 pasa a ser VIEW: el ALTER TABLE ADD CONSTRAINT al final fallaría
+  // y los UPDATE sobre registro_activo/historico son no-op (no quedan filas DISP allí).
   await db.request().batch(`
-    DECLARE @ck_viejo SYSNAME;
-    SELECT @ck_viejo = cc.name
-      FROM sys.check_constraints cc
-      JOIN sys.tables  t ON t.object_id  = cc.parent_object_id
-      JOIN sys.schemas s ON s.schema_id  = t.schema_id
-      WHERE s.name = 'bitacora'
-        AND t.name = 'disponibilidad_dashboard'
-        AND cc.name <> 'CK_disp_dashboard_evento'
-        AND cc.definition LIKE '%Disponible%';
-    IF @ck_viejo IS NOT NULL
-      EXEC('ALTER TABLE bitacora.disponibilidad_dashboard DROP CONSTRAINT ' + @ck_viejo);
+    IF EXISTS (SELECT 1 FROM sys.tables WHERE name='disponibilidad_dashboard' AND schema_id=SCHEMA_ID('bitacora'))
+    BEGIN
+      DECLARE @ck_viejo SYSNAME;
+      SELECT @ck_viejo = cc.name
+        FROM sys.check_constraints cc
+        JOIN sys.tables  t ON t.object_id  = cc.parent_object_id
+        JOIN sys.schemas s ON s.schema_id  = t.schema_id
+        WHERE s.name = 'bitacora'
+          AND t.name = 'disponibilidad_dashboard'
+          AND cc.name <> 'CK_disp_dashboard_evento'
+          AND cc.definition LIKE '%Disponible%';
+      IF @ck_viejo IS NOT NULL
+        EXEC('ALTER TABLE bitacora.disponibilidad_dashboard DROP CONSTRAINT ' + @ck_viejo);
 
-    UPDATE bitacora.disponibilidad_dashboard
-      SET evento = 'En Servicio'
-      WHERE evento = 'Disponible';
+      UPDATE bitacora.disponibilidad_dashboard
+        SET evento = 'En Servicio'
+        WHERE evento = 'Disponible';
 
-    UPDATE bitacora.registro_activo
-      SET campos_extra = JSON_MODIFY(campos_extra, '$.evento', 'En Servicio')
-      WHERE bitacora_id = ${DISP_BITACORA_ID}
-        AND JSON_VALUE(campos_extra, '$.evento') = 'Disponible';
+      UPDATE bitacora.registro_activo
+        SET campos_extra = JSON_MODIFY(campos_extra, '$.evento', 'En Servicio')
+        WHERE bitacora_id = ${DISP_BITACORA_ID}
+          AND JSON_VALUE(campos_extra, '$.evento') = 'Disponible';
 
-    UPDATE bitacora.registro_historico
-      SET campos_extra = JSON_MODIFY(campos_extra, '$.evento', 'En Servicio')
-      WHERE bitacora_id = ${DISP_BITACORA_ID}
-        AND JSON_VALUE(campos_extra, '$.evento') = 'Disponible';
+      UPDATE bitacora.registro_historico
+        SET campos_extra = JSON_MODIFY(campos_extra, '$.evento', 'En Servicio')
+        WHERE bitacora_id = ${DISP_BITACORA_ID}
+          AND JSON_VALUE(campos_extra, '$.evento') = 'Disponible';
 
-    IF NOT EXISTS (
-      SELECT 1 FROM sys.check_constraints WHERE name = 'CK_disp_dashboard_evento'
-    )
-      ALTER TABLE bitacora.disponibilidad_dashboard
-        ADD CONSTRAINT CK_disp_dashboard_evento
-        CHECK (evento IN ('En Servicio','En Reserva','Indisponible','Mantenimiento'));
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.check_constraints WHERE name = 'CK_disp_dashboard_evento'
+      )
+        ALTER TABLE bitacora.disponibilidad_dashboard
+          ADD CONSTRAINT CK_disp_dashboard_evento
+          CHECK (evento IN ('En Servicio','En Reserva','Indisponible','Mantenimiento'));
+    END
   `);
 
   // F12.A3: filtered unique index = segunda barrera (después del UPDLOCK del POST) contra
   // dos vigentes simultáneos por planta.
-  await db.request().batch(`
-    IF NOT EXISTS (
-      SELECT 1 FROM sys.indexes
-      WHERE name='UQ_disp_vigente_por_planta' AND object_id=OBJECT_ID('bitacora.registro_activo')
-    )
-      CREATE UNIQUE INDEX UQ_disp_vigente_por_planta
-        ON bitacora.registro_activo (planta_id)
-        WHERE bitacora_id = ${DISP_BITACORA_ID} AND fecha_fin_estado IS NULL;
-  `);
+  // D-026 (F26.A1): post-migración DISP no tiene filas en registro_activo; el índice se
+  // dropea en F26.A1. Gateamos por existencia de `bitacora.disponibilidad_estado`:
+  //   - pre-F26  → CREATE if missing
+  //   - post-F26 → DROP if leftover (auto-heal: arranques antes del gate dejaron el índice
+  //                huérfano; este else lo limpia sin requerir SQL manual)
+  // El gate por migracion_aplicada no sirve acá porque esa tabla se crea después (F16.A0).
+  const f26Done_UQ = (await db.request().query(
+    `SELECT 1 AS x WHERE OBJECT_ID('bitacora.disponibilidad_estado','U') IS NOT NULL`
+  )).recordset[0];
+  if (!f26Done_UQ) {
+    await db.request().batch(`
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE name='UQ_disp_vigente_por_planta' AND object_id=OBJECT_ID('bitacora.registro_activo')
+      )
+        CREATE UNIQUE INDEX UQ_disp_vigente_por_planta
+          ON bitacora.registro_activo (planta_id)
+          WHERE bitacora_id = ${DISP_BITACORA_ID} AND fecha_fin_estado IS NULL;
+    `);
+  } else {
+    await db.request().batch(`
+      IF EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE name='UQ_disp_vigente_por_planta' AND object_id=OBJECT_ID('bitacora.registro_activo')
+      )
+        DROP INDEX UQ_disp_vigente_por_planta ON bitacora.registro_activo;
+    `);
+  }
 
   // Semilla de personal (83 usuarios del Excel 2026)
   await seedPersonal(db);
@@ -1060,10 +1088,22 @@ export async function initDB() {
   // rama en server.js — se hace .input('fecha_evento', sql.DateTime2, fechaInicio)), por lo que
   // usamos `fecha_evento` como inicio sin re-parsear el JSON.
   //
-  // El endpoint GET /api/disponibilidad/metricas consume esta vista para agregar tiempos por
-  // estado en una ventana arbitraria [desde, hasta].
-  await db.request().batch(`
-    CREATE OR ALTER VIEW bitacora.v_disp_intervalos AS
+  // D-026 (F26.A1): post-migración DISP vive en `disponibilidad_estado` y `/api/disponibilidad/metricas`
+  // suma DATEDIFF_BIG directo sobre esa tabla. La vista se dropea en F26.A1.
+  //   - pre-F26  → CREATE OR ALTER (idempotente intra-versión)
+  //   - post-F26 → DROP if leftover (auto-heal: arranques antes del gate la dejaron huérfana)
+  const f26Done_VI = (await db.request().query(
+    `SELECT 1 AS x WHERE OBJECT_ID('bitacora.disponibilidad_estado','U') IS NOT NULL`
+  )).recordset[0];
+  if (f26Done_VI) {
+    await db.request().batch(`
+      IF EXISTS (SELECT 1 FROM sys.views
+                 WHERE name='v_disp_intervalos' AND schema_id=SCHEMA_ID('bitacora'))
+        DROP VIEW bitacora.v_disp_intervalos;
+    `);
+  } else {
+    await db.request().batch(`
+      CREATE OR ALTER VIEW bitacora.v_disp_intervalos AS
     SELECT
       r.planta_id,
       JSON_VALUE(r.campos_extra, '$.evento') AS evento,
@@ -1087,7 +1127,8 @@ export async function initDB() {
     FROM bitacora.registro_historico h
     INNER JOIN lov_bit.bitacora b ON b.bitacora_id = h.bitacora_id
     WHERE b.codigo = 'DISP';
-  `);
+    `);
+  }
 
   // F13.3: migración de DEFAULTs GETDATE() → SYSUTCDATETIME() para columnas DATETIME2.
   // GETDATE() retorna hora local del SQL Server; mssql con useUTC=true (default) las lee
@@ -1281,12 +1322,17 @@ export async function initDB() {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.evento_dashboard') AND name='creado_en_bogota')
       ALTER TABLE bitacora.evento_dashboard ADD creado_en_bogota AS DATEADD(HOUR, -5, creado_en);
 
-    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.disponibilidad_dashboard') AND name='fecha_inicio_estado_bogota')
-      ALTER TABLE bitacora.disponibilidad_dashboard ADD fecha_inicio_estado_bogota AS DATEADD(HOUR, -5, fecha_inicio_estado);
-    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.disponibilidad_dashboard') AND name='modificado_en_bogota')
-      ALTER TABLE bitacora.disponibilidad_dashboard ADD modificado_en_bogota AS DATEADD(HOUR, -5, modificado_en);
-    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.disponibilidad_dashboard') AND name='actualizado_en_bogota')
-      ALTER TABLE bitacora.disponibilidad_dashboard ADD actualizado_en_bogota AS DATEADD(HOUR, -5, actualizado_en);
+    -- D-026 (F26.A1): tras la migración, disponibilidad_dashboard pasa a ser VIEW. Solo
+    -- agregar columnas Bogotá si el objeto sigue siendo TABLA (ALTER TABLE ADD sobre VIEW falla).
+    IF EXISTS (SELECT 1 FROM sys.tables WHERE name='disponibilidad_dashboard' AND schema_id=SCHEMA_ID('bitacora'))
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.disponibilidad_dashboard') AND name='fecha_inicio_estado_bogota')
+        ALTER TABLE bitacora.disponibilidad_dashboard ADD fecha_inicio_estado_bogota AS DATEADD(HOUR, -5, fecha_inicio_estado);
+      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.disponibilidad_dashboard') AND name='modificado_en_bogota')
+        ALTER TABLE bitacora.disponibilidad_dashboard ADD modificado_en_bogota AS DATEADD(HOUR, -5, modificado_en);
+      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.disponibilidad_dashboard') AND name='actualizado_en_bogota')
+        ALTER TABLE bitacora.disponibilidad_dashboard ADD actualizado_en_bogota AS DATEADD(HOUR, -5, actualizado_en);
+    END
 
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_activa') AND name='inicio_sesion_bogota')
       ALTER TABLE bitacora.sesion_activa ADD inicio_sesion_bogota AS DATEADD(HOUR, -5, inicio_sesion);
@@ -1327,6 +1373,221 @@ export async function initDB() {
     IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F22.D2')
       INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F22.D2');
   `);
+
+  // ---------- F26.A1 — D-026: DISP a tabla dedicada bitacora.disponibilidad_estado ----------
+  // DISP vivía en registro_activo/registro_historico con datos clave (evento, codigo,
+  // fecha_inicio_estado) embebidos en campos_extra JSON. Mover a ER nativo elimina ~10
+  // excepciones del modelo y habilita una vista de acumulados con window functions.
+  // Cross-repo aún no consume DISP (F15 pendiente) → blast radius bajo.
+  //
+  // Steps dentro de UNA transacción (rollback ante cualquier fallo → flag no se setea →
+  // siguiente arranque reintenta):
+  //   1. CREATE TABLE bitacora.disponibilidad_estado + índices + columnas Bogotá.
+  //   2. CREATE OR ALTER VIEW bitacora.v_disponibilidad_estado (acumulados via window fns).
+  //   3. Backfill: INSERT desde registro_activo ∪ registro_historico (rows con bitacora=DISP).
+  //   4. Validación de conteo. THROW si no coincide.
+  //   5. DELETE rows DISP de registro_activo / registro_historico.
+  //   6. DROP INDEX UQ_disp_vigente_por_planta, DROP VIEW v_disp_intervalos.
+  //   7. DROP TABLE bitacora.disponibilidad_dashboard + CREATE OR ALTER VIEW del mismo nombre
+  //      (shape preservado → cross-repo y código existente leen idéntico).
+  //   8. INSERT flag F26.A1.
+  // Documentado en docs/decisions.md D-026 y BIT-MODBD-2026-001.md §4.8.
+  const f26Aplicada = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F26.A1'`
+  );
+  if (!f26Aplicada.recordset[0]) {
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    try {
+      // 1. Tabla base + índices + columnas Bogotá. (CREATE TABLE/INDEX/ALTER TABLE en un mismo
+      //    batch: no son statements de DDL "first-in-batch" como CREATE VIEW/PROCEDURE/etc.)
+      await new sql.Request(tx).batch(`
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='disponibilidad_estado' AND schema_id=SCHEMA_ID('bitacora'))
+        CREATE TABLE bitacora.disponibilidad_estado (
+          disponibilidad_id            INT IDENTITY(1,1) PRIMARY KEY,
+          planta_id                    VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+          estado                       VARCHAR(20)   NOT NULL
+              CONSTRAINT CK_disp_estado_evento
+              CHECK (estado IN ('En Servicio','En Reserva','Indisponible','Mantenimiento')),
+          codigo                       SMALLINT      NOT NULL CHECK (codigo IN (-1, 0, 1)),
+          fecha_inicio_estado          DATETIME2     NOT NULL,
+          fecha_fin_estado             DATETIME2     NULL,
+          detalle                      NVARCHAR(MAX) NULL,
+          jdts_snapshot                NVARCHAR(MAX) NOT NULL CONSTRAINT DF_dispest_jdts DEFAULT '[]',
+          jefes_planta_snapshot        NVARCHAR(MAX) NOT NULL CONSTRAINT DF_dispest_jefes DEFAULT '[]',
+          gerentes_produccion_snapshot NVARCHAR(MAX) NOT NULL CONSTRAINT DF_dispest_gerentes DEFAULT '[]',
+          ingenieros_snapshot          NVARCHAR(MAX) NOT NULL CONSTRAINT DF_dispest_ing DEFAULT '[]',
+          creado_por                   INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+          creado_en                    DATETIME2     NOT NULL CONSTRAINT DF_dispest_creado_en DEFAULT SYSUTCDATETIME(),
+          modificado_por               INT           NULL REFERENCES lov_bit.usuario(usuario_id),
+          modificado_en                DATETIME2     NULL
+        );
+
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='UQ_disp_estado_vigente_por_planta')
+          CREATE UNIQUE INDEX UQ_disp_estado_vigente_por_planta
+            ON bitacora.disponibilidad_estado(planta_id)
+            WHERE fecha_fin_estado IS NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_disp_estado_planta_inicio')
+          CREATE INDEX IX_disp_estado_planta_inicio
+            ON bitacora.disponibilidad_estado(planta_id, fecha_inicio_estado DESC);
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id=OBJECT_ID('bitacora.disponibilidad_estado') AND name='fecha_inicio_estado_bogota')
+          ALTER TABLE bitacora.disponibilidad_estado
+            ADD fecha_inicio_estado_bogota AS DATEADD(HOUR, -5, fecha_inicio_estado);
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id=OBJECT_ID('bitacora.disponibilidad_estado') AND name='fecha_fin_estado_bogota')
+          ALTER TABLE bitacora.disponibilidad_estado
+            ADD fecha_fin_estado_bogota AS DATEADD(HOUR, -5, fecha_fin_estado);
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id=OBJECT_ID('bitacora.disponibilidad_estado') AND name='creado_en_bogota')
+          ALTER TABLE bitacora.disponibilidad_estado
+            ADD creado_en_bogota AS DATEADD(HOUR, -5, creado_en);
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id=OBJECT_ID('bitacora.disponibilidad_estado') AND name='modificado_en_bogota')
+          ALTER TABLE bitacora.disponibilidad_estado
+            ADD modificado_en_bogota AS DATEADD(HOUR, -5, modificado_en);
+      `);
+
+      // 2. Vista derivada de acumulados (CREATE OR ALTER VIEW debe ser el primer statement
+      //    del batch — por eso va en su propia llamada).
+      await new sql.Request(tx).batch(`
+        CREATE OR ALTER VIEW bitacora.v_disponibilidad_estado AS
+        WITH base AS (
+          SELECT *,
+            CAST(DATEDIFF_BIG(MILLISECOND, fecha_inicio_estado,
+                              COALESCE(fecha_fin_estado, SYSUTCDATETIME())) AS BIGINT) / 3600000.0
+              AS horas_intervalo
+          FROM bitacora.disponibilidad_estado
+        )
+        SELECT
+          disponibilidad_id,
+          planta_id                                                                AS planta,
+          codigo                                                                   AS codigo_estado,
+          estado,
+          detalle,
+          fecha_inicio_estado                                                      AS fecha,
+          fecha_fin_estado,
+          creado_en                                                                AS fecha_creacion,
+          SUM(CASE WHEN estado='En Servicio'   THEN horas_intervalo ELSE 0 END)
+            OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_servicio,
+          SUM(CASE WHEN estado='Indisponible'  THEN horas_intervalo ELSE 0 END)
+            OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_indisponible,
+          SUM(CASE WHEN estado='Mantenimiento' THEN horas_intervalo ELSE 0 END)
+            OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_mantenimiento,
+          SUM(CASE WHEN estado='En Reserva'    THEN horas_intervalo ELSE 0 END)
+            OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_reserva,
+          jefes_planta_snapshot,
+          gerentes_produccion_snapshot,
+          jdts_snapshot,
+          ingenieros_snapshot,
+          creado_por,
+          modificado_por,
+          modificado_en
+        FROM base;
+      `);
+
+      // 3-7. Backfill + validación + DELETE en origen + DROP de index/view/tabla viejos.
+      await new sql.Request(tx).batch(`
+        DECLARE @disp_bid INT = (SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='DISP');
+
+        INSERT INTO bitacora.disponibilidad_estado
+          (planta_id, estado, codigo, fecha_inicio_estado, fecha_fin_estado, detalle,
+           jdts_snapshot, jefes_planta_snapshot, gerentes_produccion_snapshot, ingenieros_snapshot,
+           creado_por, creado_en, modificado_por, modificado_en)
+        SELECT
+          planta_id,
+          JSON_VALUE(campos_extra, '$.evento')                  AS estado,
+          CAST(JSON_VALUE(campos_extra, '$.codigo') AS SMALLINT) AS codigo,
+          fecha_evento                                          AS fecha_inicio_estado,
+          fecha_fin_estado,
+          detalle,
+          ISNULL(jdts_snapshot, '[]'),
+          ISNULL(jefes_snapshot, '[]'),
+          '[]'                                                  AS gerentes_produccion_snapshot,
+          ISNULL(ingenieros_snapshot, '[]'),
+          creado_por, creado_en, modificado_por, modificado_en
+        FROM bitacora.registro_activo
+        WHERE bitacora_id = @disp_bid
+        UNION ALL
+        SELECT
+          planta_id,
+          JSON_VALUE(campos_extra, '$.evento'),
+          CAST(JSON_VALUE(campos_extra, '$.codigo') AS SMALLINT),
+          fecha_evento,
+          fecha_fin_estado,
+          detalle,
+          ISNULL(jdts_snapshot, '[]'),
+          ISNULL(jefes_snapshot, '[]'),
+          '[]',
+          ISNULL(ingenieros_snapshot, '[]'),
+          creado_por, creado_en, modificado_por, modificado_en
+        FROM bitacora.registro_historico
+        WHERE bitacora_id = @disp_bid;
+
+        DECLARE @migrados INT = (SELECT COUNT(*) FROM bitacora.disponibilidad_estado);
+        DECLARE @origen INT = (
+          SELECT
+            (SELECT COUNT(*) FROM bitacora.registro_activo    WHERE bitacora_id=@disp_bid) +
+            (SELECT COUNT(*) FROM bitacora.registro_historico WHERE bitacora_id=@disp_bid)
+        );
+        IF @migrados <> @origen
+          THROW 50001, 'F26.A1: conteo backfill no coincide con origen', 1;
+
+        DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @disp_bid;
+        DELETE FROM bitacora.registro_historico WHERE bitacora_id = @disp_bid;
+
+        IF EXISTS (SELECT 1 FROM sys.indexes
+                   WHERE name='UQ_disp_vigente_por_planta'
+                     AND object_id=OBJECT_ID('bitacora.registro_activo'))
+          DROP INDEX UQ_disp_vigente_por_planta ON bitacora.registro_activo;
+
+        IF EXISTS (SELECT 1 FROM sys.views
+                   WHERE name='v_disp_intervalos' AND schema_id=SCHEMA_ID('bitacora'))
+          DROP VIEW bitacora.v_disp_intervalos;
+
+        IF EXISTS (SELECT 1 FROM sys.tables
+                   WHERE name='disponibilidad_dashboard' AND schema_id=SCHEMA_ID('bitacora'))
+          DROP TABLE bitacora.disponibilidad_dashboard;
+      `);
+
+      // 7. Vista compat para cross-repo — preserva el shape de disponibilidad_dashboard.
+      //    CREATE OR ALTER VIEW debe ser el primer statement del batch.
+      await new sql.Request(tx).batch(`
+        CREATE OR ALTER VIEW bitacora.disponibilidad_dashboard AS
+        SELECT
+          planta_id,
+          estado                                AS evento,
+          codigo,
+          fecha_inicio_estado,
+          disponibilidad_id                     AS registro_activo_id,
+          jdts_snapshot,
+          jefes_planta_snapshot                 AS jefes_snapshot,
+          modificado_por,
+          modificado_en,
+          COALESCE(modificado_en, creado_en)    AS actualizado_en
+        FROM bitacora.disponibilidad_estado
+        WHERE fecha_fin_estado IS NULL;
+      `);
+
+      // 8. Flag de migración aplicada (último statement antes del COMMIT — si algo falla
+      //    antes, el ROLLBACK borra el INSERT y el siguiente arranque reintenta).
+      await new sql.Request(tx).batch(`
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F26.A1');
+      `);
+
+      await tx.commit();
+      console.log('[F26.A1] DISP migrado a bitacora.disponibilidad_estado');
+    } catch (err) {
+      try { await tx.rollback(); } catch {}
+      throw err;
+    }
+  }
 
   // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de
   // auditoría interna (CIET).

@@ -312,6 +312,18 @@ Razón de la vista en vez de query inline: encapsula la unión `activo + histór
 
 ---
 
+## D-026 — DISP migrado a tabla dedicada con vista de acumulados
+
+**Fecha:** 2026-05-20
+
+**Contexto:** la auditoría del modelo detectó que DISP rompía ~10 invariantes del patrón "bitácora dinámica genérica" — `turno NULL`, columna `fecha_fin_estado` DISP-only en `registro_activo`/`registro_historico`, filtered unique index `UQ_disp_vigente_por_planta`, histórico mutable controlado vía PUT (D-011), vista intermedia `v_disp_intervalos` para reconstruir intervalos, tabla puente paralela `disponibilidad_dashboard`, ~13 de 25 ADRs dedicados a DISP/MAND. DISP es semánticamente una **máquina de estados con intervalos** y no encaja en la abstracción "bitácora con `campos_extra` JSON". Cross-repo aún no consume DISP (F15 pendiente) → blast radius bajo, ventana de oportunidad para refactor.
+
+**Decisión:** mover DISP a una tabla dedicada `bitacora.disponibilidad_estado` (PK `disponibilidad_id`, columnas tipadas `planta_id`, `estado`, `codigo`, `fecha_inicio_estado`, `fecha_fin_estado`, `detalle`, snapshots JSON `jdts_snapshot` / `jefes_planta_snapshot` / `gerentes_produccion_snapshot` / `ingenieros_snapshot`, FKs a `lov_bit.planta` y `lov_bit.usuario`). Acumulados por estado derivados via vista `bitacora.v_disponibilidad_estado` con window functions (`SUM(...) OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`). La tabla `bitacora.disponibilidad_dashboard` se reemplaza por una VIEW del row vigente (`fecha_fin_estado IS NULL`), preservando el contrato HTTP del endpoint `GET /api/eventos-dashboard?tipo=DISP` (F15) — la vista mapea `disponibilidad_id → registro_activo_id` y `jefes_planta_snapshot → jefes_snapshot` por compat. Migración idempotente `F26.A1` en `db.js::initDB()` (transacción con rollback ante fallo): crea la tabla nueva + índices + vistas, hace backfill desde `registro_activo` ∪ `registro_historico` mapeando campos JSON a columnas tipadas, valida conteo con `THROW`, hace DELETE de rows DISP en origen, DROP de `v_disp_intervalos` y de la vieja tabla `disponibilidad_dashboard`, CREATE de la vista compat, INSERT del flag. Endpoints, frontend y contrato cross-repo quedan idénticos.
+
+**Consecuencias:** (a) §7.8 de `BIT-MODBD` queda como referencia histórica — DISP ya NO rompe esos invariantes porque vive en su propia tabla. (b) Nueva columna `gerentes_produccion_snapshot` (cargo='Gerente de Producción' con sesión activa global) capturada en cada POST/PUT/deshacer. (c) Vista `v_disp_intervalos` dropeada — la nueva tabla ya es plana y la lógica de acumulados se mudó a `v_disponibilidad_estado` (window functions). (d) `HistoricoTable.jsx` genérica ya no muestra DISP (aceptado por el usuario — DISP solo vía mini-dashboard). (e) `jefes_snapshot` renombrado a `jefes_planta_snapshot` en la tabla nueva; la vista `disponibilidad_dashboard` mapea el nombre legacy para compat cross-repo. (f) `POST /api/disponibilidad/deshacer` ya no mueve filas entre tablas: el N-1 se reabre con `UPDATE fecha_fin_estado=NULL` sobre el mismo row (`restaurarComoVigente`); el vigente se borra con DELETE físico. (g) ~600 LoC en `server.js` simplificadas (~22% del archivo). (h) Test 1/2/6/7 de `disponibilidad.test.js` validaban estado interno vía queries directas a `registro_activo`/`registro_historico` filtrados por DISP — esos asserts internos deben re-apuntarse a `disponibilidad_estado` en seguimiento al refactor (el contrato HTTP de los tests sí queda preservado byte-a-byte). Cross-ref: [[D-008]] [[D-009]] [[D-010]] [[D-011]] [[D-012]] [[D-024]].
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

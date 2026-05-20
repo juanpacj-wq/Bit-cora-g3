@@ -119,3 +119,21 @@ export async function snapshotIngenierosDelDia(reqFactory, { planta_id, fecha })
     `);
   return toJSON(r.recordset);
 }
+
+// D-026: gerentes de producción con sesión activa global (rol no es por planta).
+// A diferencia de snapshotJefes (que usa flag es_jefe_planta sin importar sesión),
+// este filtra por sesión viva — refleja "quién estaba presente al momento del evento DISP".
+// Sin planta: el rol es global. Devuelve '[]' si no hay nadie — nunca NULL.
+export async function snapshotGerentesProduccion(reqFactory) {
+  const r = await reqFactory()
+    .query(`
+      SELECT DISTINCT u.usuario_id, u.nombre_completo
+      FROM bitacora.sesion_activa s
+      INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
+      INNER JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
+      WHERE s.activa = 1
+        AND u.activo = 1
+        AND c.nombre = 'Gerente de Producción'
+    `);
+  return toJSON(r.recordset);
+}
