@@ -954,7 +954,11 @@ const server = http.createServer(async (req, res) => {
 
         // Aplicar overrides solo cuando vienen explícitos en campos_extra o fecha_evento.
         const eventoNuevo = (extraIn && 'evento' in extraIn) ? extraIn.evento : eventoActual;
-        const detalleNuevo = (detalle !== undefined) ? detalle : null;
+        // Compat con pre-D-026: el UPDATE viejo usaba COALESCE(@detalle, detalle) → preserva
+        // el detalle previo cuando el body no lo manda. `actualizarVigente` (notificador.js)
+        // hace `detalle=@detalle` directo (sin COALESCE), así que la preservación se hace acá
+        // en el JS: si body.detalle es null/undefined, mantenemos el de la fila vigente.
+        const detalleNuevo = (detalle != null) ? detalle : reg.detalle;
         const fechaInicioNuevoRaw =
           (extraIn && 'fecha_inicio_estado' in extraIn) ? extraIn.fecha_inicio_estado
           : (fecha_evento ?? null);
