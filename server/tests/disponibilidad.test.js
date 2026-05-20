@@ -574,3 +574,33 @@ test('23. vista disponibilidad_dashboard devuelve solo vigente con shape cross-r
   assert.equal(typeof row.jefes_snapshot, 'string', 'jefes_snapshot mapeado de jefes_planta_snapshot');
   assert.ok(row.actualizado_en, 'actualizado_en presente (COALESCE(modificado_en, creado_en))');
 });
+
+// D-026 — regression test: pre-D-026 el UPDATE usaba COALESCE(@detalle, detalle), preservando
+// el detalle previo cuando el body no lo mandaba. El refactor a `actualizarVigente` perdió el
+// COALESCE; el fix preserva la semántica en el JS del handler. Sin este test, una refactor
+// futura podría re-introducir el clear silencioso.
+test('24. PUT DISP preserva detalle previo cuando body no manda detalle', async () => {
+  await cleanDisp();
+  const DETALLE_INICIAL = `${TEST_TAG} detalle inicial X`;
+  const NUEVA_FECHA = new Date(T0.getTime() + 2 * HOUR);
+
+  const post = await postDisp({
+    sesion_id: ctx.sesiones.jdt, evento: 'En Servicio', fechaInicio: T0, detalle: DETALLE_INICIAL,
+  });
+  assert.equal(post.status, 201, JSON.stringify(post.data));
+  const vigenteId = post.data.registro.registro_id;
+
+  // PUT sin `detalle` en el body — cambia sólo la fecha.
+  const put = await call('PUT', `/api/registros/${vigenteId}`, {
+    sesion_id: ctx.sesiones.jdt,
+    body: { campos_extra: { fecha_inicio_estado: NUEVA_FECHA.toISOString() } },
+  });
+  assert.equal(put.status, 200, JSON.stringify(put.data));
+
+  const db = await getDB();
+  const after = (await db.request()
+    .input('id', sql.Int, vigenteId)
+    .query(`SELECT detalle FROM bitacora.disponibilidad_estado WHERE disponibilidad_id=@id`)
+  ).recordset[0];
+  assert.equal(after.detalle, DETALLE_INICIAL, 'detalle previo debe preservarse cuando body no lo manda');
+});
