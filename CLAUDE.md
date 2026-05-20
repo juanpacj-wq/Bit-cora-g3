@@ -73,7 +73,7 @@ Bit-cora-g3/
 Dos bitácoras tienen UI propia (resto usa `GrillaRegistros` genérica):
 
 - **MAND** (Operación 24h) — `SalaDeMandoGrid.jsx`. Grilla 24p × 3 tipos × 2 plantas. Batch save atómico via `POST /api/sala-de-mando/guardar`. Cierre automático fin de día via sweeper diario. Solo HOY editable. NO acepta cierre individual ni masivo.
-- **DISP** (Disponibilidad) — `DisponibilidadDashboard.jsx`. Mini-dashboard con tabs GEC3/GEC32, counter live "tiempo en estado", historial paginado. Sin cierre de turno. 1 vigente por planta (filtered unique index). Cierre automático cuando llega nuevo evento.
+- **DISP** (Disponibilidad) — `DisponibilidadDashboard.jsx`. Mini-dashboard con tabs GEC3/GEC32, counter live "tiempo en estado", historial paginado. Sin cierre de turno. Storage: tabla dedicada `bitacora.disponibilidad_estado` (D-026), 1 vigente por planta vía filtered unique index `UQ_disp_estado_vigente_por_planta`. Cierre automático cuando llega nuevo evento (UPDATE `fecha_fin_estado` del vigente + INSERT del nuevo en la misma transacción).
 
 Las demás (CIET, AUTOR, etc.) usan `GrillaRegistros.jsx` con filtros F11.
 
@@ -86,7 +86,7 @@ Al cierre de cada turno (T1/T2 por planta GEC3/GEC32) se escribe snapshot inmuta
 1. **TTL sesión: ninguno** (post F2). `sesion_activa.activa=1` hasta logout explícito. No usar `ultima_actividad > NOW - 5min` para validar — esa columna existe pero no rige TTL ya.
 2. **Snapshots JSON inmutables**: `jdts_snapshot`, `jefes_snapshot`, `ingenieros_snapshot` en JSON. NO usar FK directo a `lov_bit.usuario` para reconstruir presencia. Solo `creado_por` y `modificado_por` son FK.
 3. **2 turnos solamente** (no 3): T1 [06,17], T2 [18,23]∪[00,05]. Cualquier mención a "3 turnos" es narrativa, no datos.
-4. **DISP es excepción a la inmutabilidad histórica**: PUT vigente DISP que cambia `fecha_inicio_estado` actualiza `N-1.fecha_fin_estado` en histórico. Documentado en D-011.
+4. **DISP vive en `bitacora.disponibilidad_estado` (D-026, post-2026-05-20)**: tabla dedicada con `fecha_inicio_estado`/`fecha_fin_estado` tipadas (no via `campos_extra` JSON). Mantiene la regla de cierre cronológico: PUT del vigente que cambia `fecha_inicio_estado` actualiza también `N-1.fecha_fin_estado`. La "excepción a la inmutabilidad histórica" de D-011 ya no aplica porque DISP no vive en `registro_historico` — el N-1 es otro row de la misma tabla. Acumulados por estado expuestos via vista `v_disponibilidad_estado` con window functions. La vista `disponibilidad_dashboard` (cross-repo, F15) preserva su shape mapeando `disponibilidad_id → registro_activo_id` y `jefes_planta_snapshot → jefes_snapshot`.
 5. **MAND `modificado_por` se actualiza SOLO si `valor_mw` cambió** (no si solo cambió detalle/funcionariocnd). D-019.
 6. **AUTH requiere `funcionariocnd`** (si hay valor en algún periodo). PRUEBA y REDESP fuerzan `funcionariocnd=NULL`. D-018.
 7. **Lock REDESP**: solo `periodo >= floor(horaBogota) + 1` ("actual o posteriores") editable. AUTH y PRUEBA sin lock. D-016.
