@@ -48,6 +48,11 @@ export async function getDB() {
 // Se cachea al final de initDB() y lo consume mand-sweeper.js + el endpoint de cierre manual.
 export let USUARIO_SISTEMA_ID = null;
 
+// D-027 (F26.B1): id de la bitácora COMB (Combustibles → Consumos). Cacheado al final de
+// initDB() después del bloque F26.B1 que la siembra. Lo consumen los endpoints
+// /api/combustibles/* en server.js para gating de permisos vía hasPermisoBitacora.
+export let COMB_BITACORA_ID = null;
+
 // JSON definitions EXACTAMENTE como en BIT-MODBD-2026-001.
 // D-024 (2026-05-15): rebrand de estados DISP. "Disponible" → "En Servicio" + nuevo estado
 // "Mantenimiento". Indisponible y Mantenimiento comparten codigo=-1; se distinguen por el
@@ -780,6 +785,9 @@ export async function initDB() {
           -- F6: MAND la ve TODO el mundo (la fila operativa la usan JdT/IngOp pero el resto
           -- la consulta read-only para coordinación).
           WHEN b.codigo = 'MAND' THEN 1
+          -- D-027 (F26.B1): COMB (Combustibles → Consumos) visible para todos los cargos;
+          -- creación restringida a Operador de Planta - Carbón y Caliza + JdT (ver puede_crear).
+          WHEN b.codigo = 'COMB' THEN 1
           -- Gerente de Producción ve todo
           WHEN c.nombre = 'Gerente de Producción'                THEN 1
           -- Ingeniero Jefe de Turno / Ingeniero de Operación ven todo
@@ -802,6 +810,9 @@ export async function initDB() {
           -- F6: en MAND solo crean JdT e IngOp (preguntas.md punto 1).
           WHEN b.codigo = 'MAND' THEN
             CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN 1 ELSE 0 END
+          -- D-027 (F26.B1): COMB la crean Operador de Planta - Carbón y Caliza + JdT.
+          WHEN b.codigo = 'COMB' THEN
+            CASE WHEN c.nombre IN ('Operador de Planta - Carbón y Caliza','Ingeniero Jefe de Turno') THEN 1 ELSE 0 END
           -- Gerente no crea en nada
           WHEN c.nombre = 'Gerente de Producción'                THEN 0
           -- JdT e IngOp sólo crean en DISP y AUTH
@@ -1587,6 +1598,203 @@ export async function initDB() {
       try { await tx.rollback(); } catch {}
       throw err;
     }
+  }
+
+  // ---------- F26.B1 — D-027: Combustibles → Consumos ----------
+  // Módulo nuevo "Combustibles/Consumos" — report numérico horario por planta. NO es
+  // bitácora con estado/turno; es long-format (1 fila por planta×fecha×periodo×combustible)
+  // con total_carbon_ton derivado por vista. Ortogonal a F26.A1 (DISP).
+  //
+  // Pasos dentro de UNA transacción (rollback ante cualquier fallo → flag no se setea →
+  // siguiente arranque reintenta):
+  //   1. CREATE TABLE lov_bit.combustible + índice + UQ(planta_id, codigo).
+  //   2. MERGE de 18 entradas de catálogo (8 GEC3 + 10 GEC32).
+  //   3. CREATE TABLE bitacora.consumo_combustible + índice + columnas Bogotá.
+  //   4. CREATE OR ALTER VIEW bitacora.v_consumo_periodo (pivot + total_carbon_ton).
+  //   5. INSERT IF NOT EXISTS de la fila marcadora COMB en lov_bit.bitacora.
+  //   6. Seed inicial de permisos (one-shot). El matrix rebuild del bloque "Datos semilla"
+  //      no maneja COMB; se actualiza por separado (ver edit en l.~790-820) para que los
+  //      restarts subsecuentes preserven los permisos. Acá seedeamos para que el primer
+  //      arranque post-F26.B1 tenga permisos correctos sin esperar al matrix rebuild.
+  //   7. Validación de conteo del catálogo (THROW si <18).
+  //   8. INSERT flag F26.B1.
+  // Documentado en docs/decisions.md D-027 y BIT-MODBD-2026-001.md §4.9.
+  const f26B1Aplicada = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F26.B1'`
+  );
+  if (!f26B1Aplicada.recordset[0]) {
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    try {
+      // 1. Catálogo lov_bit.combustible + índice + UQ.
+      await new sql.Request(tx).batch(`
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='combustible' AND schema_id=SCHEMA_ID('lov_bit'))
+        CREATE TABLE lov_bit.combustible (
+          combustible_id  INT IDENTITY(1,1) PRIMARY KEY,
+          planta_id       VARCHAR(10)  NOT NULL REFERENCES lov_bit.planta(planta_id),
+          codigo          VARCHAR(20)  NOT NULL,
+          nombre          VARCHAR(100) NOT NULL,
+          unidad          VARCHAR(10)  NOT NULL,
+          tipo            VARCHAR(20)  NOT NULL
+            CONSTRAINT CK_combustible_tipo CHECK (tipo IN ('ALIMENTADOR','CALIZA','ACPM')),
+          orden           INT          NOT NULL CONSTRAINT DF_combustible_orden DEFAULT 0,
+          activo          BIT          NOT NULL CONSTRAINT DF_combustible_activo DEFAULT 1,
+          CONSTRAINT UQ_combustible_planta_codigo UNIQUE (planta_id, codigo)
+        );
+
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_combustible_planta_orden')
+          CREATE INDEX IX_combustible_planta_orden
+            ON lov_bit.combustible(planta_id, orden)
+            WHERE activo = 1;
+      `);
+
+      // 2. Seeds del catálogo (idempotente vía MERGE por UQ(planta_id, codigo)).
+      await new sql.Request(tx).batch(`
+        MERGE lov_bit.combustible AS t
+        USING (VALUES
+          ('GEC3', 'ALIM_A', 'Alimentador A', 'Ton', 'ALIMENTADOR', 1),
+          ('GEC3', 'ALIM_B', 'Alimentador B', 'Ton', 'ALIMENTADOR', 2),
+          ('GEC3', 'ALIM_C', 'Alimentador C', 'Ton', 'ALIMENTADOR', 3),
+          ('GEC3', 'ALIM_D', 'Alimentador D', 'Ton', 'ALIMENTADOR', 4),
+          ('GEC3', 'ALIM_E', 'Alimentador E', 'Ton', 'ALIMENTADOR', 5),
+          ('GEC3', 'ALIM_F', 'Alimentador F', 'Ton', 'ALIMENTADOR', 6),
+          ('GEC3', 'CALIZA', 'Caliza',        'Ton', 'CALIZA',      7),
+          ('GEC3', 'ACPM',   'ACPM',          'Gal', 'ACPM',        8),
+          ('GEC32','ALIM_1', 'Alimentador 1', 'Ton', 'ALIMENTADOR', 1),
+          ('GEC32','ALIM_2', 'Alimentador 2', 'Ton', 'ALIMENTADOR', 2),
+          ('GEC32','ALIM_3', 'Alimentador 3', 'Ton', 'ALIMENTADOR', 3),
+          ('GEC32','ALIM_4', 'Alimentador 4', 'Ton', 'ALIMENTADOR', 4),
+          ('GEC32','ALIM_5', 'Alimentador 5', 'Ton', 'ALIMENTADOR', 5),
+          ('GEC32','ALIM_6', 'Alimentador 6', 'Ton', 'ALIMENTADOR', 6),
+          ('GEC32','ALIM_7', 'Alimentador 7', 'Ton', 'ALIMENTADOR', 7),
+          ('GEC32','ALIM_8', 'Alimentador 8', 'Ton', 'ALIMENTADOR', 8),
+          ('GEC32','CALIZA', 'Caliza',        'Ton', 'CALIZA',      9),
+          ('GEC32','ACPM',   'ACPM',          'Gal', 'ACPM',       10)
+        ) AS s(planta_id, codigo, nombre, unidad, tipo, orden)
+          ON t.planta_id = s.planta_id AND t.codigo = s.codigo
+        WHEN NOT MATCHED THEN INSERT (planta_id, codigo, nombre, unidad, tipo, orden)
+          VALUES (s.planta_id, s.codigo, s.nombre, s.unidad, s.tipo, s.orden);
+      `);
+
+      // 3. Transaccional bitacora.consumo_combustible + índice + columnas Bogotá (patrón F22).
+      await new sql.Request(tx).batch(`
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='consumo_combustible' AND schema_id=SCHEMA_ID('bitacora'))
+        CREATE TABLE bitacora.consumo_combustible (
+          consumo_id       INT IDENTITY(1,1) PRIMARY KEY,
+          planta_id        VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+          fecha            DATE          NOT NULL,
+          periodo          TINYINT       NOT NULL
+            CONSTRAINT CK_consumo_periodo CHECK (periodo BETWEEN 1 AND 24),
+          combustible_id   INT           NOT NULL REFERENCES lov_bit.combustible(combustible_id),
+          cantidad         DECIMAL(12,3) NOT NULL
+            CONSTRAINT CK_consumo_cantidad CHECK (cantidad >= 0),
+          detalle          NVARCHAR(MAX) NULL,
+          creado_por       INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+          creado_en        DATETIME2     NOT NULL CONSTRAINT DF_consumo_creado_en DEFAULT SYSUTCDATETIME(),
+          modificado_por   INT           NULL REFERENCES lov_bit.usuario(usuario_id),
+          modificado_en    DATETIME2     NULL,
+          CONSTRAINT UQ_consumo_planta_fecha_periodo_combustible UNIQUE (planta_id, fecha, periodo, combustible_id)
+        );
+
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_consumo_planta_fecha')
+          CREATE INDEX IX_consumo_planta_fecha
+            ON bitacora.consumo_combustible(planta_id, fecha DESC, periodo);
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id=OBJECT_ID('bitacora.consumo_combustible') AND name='creado_en_bogota')
+          ALTER TABLE bitacora.consumo_combustible
+            ADD creado_en_bogota AS DATEADD(HOUR, -5, creado_en);
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id=OBJECT_ID('bitacora.consumo_combustible') AND name='modificado_en_bogota')
+          ALTER TABLE bitacora.consumo_combustible
+            ADD modificado_en_bogota AS DATEADD(HOUR, -5, modificado_en);
+      `);
+
+      // 4. Vista pivot por periodo + total_carbon_ton derivado (suma de tipo='ALIMENTADOR').
+      //    CREATE OR ALTER VIEW debe ser el primer statement del batch.
+      await new sql.Request(tx).batch(`
+        CREATE OR ALTER VIEW bitacora.v_consumo_periodo AS
+        SELECT
+          c.planta_id,
+          c.fecha,
+          c.periodo,
+          SUM(CASE WHEN cb.tipo = 'ALIMENTADOR' THEN c.cantidad ELSE 0 END) AS total_carbon_ton,
+          SUM(CASE WHEN cb.tipo = 'CALIZA'      THEN c.cantidad ELSE 0 END) AS caliza_ton,
+          SUM(CASE WHEN cb.tipo = 'ACPM'        THEN c.cantidad ELSE 0 END) AS acpm_gal,
+          MAX(c.modificado_en)                                              AS modificado_en
+        FROM bitacora.consumo_combustible c
+        JOIN lov_bit.combustible cb ON cb.combustible_id = c.combustible_id
+        GROUP BY c.planta_id, c.fecha, c.periodo;
+      `);
+
+      // 5. Fila marcadora en lov_bit.bitacora — reusa el patrón de DISP/MAND para que
+      //    sidebar/permisos/routing del frontend la traten como bitácora con UI especial.
+      await new sql.Request(tx).batch(`
+        IF NOT EXISTS (SELECT 1 FROM lov_bit.bitacora WHERE codigo='COMB')
+        INSERT INTO lov_bit.bitacora (nombre, codigo, icono, formulario_especial, definicion_campos, orden, activa, oculta)
+        VALUES ('Consumos', 'COMB', 'Flame', 1, NULL, 11, 1, 0);
+      `);
+
+      // 6. Permisos COMB (one-shot bootstrap). El matrix rebuild de "Datos semilla" se
+      //    actualizó en este mismo archivo para que en restarts subsecuentes preserve estos
+      //    permisos vía las nuevas CASE clauses 'COMB'. Acá seedeamos para que el primer
+      //    arranque post-F26.B1 ya tenga el módulo visible sin esperar otra reinicio.
+      await new sql.Request(tx).batch(`
+        DECLARE @comb_bid INT = (SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='COMB');
+
+        MERGE lov_bit.cargo_bitacora_permiso AS t
+        USING (
+          SELECT c.cargo_id, @comb_bid AS bitacora_id,
+                 CAST(1 AS BIT) AS puede_ver, CAST(1 AS BIT) AS puede_crear
+          FROM lov_bit.cargo c
+          WHERE c.nombre IN ('Operador de Planta - Carbón y Caliza', 'Ingeniero Jefe de Turno')
+        ) AS s
+          ON t.cargo_id = s.cargo_id AND t.bitacora_id = s.bitacora_id
+        WHEN MATCHED THEN UPDATE SET puede_ver = s.puede_ver, puede_crear = s.puede_crear
+        WHEN NOT MATCHED THEN INSERT (cargo_id, bitacora_id, puede_ver, puede_crear)
+          VALUES (s.cargo_id, s.bitacora_id, s.puede_ver, s.puede_crear);
+
+        MERGE lov_bit.cargo_bitacora_permiso AS t
+        USING (
+          SELECT c.cargo_id, @comb_bid AS bitacora_id,
+                 CAST(1 AS BIT) AS puede_ver, CAST(0 AS BIT) AS puede_crear
+          FROM lov_bit.cargo c
+          WHERE c.nombre NOT IN ('Operador de Planta - Carbón y Caliza', 'Ingeniero Jefe de Turno')
+        ) AS s
+          ON t.cargo_id = s.cargo_id AND t.bitacora_id = s.bitacora_id
+        WHEN NOT MATCHED THEN INSERT (cargo_id, bitacora_id, puede_ver, puede_crear)
+          VALUES (s.cargo_id, s.bitacora_id, s.puede_ver, s.puede_crear);
+      `);
+
+      // 7. Validación: el catálogo debe haber quedado con las 18 entradas. Si falló algo,
+      //    ROLLBACK + reintentar en el siguiente arranque.
+      await new sql.Request(tx).batch(`
+        IF (SELECT COUNT(*) FROM lov_bit.combustible) < 18
+          THROW 50002, 'F26.B1: seeds de combustible incompletos (esperado >= 18)', 1;
+      `);
+
+      // 8. Flag de migración aplicada (último statement antes del COMMIT).
+      await new sql.Request(tx).batch(`
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F26.B1');
+      `);
+
+      await tx.commit();
+      console.log('[F26.B1] Catálogo combustibles + tabla consumo + vista + permisos creados');
+    } catch (err) {
+      try { await tx.rollback(); } catch {}
+      throw err;
+    }
+  }
+
+  // D-027: cache del id de la bitácora COMB. Fuera del bloque F26.B1 para que se
+  // resuelva en CADA arranque (no solo el primero). Lo consumen los endpoints
+  // /api/combustibles/* en server.js para gating con hasPermisoBitacora.
+  const combRow = await db.request().query(
+    `SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='COMB'`
+  );
+  COMB_BITACORA_ID = combRow.recordset[0]?.bitacora_id ?? null;
+  if (!COMB_BITACORA_ID) {
+    throw new Error("[initDB] bitácora 'COMB' no fue sembrada (F26.B1)");
   }
 
   // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de

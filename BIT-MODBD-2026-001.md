@@ -5,13 +5,19 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 1.7 |
-| Fecha | 2026-05-20 |
+| Versión | 1.8 |
+| Fecha | 2026-05-21 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
 
 > **Convenciones:** las tablas de catálogos viven en `lov_bit`; las tablas operativas en `bitacora`. Los campos JSON usan `NVARCHAR(MAX)` y se validan en la capa de aplicación.
+
+> **Cambios v1.8 (2026-05-21) — Consumos de Combustibles (D-027):**
+> - **Nueva §2.7 `lov_bit.combustible`** — catálogo por planta (`planta_id, codigo, nombre, unidad, tipo, orden, activo`). 18 seeds (8 GEC3 + 10 GEC32). Tipo discriminador `ALIMENTADOR/CALIZA/ACPM` usado por la vista `v_consumo_periodo` para derivar Total Carbón.
+> - **Nueva §4.9 `bitacora.consumo_combustible`** — transaccional long-format (1 fila por celda planta+fecha+periodo+combustible), `cantidad DECIMAL(12,3)`, auditoría `creado_por/modificado_por`. UNIQUE compuesto previene duplicados. Vista `v_consumo_periodo` pivotea por (planta, fecha, periodo) y suma `total_carbon_ton = SUM(tipo='ALIMENTADOR')`, `caliza_ton`, `acpm_gal`.
+> - **§2.4 `lov_bit.bitacora`** gana una fila más: `codigo='COMB'`, `nombre='Consumos'`, `icono='Flame'`, `formulario_especial=1`, `orden=11`. Reusa el sistema de permisos en `cargo_bitacora_permiso` sin código nuevo; la matriz canónica de §2.6 se extendió con CASE clauses para COMB.
+> - **Migración `F26.B1`** idempotente en `db.js::initDB()`: tablas + vista + seeds + permisos one-shot. Convive ortogonalmente con F26.A1 (DISP).
 
 > **Cambios v1.7 (2026-05-20) — Migración ER DISP (D-026):**
 > - **Nueva §4.8** con DDL de `bitacora.disponibilidad_estado` (PK `disponibilidad_id`, columnas tipadas, filtered unique index `UQ_disp_estado_vigente_por_planta`, columnas Bogotá calculadas, vista `v_disponibilidad_estado` con acumulados via window functions). Reemplaza el storage DISP que vivía en `registro_activo` / `registro_historico` con datos clave embebidos en `campos_extra` JSON.
@@ -51,6 +57,7 @@
 0. [Resumen de arquitectura](#0-resumen-de-arquitectura)
 1. [Creación de esquemas](#1-creación-de-esquemas)
 2. [Catálogos (esquema `lov_bit`)](#2-catálogos-esquema-lov_bit)
+   - 2.7 [`combustible` — catálogo por planta de Consumos (D-027)](#27-combustible--catálogo-por-planta-de-consumos-d-027)
 3. [Sesiones activas (esquema `bitacora`)](#3-sesiones-activas-esquema-bitacora)
 4. [Registros de bitácora (esquema `bitacora`)](#4-registros-de-bitácora-esquema-bitacora)
    - 4.4 [Tablas auxiliares de migración y cierre MAND](#44-tablas-auxiliares-de-migración-y-cierre-mand)
@@ -58,6 +65,7 @@
    - 4.6 [`sesion_bitacora` — participación por bitácora (F2)](#46-sesion_bitacora--participación-por-bitácora-f2)
    - 4.7 [`conformacion_turno` — snapshot histórico por turno-planta](#47-conformacion_turno--snapshot-histórico-por-turno-planta)
    - 4.8 [`disponibilidad_estado` — máquina de estados DISP (D-026)](#48-disponibilidad_estado--máquina-de-estados-disp-d-026)
+   - 4.9 [`consumo_combustible` — Consumos long-format + vista pivot (D-027)](#49-consumo_combustible--consumos-long-format--vista-pivot-d-027)
 5. [Integración con el Dashboard (esquema `bitacora`)](#5-integración-con-el-dashboard-esquema-bitacora)
 6. [Vistas útiles](#6-vistas-útiles)
 7. [Notas de diseño](#7-notas-de-diseño)
@@ -350,6 +358,61 @@ FROM lov_bit.bitacora;
 INSERT INTO lov_bit.cargo_bitacora_permiso (cargo_id, bitacora_id, puede_ver, puede_crear)
 SELECT 4, bitacora_id, 1, 0 FROM lov_bit.bitacora;
 ```
+
+> **Nota v1.8 (D-027):** la matriz canónica que reconstruye `cargo_bitacora_permiso` en cada arranque (`db.js`, bloque "Matriz de permisos") se extendió con dos CASE clauses para `b.codigo = 'COMB'`:
+>
+> - `puede_ver = 1` para TODOS los cargos (igual que MAND).
+> - `puede_crear = 1` solo si `c.nombre IN ('Operador de Planta - Carbón y Caliza', 'Ingeniero Jefe de Turno')`.
+>
+> Esto garantiza que los permisos COMB sobreviven a restarts sin depender del bloque idempotente F26.B1 (que solo corre una vez y seedea los permisos como bootstrap del primer arranque).
+
+---
+
+### 2.7 `combustible` — catálogo por planta de Consumos (D-027)
+
+Catálogo de combustibles operativos por planta, consumido por el módulo Consumos (§4.9). Filas estables — cambios se hacen vía `db.js` (seed MERGE en F26.B1) y redeploy; sin UI admin. El catálogo es asimétrico entre plantas: GEC3 tiene 6 alimentadores nombrados (A–F); GEC32 tiene 8 numerados (1–8); ambas con CALIZA y ACPM.
+
+```sql
+CREATE TABLE lov_bit.combustible (
+    combustible_id  INT IDENTITY(1,1) PRIMARY KEY,
+    planta_id       VARCHAR(10)  NOT NULL REFERENCES lov_bit.planta(planta_id),
+    codigo          VARCHAR(20)  NOT NULL,
+    nombre          VARCHAR(100) NOT NULL,
+    unidad          VARCHAR(10)  NOT NULL,           -- 'Ton' | 'Gal'
+    tipo            VARCHAR(20)  NOT NULL
+        CONSTRAINT CK_combustible_tipo CHECK (tipo IN ('ALIMENTADOR','CALIZA','ACPM')),
+    orden           INT          NOT NULL DEFAULT 0, -- orden visual en la grilla
+    activo          BIT          NOT NULL DEFAULT 1,
+    CONSTRAINT UQ_combustible_planta_codigo UNIQUE (planta_id, codigo)
+);
+
+CREATE INDEX IX_combustible_planta_orden
+    ON lov_bit.combustible(planta_id, orden)
+    WHERE activo = 1;
+```
+
+**18 seeds (F26.B1):**
+
+| Planta | Codigo  | Nombre          | Unidad | Tipo        | Orden |
+|--------|---------|-----------------|--------|-------------|-------|
+| GEC3   | ALIM_A  | Alimentador A   | Ton    | ALIMENTADOR | 1     |
+| GEC3   | ALIM_B  | Alimentador B   | Ton    | ALIMENTADOR | 2     |
+| GEC3   | ALIM_C  | Alimentador C   | Ton    | ALIMENTADOR | 3     |
+| GEC3   | ALIM_D  | Alimentador D   | Ton    | ALIMENTADOR | 4     |
+| GEC3   | ALIM_E  | Alimentador E   | Ton    | ALIMENTADOR | 5     |
+| GEC3   | ALIM_F  | Alimentador F   | Ton    | ALIMENTADOR | 6     |
+| GEC3   | CALIZA  | Caliza          | Ton    | CALIZA      | 7     |
+| GEC3   | ACPM    | ACPM            | Gal    | ACPM        | 8     |
+| GEC32  | ALIM_1  | Alimentador 1   | Ton    | ALIMENTADOR | 1     |
+| GEC32  | ALIM_2  | Alimentador 2   | Ton    | ALIMENTADOR | 2     |
+| ...    | ...     | ...             | ...    | ...         | ...   |
+| GEC32  | ALIM_8  | Alimentador 8   | Ton    | ALIMENTADOR | 8     |
+| GEC32  | CALIZA  | Caliza          | Ton    | CALIZA      | 9     |
+| GEC32  | ACPM    | ACPM            | Gal    | ACPM        | 10    |
+
+El campo `tipo` es el discriminador semántico que usa la vista `v_consumo_periodo` (§4.9) para calcular el **Total Carbón** como `SUM(cantidad) WHERE tipo='ALIMENTADOR'` por (planta, fecha, periodo) — sin almacenar el total derivado en la tabla transaccional.
+
+**Cross-ref:** ADR [[D-027]]. Catálogo se siembra en `db.js::initDB()` bloque F26.B1 vía `MERGE` por `UQ(planta_id, codigo)` (idempotente).
 
 ---
 
@@ -867,6 +930,80 @@ El vigente (sin `fecha_fin_estado`) se trunca a `SYSUTCDATETIME()` al calcular `
 
 ---
 
+### 4.9 `consumo_combustible` — Consumos long-format + vista pivot (D-027)
+
+Tabla transaccional del módulo Consumos de Combustibles. Storage en formato **long**: 1 fila por celda `(planta, fecha, periodo, combustible)` — soporta el catálogo asimétrico de §2.7 (GEC3 tiene 8 combustibles, GEC32 tiene 10) sin columnas fijas por planta. La presentación wide (24 periodos × N combustibles) se construye en el frontend o vía la vista `v_consumo_periodo` de abajo.
+
+```sql
+CREATE TABLE bitacora.consumo_combustible (
+    consumo_id       INT IDENTITY(1,1) PRIMARY KEY,
+    planta_id        VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+    fecha            DATE          NOT NULL,
+    periodo          TINYINT       NOT NULL
+        CONSTRAINT CK_consumo_periodo CHECK (periodo BETWEEN 1 AND 24),
+    combustible_id   INT           NOT NULL REFERENCES lov_bit.combustible(combustible_id),
+    cantidad         DECIMAL(12,3) NOT NULL
+        CONSTRAINT CK_consumo_cantidad CHECK (cantidad >= 0),
+    detalle          NVARCHAR(MAX) NULL,
+    creado_por       INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+    creado_en        DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    modificado_por   INT           NULL REFERENCES lov_bit.usuario(usuario_id),
+    modificado_en    DATETIME2     NULL,
+    CONSTRAINT UQ_consumo_planta_fecha_periodo_combustible
+        UNIQUE (planta_id, fecha, periodo, combustible_id)
+);
+
+CREATE INDEX IX_consumo_planta_fecha
+    ON bitacora.consumo_combustible(planta_id, fecha DESC, periodo);
+
+-- Columnas Bogotá calculadas (patrón F22, idempotente):
+ALTER TABLE bitacora.consumo_combustible
+    ADD creado_en_bogota     AS DATEADD(HOUR, -5, creado_en);
+ALTER TABLE bitacora.consumo_combustible
+    ADD modificado_en_bogota AS DATEADD(HOUR, -5, modificado_en);
+```
+
+**Vista pivot por periodo** — agrega los N combustibles de la planta a un row por (planta, fecha, periodo) y deriva los acumulados semánticos:
+
+```sql
+CREATE VIEW bitacora.v_consumo_periodo AS
+SELECT
+    c.planta_id,
+    c.fecha,
+    c.periodo,
+    SUM(CASE WHEN cb.tipo = 'ALIMENTADOR' THEN c.cantidad ELSE 0 END) AS total_carbon_ton,
+    SUM(CASE WHEN cb.tipo = 'CALIZA'      THEN c.cantidad ELSE 0 END) AS caliza_ton,
+    SUM(CASE WHEN cb.tipo = 'ACPM'        THEN c.cantidad ELSE 0 END) AS acpm_gal,
+    MAX(c.modificado_en)                                              AS modificado_en
+FROM bitacora.consumo_combustible c
+JOIN lov_bit.combustible cb ON cb.combustible_id = c.combustible_id
+GROUP BY c.planta_id, c.fecha, c.periodo;
+```
+
+**Invariantes:**
+
+- **UQ compuesto `(planta_id, fecha, periodo, combustible_id)`** garantiza una sola celda por intersección — el endpoint POST hace lookup→UPDATE/INSERT/DELETE en lugar de re-INSERT.
+- **`cantidad >= 0`** (CHECK constraint); el handler trata `cantidad=null` o `cantidad=0` como "celda vacía" y DELETE-ea la fila si existía.
+- **Ventana de fechas**: hoy o pasado en TZ Bogotá. Futuro rechazado con `400 fecha_futura` por el handler (`fechaBogotaStr(new Date())` para el corte canónico).
+- **`modificado_por` paridad D-019**: el UPDATE solo setea `modificado_por`/`modificado_en` si `cantidad` cambió. Cambios solo de `detalle` actualizan la fila pero NO el audit trail (no es una modificación operativa). Cross-ref [[D-019]] (MAND).
+
+**Flujo del POST batch** (endpoint `POST /api/combustibles/consumos`):
+
+1. Validar permiso `puede_crear` en bitácora COMB. 403 si no.
+2. Validar `planta_id ∈ {GEC3, GEC32}`, `fecha` formato `YYYY-MM-DD`, `fecha <= hoyBogota`, `celdas: Array`.
+3. Pre-load del catálogo activo de la planta. Validar cada celda: `periodo ∈ [1,24]`, `combustible_id ∈ catálogo`, `cantidad >= 0` o null/0.
+4. Si hay errores estructurados → `400 { errores: [{periodo, combustible_id, motivo}] }` sin ejecutar nada.
+5. Transacción única: por celda, lookup por UQ → si `cantidad` vacío y existe ⇒ DELETE (`eliminados++`); si nuevo ⇒ INSERT (`creados++`); si existe y `cantidad` cambió ⇒ UPDATE + setear `modificado_por` (`actualizados++`); si solo cambió `detalle` ⇒ UPDATE detalle sin tocar audit (`actualizados++`); si idéntico ⇒ no-op.
+6. Response `200 { resumen: { creados, actualizados, eliminados } }`.
+
+**Migración idempotente (F26.B1):**
+
+`db.js::initDB()` ejecuta el bloque F26.B1 una sola vez (gateado por flag en `bitacora.migracion_aplicada`). Dentro de una transacción única: crea `lov_bit.combustible` + índice + UQ, MERGE de 18 seeds del catálogo, crea `bitacora.consumo_combustible` + índice + columnas Bogotá, crea `v_consumo_periodo`, INSERT IF NOT EXISTS de la fila `COMB` en `lov_bit.bitacora`, seed one-shot de permisos en `cargo_bitacora_permiso` (Operador Carbón y Caliza + JdT crean; resto ven), validación de conteo (`THROW` si <18), INSERT flag F26.B1. Ortogonal a F26.A1 (DISP). La matriz canónica de §2.6 se extendió con CASE clauses para `b.codigo='COMB'` → los permisos persisten en restarts subsecuentes vía el rebuild de matriz, sin depender del flag F26.B1.
+
+**Cross-ref:** ADR [[D-027]] documenta la decisión completa. §2.7 detalla el catálogo. Paridad de `modificado_por` con [[D-019]] (MAND).
+
+---
+
 ## 5. Integración con el Dashboard (esquema `bitacora`)
 
 El esquema expone dos tablas-puente independientes hacia el Dashboard de Generación:
@@ -1178,6 +1315,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 | 1.5 | 2026-05-18 | Sincronización doc↔BD productiva tras auditoría de `INFORMATION_SCHEMA` + `sys.indexes` + `sys.foreign_keys`. **Catálogos:** `lov_bit.cargo.puede_cerrar_turno` agregado al DDL (estaba en §2.3.1 sin DDL); cargo "Jefe de Turno" renombrado a "Ingeniero Jefe de Turno" (migración v2). `lov_bit.usuario.username NOT NULL` con `UQ_usuario_username` (reemplaza email como identificador de login); `email` pasa a NULL; `password_hash` migra a bcrypt. `lov_bit.bitacora.oculta` (toggle de sidebar). `lov_bit.tipo_evento.notificar_dashboard_tipo VARCHAR(10) CHECK IN ('AUTH','REDESP','PRUEBA')` (F6) reemplaza al flag JSON `notificar_dashboard:true`. **Sesiones:** `bitacora.sesion_activa.cerrada_en` (F2). **Sweep TTL eliminado en F9** — el modelo post-F2 mantiene la sesión hasta logout o sweeper de turno; §3 y §7.4 actualizadas. **Nueva §4.6 `sesion_bitacora`** (F2 — DDL formal que estaba en código pero ausente del MD). **Registros:** `detalle` pasa a NULL en §4.1 y §4.2 (F3). **Dashboard:** §5.1 UQ corregido a 4 columnas `(planta_id, fecha, periodo, tipo)`; vista compat `autorizacion_dashboard` documentada como deuda viva (el doc v1.4 afirmaba que F9 la eliminó, pero `db.js` la recrea). |
 | 1.6 | 2026-05-19 | Conformación de turno (D-025). **Nueva §4.7** con DDL de `bitacora.conformacion_turno` (PK compuesta, FKs a usuario/planta/cargo, índice de lookup, columnas `*_bogota` calculadas vía F22.D2). Trigger híbrido: `turno-sweeper.js` extendido + catchup en `initDB()` para los últimos 7 días Bogotá. Endpoints `GET /api/conformacion-turno` y `POST /api/conformacion-turno/trigger`. **Fix retro:** `POST /api/auth/logout` ahora pobla `sesion_activa.cerrada_en = SYSUTCDATETIME()` (era deuda F2 nunca cerrada). **Filtro semántico del builder:** una sesión cuenta para el turno X si arrancó dentro de la ventana de X (derivación de D-003). Cobertura backend: 14 tests dirigidos en `conformacion_turno.test.js`. |
 | 1.7 | 2026-05-20 | Migración ER DISP (D-026). **Nueva §4.8** con DDL de `bitacora.disponibilidad_estado` (PK `disponibilidad_id`, columnas tipadas `estado`/`codigo`/`fecha_inicio_estado`/`fecha_fin_estado`, snapshot adicional `gerentes_produccion_snapshot`, filtered unique index `UQ_disp_estado_vigente_por_planta`, columnas Bogotá) + vista `v_disponibilidad_estado` (acumulados via window functions). §5.2 actualizada — `disponibilidad_dashboard` ahora es VIEW del vigente sobre la nueva tabla (preserva shape: `disponibilidad_id → registro_activo_id`, `jefes_planta_snapshot → jefes_snapshot`). §7.8 marcada como histórica. Vista `v_disp_intervalos` dropeada (las métricas suman `DATEDIFF_BIG` directo sobre la nueva tabla). Migración idempotente F26.A1 hace backfill + DELETE de rows DISP en `registro_activo`/`registro_historico`. Contratos HTTP y shape de response preservados (los tests existentes que validan via HTTP siguen verdes). |
+| 1.8 | 2026-05-21 | Consumos de Combustibles (D-027). **Nueva §2.7** `lov_bit.combustible` (catálogo por planta, 18 seeds: 8 GEC3 + 10 GEC32 con tipos `ALIMENTADOR/CALIZA/ACPM`). **Nueva §4.9** `bitacora.consumo_combustible` (long-format transaccional, `cantidad DECIMAL(12,3)`, UQ compuesto, columnas Bogotá) + vista `v_consumo_periodo` (pivot con `total_carbon_ton = SUM(tipo='ALIMENTADOR')`, `caliza_ton`, `acpm_gal`). §2.4 gana fila `COMB` (formulario_especial=1, icono Flame). §2.6 matriz extendida con CASE para COMB. Permisos: `Operador de Planta - Carbón y Caliza` + JdT crean; resto ven. Migración idempotente F26.B1 (ortogonal a F26.A1). Endpoints `GET /api/combustibles/catalogo`, `GET /api/combustibles/consumos`, `POST /api/combustibles/consumos` (batch atómico, regla D-019 paridad `modificado_por` solo si cantidad cambió). Frontend bajo `src/components/Combustibles/` integrado a categoría jerárquica nueva "Combustibles". 12 tests en `consumos_combustible.test.js`. |
 
 ---
 
