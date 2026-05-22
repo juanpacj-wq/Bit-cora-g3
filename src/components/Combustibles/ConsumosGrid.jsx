@@ -154,7 +154,11 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   }, [catalogo]);
 
   return (
-    <div className="p-4">
+    // flex-1 overflow-auto: el parent en BitacorasGecelca3.jsx es `h-screen flex flex-col`;
+    // sin esto, el grid (24 periodos × N combustibles) excede el viewport y el page document
+    // hace scroll vertical, empujando BitacoraTabs fuera de vista (softlock de navegación).
+    // Mismo patrón que SalaDeMandoGrid (l.332) y DisponibilidadDashboard (l.163).
+    <div className="flex-1 overflow-auto p-4">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div className="flex items-center gap-3">
           {bitacora?.nombre && <h2 className="text-lg font-semibold">{bitacora.nombre}</h2>}
