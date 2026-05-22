@@ -773,9 +773,19 @@ export async function initDB() {
   // Matriz de permisos (cargo × bitácora) derivada del Excel 2026.
   // Nota clave: Ingeniero Jefe de Turno e Ingeniero de Operación tienen filas idénticas (mismo
   // poder operativo). La distinción de rol se preserva por cargo.nombre en UI y snapshots.
-  // Se reconstruye desde cero con DELETE + MERGE para limpiar combinaciones muertas.
-  await db.request().batch(`
-    DELETE FROM lov_bit.cargo_bitacora_permiso;
+  // Se reconstruye desde cero con DELETE + INSERT para limpiar combinaciones muertas.
+  //
+  // 2026-05-22: el bloque va envuelto en transacción explícita con `TABLOCKX, HOLDLOCK` sobre
+  // el DELETE — sin esto, dos arranques concurrentes de initDB (ej. --watch reload + npm start
+  // simultáneos) podían meterse en una race: A.DELETE → A.INSERT → B.DELETE (post-A.INSERT) →
+  // B.INSERT falla con PK violation porque algún bloque defensivo posterior (F12.A6) ya
+  // re-pobló la fila. El TABLOCKX serializa el rebuild a nivel de tabla; la transacción
+  // garantiza atomicidad delete+insert. Costo: locks por ~ms al arranque, irrelevante.
+  const matrizTx = new sql.Transaction(db);
+  await matrizTx.begin();
+  try {
+    await new sql.Request(matrizTx).batch(`
+    DELETE FROM lov_bit.cargo_bitacora_permiso WITH (TABLOCKX, HOLDLOCK);
 
     ;WITH matriz AS (
       SELECT c.cargo_id, b.bitacora_id,
@@ -834,7 +844,12 @@ export async function initDB() {
     )
     INSERT INTO lov_bit.cargo_bitacora_permiso (cargo_id, bitacora_id, puede_ver, puede_crear)
     SELECT cargo_id, bitacora_id, puede_ver, puede_crear FROM matriz;
-  `);
+    `);
+    await matrizTx.commit();
+  } catch (err) {
+    try { await matrizTx.rollback(); } catch {}
+    throw err;
+  }
 
   // ---------- F12.A — Disponibilidad: BD ----------
   // F12: DISP pasa de grilla genérica a mini-dashboard. La rama POST/PUT/deshacer en
