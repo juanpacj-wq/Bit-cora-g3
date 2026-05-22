@@ -74,6 +74,7 @@ Dos bitácoras tienen UI propia (resto usa `GrillaRegistros` genérica):
 
 - **MAND** (Operación 24h) — `SalaDeMandoGrid.jsx`. Grilla 24p × 3 tipos × 2 plantas. Batch save atómico via `POST /api/sala-de-mando/guardar`. Cierre automático fin de día via sweeper diario. Solo HOY editable. NO acepta cierre individual ni masivo.
 - **DISP** (Disponibilidad) — `DisponibilidadDashboard.jsx`. Mini-dashboard con tabs GEC3/GEC32, counter live "tiempo en estado", historial paginado. Sin cierre de turno. Storage: tabla dedicada `bitacora.disponibilidad_estado` (D-026), 1 vigente por planta vía filtered unique index `UQ_disp_estado_vigente_por_planta`. Cierre automático cuando llega nuevo evento (UPDATE `fecha_fin_estado` del vigente + INSERT del nuevo en la misma transacción).
+- **COMB** (Consumos de Combustibles) — `Combustibles/ConsumosGrid.jsx`. Pestaña bajo categoría jerárquica "Combustibles" en el sidebar. Grilla 24 periodos × N combustibles dinámicos por planta (8 GEC3 / 10 GEC32 desde `lov_bit.combustible`). Selector de fecha (default hoy, futuro bloqueado con 400 `fecha_futura`). Total Carbón calculado live (`SUM(tipo='ALIMENTADOR')`). Batch save atómico vía `POST /api/combustibles/consumos`. Permisos: crean `Operador de Planta - Carbón y Caliza` + JdT; resto ven. NO es una bitácora — es un report numérico. D-027.
 
 Las demás (CIET, AUTOR, etc.) usan `GrillaRegistros.jsx` con filtros F11.
 
@@ -93,6 +94,7 @@ Al cierre de cada turno (T1/T2 por planta GEC3/GEC32) se escribe snapshot inmuta
 8. **Usuario SISTEMA** (`activo=0`, `password_hash='!disabled!'`) seedeado para CIETs automáticos del sweeper MAND. NUNCA loguea. D-015.
 9. **TZ canónica**: BD en UTC, presentación en Bogotá explícito (`Intl.DateTimeFormat` con `timeZone`). Comparaciones de día Bogotá en SQL con `CAST(DATEADD(HOUR, -5, columna) AS DATE)`. D-020.
 10. **No node_modules en búsquedas**: si necesitás grep, excluí siempre `node_modules/`.
+11. **Combustibles (D-027)**: catálogo `lov_bit.combustible` por planta (`codigo, nombre, unidad, tipo`). El campo `tipo` es discriminador (`ALIMENTADOR/CALIZA/ACPM`) usado por la vista `bitacora.v_consumo_periodo` para calcular `total_carbon_ton = SUM(WHERE tipo='ALIMENTADOR')`. Storage en `bitacora.consumo_combustible` long-format (1 fila por celda planta+fecha+periodo+combustible). `modificado_por` solo se actualiza si `cantidad` cambió, no si solo cambió `detalle` (paridad D-019 con MAND). Para agregar/quitar un combustible: editar seed en `db.js` (F26.B1) + matriz canónica de permisos si afecta cargos + redeploy — sin CRUD admin. Permisos COMB sobreviven a restarts porque la matriz de §2.6 BIT-MODBD se extendió con CASE clauses para `b.codigo='COMB'`.
 
 ## Contrato con dashboard-gen-gec3
 
