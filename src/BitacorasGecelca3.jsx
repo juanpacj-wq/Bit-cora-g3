@@ -965,11 +965,6 @@ function BarraEstado({
   mandDirty, mandGuardando, onGuardarMand,
 }) {
   const isMand = bitacora?.codigo === 'MAND';
-  // D-027: COMB (Combustibles → Consumos) comparte con MAND el "sin filtros/botones
-  // genéricos" — su UI tiene selector de fecha + botón Guardar propios dentro del
-  // componente, así que el header queda completamente limpio.
-  const isComb = bitacora?.codigo === 'COMB';
-  const isSinHeader = isMand || isComb;
   const borradores = registros.filter((r) => r.estado === "borrador").length;
   const cerrados = registros.filter((r) => r.estado === "cerrado").length;
 
@@ -993,8 +988,8 @@ function BarraEstado({
 
       {/* F11: filtros fecha+turno para no-MAND. MAND tiene su propia paginación entre días
           (F10) y muestra los 24 periodos, así que el turno es derivable visualmente.
-          D-027: COMB también los oculta — el selector de fecha vive dentro del ConsumosGrid. */}
-      {!isSinHeader && (
+          D-027: COMB ya no llega acá — la BarraEstado entera se omite en el routing. */}
+      {!isMand && (
         <div className="flex items-center gap-2 flex-wrap">
           <Calendar size={16} className="text-gray-400" />
           <button
@@ -1046,8 +1041,8 @@ function BarraEstado({
       )}
 
       {/* F17: filtros de búsqueda no aplican a MAND — la grilla muestra solo HOY.
-          D-027: tampoco a COMB — no hay "registros" que buscar (es una matriz numérica). */}
-      {!isSinHeader && (
+          D-027: COMB ya no llega acá — la BarraEstado entera se omite en el routing. */}
+      {!isMand && (
         <div className="flex items-center gap-3">
           <div className="relative">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -1074,10 +1069,8 @@ function BarraEstado({
       )}
 
       {/* F17: en MAND el slot del "+ Nuevo Registro" se reemplaza por el botón "Guardar"
-          que despacha el batch save del child via mandSaveRef.
-          D-027: en COMB el botón Guardar vive dentro del ConsumosGrid (al lado del selector
-          de fecha), así que el slot del header queda vacío. */}
-      {!isComb && (isMand ? (
+          que despacha el batch save del child via mandSaveRef. */}
+      {isMand ? (
         puedeCrear && (
           <button
             onClick={onGuardarMand}
@@ -1098,13 +1091,12 @@ function BarraEstado({
             Nuevo Registro
           </button>
         )
-      ))}
+      )}
 
       {/* F4: "Finalizar turno" para todo ingeniero logueado (preguntas3.md punto E). Finaliza
           globalmente todas sus sesion_bitacora y emite CIET. Convive con el popup de logout.
-          F17: oculto en MAND (cierre del día es automático vía sweeper).
-          D-027: también oculto en COMB (no hay turno operativo asociado a Combustibles). */}
-      {!isSinHeader && onFinalizarTurno && (
+          F17: oculto en MAND (cierre del día es automático vía sweeper). */}
+      {!isMand && onFinalizarTurno && (
         <button onClick={onFinalizarTurno} disabled={finalizandoTurno}
           className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
           style={{ backgroundColor: COLORS.greenDark }}>
@@ -1116,9 +1108,8 @@ function BarraEstado({
       {/* "Cerrar Turno" individual: oculto en MAND. El cierre del día MAND es automático
           vía sweeper diario (`server/utils/mand-sweeper.js`); el backend ya rechaza el
           intento con 400 `mand_cierre_individual_no_permitido` (defensa en profundidad).
-          En la pestaña Operación 24h, el único botón de acción del header es "Guardar".
-          D-027: COMB no tiene "registros que cerrar" — es un report numérico. */}
-      {!isSinHeader && esJefeTurno && borradores + cerrados > 0 && (
+          En la pestaña Operación 24h, el único botón de acción del header es "Guardar". */}
+      {!isMand && esJefeTurno && borradores + cerrados > 0 && (
         <button onClick={onCerrarTurno}
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
           style={{ backgroundColor: COLORS.blueDark }}>
@@ -1128,9 +1119,8 @@ function BarraEstado({
       )}
 
       {/* F4: cierre masivo con popup de pendientes — solo cargos puede_cerrar_turno.
-          F17: oculto en MAND (sweeper automático en lugar de cierre manual).
-          D-027: idem COMB. */}
-      {!isSinHeader && esJefeTurno && (
+          F17: oculto en MAND (sweeper automático en lugar de cierre manual). */}
+      {!isMand && esJefeTurno && (
         <button onClick={onCerrarMasivo}
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
           style={{ backgroundColor: COLORS.blueDeep }}>
@@ -1853,7 +1843,7 @@ export default function App() {
             registrosPorBitacora={registrosPorBitacora}
           />
 
-          {bitacoraActiva && bitacoraActiva.codigo !== 'DISP' && (
+          {bitacoraActiva && !['DISP', 'COMB'].includes(bitacoraActiva.codigo) && (
             <BarraEstado
               bitacora={bitacoraActiva}
               registros={registrosDeBitacora}
