@@ -22,7 +22,7 @@ NO hay GEC4, GEC1, GEC2. Cualquier referencia a otras es error de un agente conf
 | Código | Nombre | `formulario_especial` | UI | Notas |
 |---|---|---|---|---|
 | `MAND` | Operación 24h (anteriormente "Sala de Mando") | 1 | `SalaDeMandoGrid.jsx` | Grilla 24p × 3 tipos × 2 plantas. Batch save. No tiene cierre individual ni masivo (sweeper diario). Solo HOY editable. |
-| `DISP` | Disponibilidad | 1 | `DisponibilidadDashboard.jsx` | Mini-dashboard con tabs GEC3/GEC32. Sin cierre de turno. 1 vigente por planta. 4 estados (D-024): `En Servicio` (`1`, verde), `En Reserva` (`0`, azul), `Indisponible` (`-1`, rojo, salida forzada), `Mantenimiento` (`-1`, amarillo, consignación). `Indisponible` y `Mantenimiento` comparten `codigo=-1`; el discriminador es el string `evento`. |
+| `DISP` | Disponibilidad | 1 | `DisponibilidadDashboard.jsx` | Mini-dashboard con tabs GEC3/GEC32. Sin cierre de turno. 1 vigente por planta. 4 estados (D-024): `En Servicio` (`1`, verde), `En Reserva` (`0`, azul), `Indisponible` (`-1`, rojo, salida forzada), `Mantenimiento` (`-1`, amarillo, consignación). `Indisponible` y `Mantenimiento` comparten `codigo=-1`; el discriminador es el string `evento`. Panel de acumulado histórico por estado (D-028): el del estado vigente crece en vivo, el resto congelado. |
 | `CIET` | Cierres y Finalizaciones | 0 | Solo histórico | Auditoría automática. Nadie tiene `puede_crear=1`. Tipos: Finalización de turno, Cierre de turno, Deshacer disponibilidad. |
 | `AUTOR` / similar | Autorizaciones (genérica histórica) | 0 | `GrillaRegistros` genérica | Bitácora estándar. |
 | (otras) | bitácoras operativas | 0 | `GrillaRegistros` genérica | Con filtros F11 (fecha+turno). |

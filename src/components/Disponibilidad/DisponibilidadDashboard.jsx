@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Inbox, Plus, Undo2 } from 'lucide-react';
 import EstadoActualCard from './EstadoActualCard';
+import AcumuladosPorEstado from './AcumuladosPorEstado';
 import HistorialList from './HistorialList';
 import CambiarEstadoModal from './CambiarEstadoModal';
 import DashboardSkeleton from './Skeleton';
@@ -29,7 +30,7 @@ export default function DisponibilidadDashboard({
   puedeEditar,
   showToast,
 }) {
-  const { getEstado, crear, editar, deshacer } = useDisponibilidad(bitacoraId);
+  const { getEstado, getMetricas, crear, editar, deshacer } = useDisponibilidad(bitacoraId);
 
   const [plantaSeleccionada, setPlantaSeleccionada] = useState(() => loadStoredPlanta(plantaInicial));
 
@@ -50,13 +51,19 @@ export default function DisponibilidadDashboard({
   const fetchEstado = useCallback(
     async (planta, { silent = false } = {}) => {
       try {
-        const res = await getEstado(planta, { historial_limit: HIST_PAGE, historial_offset: 0 });
+        // Estado vigente + acumulados en paralelo. metricas se degrada a null si falla (el
+        // panel de acumulados simplemente no se muestra) — no debe tumbar la carga del estado.
+        const [res, met] = await Promise.all([
+          getEstado(planta, { historial_limit: HIST_PAGE, historial_offset: 0 }),
+          getMetricas(planta).catch(() => null),
+        ]);
         setDataByPlanta((prev) => ({
           ...prev,
           [planta]: {
             vigente: res.vigente || null,
             historial: res.historial || [],
             historial_total: res.historial_total || 0,
+            metricas: met,
             loaded: true,
           },
         }));
@@ -65,7 +72,7 @@ export default function DisponibilidadDashboard({
         if (!silent) setError(e.message || 'Error al cargar disponibilidad');
       }
     },
-    [getEstado]
+    [getEstado, getMetricas]
   );
 
   // Fetch al cambiar de planta. SWR: si ya hay cache, refrescamos en silencio.
@@ -194,6 +201,7 @@ export default function DisponibilidadDashboard({
                 onEditar={() => setModal({ mode: 'editar' })}
                 onDeshacer={() => setConfirmDeshacer(true)}
               />
+              <AcumuladosPorEstado metricas={data.metricas} vigente={data.vigente} />
               <div className="flex-1 min-h-0 flex flex-col">
                 <HistorialList
                   planta={plantaSeleccionada}
