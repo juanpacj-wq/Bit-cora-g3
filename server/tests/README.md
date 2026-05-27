@@ -29,6 +29,8 @@ TZ=UTC npm test
 | `disponibilidad.test.js` | F12-F14: bitácora DISP (vigente, histórico, deshacer, edit, permisos). |
 | `cierre_y_fechas.test.js` | F13.3: regresiones bug A (cierre arrastraba DISP) y bug B (`creado_en` consistente UTC). |
 | `sala_de_mando_batch.test.js` | F16-F17: batch save MAND + cierre-diario + F21.B regresión T1 (madrugada Bogotá) + F21.C CIET fecha_cerrada Bogotá. |
+| `conformacion_turno.test.js` | D-025: builder de conformación de turno (agregación por fecha/planta/turno) + endpoints `GET /api/conformacion-turno` y `POST .../trigger`. |
+| `consumos_combustible.test.js` | D-027: Consumos de Combustibles — catálogo por planta, batch atómico (INSERT/UPDATE/DELETE), permisos crear, vista pivot `v_consumo_periodo` (Total Carbón), ventana de fechas (futuro → 400). 12 tests. |
 
 ## Convención TZ-agnóstica (post F19+F20+F21)
 
