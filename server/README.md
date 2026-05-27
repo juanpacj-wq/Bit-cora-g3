@@ -91,7 +91,7 @@ Al arrancar, `initDB()` crea esquemas, tablas, índices, vistas y datos semilla 
 |---|---|---|
 | GET | `/api/disponibilidad?planta_id=&historial_limit=&historial_offset=` | Vigente + historial paginado |
 | POST | `/api/disponibilidad/deshacer` | Revierte el último cambio (restaura el último histórico) |
-| GET | `/api/disponibilidad/metricas?planta_id=&desde=&hasta=` | **D-024** — tiempo por estado + acumulados (`disponible`, `no_disponible`) en `[desde, hasta]`. Cimiento SQL: vista `bitacora.v_disp_intervalos`. |
+| GET | `/api/disponibilidad/metricas?planta_id=&desde=&hasta=` | **D-024/D-026** — tiempo por estado + acumulados (`disponible`, `no_disponible`) en `[desde, hasta]` + `ahora` (reloj server). Cimiento SQL: suma `DATEDIFF_BIG` directo sobre `bitacora.disponibilidad_estado` (la vista `v_disp_intervalos` se dropeó en D-026). Consumido por el panel de acumulados del mini-dashboard (D-028). |
 
 ## Sesión y autenticación
 

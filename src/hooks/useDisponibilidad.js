@@ -50,6 +50,15 @@ export function useDisponibilidad(dispBitacoraId) {
     []
   );
 
+  // D-024/D-026: acumulado histórico por estado (tiempo_ms) + `ahora` (reloj del server).
+  // Sin desde/hasta → ventana = toda la historia de la planta. Alimenta el panel de
+  // acumulados; el estado vigente crece en vivo client-side reusando el tick de TiempoEnEstado.
+  const getMetricas = useCallback(
+    (planta_id) =>
+      api.get(`/api/disponibilidad/metricas?planta_id=${encodeURIComponent(planta_id)}`),
+    []
+  );
+
   const crear = useCallback(
     ({ planta_id, evento, codigo, fecha_inicio_estado, detalle }) => {
       if (!dispBitacoraId) throw new Error('bitacora_id de DISP no resuelto');
@@ -91,7 +100,7 @@ export function useDisponibilidad(dispBitacoraId) {
   );
 
   return useMemo(
-    () => ({ getEstado, crear, editar, deshacer }),
-    [getEstado, crear, editar, deshacer]
+    () => ({ getEstado, getMetricas, crear, editar, deshacer }),
+    [getEstado, getMetricas, crear, editar, deshacer]
   );
 }

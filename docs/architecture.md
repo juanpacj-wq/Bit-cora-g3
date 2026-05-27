@@ -92,7 +92,7 @@ Bit-cora-g3/server/
 | `POST /api/cierre/masivo` | Cierra todas las bitácoras del turno (`b.codigo NOT IN ('DISP','MAND')`). |
 | `GET /api/disponibilidad?planta_id=` | Vista mini-dashboard DISP (vigente + historial paginado). |
 | `POST /api/disponibilidad/deshacer` | Borra vigente + restaura último histórico. Emite CIET 'Deshacer disponibilidad' con audit completo. |
-| `GET /api/disponibilidad/metricas?planta_id=&desde=&hasta=` | **D-024** — tiempo agregado por estado + acumulados (`disponible`, `no_disponible`) en una ventana. Cimiento del futuro dashboard. Lee de la vista `bitacora.v_disp_intervalos`. |
+| `GET /api/disponibilidad/metricas?planta_id=&desde=&hasta=` | **D-024/D-026** — tiempo agregado por estado + acumulados (`disponible`, `no_disponible`) en una ventana + `ahora` (reloj UTC del server). Lee directo de `bitacora.disponibilidad_estado` (la vista `v_disp_intervalos` se dropeó en D-026). Consumido por el panel "Acumulado histórico por estado" del mini-dashboard (D-028). |
 | `GET /api/sala-de-mando?planta_id=&fecha=` | Grilla MAND del día (siempre hoy). |
 | `POST /api/sala-de-mando/guardar` | **Batch atómico**. Body `{planta_id, fecha, filas:[{tipo, detalle, funcionariocnd, periodos:[{periodo, valor_mw}]}]}`. Transacción única. (F16) |
 | `POST /api/sala-de-mando/cierre-diario` | Trigger manual del sweeper (tests, recovery). Requiere `puede_cerrar_turno`. |
@@ -119,9 +119,10 @@ Bit-cora-g3/src/
 │   ├── Disponibilidad/
 │   │   ├── DisponibilidadDashboard.jsx  UI especial DISP (orquestador)
 │   │   ├── EstadoActualCard.jsx
+│   │   ├── AcumuladosPorEstado.jsx  Panel acumulado histórico por estado (D-028)
 │   │   ├── HistorialList.jsx
 │   │   ├── CambiarEstadoModal.jsx
-│   │   ├── TiempoEnEstado.jsx     Counter live (setInterval 1s)
+│   │   ├── TiempoEnEstado.jsx     Counter live (setInterval 1s); exporta formatDiff + useTiempoTranscurrido
 │   │   └── colores.js             Paleta de estados DISP
 │   ├── historicos/HistoricoTable.jsx
 │   └── BarraEstado.jsx            Filtros F11 (fecha+turno) — NO se renderiza para DISP. En MAND se renderiza pero oculta filtros/cierres (la grilla solo muestra HOY) y muestra contador "X registros" sincronizado con el badge.
@@ -129,7 +130,7 @@ Bit-cora-g3/src/
     ├── useAuth.js                 Login, logout, sesión persistente
     ├── useBitacoraSesion.js       POST /api/bitacora/abrir al montar
     ├── useUsuariosActivos.js      WS de "usuarios en turno"
-    ├── useDisponibilidad.js       GET/POST/PUT/deshacer para DISP
+    ├── useDisponibilidad.js       getEstado/getMetricas/crear/editar/deshacer para DISP
     ├── useSalaDeMando.js          getGrilla + guardarBatch
     └── useApi.js                  fetch base con manejo de errores estructurados
 ```
@@ -259,9 +260,10 @@ Todo en una transacción única. Si algo falla, rollback completo. Devuelve `{ r
 
 **Frontend:**
 
-- `DisponibilidadDashboard.jsx`: tabs/toggle GEC3↔GEC32 con animación slide horizontal 250ms. Polling 30s para capturar cambios de otros usuarios.
+- `DisponibilidadDashboard.jsx`: tabs/toggle GEC3↔GEC32 con animación slide horizontal 250ms. Polling 30s para capturar cambios de otros usuarios. Fetchea estado vigente (`getEstado`) + acumulados (`getMetricas`) en paralelo, cacheados por planta en el SWR; metricas se degrada a `null` si falla (el panel no se renderiza, sin tumbar la carga del estado).
 - `EstadoActualCard.jsx`: paleta por estado (D-024) — `En Servicio` verde + `CheckCircle2`, `En Reserva` azul + `Clock`, `Indisponible` rojo + `XCircle`, `Mantenimiento` amarillo + `Wrench`. Fade-out/in al cambiar planta.
-- `TiempoEnEstado.jsx`: counter live `setInterval(1000ms)`. Formato fijo (D-024): unidades `años, meses, d, hr, min, s`. Plural correcto en `años`/`meses`; abreviaturas invariantes. Omite unidades con valor 0 **excepto segundos** (siempre presentes). Aproximaciones `1 año = 365.25 d`, `1 mes = 30.44 d`. Sin semanas.
+- `AcumuladosPorEstado.jsx` (D-028): panel "Acumulado histórico por estado" bajo la tarjeta — 4 mini-tarjetas color-coded con el tiempo total por estado (fuente `GET /api/disponibilidad/metricas`). Los 3 estados no vigentes van **congelados** (`tiempo_ms[estado]`); el vigente crece en vivo en lockstep con "Tiempo en estado" via `base + tiempoEnEstado`, donde `base = tiempo_ms[actual] − (ahora − fecha_inicio_estado)`. Reusa el mismo tick de `TiempoEnEstado` (un solo `setInterval`) → sin doble conteo ni salto en el borde.
+- `TiempoEnEstado.jsx`: counter live `setInterval(1000ms)`. Formato fijo (D-024): unidades `años, meses, d, hr, min, s`. Plural correcto en `años`/`meses`; abreviaturas invariantes. Omite unidades con valor 0 **excepto segundos** (siempre presentes). Aproximaciones `1 año = 365.25 d`, `1 mes = 30.44 d`. Sin semanas. Exporta `formatDiff` y `useTiempoTranscurrido` para reuso (D-028).
 - `HistorialList.jsx`: paginación "Ver más" (+20 vía `historial_offset`).
 - `CambiarEstadoModal.jsx`: 3 modos (crear / editar / deshacer-confirm). Manejo de 409 con popups reactivos.
 - `sessionStorage('disponibilidad.plantaSeleccionada')`: persiste el toggle entre tabs.

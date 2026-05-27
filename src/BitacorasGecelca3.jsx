@@ -695,8 +695,8 @@ function nivelCarga(count) {
 const CATEGORIAS = [
   {
     codigo: 'SALA_DE_MANDOS',
-    nombre: 'Sala de Mando',
-    nombreCorto: 'Sala',
+    nombre: 'Despachos',
+    nombreCorto: 'Despachos',
     icono: 'MonitorCog',
     bitacora_codigos: ['DISP', 'MAND'],
   },

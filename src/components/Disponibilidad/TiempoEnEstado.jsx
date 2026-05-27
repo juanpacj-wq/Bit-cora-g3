@@ -14,7 +14,7 @@ const MS_PER_D   = 24 * MS_PER_HR;
 const MS_PER_MES = 30.44 * MS_PER_D;
 const MS_PER_ANO = 365.25 * MS_PER_D;
 
-function formatDiff(ms) {
+export function formatDiff(ms) {
   if (ms < 0) ms = 0;
   let rest = ms;
   const anos  = Math.floor(rest / MS_PER_ANO);  rest -= anos  * MS_PER_ANO;
