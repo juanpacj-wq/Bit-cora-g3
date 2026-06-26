@@ -1,12 +1,12 @@
 import http from 'http';
 import sql from 'mssql';
-import { initDB, getDB } from './db.js';
+import { initDB, getDB, TEST_PLANTA_ID } from './db.js';
 // F16: USUARIO_SISTEMA_ID es un export `let` que se inicializa al final de initDB(). El
 // binding live de ESM permite usarlo después; al momento de los handlers del request ya
 // está cargado.
 import * as dbBindings from './db.js';
-import { verifyPassword } from './utils/password.js';
 import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
+import { resolveCargo } from './utils/entra-roles.js';
 import { getTurnoColombia, periodoFromFechaBogota, turnoFromPeriodo, ventanaTurno, fechaBogotaStr } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
 import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, canEditarRegistro, puedeVerConformacion, puedeTriggerConformacion } from './middleware/permissions.js';
@@ -30,6 +30,9 @@ import { attachWSConteoBitacoras, broadcastConteoBitacoras } from './utils/ws-co
 import { startTurnoSweeper, stopTurnoSweeper } from './utils/turno-sweeper.js';
 // F16: sweeper diario MAND + helper de cierre manual.
 import { startMandSweeper, stopMandSweeper, cerrarDiaMand } from './utils/mand-sweeper.js';
+import { startSisSweeper, stopSisSweeper } from './utils/sis/sis-sweeper.js';
+// Login Entra ID: wrapper Express (sesión cookie + rutas /auth) que envuelve este if-chain.
+import { buildAuthApp, setBroadcastUsuariosActivos } from './auth/app.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
 
@@ -93,7 +96,11 @@ function mapDispRowToLegacyShape(row, bitacoraId) {
   };
 }
 
-const server = http.createServer(async (req, res) => {
+// El cuerpo del router nativo (if-chain). Antes era el callback de http.createServer; ahora es
+// una función a la que el wrapper Express (auth/app.js) delega todo lo que no sea ruta de auth.
+// express-session ya pobló req.session antes de llegar acá, así que loadSession() puede leer la
+// cookie Entra. parseBody() sigue leyendo el stream crudo porque express.json() NO es global.
+async function legacyHandler(req, res) {
   const { method } = req;
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
@@ -109,61 +116,65 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
     }
 
-    // POST /api/auth/login  (autentica por username + bcrypt)
-    if (pathname === '/api/auth/login' && method === 'POST') {
-      const { username, password } = await parseBody(req);
-      if (!username || !password) {
-        return sendJSON(res, 400, { error: 'username y password son requeridos' });
-      }
-      const db = await getDB();
-      const result = await db.request()
-        .input('username', sql.VarChar(50), username)
-        .query(`
-          SELECT usuario_id, nombre_completo, username, email, password_hash,
-                 es_jefe_planta, es_jdt_default, activo
-          FROM lov_bit.usuario
-          WHERE username = @username AND activo = 1
-        `);
-      const u = result.recordset[0];
-      if (!u || !(await verifyPassword(password, u.password_hash))) {
-        return sendJSON(res, 401, { error: 'Credenciales inválidas' });
-      }
-      const { password_hash: _omit, ...usuario } = u;
-      return sendJSON(res, 200, { usuario });
-    }
+    // Login Entra ID: /api/auth/login (password local) y /api/auth/logout (por sesion_id)
+    // fueron ELIMINADOS. La autenticación la maneja el wrapper Express (auth/app.js):
+    //   GET  /auth/login → Microsoft (OIDC) ; GET /auth/redirect → callback + auto-provisión
+    //   GET  /api/me     → identidad + sesión de app vigente
+    //   POST /api/logout → cierra sesión de app + cookie + front-channel logout
+    // Acá solo queda la creación de la SESIÓN DE APP (sesion_activa) tras elegir planta.
 
-    // POST /api/auth/select-context
+    // POST /api/auth/select-context { planta_id }
+    // Deriva usuario_id de la cookie Entra (req.session.user) y cargo_id de los App Roles del
+    // token por precedencia. NO recibe usuario_id ni cargo_id del cliente (no son confiables).
     if (pathname === '/api/auth/select-context' && method === 'POST') {
-      const { usuario_id, planta_id, cargo_id } = await parseBody(req);
-      if (!usuario_id || !planta_id || !cargo_id) {
-        return sendJSON(res, 400, { error: 'usuario_id, planta_id y cargo_id son requeridos' });
+      const sUser = req.session?.user;
+      if (!sUser?.oid || !sUser?.usuario_id) {
+        return sendJSON(res, 401, { error: 'No autenticado con Microsoft' });
       }
-      const db = await getDB();
+      const { planta_id } = await parseBody(req);
+      if (!planta_id) {
+        return sendJSON(res, 400, { error: 'planta_id es requerido' });
+      }
 
+      // Cargo automático desde los roles del token (precedencia). Sin rol conocido → 403.
+      const elegido = resolveCargo(sUser.roles);
+      if (!elegido) {
+        return sendJSON(res, 403, {
+          error: 'sin_cargo_asignado',
+          detail: 'Tu cuenta no tiene un App Role de bitácoras asignado en Entra.',
+          roles: sUser.roles || [],
+        });
+      }
+
+      const db = await getDB();
       const valid = await db.request()
         .input('planta_id', sql.VarChar(10), planta_id)
-        .input('cargo_id', sql.Int, cargo_id)
+        .input('cargo_nombre', sql.VarChar(100), elegido.cargoNombre)
         .query(`
           SELECT
             (SELECT COUNT(*) FROM lov_bit.planta WHERE planta_id = @planta_id AND activa = 1) AS planta_ok,
-            (SELECT COUNT(*) FROM lov_bit.cargo WHERE cargo_id = @cargo_id) AS cargo_ok
+            (SELECT cargo_id FROM lov_bit.cargo WHERE nombre = @cargo_nombre) AS cargo_id
         `);
-      if (!valid.recordset[0].planta_ok || !valid.recordset[0].cargo_ok) {
-        return sendJSON(res, 400, { error: 'planta_id o cargo_id inválido' });
+      if (!valid.recordset[0].planta_ok) {
+        return sendJSON(res, 400, { error: 'planta_id inválido' });
+      }
+      const cargo_id = valid.recordset[0].cargo_id;
+      if (!cargo_id) {
+        // El App Role existe en el mapa pero el cargo no está sembrado: configuración inconsistente.
+        return sendJSON(res, 500, { error: `Cargo '${elegido.cargoNombre}' no existe en lov_bit.cargo` });
       }
 
       const turno = getTurnoColombia();
-      // F10: dedupe por (usuario_id, planta_id, cargo_id). Si ya existe sesión (cualquier
-      // estado), reusamos el sesion_id reactivando si quedó activa=0. NO pisamos
-      // inicio_sesion ni turno — la "sesión" es persistente para el usuario; el segundo
-      // login se incorpora a la fila existente. UPDLOCK+HOLDLOCK previene la carrera
-      // entre 2 pestañas/dispositivos del mismo usuario haciendo select-context simultáneo.
+      // Dedupe por (usuario_id, planta_id, cargo_id). A diferencia del modelo viejo, la sesión de
+      // app es POR TURNO: al reactivar (el usuario volvió tras ser expulsado a fin de turno)
+      // REFRESCAMOS inicio_sesion y turno, para que la conformación del turno nuevo lo incluya y
+      // loadSession devuelva el turno vigente (no el viejo). UPDLOCK+HOLDLOCK serializa pestañas.
       const transaction = new sql.Transaction(db);
       await transaction.begin();
       let result;
       try {
         result = await new sql.Request(transaction)
-          .input('usuario_id', sql.Int, usuario_id)
+          .input('usuario_id', sql.Int, sUser.usuario_id)
           .input('planta_id', sql.VarChar(10), planta_id)
           .input('cargo_id', sql.Int, cargo_id)
           .input('turno', sql.TinyInt, turno)
@@ -181,6 +192,8 @@ const server = http.createServer(async (req, res) => {
               UPDATE bitacora.sesion_activa
                  SET activa           = 1,
                      cerrada_en       = NULL,
+                     inicio_sesion    = SYSUTCDATETIME(),
+                     turno            = @turno,
                      ultima_actividad = SYSUTCDATETIME()
                WHERE sesion_id = @sesion_id;
             END
@@ -209,27 +222,6 @@ const server = http.createServer(async (req, res) => {
       broadcastUsuariosActivos().catch(() => {});
       return sendJSON(res, 200, { sesion: result.recordset[0] });
     }
-
-    // POST /api/auth/logout
-    if (pathname === '/api/auth/logout' && method === 'POST') {
-      const { sesion_id } = await parseBody(req);
-      if (!sesion_id) {
-        return sendJSON(res, 400, { error: 'sesion_id es requerido' });
-      }
-      const db = await getDB();
-      await db.request()
-        .input('sesion_id', sql.Int, sesion_id)
-        .query(`UPDATE bitacora.sesion_activa
-                SET activa = 0,
-                    cerrada_en = SYSUTCDATETIME()
-                WHERE sesion_id = @sesion_id`);
-      broadcastUsuariosActivos().catch(() => {});
-      return sendJSON(res, 200, { ok: true });
-    }
-
-    // F9: /api/auth/resume y /api/auth/heartbeat eliminados. La sesión queda activa hasta
-    // logout o sweeper de turno (F4). Si una sesión queda inválida, el primer request
-    // autenticado retorna 401 y el cliente hace logout via setUnauthorizedHandler.
 
     // GET /api/auth/usuarios-activos  (todas las plantas, requiere sesion)
     // F2: sin filtro TTL — refleja sesion_activa.activa=1 hasta logout o cierre por sweeper de F4.
@@ -2238,6 +2230,14 @@ const server = http.createServer(async (req, res) => {
       const fecha = url.searchParams.get('fecha');
       const tipo = url.searchParams.get('tipo');
 
+      // D-030: la planta de test reservada nunca debe filtrarse al dashboard productivo. Este
+      // endpoint es el único borde del contrato cross-repo (el dashboard no toca esta BD directo),
+      // así que la tratamos como inexistente acá — independientemente del tipo. Las vistas DISP no
+      // la filtran a propósito (los tests dependen de ellas); el corte vive en este borde.
+      if (planta_id === TEST_PLANTA_ID) {
+        return sendJSON(res, 200, { eventos: [] });
+      }
+
       if (tipo === 'DISP') {
         if (!planta_id) {
           return sendJSON(res, 400, { error: 'planta_id es requerido para tipo=DISP' });
@@ -2646,15 +2646,21 @@ const server = http.createServer(async (req, res) => {
     console.error('[ERROR]', err);
     sendJSON(res, 500, { error: err.message });
   }
-});
+}
 
 initDB()
   .then(async () => {
+    // Inyecta el broadcaster al surface de auth (logout dispara refresh de usuarios activos).
+    setBroadcastUsuariosActivos(broadcastUsuariosActivos);
+    // Wrapper Express: sesión cookie + rutas /auth, delegando el if-chain (legacyHandler).
+    const app = await buildAuthApp(legacyHandler);
+    const server = http.createServer(app);
     attachWSS(server);
     attachWSConteoBitacoras(server);
     const db = await getDB();
     startTurnoSweeper(db);
     startMandSweeper(db);
+    startSisSweeper(db);
     server.listen(PORT, () => {
       console.log(`[SERVER] Escuchando en puerto ${PORT}`);
     });
@@ -2668,6 +2674,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     stopTurnoSweeper();
     stopMandSweeper();
+    stopSisSweeper();
     process.exit(0);
   });
 }

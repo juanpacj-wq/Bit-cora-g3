@@ -6,10 +6,14 @@
   "scripts": {
     "dev": "node --env-file=../.env --watch server.js",
     "start": "node --env-file=../.env server.js",
-    "test": "node --env-file=../.env --test --test-concurrency=1 tests/fechas_bogota.test.js tests/auth_middleware.test.js tests/auth_reactivate.test.js tests/disponibilidad.test.js tests/cierre_y_fechas.test.js tests/sala_de_mando_batch.test.js tests/conformacion_turno.test.js tests/consumos_combustible.test.js",
+    "test": "node --env-file=../.env --test --test-concurrency=1 tests/entra_roles.test.js tests/fechas_bogota.test.js tests/auth_middleware.test.js tests/auth_reactivate.test.js tests/disponibilidad.test.js tests/cierre_y_fechas.test.js tests/sala_de_mando_batch.test.js tests/conformacion_turno.test.js tests/consumos_combustible.test.js tests/rol_coordinador_carbon_maquinaria.test.js tests/sis_schema.test.js tests/sis_parser.test.js tests/sis_scraper_ownership.test.js",
     "test:reset-db": "node --env-file=../.env tests/reset-db.js"
   },
   "dependencies": {
+    "@azure/msal-node": "^5.3.0",
+    "connect-mssql-v2": "^6.0.0",
+    "express": "^4.21.2",
+    "express-session": "^1.19.0",
     "mssql": "^11.0.1",
     "ws": "^8.18.0"
   }

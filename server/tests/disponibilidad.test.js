@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
-import { setupSessions, cleanupTestRegistros, call, PLANTA_ID, TEST_TAG } from './helpers.js';
+import { setupSessions, cleanupTestRegistros, call, TEST_PLANTA, TEST_TAG } from './helpers.js';
 
 let ctx;
 let DISP_BITACORA_ID;
@@ -17,12 +17,14 @@ const T3 = new Date(NOW - 12 * HOUR);
 const FUTURE = new Date(NOW + HOUR);
 
 async function cleanDisp() {
-  // D-026: DISP storage migró a bitacora.disponibilidad_estado. Las tablas viejas
-  // (registro_activo/registro_historico) ya no contienen filas DISP — el bloque F26.A1
-  // de db.js las migró + DELETE en origen.
+  // D-030: borra por planta_id, pero apuntando a TEST_PLANTA (planta sintética sembrada por
+  // setupSessions). Antes este DELETE usaba GEC3 y arrasaba la disponibilidad REAL en cada corrida
+  // (la BD de test es la productiva). Ahora la planta de prueba es el límite de aislamiento: el
+  // borrado por planta es seguro (TST nunca tiene datos reales) y sigue limpiando las filas sin
+  // tag que inserta insertDispDirecto. GEC3/GEC32 quedan intactas pase lo que pase.
   const db = await getDB();
   await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`DELETE FROM bitacora.disponibilidad_estado WHERE planta_id = @p;`);
 }
 
@@ -46,7 +48,7 @@ async function insertDispDirecto({ planta_id, estado, codigo, fecha_inicio, fech
     `);
 }
 
-async function postDisp({ sesion_id, evento, fechaInicio, detalle = `${TEST_TAG} disp`, planta_id = PLANTA_ID }) {
+async function postDisp({ sesion_id, evento, fechaInicio, detalle = `${TEST_TAG} disp`, planta_id = TEST_PLANTA }) {
   return call('POST', '/api/registros', {
     sesion_id,
     body: {
@@ -60,7 +62,7 @@ async function postDisp({ sesion_id, evento, fechaInicio, detalle = `${TEST_TAG}
 }
 
 before(async () => {
-  ctx = await setupSessions();
+  ctx = await setupSessions({ planta: TEST_PLANTA });
   DISP_BITACORA_ID = ctx.bitByCodigo.DISP;
   assert.ok(DISP_BITACORA_ID, 'DISP bitacora_id debe existir');
   await cleanDisp();
@@ -81,7 +83,7 @@ test('1. POST primer registro En Servicio crea activo + dashboard', async () => 
 
   const db = await getDB();
   const dash = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT evento, codigo FROM bitacora.disponibilidad_dashboard WHERE planta_id=@p`);
   assert.equal(dash.recordset.length, 1);
   assert.equal(dash.recordset[0].evento, 'En Servicio');
@@ -90,7 +92,7 @@ test('1. POST primer registro En Servicio crea activo + dashboard', async () => 
   // D-026 (Q11): post-migración DISP vive en `disponibilidad_estado`; el "vigente" es
   // la fila con fecha_fin_estado IS NULL. Antes esto se consultaba en registro_activo.
   const activos = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT COUNT(*) AS n FROM bitacora.disponibilidad_estado WHERE planta_id=@p AND fecha_fin_estado IS NULL`);
   assert.equal(activos.recordset[0].n, 1);
 });
@@ -114,7 +116,7 @@ test('2. POST estado distinto cierra el anterior y mueve a histórico', async ()
   assert.equal(new Date(hist.recordset[0].fecha_fin_estado).getTime(), T1.getTime());
 
   const dash = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT evento FROM bitacora.disponibilidad_dashboard WHERE planta_id=@p`);
   assert.equal(dash.recordset[0].evento, 'Indisponible');
 });
@@ -151,12 +153,12 @@ test('6. PUT vigente cambia fecha → side-effect en N-1.fecha_fin_estado', asyn
   // por fecha_fin_estado (NULL → vigente, NOT NULL → histórico). El handler PUT mapea
   // disponibilidad_id al param :id del route.
   const vigQ = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT TOP 1 disponibilidad_id FROM bitacora.disponibilidad_estado WHERE planta_id=@p AND fecha_fin_estado IS NULL`);
   const vigenteId = vigQ.recordset[0].disponibilidad_id;
 
   const histPrev = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT TOP 1 disponibilidad_id FROM bitacora.disponibilidad_estado WHERE planta_id=@p AND fecha_fin_estado IS NOT NULL ORDER BY fecha_inicio_estado DESC, disponibilidad_id DESC`);
   const nMinus1Id = histPrev.recordset[0].disponibilidad_id;
 
@@ -182,13 +184,13 @@ test('7. POST /api/disponibilidad/deshacer con histórico restaura', async () =>
   // se distinguen por fecha_fin_estado. Deshacer DELETE-ea el vigente y UPDATE-a
   // fecha_fin_estado=NULL al ex-N-1.
   const histPrev = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT COUNT(*) AS n FROM bitacora.disponibilidad_estado WHERE planta_id=@p AND fecha_fin_estado IS NOT NULL`);
   const histCountAntes = histPrev.recordset[0].n;
 
   const { status, data } = await call('POST', '/api/disponibilidad/deshacer', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: PLANTA_ID },
+    body: { planta_id: TEST_PLANTA },
   });
   assert.equal(status, 200, JSON.stringify(data));
   assert.ok(data.restaurado, 'restaurado debe estar presente');
@@ -196,19 +198,19 @@ test('7. POST /api/disponibilidad/deshacer con histórico restaura', async () =>
   assert.ok(data.ciet_registro_id);
 
   const dash = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT evento FROM bitacora.disponibilidad_dashboard WHERE planta_id=@p`);
   assert.equal(dash.recordset[0].evento, 'En Servicio');
 
   // El histórico tiene 1 fila menos (el vigente Indisponible fue DELETE-eado).
   const histPost = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT COUNT(*) AS n FROM bitacora.disponibilidad_estado WHERE planta_id=@p AND fecha_fin_estado IS NOT NULL`);
   assert.equal(histPost.recordset[0].n, histCountAntes - 1);
 
   // Existe exactamente 1 vigente En Servicio en disponibilidad_estado.
   const activos = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT COUNT(*) AS n FROM bitacora.disponibilidad_estado WHERE planta_id=@p AND fecha_fin_estado IS NULL`);
   assert.equal(activos.recordset[0].n, 1);
 });
@@ -220,19 +222,19 @@ test('8. POST /api/disponibilidad/deshacer sin histórico → empty state', asyn
 
   const { status, data } = await call('POST', '/api/disponibilidad/deshacer', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: PLANTA_ID },
+    body: { planta_id: TEST_PLANTA },
   });
   assert.equal(status, 200, JSON.stringify(data));
   assert.equal(data.restaurado, null);
 
   const db = await getDB();
   const dash = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT planta_id FROM bitacora.disponibilidad_dashboard WHERE planta_id=@p`);
   assert.equal(dash.recordset.length, 0);
 
   const activos = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .input('bid', sql.Int, DISP_BITACORA_ID)
     .query(`SELECT COUNT(*) AS n FROM bitacora.registro_activo WHERE bitacora_id=@bid AND planta_id=@p`);
   assert.equal(activos.recordset[0].n, 0);
@@ -260,7 +262,7 @@ test('10. GET /api/disponibilidad devuelve vigente + historial', async () => {
   await postDisp({ sesion_id: ctx.sesiones.jdt, evento: 'En Servicio', fechaInicio: T0 });
   await postDisp({ sesion_id: ctx.sesiones.jdt, evento: 'Indisponible', fechaInicio: T1 });
 
-  const { status, data } = await call('GET', `/api/disponibilidad?planta_id=${PLANTA_ID}`, {
+  const { status, data } = await call('GET', `/api/disponibilidad?planta_id=${TEST_PLANTA}`, {
     sesion_id: ctx.sesiones.jdt,
   });
   assert.equal(status, 200, JSON.stringify(data));
@@ -290,7 +292,7 @@ test('12. POST Mantenimiento como primer registro persiste codigo=-1', async () 
 
   const db = await getDB();
   const dash = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT evento, codigo FROM bitacora.disponibilidad_dashboard WHERE planta_id=@p`);
   assert.equal(dash.recordset[0].evento, 'Mantenimiento');
   assert.equal(dash.recordset[0].codigo, -1);
@@ -311,7 +313,7 @@ test('13. POST Indisponible → Mantenimiento NO es mismo_estado (cambio válido
 
   const db = await getDB();
   const dash = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT evento, codigo FROM bitacora.disponibilidad_dashboard WHERE planta_id=@p`);
   assert.equal(dash.recordset[0].evento, 'Mantenimiento');
   assert.equal(dash.recordset[0].codigo, -1);
@@ -349,11 +351,11 @@ test('16. GET /api/disponibilidad/metricas suma tiempo por evento entre históri
 
   const { status, data } = await call(
     'GET',
-    `/api/disponibilidad/metricas?planta_id=${PLANTA_ID}`,
+    `/api/disponibilidad/metricas?planta_id=${TEST_PLANTA}`,
     { sesion_id: ctx.sesiones.jdt }
   );
   assert.equal(status, 200, JSON.stringify(data));
-  assert.equal(data.planta_id, PLANTA_ID);
+  assert.equal(data.planta_id, TEST_PLANTA);
   assert.ok(data.tiempo_ms);
   assert.ok(data.acumulados_ms);
 
@@ -383,7 +385,7 @@ test('17. GET /api/disponibilidad/metricas con ventana [desde, hasta] recorta in
   // Mismo dataset que test 16. Pido solo [T1, T2] — eso encierra exactamente al Indisponible (24h).
   const { status, data } = await call(
     'GET',
-    `/api/disponibilidad/metricas?planta_id=${PLANTA_ID}&desde=${T1.toISOString()}&hasta=${T2.toISOString()}`,
+    `/api/disponibilidad/metricas?planta_id=${TEST_PLANTA}&desde=${T1.toISOString()}&hasta=${T2.toISOString()}`,
     { sesion_id: ctx.sesiones.jdt }
   );
   assert.equal(status, 200, JSON.stringify(data));
@@ -401,7 +403,7 @@ test('18. GET /api/disponibilidad/metricas planta sin registros → todo 0', asy
   await cleanDisp();
   const { status, data } = await call(
     'GET',
-    `/api/disponibilidad/metricas?planta_id=${PLANTA_ID}`,
+    `/api/disponibilidad/metricas?planta_id=${TEST_PLANTA}`,
     { sesion_id: ctx.sesiones.jdt }
   );
   assert.equal(status, 200, JSON.stringify(data));
@@ -456,13 +458,13 @@ test('20. v_disponibilidad_estado acumula correctamente intervalos cerrados', as
   const t2 = new Date(t1.getTime() + 3 * 3600 * 1000);
   const t3 = new Date(t2.getTime() + 1 * 3600 * 1000);
 
-  await insertDispDirecto({ planta_id: PLANTA_ID, estado: 'En Servicio',  codigo:  1, fecha_inicio: t0, fecha_fin: t1 });
-  await insertDispDirecto({ planta_id: PLANTA_ID, estado: 'En Reserva',   codigo:  0, fecha_inicio: t1, fecha_fin: t2 });
-  await insertDispDirecto({ planta_id: PLANTA_ID, estado: 'Indisponible', codigo: -1, fecha_inicio: t2, fecha_fin: t3 });
+  await insertDispDirecto({ planta_id: TEST_PLANTA, estado: 'En Servicio',  codigo:  1, fecha_inicio: t0, fecha_fin: t1 });
+  await insertDispDirecto({ planta_id: TEST_PLANTA, estado: 'En Reserva',   codigo:  0, fecha_inicio: t1, fecha_fin: t2 });
+  await insertDispDirecto({ planta_id: TEST_PLANTA, estado: 'Indisponible', codigo: -1, fecha_inicio: t2, fecha_fin: t3 });
 
   const db = await getDB();
   const rows = (await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT * FROM bitacora.v_disponibilidad_estado WHERE planta=@p ORDER BY fecha`)
   ).recordset;
 
@@ -486,12 +488,12 @@ test('21. v_disponibilidad_estado: vigente acumula hasta SYSUTCDATETIME()', asyn
   const t0 = new Date(Date.now() - 60 * 60 * 1000);
   const t1 = new Date(Date.now() - 30 * 60 * 1000);
 
-  await insertDispDirecto({ planta_id: PLANTA_ID, estado: 'En Servicio', codigo: 1, fecha_inicio: t0, fecha_fin: t1 });
-  await insertDispDirecto({ planta_id: PLANTA_ID, estado: 'En Reserva',  codigo: 0, fecha_inicio: t1, fecha_fin: null });
+  await insertDispDirecto({ planta_id: TEST_PLANTA, estado: 'En Servicio', codigo: 1, fecha_inicio: t0, fecha_fin: t1 });
+  await insertDispDirecto({ planta_id: TEST_PLANTA, estado: 'En Reserva',  codigo: 0, fecha_inicio: t1, fecha_fin: null });
 
   const db = await getDB();
   const rows = (await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT * FROM bitacora.v_disponibilidad_estado WHERE planta=@p ORDER BY fecha`)
   ).recordset;
 
@@ -516,14 +518,14 @@ test('22. deshacer restaura N-1 como vigente y la vista refleja el rollback', as
   assert.equal(postB.status, 201);
 
   // Estado pre-deshacer: vigente=En Reserva, cerrado=En Servicio.
-  const antes = await call('GET', `/api/disponibilidad?planta_id=${PLANTA_ID}`, { sesion_id: ctx.sesiones.jdt });
+  const antes = await call('GET', `/api/disponibilidad?planta_id=${TEST_PLANTA}`, { sesion_id: ctx.sesiones.jdt });
   assert.equal(antes.data.vigente?.evento, 'En Reserva');
   assert.equal(antes.data.historial[0]?.evento, 'En Servicio');
 
   // Deshacer.
   const undo = await call('POST', '/api/disponibilidad/deshacer', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: PLANTA_ID },
+    body: { planta_id: TEST_PLANTA },
   });
   assert.equal(undo.status, 200, JSON.stringify(undo.data));
   assert.equal(undo.data.revertido?.evento, 'En Reserva');
@@ -532,14 +534,14 @@ test('22. deshacer restaura N-1 como vigente y la vista refleja el rollback', as
   assert.ok(undo.data.ciet_registro_id, 'ciet_registro_id presente');
 
   // Estado post-deshacer: vigente=En Servicio, historial vacío.
-  const despues = await call('GET', `/api/disponibilidad?planta_id=${PLANTA_ID}`, { sesion_id: ctx.sesiones.jdt });
+  const despues = await call('GET', `/api/disponibilidad?planta_id=${TEST_PLANTA}`, { sesion_id: ctx.sesiones.jdt });
   assert.equal(despues.data.vigente?.evento, 'En Servicio');
   assert.equal(despues.data.historial.length, 0);
 
   // La vista refleja: solo el row En Servicio vigente; horas_en_reserva = 0.
   const db = await getDB();
   const rows = (await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT * FROM bitacora.v_disponibilidad_estado WHERE planta=@p`)
   ).recordset;
   assert.equal(rows.length, 1, 'solo el vigente queda tras deshacer');
@@ -552,12 +554,12 @@ test('23. vista disponibilidad_dashboard devuelve solo vigente con shape cross-r
   const t0 = new Date(Date.now() - 60 * 60 * 1000);
   const t1 = new Date(Date.now() - 30 * 60 * 1000);
 
-  await insertDispDirecto({ planta_id: PLANTA_ID, estado: 'En Servicio', codigo: 1, fecha_inicio: t0, fecha_fin: t1 });
-  await insertDispDirecto({ planta_id: PLANTA_ID, estado: 'En Reserva',  codigo: 0, fecha_inicio: t1, fecha_fin: null });
+  await insertDispDirecto({ planta_id: TEST_PLANTA, estado: 'En Servicio', codigo: 1, fecha_inicio: t0, fecha_fin: t1 });
+  await insertDispDirecto({ planta_id: TEST_PLANTA, estado: 'En Reserva',  codigo: 0, fecha_inicio: t1, fecha_fin: null });
 
   const db = await getDB();
   const rows = (await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`SELECT * FROM bitacora.disponibilidad_dashboard WHERE planta_id=@p`)
   ).recordset;
 
@@ -565,7 +567,7 @@ test('23. vista disponibilidad_dashboard devuelve solo vigente con shape cross-r
   const row = rows[0];
 
   // Shape exacto del contrato cross-repo (preservado tras D-026):
-  assert.equal(row.planta_id, PLANTA_ID);
+  assert.equal(row.planta_id, TEST_PLANTA);
   assert.equal(row.evento, 'En Reserva');
   assert.equal(row.codigo, 0);
   assert.ok(row.fecha_inicio_estado, 'fecha_inicio_estado presente');
