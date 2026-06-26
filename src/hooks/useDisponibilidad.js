@@ -1,30 +1,17 @@
 import { useCallback, useMemo } from 'react';
 import { api } from './useApi';
 
-const STORAGE_KEY = 'bitacoras_auth';
-
-function getSesionId() {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const { sesion } = JSON.parse(raw);
-    return sesion?.sesion_id ?? null;
-  } catch {
-    return null;
-  }
-}
-
 // useApi.api hace `throw new Error(data.error)` y descarta el body — para los 409
 // del flujo DISP necesitamos el `vigente` (mismo_estado / fecha_anterior_a_vigente)
 // y el `n_menos_1` (mismo_estado_que_anterior). Wrapper local que adjunta el body
-// al Error para que el modal pueda construir popups específicos.
+// al Error para que el modal pueda construir popups específicos. Autenticación por cookie
+// Entra (credentials:'include'), igual que useApi.
 async function requestWithBody(url, { method = 'POST', body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
-  const sid = getSesionId();
-  if (sid != null) headers['X-Sesion-Id'] = String(sid);
   const res = await fetch(url, {
     method,
     headers,
+    credentials: 'include',
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));

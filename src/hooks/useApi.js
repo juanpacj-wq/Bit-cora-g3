@@ -1,16 +1,7 @@
-const STORAGE_KEY = 'bitacoras_auth';
-
-function getSesionIdFromStorage() {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const { sesion } = JSON.parse(raw);
-    return sesion?.sesion_id ?? null;
-  } catch {
-    return null;
-  }
-}
-
+// Login Entra ID: la autenticación viaja en la cookie httpOnly de sesión (no más X-Sesion-Id en
+// sessionStorage, que era exfiltrable por XSS). `credentials:'include'` adjunta la cookie en cada
+// request (same-origin vía proxy Vite en dev / mismo host en prod). `skipAuth` ya no inyecta nada;
+// solo sirve para que un 401 esperado (ej. el bootstrap GET /api/me) NO dispare el logout global.
 let unauthorizedHandler = null;
 
 export function setUnauthorizedHandler(fn) {
@@ -20,13 +11,10 @@ export function setUnauthorizedHandler(fn) {
 async function request(url, { method = 'GET', body, skipAuth = false } = {}) {
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  if (!skipAuth) {
-    const sesion_id = getSesionIdFromStorage();
-    if (sesion_id != null) headers['X-Sesion-Id'] = String(sesion_id);
-  }
   const res = await fetch(url, {
     method,
     headers,
+    credentials: 'include',
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));

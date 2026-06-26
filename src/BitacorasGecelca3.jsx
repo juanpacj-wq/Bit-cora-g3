@@ -11,7 +11,7 @@ import {
   Search, Filter, FileText,
   Activity, Flame, Droplets, Zap, Gauge, Cpu, FlaskConical, Leaf,
   Settings, FileCheck, Edit3, Eye, XCircle, Check, Users, History,
-  User, LayoutDashboard, MonitorCog,
+  LayoutDashboard, MonitorCog,
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 import CierrePendientesModal from "./components/CierrePendientesModal";
@@ -228,28 +228,34 @@ function EstadoBadge({ estado }) {
 // Login (email/password → planta → cargo)
 // ============================================================
 
-function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
-  const [paso, setPaso] = useState("credenciales"); // 'credenciales' | 'planta' | 'cargo'
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [plantaSel, setPlantaSel] = useState(null);
+function LoginScreen({ auth, plantas, onReady, showToast }) {
+  // Login Entra ID: dos pasos. 'microsoft' (sin sesión Entra) → 'planta' (autenticado, elige
+  // planta). El cargo lo asigna Entra automáticamente desde los App Roles; ya NO hay paso de
+  // selección de cargo ni de credenciales.
+  const paso = auth.user ? "planta" : "microsoft";
 
-  const handleLogin = async (e) => {
-    e.preventDefault();
-    try {
-      await auth.login(username, password);
-      setPaso("planta");
-    } catch (err) {
-      showToast(err.message || "Error al iniciar sesión", "error");
+  // Surfacing de resultados del callback OIDC (/?auth=...): error → toast, y limpiamos la URL
+  // para no repetir el toast al recargar.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const a = params.get("auth");
+    if (!a) return;
+    if (a === "no_acceso") {
+      showToast("Tu cuenta no tiene acceso a Bitácoras en Microsoft Entra.", "error");
+    } else if (a === "error" || a === "state_invalido") {
+      showToast("No se pudo completar el inicio de sesión. Intentá de nuevo.", "error");
     }
-  };
+    params.delete("auth");
+    const qs = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (qs ? "?" + qs : ""));
+  }, [showToast]);
 
-  const handleSelectCargo = async (cargo) => {
+  const handleSelectPlanta = async (planta_id) => {
     try {
-      await auth.selectContext(plantaSel, cargo.cargo_id);
+      await auth.selectContext(planta_id);
       onReady();
     } catch (err) {
-      showToast(err.message || "Error al seleccionar contexto", "error");
+      showToast(err.message || "Error al seleccionar planta", "error");
     }
   };
 
@@ -273,7 +279,7 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
           <div className="text-center mb-5">
             <img src="/gecelca3-logo.png" alt="Gecelca3" className="h-11 mx-auto mb-3"
               onError={(e) => { e.target.style.display = "none"; }} />
-            {paso === "credenciales" ? (
+            {paso === "microsoft" ? (
               <>
                 <h1 className="text-3xl font-bold tracking-tight" style={{ color: COLORS.blueDark }}>INICIAR SESION</h1>
                 <p className="text-sm mt-1.5" style={{ color: COLORS.grayText }}>
@@ -284,73 +290,35 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
               <>
                 <h1 className="text-2xl font-bold" style={{ color: COLORS.blueDeep }}>Bitácoras de Planta</h1>
                 <p className="text-sm mt-1" style={{ color: COLORS.grayText }}>
-                  {paso === "planta" ? "Selecciona tu planta de operación" : "Selecciona tu cargo"}
+                  Selecciona tu planta de operación
                 </p>
               </>
             )}
           </div>
 
-          {paso === "credenciales" && (
-            <form onSubmit={handleLogin} className="space-y-4 max-w-sm mx-auto w-full">
-              <div className="relative">
-                <User size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
-                  style={{ color: COLORS.grayText }} />
-                <input
-                  type="text" required placeholder="Usuario"
-                  autoComplete="username" autoCapitalize="off" autoCorrect="off" spellCheck="false"
-                  value={username} onChange={(e) => setUsername(e.target.value.trim().toLowerCase())}
-                  className="w-full pl-10 pr-4 py-3 rounded-xl border focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none text-sm transition-all"
-                  style={{ backgroundColor: COLORS.grayLight, borderColor: COLORS.grayBorder }}
-                />
-              </div>
-              <div className="relative">
-                <Lock size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
-                  style={{ color: COLORS.grayText }} />
-                <input
-                  type="password" required placeholder="Contraseña"
-                  value={password} onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 rounded-xl border focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none text-sm transition-all"
-                  style={{ backgroundColor: COLORS.grayLight, borderColor: COLORS.grayBorder }}
-                />
-              </div>
-
-              <div className="pt-2 flex justify-center">
-                <button
-                  type="submit" disabled={auth.loading}
-                  className="px-10 py-3 rounded-xl text-white font-semibold shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all disabled:opacity-60 disabled:hover:translate-y-0"
-                  style={{ background: `linear-gradient(135deg, ${COLORS.greenPrimary} 0%, ${COLORS.greenDark} 100%)` }}
-                >
-                  {auth.loading ? "Validando..." : "Iniciar sesión"}
-                </button>
-              </div>
-
-              <div className="flex items-center gap-3 pt-3">
-                <span className="flex-1 h-px" style={{ backgroundColor: COLORS.grayBorder }} />
-                <span className="text-xs font-semibold" style={{ color: COLORS.grayText }}>
-                  <strong style={{ color: COLORS.blueDeep }}>O continúa</strong> con
+          {paso === "microsoft" && (
+            <div className="space-y-5 max-w-sm mx-auto w-full">
+              <p className="text-center text-sm" style={{ color: COLORS.grayText }}>
+                Accedé con tu cuenta corporativa de Microsoft. Tu rol se asigna automáticamente.
+              </p>
+              <button
+                type="button"
+                onClick={() => auth.loginWithMicrosoft()}
+                className="w-full flex items-center justify-center gap-3 py-3 rounded-xl border bg-white shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all"
+                style={{ borderColor: COLORS.grayBorder }}
+                aria-label="Iniciar sesión con Microsoft"
+              >
+                <svg width="18" height="18" viewBox="0 0 23 23" aria-hidden="true">
+                  <rect x="1" y="1" width="10" height="10" fill="#F25022" />
+                  <rect x="12" y="1" width="10" height="10" fill="#7FBA00" />
+                  <rect x="1" y="12" width="10" height="10" fill="#00A4EF" />
+                  <rect x="12" y="12" width="10" height="10" fill="#FFB900" />
+                </svg>
+                <span className="text-sm" style={{ color: COLORS.blueDeep }}>
+                  Iniciar sesión con <strong>Microsoft</strong>
                 </span>
-                <span className="flex-1 h-px" style={{ backgroundColor: COLORS.grayBorder }} />
-              </div>
-
-              <span title="Próximamente — usar credenciales por ahora" className="inline-block w-full">
-                <button
-                  type="button" disabled
-                  className="w-full flex items-center justify-center gap-3 py-3 rounded-xl border bg-white opacity-50 cursor-not-allowed"
-                  style={{ borderColor: COLORS.grayBorder }}
-                  aria-label="Iniciar sesión con Microsoft (próximamente)"
-                >
-                  <svg width="18" height="18" viewBox="0 0 23 23" aria-hidden="true">
-                    <rect x="1" y="1" width="10" height="10" fill="#F25022" />
-                    <rect x="12" y="1" width="10" height="10" fill="#7FBA00" />
-                    <rect x="1" y="12" width="10" height="10" fill="#00A4EF" />
-                    <rect x="12" y="12" width="10" height="10" fill="#FFB900" />
-                  </svg>
-                  <span className="text-sm" style={{ color: COLORS.blueDeep }}>
-                    Iniciar sesión con <strong>Microsoft</strong>
-                  </span>
-                </button>
-              </span>
-            </form>
+              </button>
+            </div>
           )}
 
           {paso === "planta" && (
@@ -365,8 +333,9 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
                 {plantas.map((p) => (
                   <button
                     key={p.planta_id}
-                    onClick={() => { setPlantaSel(p.planta_id); setPaso("cargo"); }}
-                    className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left bg-white"
+                    onClick={() => handleSelectPlanta(p.planta_id)}
+                    disabled={auth.loading}
+                    className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left bg-white disabled:opacity-60"
                   >
                     <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-sm flex-shrink-0"
                       style={{ backgroundColor: COLORS.greenDark }}>
@@ -383,45 +352,6 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
             </div>
           )}
 
-          {paso === "cargo" && (
-            <div className="max-w-sm mx-auto w-full">
-              <div className="flex items-center gap-2 mb-3 flex-wrap">
-                <button onClick={() => setPaso("planta")} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 transition-colors">
-                  ← Cambiar planta
-                </button>
-                <span className="text-xs font-semibold px-2 py-0.5 rounded-md text-white" style={{ backgroundColor: COLORS.greenDark }}>
-                  {plantas.find((p) => p.planta_id === plantaSel)?.nombre}
-                </span>
-              </div>
-              <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-gray-400">
-                {cargos.map((c) => (
-                  <button
-                    key={c.cargo_id}
-                    onClick={() => handleSelectCargo(c)}
-                    className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left bg-white"
-                  >
-                    <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0"
-                      style={{ backgroundColor: c.puede_cerrar_turno ? COLORS.greenDark : COLORS.blueDark }}>
-                      {iniciales(c.nombre)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="font-semibold text-gray-900 group-hover:text-emerald-700 transition-colors">{c.nombre}</div>
-                      <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-medium"
-                          style={{
-                            backgroundColor: c.puede_cerrar_turno ? "#e6f4ea" : "#e8f0fe",
-                            color: c.puede_cerrar_turno ? COLORS.greenDark : COLORS.blueDark,
-                          }}>
-                          {c.solo_lectura ? "Solo lectura" : "Operativo"}
-                        </span>
-                      </div>
-                    </div>
-                    <LogIn size={20} className="text-gray-300 group-hover:text-emerald-500 transition-colors flex-shrink-0" />
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
 
         {/* PANEL DERECHO — Hero (oculto en móvil) */}
@@ -1804,7 +1734,6 @@ export default function App() {
         <LoginScreen
           auth={auth}
           plantas={catalogos.plantas}
-          cargos={catalogos.cargos}
           onReady={() => {}}
           showToast={showToast}
         />

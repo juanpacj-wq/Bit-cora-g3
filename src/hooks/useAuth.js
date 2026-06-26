@@ -3,10 +3,11 @@ import { api, setUnauthorizedHandler } from './useApi';
 
 const STORAGE_KEY = 'bitacoras_auth';
 
-// F13.4: persist síncrono. El efecto de antes corría DESPUÉS de los useEffects de los hijos
-// (React: child effects first, then parent), entonces el Dashboard disparaba su fetch leyendo
-// sessionStorage viejo y obtenía 401. Cualquier mutación de user/sesion debe escribir storage
-// inmediatamente para que el siguiente request use el id correcto.
+// Login Entra ID: la IDENTIDAD ya no se persiste como token (vive en la cookie httpOnly). Solo
+// guardamos en sessionStorage los campos NO secretos de la sesión de app que algunos componentes
+// leen rápido en el primer render (cargo/planta/turno/sesion_id para WS). La fuente de verdad es
+// GET /api/me (cookie). persistAuth se mantiene síncrono (F13.4) para que el siguiente request no
+// lea storage viejo.
 function persistAuth(user, sesion) {
   try {
     if (user || sesion) {
@@ -23,30 +24,46 @@ export function useAuth() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [ready, setReady] = useState(false);
-  // Cache local para evitar leer sessionStorage en cada persist (sincronización con state).
+  // Última planta usada (la devuelve /api/me) para que reentrar en un turno nuevo sea de un clic.
+  const [ultimaPlanta, setUltimaPlanta] = useState(null);
   const userRef = useRef(null);
   const sesionRef = useRef(null);
 
-  // F9: bootstrap simplificado — leemos sessionStorage y listo. Si la sesión fue invalidada
-  // (logout en otra pestaña, sweeper de turno, server caído), el primer request autenticado
-  // retorna 401 y el unauthorizedHandler dispara logout(). No hay endpoint resume ni heartbeat.
+  // Bootstrap: consultamos /api/me. La cookie Entra autentica; si está viva, recuperamos la
+  // identidad y la sesión de app vigente (sesion=null si el turno ya la expulsó → el usuario verá
+  // la selección de planta). skipAuth: un 401 acá es esperado (no logueado) y NO debe disparar el
+  // logout global.
   useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const { user: u, sesion: s } = JSON.parse(raw);
-        if (u) { setUser(u); userRef.current = u; }
-        if (s) { setSesion(s); sesionRef.current = s; }
+    let cancel = false;
+    (async () => {
+      try {
+        const r = await api.get('/api/me', { skipAuth: true });
+        if (cancel) return;
+        if (r?.authenticated && r.user) {
+          userRef.current = r.user;
+          sesionRef.current = r.sesion || null;
+          setUser(r.user);
+          setSesion(r.sesion || null);
+          setUltimaPlanta(r.ultimaPlanta || null);
+          persistAuth(r.user, r.sesion || null);
+        } else {
+          persistAuth(null, null);
+        }
+      } catch {
+        persistAuth(null, null);
+      } finally {
+        if (!cancel) setReady(true);
       }
-    } catch {
-    } finally {
-      setReady(true);
-    }
+    })();
+    return () => { cancel = true; };
   }, []);
 
-  // Cleanup de cliente sin tocar BD. La sesion_activa queda con activa=1 (igual que cerrar
-  // pestaña), respetando D-003. Si el mismo usuario vuelve a entrar con la misma planta+cargo,
-  // /api/auth/select-context reutiliza la sesion_id existente (UPDLOCK+UPDATE).
+  // Inicia el login OIDC: navegación top-level a la ruta del backend (Microsoft → /auth/redirect).
+  const loginWithMicrosoft = useCallback(() => {
+    window.location.href = '/auth/login';
+  }, []);
+
+  // Cleanup de cliente sin tocar la cookie Entra ni la BD (cerrar pestaña / "salir sin finalizar").
   const logoutLocal = useCallback(() => {
     userRef.current = null;
     sesionRef.current = null;
@@ -55,12 +72,16 @@ export function useAuth() {
     setSesion(null);
   }, []);
 
+  // Logout explícito: cierra la sesión de app, destruye la cookie y navega al front-channel logout
+  // de Microsoft (cierra también la sesión M365 del navegador).
   const logout = useCallback(async () => {
-    const sid = sesionRef.current?.sesion_id;
-    if (sid) {
-      try { await api.post('/api/auth/logout', { sesion_id: sid }, { skipAuth: true }); } catch {}
-    }
+    let logoutUrl = '/';
+    try {
+      const r = await api.post('/api/logout', {}, { skipAuth: true });
+      if (r?.logoutUrl) logoutUrl = r.logoutUrl;
+    } catch {}
     logoutLocal();
+    window.location.href = logoutUrl;
   }, [logoutLocal]);
 
   useEffect(() => {
@@ -68,29 +89,15 @@ export function useAuth() {
     return () => setUnauthorizedHandler(null);
   }, [logout]);
 
-  const login = useCallback(async (username, password) => {
+  // Crea/reactiva la sesión de app para la planta elegida. El cargo lo deriva el backend de los
+  // App Roles del token (no se envía). Autenticado por cookie.
+  const selectContext = useCallback(async (planta_id) => {
+    if (!userRef.current) throw new Error('No hay usuario autenticado');
     setLoading(true); setError(null);
     try {
-      const { usuario } = await api.post('/api/auth/login', { username, password }, { skipAuth: true });
-      userRef.current = usuario;
-      persistAuth(usuario, sesionRef.current);
-      setUser(usuario);
-      return usuario;
-    } catch (e) {
-      setError(e.message); throw e;
-    } finally { setLoading(false); }
-  }, []);
-
-  const selectContext = useCallback(async (planta_id, cargo_id) => {
-    const currentUser = userRef.current;
-    if (!currentUser) throw new Error('No hay usuario autenticado');
-    setLoading(true); setError(null);
-    try {
-      const { sesion: s } = await api.post('/api/auth/select-context', {
-        usuario_id: currentUser.usuario_id, planta_id, cargo_id,
-      }, { skipAuth: true });
+      const { sesion: s } = await api.post('/api/auth/select-context', { planta_id });
       sesionRef.current = s;
-      persistAuth(currentUser, s);
+      persistAuth(userRef.current, s);
       setSesion(s);
       return s;
     } catch (e) {
@@ -98,5 +105,8 @@ export function useAuth() {
     } finally { setLoading(false); }
   }, []);
 
-  return { user, sesion, loading, error, ready, login, selectContext, logout, logoutLocal };
+  return {
+    user, sesion, loading, error, ready, ultimaPlanta,
+    loginWithMicrosoft, selectContext, logout, logoutLocal,
+  };
 }

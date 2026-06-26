@@ -1,9 +1,13 @@
 import sql from 'mssql';
-import { initDB, getDB } from '../db.js';
+import { initDB, getDB, TEST_PLANTA_ID } from '../db.js';
 import { hashPassword } from '../utils/password.js';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3002';
 export const PLANTA_ID = 'GEC3';
+
+// D-030: planta sintética reservada para tests (definida en db.js, excluida de las vistas DISP).
+// Los tests que tocan disponibilidad operan sobre esta planta — nunca sobre GEC3/GEC32 reales.
+export const TEST_PLANTA = TEST_PLANTA_ID;
 
 // D5: sin corchetes [...]. SQL Server interpreta [ y ] como wildcards de conjunto en LIKE,
 // con corchetes el patrón '%[TEST-RUN-N]%' NO matchea el literal '[TEST-RUN-N]' — el
@@ -37,10 +41,23 @@ const USER_CARGO = {
   ingQuim: 'Ingeniero Químico',
 };
 
-export async function setupSessions() {
+export async function setupSessions({ planta = PLANTA_ID } = {}) {
   await initDB();
   const db = await getDB();
   const password_hash = await hashPassword('1234');
+
+  // D-030: si las sesiones van a una planta distinta de las productivas (típicamente TEST_PLANTA),
+  // sembrarla idempotentemente. Necesaria por la FK de sesion_activa/disponibilidad_estado y por la
+  // validación `planta_id=@p AND activa=1` del POST DISP y /metricas (activa=1 obligatorio).
+  if (planta !== PLANTA_ID) {
+    await db.request()
+      .input('planta', sql.VarChar(10), planta)
+      .query(`
+        MERGE lov_bit.planta AS t
+        USING (SELECT @planta AS planta_id) AS s ON t.planta_id = s.planta_id
+        WHEN NOT MATCHED THEN INSERT (planta_id, nombre, activa) VALUES (@planta, 'Test Synthetic', 1);
+      `);
+  }
 
   for (const u of TEST_USERS) {
     await db.request()
@@ -77,7 +94,7 @@ export async function setupSessions() {
       .query(`UPDATE bitacora.sesion_activa SET activa = 0 WHERE usuario_id = @usuario_id`);
     const ins = await db.request()
       .input('usuario_id', sql.Int, usuario_id)
-      .input('planta_id', sql.VarChar(10), PLANTA_ID)
+      .input('planta_id', sql.VarChar(10), planta)
       .input('cargo_id', sql.Int, cargo_id)
       .input('turno', sql.TinyInt, 1)
       .query(`

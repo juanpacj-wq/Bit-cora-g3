@@ -13,6 +13,12 @@
 
 > **Convenciones:** las tablas de catálogos viven en `lov_bit`; las tablas operativas en `bitacora`. Los campos JSON usan `NVARCHAR(MAX)` y se validan en la capa de aplicación.
 
+> **Cambios v1.9 (2026-06-26) — Login Microsoft Entra ID (D-031):**
+> - **§2.3 `lov_bit.usuario`**: nuevas columnas `azure_oid VARCHAR(64) NULL` (clave de auto-aprovisionamiento, índice único filtrado `UQ_usuario_oid`), `azure_upn VARCHAR(200) NULL`, `azure_tid VARCHAR(64) NULL`. `password_hash` pasa a **nullable** (los usuarios Entra se insertan con `NULL`; SISTEMA conserva el centinela `'!disabled!'`). El seed por `personal-2026.json` (`seedPersonal`) se **retiró**: la identidad se auto-aprovisiona en el primer login (`auth/provision.js`, MERGE por `azure_oid`). Los singletons `es_jefe_planta`/`es_jdt_default` se fijan por UPN (`M365_JEFE_PLANTA_UPNS`/`M365_JDT_DEFAULT_UPNS`), no por App Role.
+> - **§3 `sesion_activa`**: cambia el ciclo de vida — el `turno-sweeper` ahora **expulsa** la sesión de app a fin de turno (`activa=0`, `cerrada_en`), separada de la cookie de login Entra (larga). La reactivación (`select-context`) refresca `inicio_sesion`+`turno`. La identidad ya no viaja en `X-Sesion-Id`; `loadSession` resuelve por `req.session.user.oid` (cookie). El login local (`/api/auth/login`, scrypt) y `/api/auth/logout` por `sesion_id` fueron eliminados; nuevos `/auth/login`, `/auth/redirect`, `/api/me`, `/api/logout`.
+> - **Nuevo esquema `auth`**: tabla `[auth].[AppSessions]` (store de `express-session`, auto-provisionada). Aislada de `lov_bit`/`bitacora`.
+> - **§2.6 matriz de permisos**: sin cambios estructurales — el cargo se deriva del App Role (`server/utils/entra-roles.js`, value→`cargo.nombre` 1:1, precedencia en multi-rol) en `select-context`, no de selección manual. Ver D-031.
+
 > **Cambios v1.8 (2026-05-21) — Consumos de Combustibles (D-027):**
 > - **Nueva §2.7 `lov_bit.combustible`** — catálogo por planta (`planta_id, codigo, nombre, unidad, tipo, orden, activo`). 18 seeds (8 GEC3 + 10 GEC32). Tipo discriminador `ALIMENTADOR/CALIZA/ACPM` usado por la vista `v_consumo_periodo` para derivar Total Carbón.
 > - **Nueva §4.9 `bitacora.consumo_combustible`** — transaccional long-format (1 fila por celda planta+fecha+periodo+combustible), `cantidad DECIMAL(12,3)`, auditoría `creado_por/modificado_por`. UNIQUE compuesto previene duplicados. Vista `v_consumo_periodo` pivotea por (planta, fecha, periodo) y suma `total_carbon_ton = SUM(tipo='ALIMENTADOR')`, `caliza_ton`, `acpm_gal`.

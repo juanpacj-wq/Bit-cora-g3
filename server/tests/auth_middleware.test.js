@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { setupSessions, cleanupTestRegistros, call, makeRegistroPayload, firstTipoEvento, PLANTA_ID } from './helpers.js';
+import { sweepTurnosVencidos } from '../utils/turno-sweeper.js';
 
 let ctx;
 
@@ -152,32 +153,33 @@ test('POST /api/cierre/bitacora sin header devuelve 401', async () => {
   assert.equal(status, 401);
 });
 
-// Último test del archivo a propósito: cierra sesiones.gerente y no debe correr antes que
+// Último test del archivo a propósito: expulsa sesiones.gerente y no debe correr antes que
 // los tests que la usan (POST /api/registros Gerente devuelve 403, línea 105).
-test('POST /api/auth/logout pobla cerrada_en además de activa=0', async () => {
+// Login Entra: /api/auth/logout (por sesion_id) fue eliminado. La sesión de app ahora se cierra
+// a fin de turno vía el sweeper (activa=0 + cerrada_en), conservando la cookie Entra. Este test
+// fuerza la sesión a un turno vencido y verifica que el sweeper la expulse.
+test('turno-sweeper expulsa la sesión de app a fin de turno (activa=0 + cerrada_en)', async () => {
   const { sesiones } = ctx;
   const sesion_id = sesiones.gerente;
   const db = await getDB();
 
-  const pre = await db.request()
+  // Forzamos inicio_sesion a un turno claramente vencido (2 días atrás) para que su ventana
+  // ya haya terminado. Sin sesion_bitacora abierta → solo la rama de expulsión la alcanza.
+  await db.request()
     .input('sid', sql.Int, sesion_id)
-    .query('SELECT activa, cerrada_en FROM bitacora.sesion_activa WHERE sesion_id = @sid');
-  assert.equal(pre.recordset[0].activa, true, 'precondicion: sesion activa');
-  assert.equal(pre.recordset[0].cerrada_en, null, 'precondicion: cerrada_en NULL antes del logout');
+    .query(`
+      UPDATE bitacora.sesion_activa
+         SET activa = 1, cerrada_en = NULL, turno = 1,
+             inicio_sesion = DATEADD(DAY, -2, SYSUTCDATETIME())
+       WHERE sesion_id = @sid`);
 
-  const { status, data } = await call('POST', '/api/auth/logout', { body: { sesion_id } });
-  assert.equal(status, 200, JSON.stringify(data));
-  assert.equal(data.ok, true);
+  await sweepTurnosVencidos(db);
 
   const post = await db.request()
     .input('sid', sql.Int, sesion_id)
     .query('SELECT activa, cerrada_en FROM bitacora.sesion_activa WHERE sesion_id = @sid');
-  assert.equal(post.recordset[0].activa, false, 'activa debe quedar en 0');
+  assert.equal(post.recordset[0].activa, false, 'activa debe quedar en 0 tras la expulsión');
   assert.ok(post.recordset[0].cerrada_en instanceof Date, 'cerrada_en debe ser timestamp');
-  // Tolerar clock skew entre SQL Server (SYSUTCDATETIME()) y Date.now() del cliente node:
-  // observé hasta -100ms en runs reales — el reloj SQL puede ir levemente adelantado. La
-  // intención del assert es "es un timestamp del momento del logout, no de 2020 ni 2099";
-  // 60s en cualquier dirección es ventana suficiente para esa intención.
   const ageMs = Date.now() - post.recordset[0].cerrada_en.getTime();
   assert.ok(Math.abs(ageMs) < 60_000, `cerrada_en debe ser reciente (age=${ageMs}ms)`);
 });
