@@ -32,6 +32,9 @@ export async function provisionEntraUser(db, { oid, upn, name, email, tid }) {
     .input('es_jefe', sql.Bit, esJefe)
     .input('es_jdt', sql.Bit, esJdtDefault)
     .query(`
+      -- AUD-22: la rama MATCHED ya NO fuerza activo=1. Antes, cada login re-activaba a un usuario
+      -- desactivado localmente (lov_bit.usuario.activo=0), anulando esa desactivación administrativa.
+      -- Ahora la desactivación local es "pegajosa". activo=1 solo se fija en el alta (NOT MATCHED).
       MERGE lov_bit.usuario AS t
       USING (VALUES (@oid)) AS s (azure_oid) ON t.azure_oid = s.azure_oid
       WHEN MATCHED THEN UPDATE SET
@@ -40,8 +43,7 @@ export async function provisionEntraUser(db, { oid, upn, name, email, tid }) {
         azure_tid       = @tid,
         email           = @email,
         es_jefe_planta  = @es_jefe,
-        es_jdt_default  = @es_jdt,
-        activo          = 1
+        es_jdt_default  = @es_jdt
       WHEN NOT MATCHED THEN INSERT
         (nombre_completo, username, email, password_hash, azure_oid, azure_upn, azure_tid,
          es_jefe_planta, es_jdt_default, activo)

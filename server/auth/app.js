@@ -40,10 +40,26 @@ export async function buildAuthApp(legacyHandler) {
   const app = express();
   app.set('trust proxy', 1);
 
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  // AUD-22: en producción SESSION_SECRET es OBLIGATORIO. Un fallback efímero por proceso mata las
+  // sesiones en cada reinicio y rompe multi-instancia (cada réplica firma con un secreto distinto).
+  // Fuera de prod conservamos el fallback efímero + warn para no estorbar el dev local.
+  if (isProduction && !process.env.SESSION_SECRET) {
+    throw new Error(
+      'SESSION_SECRET es obligatorio en producción (NODE_ENV=production). ' +
+      'Genera uno con `openssl rand -hex 32` y configúralo en el entorno antes de arrancar.'
+    );
+  }
+  const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
+  // AUD-09: en producción se FUERZA secure:true derivado de NODE_ENV (no depende de que el
+  // operador recuerde poner la env). `trust proxy` (arriba) hace que express-session reconozca la
+  // terminación TLS del proxy y no descarte la cookie por verse "sobre HTTP".
   const { store, kind: storeKind } = await buildSessionStore();
   app.use(session({
     name: SESSION_COOKIE_NAME,
-    secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
+    secret: sessionSecret,
     store,                 // undefined => MemoryStore (solo dev)
     resave: false,
     saveUninitialized: false,
@@ -51,7 +67,7 @@ export async function buildAuthApp(legacyHandler) {
     cookie: {
       httpOnly: true,
       sameSite: 'lax',     // permite que la cookie viaje en la redirección OIDC (navegación top-level)
-      secure: SESSION_COOKIE_SECURE,
+      secure: isProduction ? true : SESSION_COOKIE_SECURE,
       maxAge: SESSION_MAX_AGE_MS,
     },
   }));
@@ -60,9 +76,8 @@ export async function buildAuthApp(legacyHandler) {
   if (!process.env.SESSION_SECRET) {
     console.warn('  ⚠  SESSION_SECRET no está en .env — se generó uno efímero (las sesiones mueren al reiniciar).');
   }
-  if (process.env.NODE_ENV === 'production') {
-    if (!SESSION_COOKIE_SECURE) console.warn('  ⚠  PRODUCCIÓN sin SESSION_COOKIE_SECURE=true: la cookie viajaría por HTTP.');
-    if (storeKind === 'memory') console.warn('  ⚠  PRODUCCIÓN con store en MEMORIA: usa SESSION_STORE=mssql.');
+  if (isProduction && storeKind === 'memory') {
+    console.warn('  ⚠  PRODUCCIÓN con store en MEMORIA: usa SESSION_STORE=mssql.');
   }
 
   // ── Paso 1: arranca el login OIDC ──────────────────────────────────────────
