@@ -50,8 +50,8 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 | AUD-05 | ✅ | **Crítica** | Autenticación opt-in: endpoints de datos/PII sin `loadSession` | `server.js:582,2098,2127,2141,2190,2213,536,568,2270` |
 | AUD-06 | ✅ | **Alta** | Backdoor `AUTH_TEST_BYPASS` suplanta por `X-Sesion-Id` enumerable | `middleware/auth.js:26-46`, `utils/http.js:4` |
 | AUD-07 | 🟡 | **Alta** | SQL Server sin cifrado (`encrypt:false` + `trustServerCertificate:true`) | `db.js:22-26`, `auth/sessionStore.js:29-34` |
-| AUD-08 | ⬜ | **Alta** | Cadena SIS HTTP plano + parser binario hecho a mano sin límites → DoS de todo el backend | `sis/sis-client.js:15`, `sis/xls-parser.js:13,36,44-56,84-114` |
-| AUD-21 | ⬜ | **Alta** | Handshake WS fuera de Express: sin cookie ni `Origin` → Cross-Site WebSocket Hijacking | `ws-usuarios-activos.js:59-86`, `ws-conteo-bitacoras.js:60-86`, `server.js:2707-2709` |
+| AUD-08 | 🟡 | **Alta** | Cadena SIS HTTP plano + parser binario hecho a mano sin límites → DoS de todo el backend | `sis/sis-client.js:15`, `sis/xls-parser.js:13,36,44-56,84-114` |
+| AUD-21 | 🟡 | **Alta** | Handshake WS fuera de Express: sin cookie ni `Origin` → Cross-Site WebSocket Hijacking | `ws-usuarios-activos.js:59-86`, `ws-conteo-bitacoras.js:60-86`, `server.js:2707-2709` |
 
 ### P2 — Seguridad media (posición de red/config o defensa en profundidad)
 
@@ -62,7 +62,7 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 | AUD-11 | ⬜ | Media | IDOR cross-planta en DISP (escritura sin `plantaMatch`) | `server.js:659-768,958-1092,2035-2094` |
 | AUD-12 | ⬜ | Media | Login de la app con privilegios DDL/DROP (initDB acoplado al arranque) | `db.js:329-2067` |
 | AUD-13 | 🟡 | Media | Tokens Entra (incl. refresh) en claro en `[auth].[AppSessions]` | `auth/sessionStore.js:56-69` |
-| AUD-14 | ⬜ | Media | Scraper escribe a BD como SISTEMA sin validar rango (NaN/Infinity/`>cantidad_max`/DELETE) | `sis/sis-client.js:84-96`, `sis/carbon-scraper.js:127-145,202-233` |
+| AUD-14 | ✅ | Media | Scraper escribe a BD como SISTEMA sin validar rango (NaN/Infinity/`>cantidad_max`/DELETE) | `sis/sis-client.js:84-96`, `sis/carbon-scraper.js:127-145,202-233` |
 | AUD-15 | ⬜ | Media | `parseBody` sin límite de tamaño → DoS por memoria | `utils/http.js:7-21` |
 | AUD-16 | ⬜ | Media | CORS wildcard `Access-Control-Allow-Origin: *` global | `utils/http.js:1-5`, `server.js:109-112` |
 | AUD-17 | ⬜ | Media | Topología de red interna hardcodeada (IPs BD/SIS) | `sis/sis-client.js:5,15`, `scrape.js:7`, `docs/`, `prompts/` |
@@ -78,11 +78,11 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 | AUD-39 | ⬜ | Media | `validateCamposExtra` sin tope de tamaño/claves → mass-assignment + DoS de storage | `utils/campos.js:6-55` (esp. `:18`) |
 | AUD-40 | ⬜ | Media | Usuarios `test_*` con password `'1234'` + `activo=1` residentes en BD productiva | `tests/helpers.js:46` |
 | AUD-41 | ⬜ | Baja | `IN (...)` por concatenación de enteros en el turno-sweeper (latente) | `utils/turno-sweeper.js:52-54,124-128` |
-| AUD-42 | ⬜ | Baja | WS `usuarios-activos` emite snapshot global cross-planta a cualquier sesión | `ws-usuarios-activos.js:8-24,83` |
+| AUD-42 | ✅ | Baja | WS `usuarios-activos` emite snapshot global cross-planta a cualquier sesión | `ws-usuarios-activos.js:8-24,83` |
 | AUD-23 | ⬜ | Baja | Interpolación de nombre de columna en `hasPermisoBitacora` | `middleware/permissions.js:6,12` |
 | AUD-24 | ⬜ | Baja | `bitacora/abrir` no valida existencia/permiso de `bitacora_id` | `server.js:291-312` |
-| AUD-25 | ⬜ | Baja | `buildUrl` interpola params en XML/URL sin escapar (latente) | `sis/sis-client.js:26-35`, `scrape.js:15-24` |
-| AUD-26 | ⬜ | Baja | SSRF de baja exposición: `SIS_HOST` sin allowlist; `fetch` sigue redirects | `sis/sis-client.js:15,71` |
+| AUD-25 | ✅ | Baja | `buildUrl` interpola params en XML/URL sin escapar (latente) | `sis/sis-client.js:26-35`, `scrape.js:15-24` |
+| AUD-26 | ✅ | Baja | SSRF de baja exposición: `SIS_HOST` sin allowlist; `fetch` sigue redirects | `sis/sis-client.js:15,71` |
 | AUD-27 | ⬜ | Baja | Confianza ciega en `logoutUrl` del backend (open-redirect latente) | `useAuth.js:90-97` |
 | AUD-28 | ⬜ | Baja | `xlsx-write` escribe en `..` sin validar ruta (utilitario standalone) | `xlsx-write.js:85,133`, `scrape.js:94-95` |
 
@@ -102,7 +102,7 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 | AUD-33 | 🟡 | Alta (arq.) | Suite de tests corre contra la BD productiva con borrados por `planta_id='GEC3'` | `db.js:38-56`; `CLAUDE.md` conv. #14 (riesgo residual) |
 | AUD-34 | ⬜ | Media (arq.) | `server.js` monolítico (~2700 líneas, if-chain único) | `server/server.js` |
 | AUD-35 | ⬜ | Media (arq.) | Modelo de routing partido http-nativo + wrapper Express tras D-031 | `auth/app.js`, `server.js` |
-| AUD-36 | ⬜ | Baja (arq.) | Parser binario duplicado (ESM servidor ≡ CommonJS CLI, divergibles) | `sis/xls-parser.js` ≡ `js-scraper-carbon-g32/xls.js` |
+| AUD-36 | ✅ | Baja (arq.) | Parser binario duplicado (ESM servidor ≡ CommonJS CLI, divergibles) | `sis/xls-parser.js` ≡ `js-scraper-carbon-g32/xls.js` |
 | AUD-37 | ⬜ | Baja (arq.) | Sin `engines.node`; lockfile del scraper standalone ausente | `package.json`, `server/package.json`, `js-scraper-carbon-g32/package.json` |
 | AUD-38 | ⬜ | Baja (arq.) | Drift de documentación (`architecture.md` vs. estado real post D-031/D-035) | `docs/architecture.md:14,269` |
 
