@@ -1,32 +1,67 @@
 "use strict";
 // Lector mínimo de .xls (OLE2/CFB + BIFF8), sin dependencias.
+//
+// AUD-36 (BIT-AUDSEG-2026-001): MIRROR CommonJS de `server/utils/sis/xls-parser.js` (la
+// implementación canónica ESM). El split ESM/CJS impide reuso síncrono (este CLI es CommonJS y
+// no puede `require()` el módulo ESM del servidor sin volverse async), así que se mantiene como
+// copia. CUALQUIER cambio aquí debe replicarse en el otro archivo y viceversa.
+//
+// AUD-08: el parser corre síncrono sobre bytes de un SIS HTTP plano no autenticado; un .xls
+// malicioso podía colgar/OOM el proceso. Endurecido igual que la copia canónica: detección de
+// ciclos, validación de sectorSize y de todo índice de sector, topes derivados del buffer y
+// construcción incremental de strings.
+//
 // El SIS exporta los valores como TEXTO en la Shared String Table (SST),
 // así que hay que reconstruir la SST (incl. strings que cruzan CONTINUE) y
 // resolver las celdas LABELSST de la primera hoja.
 
 function readCFBStream(buf, wantName) {
+  // AUD-08: el header CFB ocupa 512 bytes; sin ellos no hay nada que parsear.
+  if (buf.length < 512) throw new Error("xls inválido: buffer menor que el header CFB");
   if (buf.readUInt32LE(0) !== 0xe011cfd0 || buf.readUInt32LE(4) !== 0xe11ab1a1) {
     throw new Error("No es un archivo OLE2/CFB válido");
   }
-  const sectorSize = 1 << buf.readUInt16LE(30);
+  // AUD-08: validar sectorSize ANTES de dimensionar cualquier array (exponente solo 9 ó 12).
+  const ssExp = buf.readUInt16LE(30);
+  if (ssExp !== 9 && ssExp !== 12) {
+    throw new Error(`xls inválido: sectorSize exponente fuera de {9,12}: ${ssExp}`);
+  }
+  const sectorSize = 1 << ssExp; // 512 o 4096
   const firstDirSector = buf.readUInt32LE(48);
   const numDifat = buf.readUInt32LE(72);
   const firstDifat = buf.readUInt32LE(68);
   const sectorOffset = (s) => 512 + s * sectorSize;
 
+  // AUD-08: nº real de sectores; todo índice de sector debe caer en [0, numSectores).
+  const numSectores = Math.floor((buf.length - 512) / sectorSize);
+  const sectorValido = (s) => s >= 0 && s < numSectores;
+  if (numDifat > numSectores) {
+    throw new Error(`xls inválido: numDifat excede el nº de sectores: ${numDifat}`);
+  }
+
   const fatSectors = [];
   for (let i = 0; i < 109; i++) {
     const v = buf.readUInt32LE(76 + i * 4);
     if (v === 0xffffffff) break;
+    if (!sectorValido(v)) throw new Error(`xls inválido: FAT sector fuera de rango: ${v}`);
     fatSectors.push(v);
   }
   let difatSec = firstDifat;
+  const difatVistos = new Set();
   for (let n = 0; n < numDifat && difatSec !== 0xffffffff && difatSec !== 0xfffffffe; n++) {
+    if (!sectorValido(difatSec)) {
+      throw new Error(`xls inválido: DIFAT sector fuera de rango: ${difatSec}`);
+    }
+    if (difatVistos.has(difatSec)) throw new Error("xls inválido: ciclo en la cadena DIFAT");
+    difatVistos.add(difatSec);
     const base = sectorOffset(difatSec);
     const cnt = sectorSize / 4 - 1;
     for (let i = 0; i < cnt; i++) {
       const v = buf.readUInt32LE(base + i * 4);
-      if (v !== 0xffffffff) fatSectors.push(v);
+      if (v !== 0xffffffff) {
+        if (!sectorValido(v)) throw new Error(`xls inválido: FAT sector fuera de rango: ${v}`);
+        fatSectors.push(v);
+      }
     }
     difatSec = buf.readUInt32LE(base + cnt * 4);
   }
@@ -39,11 +74,19 @@ function readCFBStream(buf, wantName) {
     for (let i = 0; i < eps; i++) fat[fi++] = buf.readUInt32LE(base + i * 4);
   }
 
+  // AUD-08: cadena FAT con validación de índice + Set de visitados (aborta ante ciclo) + tope
+  // duro de sectores derivado del buffer (clave para la cadena de directorio size==null).
+  const maxSectores = numSectores + 1;
   const readChain = (start, size) => {
     const chunks = [];
-    let s = start, total = 0;
+    let s = start, total = 0, pasos = 0;
     const lim = size == null ? Infinity : size;
+    const vistos = new Set();
     while (s !== 0xfffffffe && s !== 0xffffffff && total < lim) {
+      if (!sectorValido(s)) throw new Error(`xls inválido: índice de sector fuera de rango: ${s}`);
+      if (vistos.has(s)) throw new Error("xls inválido: ciclo en la cadena FAT");
+      vistos.add(s);
+      if (++pasos > maxSectores) throw new Error("xls inválido: cadena FAT excede el tope de sectores");
       const off = sectorOffset(s);
       chunks.push(buf.subarray(off, off + sectorSize));
       total += sectorSize;
@@ -56,7 +99,7 @@ function readCFBStream(buf, wantName) {
   const dir = readChain(firstDirSector, null);
   for (let off = 0; off + 128 <= dir.length; off += 128) {
     const nameLen = dir.readUInt16LE(off + 64);
-    if (nameLen <= 0) continue;
+    if (nameLen <= 0 || nameLen > 64) continue;
     if (dir.readUInt8(off + 66) !== 2) continue;
     const name = dir.toString("utf16le", off, off + nameLen - 2);
     if (name === wantName) {
@@ -79,8 +122,15 @@ function parseSST(blocks) {
     while (rem > 0) { ensure(); const avail = blocks[bi].length - pos; const take = Math.min(avail, rem); pos += take; rem -= take; }
   };
 
+  // AUD-08: cada string ocupa ≥3 bytes; cstUnique no puede superar el total de la SST. Tope
+  // ANTES de `new Array(cstUnique)` y del bucle.
+  const totalBytes = blocks.reduce((a, b) => a + b.length, 0);
+
   u32(); // cstTotal
   const cstUnique = u32();
+  if (cstUnique > totalBytes) {
+    throw new Error(`xls inválido: cstUnique (${cstUnique}) excede el tamaño de la SST (${totalBytes})`);
+  }
   const strings = new Array(cstUnique);
 
   for (let s = 0; s < cstUnique; s++) {
@@ -108,7 +158,12 @@ function parseSST(blocks) {
     }
     skip(rich * 4); // runs de rich text (ich+ifnt)
     skip(ext);      // datos fonéticos/extendidos
-    strings[s] = String.fromCharCode(...codes);
+    // AUD-08: construcción incremental por chunks (evita RangeError del spread).
+    let str = "";
+    for (let i = 0; i < codes.length; i += 8192) {
+      str += String.fromCharCode.apply(null, codes.slice(i, i + 8192));
+    }
+    strings[s] = str;
   }
   return strings;
 }

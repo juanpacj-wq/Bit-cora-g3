@@ -38,16 +38,18 @@ async function resolverSistemaId(pool) {
   return id;
 }
 
-// Mapa { k: combustible_id } para las 8 tolvas (ALIM_1..ALIM_8) de GEC32. Tolva k → ALIM_k.
+// Mapa { k: { id, max } } para las 8 tolvas (ALIM_1..ALIM_8) de GEC32. Tolva k → ALIM_k.
+// AUD-14: incluye `cantidad_max` (D-034) para validar el valor del SIS contra el tope físico
+// antes de escribirlo (paridad con el límite que el POST humano ya aplica). `max=null` = sin tope.
 async function resolverAlimMap(pool) {
   const r = await pool.request()
     .input('p', sql.VarChar(10), PLANTA_ID)
-    .query(`SELECT combustible_id, codigo FROM lov_bit.combustible
+    .query(`SELECT combustible_id, codigo, cantidad_max FROM lov_bit.combustible
             WHERE planta_id = @p AND codigo LIKE 'ALIM[_]%'`);
   const map = {};
   for (const row of r.recordset) {
     const m = /^ALIM_(\d+)$/.exec(row.codigo);
-    if (m) map[Number(m[1])] = row.combustible_id;
+    if (m) map[Number(m[1])] = { id: row.combustible_id, max: row.cantidad_max ?? null };
   }
   for (let k = 1; k <= 8; k++) {
     if (!map[k]) throw new Error(`carbon-scraper: falta combustible ALIM_${k} en GEC32`);
@@ -128,6 +130,9 @@ async function aplicarCelda(tx, { fecha, periodo, combustibleId, valorSis, siste
   if (!existente) return 'skip';            // =0, no existe → nada.
   if (sisOwned) {
     // =0, SIS-owned → DELETE (el SIS había creado la fila y ahora dice 0).
+    // AUD-14 FOLLOW-UP (no abordado en esta ronda): un MITM que reporte enServicio=false o
+    // tolvas 0 borra filas SIS-owned sin rastro humano. Pendiente: umbral/confirmación o
+    // tombstone (valor_sis=0 sin DELETE) antes de eliminar. No se cambia la lógica aquí aún.
     await new sql.Request(tx)
       .input('id', sql.Int, existente.consumo_id)
       .query(`DELETE FROM bitacora.consumo_combustible WHERE consumo_id=@id`);
@@ -222,9 +227,22 @@ export async function scrapeDia(pool, {
   try {
     for (const { periodo, tolvasVal } of lecturas) {
       for (let k = 1; k <= 8; k++) {
+        const { id: combustibleId, max } = alimMap[k];
+        let valorSis = tolvasVal[k - 1];
+        // AUD-14: defensa en profundidad antes de tocar la BD. extraerCarbonValidado ya entrega
+        // finito y ≥0, pero NO confiamos: un valor no finito/negativo se descarta (no se escribe
+        // esa celda) y uno por encima del tope físico (D-034) se clampa a cantidad_max. Así el
+        // scraper NUNCA evade la regla de negocio ni mete Infinity/NaN en Decimal(12,3).
+        if (!Number.isFinite(valorSis) || valorSis < 0) {
+          log(`valor inválido descartado ${fecha} p${periodo} ALIM_${k}: ${valorSis}`);
+          continue;
+        }
+        if (max != null && valorSis > max) {
+          log(`valor excede cantidad_max(${max}) ${fecha} p${periodo} ALIM_${k}: ${valorSis} → clamp`);
+          valorSis = Number(max);
+        }
         const accion = await aplicarCelda(tx, {
-          fecha, periodo, combustibleId: alimMap[k],
-          valorSis: tolvasVal[k - 1], sistemaId,
+          fecha, periodo, combustibleId, valorSis, sistemaId,
         });
         if (accion === 'insert') creados++;
         else if (accion === 'update') actualizados++;
