@@ -21,7 +21,7 @@
 | 1 P0 secretos/PII | ✅ | AUD-04✅ · AUD-01/02/03🟡 (código `4a96531`; rotación+purga = checkpoint humano, runbook en ficha) |
 | 2 Auth/routing | ✅* | AUD-05✅ AUD-06✅ (`30b9447`); AUD-34/AUD-35 ⬜ diferidos (refactor arq. grande, no a ciegas) |
 | 3 Transporte/sesión | ✅* | AUD-09✅ AUD-22✅ (`1903579`); AUD-07🟡 (código+warn, cert=infra); AUD-13🟡 (documentado, ronda dedicada) |
-| 4 Scraper/WS | ⬜ | AUD-08, AUD-36, AUD-14, AUD-25, AUD-26, AUD-21, AUD-42 |
+| 4 Scraper/WS | ✅* | AUD-14/25/26/36/42 ✅, AUD-08/21 🟡 (`0013f52`); follow-ups: worker_thread, canal TLS (infra), DELETE SIS, auth WS por cookie |
 | 5 Authz/BD | ⬜ | AUD-11, AUD-18, AUD-10, AUD-12, AUD-29, AUD-30, AUD-31 |
 | 6 Endurecimiento | ⬜ | AUD-15, AUD-16, AUD-17, AUD-19, AUD-20, AUD-23, AUD-24, AUD-27, AUD-28, AUD-32, AUD-39, AUD-40, AUD-41 |
 | 7 Arquitectura/cierre | ⬜ | AUD-37, AUD-38, security-review |
