@@ -35,7 +35,11 @@ export async function provisionEntraUser(db, { oid, upn, name, email, tid }) {
       -- AUD-22: la rama MATCHED ya NO fuerza activo=1. Antes, cada login re-activaba a un usuario
       -- desactivado localmente (lov_bit.usuario.activo=0), anulando esa desactivación administrativa.
       -- Ahora la desactivación local es "pegajosa". activo=1 solo se fija en el alta (NOT MATCHED).
-      MERGE lov_bit.usuario AS t
+      -- AUD-30: HOLDLOCK (= SERIALIZABLE) en el target serializa el MERGE para el mismo OID.
+      -- Sin él, dos logins concurrentes del primer login del mismo usuario pueden ambos ver
+      -- "no existe" en el lookup interno del MERGE e intentar INSERT → race / violación de
+      -- UQ_usuario_oid. El hint toma un range lock sobre la clave de match.
+      MERGE lov_bit.usuario WITH (HOLDLOCK) AS t
       USING (VALUES (@oid)) AS s (azure_oid) ON t.azure_oid = s.azure_oid
       WHEN MATCHED THEN UPDATE SET
         nombre_completo = @nombre,
