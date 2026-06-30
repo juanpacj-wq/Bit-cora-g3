@@ -10,8 +10,13 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@fontsource/archivo": "^5.2.7",
+    "@fontsource/inter": "^5.2.7",
+    "@fontsource/jetbrains-mono": "^5.2.7",
+    "@fontsource/public-sans": "^5.2.7",
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.27",
+    "chart.js": "^4.5.1",
     "lucide-react": "^0.577.0",
     "postcss": "^8.5.8",
     "react": "^19.2.4",

@@ -1,0 +1,171 @@
+/* D-033: Rediseño visual COMB — look "Blueprint Heatmap" (plano técnico azul + heatmap).
+ * TODO está scopeado bajo `.comb-root` para no filtrar al resto del portal:
+ *  - Las variables (--ink, --bg, …) se declaran en `.comb-root`, no en `:root`.
+ *  - Las fuentes Archivo / Inter / JetBrains Mono (cargadas por @fontsource en
+ *    ConsumosGrid.jsx) se aplican solo dentro de `.comb-root`.
+ *  - Las clases (.comb-topbar, .comb-grid, …) van prefijadas con `.comb-root`.
+ * El tinte del heatmap por celda es el ÚNICO estilo inline (no se puede precalcular en CSS);
+ * sale de colores.js (tint()) y comparte rampa con la leyenda → leyenda ↔ tinte siempre igual.
+ */
+
+.comb-root{
+  --ink:#16324f;          /* plano técnico azul: texto principal, botón Guardar */
+  --bg:#fbfcfd;           /* fondo del plano */
+  --header-bg:#f3f7fa;    /* fondo de thead sticky */
+  --line-soft:#eef2f6;    /* borde inferior celdas */
+  --line:#e6ebf0;         /* borde barra superior / separadores */
+  --line-head:#dde6ee;    /* borde inferior headers */
+  --total-fg:#0f766e;     /* teal: texto Total Carbón */
+  --total-bg:#effbf8;     /* teal pálido: fondo Total Carbón */
+  --accent:#2563eb;       /* azul acento: focus, botón Hoy */
+  --head-fg:#5a7184;      /* gris headers */
+  --muted:#64748b;        /* gris leyenda */
+  --faint:#9bb0c1;        /* gris unidades / horas N-1 */
+  --per-fg:#2c4257;       /* azul etiqueta de periodo */
+
+  --font-display:'Archivo', system-ui, sans-serif;
+  --font-sans:'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono:'JetBrains Mono', ui-monospace, monospace;
+
+  flex:1;
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+  font-family:var(--font-sans);
+  color:var(--ink);
+  padding:16px;
+}
+.comb-root *{box-sizing:border-box}
+
+/* Tarjeta/plano que llena el alto; solo la grilla scrollea (anti-softlock: el page
+   document NO crece, así BitacoraTabs no se empuja fuera de vista). */
+.comb-root .comb-card{
+  flex:1;
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+  background:var(--bg);
+  border:1px solid var(--line);
+  border-radius:10px;
+  overflow:hidden;
+}
+
+/* barra superior */
+.comb-root .comb-topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 20px;border-bottom:1px solid var(--line);
+  flex-wrap:wrap;gap:12px;flex-shrink:0;
+}
+.comb-root .comb-topbar-left{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.comb-root .comb-topbar-right{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.comb-root .comb-title{
+  font-family:var(--font-display);font-size:16px;font-weight:700;color:var(--ink);margin:0;
+}
+
+/* leyenda de escala del heatmap */
+.comb-root .comb-legend{
+  display:flex;align-items:center;gap:8px;
+  font-size:11px;color:var(--muted);font-family:var(--font-mono);
+}
+.comb-root .comb-legend-bar{
+  display:flex;border-radius:4px;overflow:hidden;border:1px solid #d8e0e8;
+}
+.comb-root .comb-legend-bar i{width:16px;height:12px;display:block}
+
+/* botón Guardar */
+.comb-root .comb-save{
+  background:var(--ink);color:#fff;border:none;border-radius:7px;
+  padding:8px 18px;font-weight:600;font-size:13px;font-family:var(--font-sans);cursor:pointer;
+}
+.comb-root .comb-save:disabled{opacity:.4;cursor:not-allowed}
+
+/* selector de fecha */
+.comb-root .comb-fecha{display:flex;align-items:center;gap:8px}
+.comb-root .comb-fecha-nav{
+  display:flex;align-items:center;justify-content:center;
+  width:30px;height:30px;border:1px solid #d8e0e8;background:#fff;border-radius:7px;
+  color:var(--ink);cursor:pointer;
+}
+.comb-root .comb-fecha-nav:disabled{opacity:.5;cursor:not-allowed}
+.comb-root .comb-fecha-box{
+  display:flex;align-items:center;gap:6px;
+  padding:6px 10px;border:1px solid #d8e0e8;background:#fff;border-radius:7px;
+}
+.comb-root .comb-fecha-box svg{color:var(--faint)}
+.comb-root .comb-fecha-box input{
+  border:none;outline:none;background:transparent;font-size:13px;
+  font-family:var(--font-mono);color:var(--ink);
+}
+.comb-root .comb-fecha-box input:disabled{color:var(--faint)}
+.comb-root .comb-fecha-hoy{
+  border:none;background:transparent;color:var(--accent);
+  font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font-sans);
+}
+.comb-root .comb-fecha-hoy:disabled{opacity:.5;cursor:not-allowed}
+
+/* estados */
+.comb-root .comb-state{padding:14px 20px;font-size:13px;font-family:var(--font-sans)}
+.comb-root .comb-state.loading{color:var(--muted)}
+.comb-root .comb-state.error{color:#d9627a}
+.comb-root .comb-state.empty{color:var(--muted)}
+
+/* contenedor de scroll de la grilla */
+.comb-root .comb-scroll{flex:1;min-height:0;overflow:auto}
+
+/* tabla */
+.comb-root table{border-collapse:collapse;width:100%}
+.comb-root thead th{
+  position:sticky;top:0;z-index:2;
+  background:var(--header-bg);color:var(--head-fg);
+  text-align:center;padding:11px 8px;font-weight:600;font-size:11px;
+  border-bottom:1px solid var(--line-head);white-space:nowrap;
+}
+.comb-root thead th.comb-th-first{
+  text-align:left;left:0;z-index:3;padding-left:18px;
+}
+.comb-root thead th .comb-unit{
+  display:block;font-family:var(--font-mono);font-size:9px;color:var(--faint);font-weight:400;
+}
+
+.comb-root td.comb-per{
+  position:sticky;left:0;background:var(--bg);
+  text-align:left;padding:10px 18px;font-weight:600;color:var(--per-fg);
+  white-space:nowrap;border-right:1px solid var(--line);border-bottom:1px solid var(--line-soft);
+}
+.comb-root td.comb-per small{
+  font-family:var(--font-mono);color:var(--faint);font-weight:400;margin-left:5px;font-size:10px;
+}
+
+.comb-root td.comb-cell{
+  padding:0;border-bottom:1px solid var(--line-soft);border-right:1px solid #f1f5f8;
+  transition:background .12s ease;
+}
+/* input transparente para que el tinte del <td> se vea; texto en --ink (#16324f) se mantiene
+   legible incluso sobre el tono más saturado de la rampa. */
+.comb-root td.comb-cell input{
+  width:100%;border:none;outline:none;background:transparent;
+  padding:9px 8px;text-align:right;
+  font-family:var(--font-mono);font-size:12.5px;color:var(--ink);
+  -moz-appearance:textfield;
+}
+.comb-root td.comb-cell input::-webkit-outer-spin-button,
+.comb-root td.comb-cell input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.comb-root td.comb-cell input:focus{box-shadow:inset 0 0 0 1.5px var(--accent)}
+.comb-root td.comb-cell input:disabled{color:#7c93a6;cursor:not-allowed}
+.comb-root td.comb-cell input::placeholder{color:var(--faint)}
+
+/* D-034: celda fuera de rango (cantidad > cantidad_max) — marca + bloqueo de Guardar. */
+.comb-root td.comb-cell.invalid{background:#fdecef !important;box-shadow:inset 0 0 0 1.5px #d9627a}
+.comb-root td.comb-cell.invalid input{color:#c0344f;font-weight:600}
+
+/* mensaje de advertencia bajo la barra superior */
+.comb-root .comb-alert{
+  padding:8px 20px;font-size:12px;font-weight:600;color:#b23a52;
+  background:#fdecef;border-bottom:1px solid #f3c9d2;font-family:var(--font-sans);flex-shrink:0;
+}
+
+.comb-root td.comb-total{
+  font-family:var(--font-mono);color:var(--total-fg);font-weight:700;background:var(--total-bg);
+  padding:11px 8px;text-align:right;border-bottom:1px solid var(--line-soft);
+  font-variant-numeric:tabular-nums;white-space:nowrap;
+}

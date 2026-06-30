@@ -1,7 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// Fuentes locales (@fontsource, sin CDN en runtime — mismo criterio que DISP).
+import '@fontsource/archivo/400.css';
+import '@fontsource/archivo/600.css';
+import '@fontsource/archivo/700.css';
+import '@fontsource/archivo/800.css';
+import '@fontsource/inter/400.css';
+import '@fontsource/inter/500.css';
+import '@fontsource/inter/600.css';
+import '@fontsource/inter/700.css';
+import '@fontsource/jetbrains-mono/400.css';
+import '@fontsource/jetbrains-mono/500.css';
+import '@fontsource/jetbrains-mono/600.css';
+import '@fontsource/jetbrains-mono/700.css';
 import { useCombustibles } from '../../hooks/useCombustibles';
-import { getTodayBogota } from '../../utils/fecha';
 import { SelectorFecha } from './SelectorFecha';
+import { HEATMAP_MAX_TON, HEATMAP_RAMP, tint } from './colores';
+import './combustibles.css';
 
 // D-027: grilla de Consumos de Combustibles. Patrón paralelo a SalaDeMandoGrid:
 // buffer-en-memoria editable + snapshot del server + diff() al guardar.
@@ -14,10 +28,20 @@ import { SelectorFecha } from './SelectorFecha';
 // `bitacora:counts-refresh`).
 const PERIODOS = Array.from({ length: 24 }, (_, i) => i + 1);
 
-export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast }) {
+// D-034: motivos estructurados del backend → texto amigable es-CO para los toasts.
+const MOTIVO_TEXTO = {
+  cantidad_excede_max: 'una o más cantidades superan el máximo permitido',
+  cantidad_invalida: 'cantidad inválida',
+  periodo_fuera_rango: 'periodo fuera de rango',
+  combustible_no_pertenece_planta: 'combustible no corresponde a la planta',
+};
+
+// D-035: `fecha`/`onFechaChange` son controlados por el dashboard (la URL es la fuente de verdad
+// para deep-link/F5). El resto de la lógica (snapshot/buffer, diff, validaciones D-034,
+// beforeunload) queda intacta.
+export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast, fecha, onFechaChange }) {
   const { loading, getConsumos, guardarBatch } = useCombustibles();
 
-  const [fecha, setFecha] = useState(() => getTodayBogota());
   const [catalogo, setCatalogo] = useState([]);
   const [snapshot, setSnapshot] = useState({});  // shape: { "<periodo>": { "<combustible_id>": { cantidad, detalle, ... } } }
   const [buffer, setBuffer] = useState({});
@@ -130,7 +154,7 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     } catch (e) {
       // Errores estructurados del backend (cantidad inválida, periodo OOR, etc.)
       if (Array.isArray(e.errores) && e.errores.length > 0) {
-        const motivos = [...new Set(e.errores.map((x) => x.motivo))].join(', ');
+        const motivos = [...new Set(e.errores.map((x) => MOTIVO_TEXTO[x.motivo] || x.motivo))].join(', ');
         showToastRef.current?.(`Errores de validación: ${motivos}`, 'error');
       } else {
         showToastRef.current?.(`Error al guardar: ${e.message || 'desconocido'}`, 'error');
@@ -153,93 +177,155 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     ];
   }, [catalogo]);
 
+  // D-034: límite físico por combustible (data-driven desde cantidad_max del catálogo).
+  // maxPorId: clave string (igual que el buffer). null = sin tope.
+  const maxPorId = useMemo(() => {
+    const m = new Map();
+    for (const c of catalogo) {
+      m.set(String(c.combustible_id), c.cantidad_max == null ? null : Number(c.cantidad_max));
+    }
+    return m;
+  }, [catalogo]);
+
+  // Máximo del heatmap = mayor cantidad_max entre alimentadores (fallback a la constante).
+  const maxAlim = useMemo(() => {
+    let mx = 0;
+    for (const c of catalogo) {
+      if (c.tipo === 'ALIMENTADOR' && c.cantidad_max != null) mx = Math.max(mx, Number(c.cantidad_max));
+    }
+    return mx > 0 ? mx : HEATMAP_MAX_TON;
+  }, [catalogo]);
+
+  // Celdas del buffer cuyo valor supera su cantidad_max → bloquean el guardado (front).
+  const celdasInvalidas = useMemo(() => {
+    let n = 0;
+    for (const p of Object.keys(buffer)) {
+      for (const cid of Object.keys(buffer[p])) {
+        const max = maxPorId.get(cid);
+        const v = buffer[p][cid]?.cantidad;
+        if (max != null && typeof v === 'number' && v > max) n++;
+      }
+    }
+    return n;
+  }, [buffer, maxPorId]);
+  const hayInvalidos = celdasInvalidas > 0;
+
   return (
-    // flex-1 overflow-auto: el parent en BitacorasGecelca3.jsx es `h-screen flex flex-col`;
-    // sin esto, el grid (24 periodos × N combustibles) excede el viewport y el page document
-    // hace scroll vertical, empujando BitacoraTabs fuera de vista (softlock de navegación).
-    // Mismo patrón que SalaDeMandoGrid (l.332) y DisponibilidadDashboard (l.163).
-    <div className="flex-1 overflow-auto p-4">
-      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-        <div className="flex items-center gap-3">
-          {bitacora?.nombre && <h2 className="text-lg font-semibold">{bitacora.nombre}</h2>}
-          <SelectorFecha fecha={fecha} onChange={setFecha} disabled={loading} />
-        </div>
-        <button
-          type="button"
-          onClick={onGuardar}
-          disabled={!hayCambios || !puedeCrear || loading}
-          className="px-4 py-2 rounded-md bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          Guardar
-        </button>
-      </div>
-
-      {loading && <div className="text-sm text-gray-500 mb-2">Cargando...</div>}
-      {error && <div className="text-sm text-red-600 mb-2">Error: {error.message || 'desconocido'}</div>}
-      {!loading && catalogo.length === 0 && (
-        <div className="text-sm text-gray-500">Sin combustibles configurados para esta planta.</div>
-      )}
-
-      {catalogo.length > 0 && (
-        <div className="overflow-auto border rounded-md">
-          <table className="text-sm">
-            <thead className="bg-gray-50 sticky top-0 z-10">
-              <tr>
-                <th className="px-3 py-2 text-left whitespace-nowrap">Periodo</th>
-                {columnasOrdenadas.map((c) => (
-                  <th
-                    key={String(c.combustible_id)}
-                    className={`px-3 py-2 text-center whitespace-nowrap ${c.virtual ? 'bg-yellow-50' : ''}`}
-                  >
-                    <div>{c.nombre}</div>
-                    <div className="text-xs text-gray-500 font-normal">[{c.unidad}]</div>
-                  </th>
+    // .comb-root (flex-1 + scroll DENTRO de .comb-scroll): el parent en BitacorasGecelca3.jsx
+    // es `h-screen flex flex-col`; sin esto, el grid (24 periodos × N combustibles) excede el
+    // viewport y el page document hace scroll vertical, empujando BitacoraTabs fuera de vista
+    // (softlock de navegación). Mismo patrón anti-softlock que SalaDeMando y DisponibilidadDashboard.
+    <div className="comb-root">
+      <div className="comb-card">
+        <div className="comb-topbar">
+          <div className="comb-topbar-left">
+            <h2 className="comb-title">
+              {bitacora?.nombre ? `${bitacora.nombre} · Mapa de carga` : 'Consumos · Mapa de carga'}
+            </h2>
+            <SelectorFecha fecha={fecha} onChange={onFechaChange} disabled={loading} />
+          </div>
+          <div className="comb-topbar-right">
+            {/* Leyenda de escala: chips desde HEATMAP_RAMP → coinciden con tint() siempre. */}
+            <div className="comb-legend">
+              bajo
+              <span className="comb-legend-bar">
+                {HEATMAP_RAMP.map((c) => (
+                  <i key={c} style={{ background: c }} />
                 ))}
-              </tr>
-            </thead>
-            <tbody>
-              {PERIODOS.map((p) => (
-                <tr key={p} className="border-t hover:bg-gray-50">
-                  <td className="px-3 py-1.5 font-medium whitespace-nowrap">
-                    P{p}{' '}
-                    <span className="text-xs text-gray-500">
-                      ({String(p - 1).padStart(2, '0')}h)
-                    </span>
-                  </td>
-                  {columnasOrdenadas.map((c) => {
-                    if (c.virtual) {
-                      const t = totalCarbonPeriodo(p);
+              </span>
+              alto
+            </div>
+            <button
+              type="button"
+              onClick={onGuardar}
+              disabled={!hayCambios || !puedeCrear || loading || hayInvalidos}
+              className="comb-save"
+            >
+              Guardar
+            </button>
+          </div>
+        </div>
+
+        {hayInvalidos && (
+          <div className="comb-alert">
+            ⚠ {celdasInvalidas} {celdasInvalidas === 1 ? 'celda excede' : 'celdas exceden'} el máximo permitido
+          </div>
+        )}
+
+        {loading && <div className="comb-state loading">Cargando...</div>}
+        {error && <div className="comb-state error">Error: {error.message || 'desconocido'}</div>}
+        {!loading && catalogo.length === 0 && (
+          <div className="comb-state empty">Sin combustibles configurados para esta planta.</div>
+        )}
+
+        {catalogo.length > 0 && (
+          <div className="comb-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th className="comb-th-first">Periodo</th>
+                  {columnasOrdenadas.map((c) => (
+                    <th key={String(c.combustible_id)}>
+                      <span>{c.nombre}</span>
+                      <span className="comb-unit">{c.unidad}</span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {PERIODOS.map((p) => (
+                  <tr key={p}>
+                    <td className="comb-per">
+                      P{p}
+                      <small>{String(p - 1).padStart(2, '0')}h</small>
+                    </td>
+                    {columnasOrdenadas.map((c) => {
+                      if (c.virtual) {
+                        const t = totalCarbonPeriodo(p);
+                        return (
+                          <td key="TOTAL" className="comb-total">
+                            {t.toFixed(3)}
+                          </td>
+                        );
+                      }
+                      const v = buffer[String(p)]?.[String(c.combustible_id)]?.cantidad ?? '';
+                      // Heatmap SOLO en columnas de alimentador (tint() es el único estilo inline);
+                      // escala desde cantidad_max del alimentador (D-034).
+                      const bg = c.tipo === 'ALIMENTADOR' ? tint(v, maxAlim) : 'transparent';
+                      // Límite físico por combustible (D-034): celda fuera de rango se marca y bloquea.
+                      const max = maxPorId.get(String(c.combustible_id));
+                      const invalida = max != null && v !== '' && Number(v) > max;
                       return (
-                        <td key="TOTAL" className="px-2 py-1 text-right bg-yellow-50 font-mono">
-                          {t.toFixed(3)}
+                        <td
+                          key={c.combustible_id}
+                          className={`comb-cell${invalida ? ' invalid' : ''}`}
+                          style={{ background: bg }}
+                        >
+                          <input
+                            type="number"
+                            step="0.001"
+                            min="0"
+                            max={max ?? undefined}
+                            placeholder="·"
+                            value={v}
+                            disabled={!puedeCrear}
+                            aria-invalid={invalida || undefined}
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              const n = raw === '' ? null : parseFloat(raw);
+                              setCelda(p, c.combustible_id, n);
+                            }}
+                          />
                         </td>
                       );
-                    }
-                    const v = buffer[String(p)]?.[String(c.combustible_id)]?.cantidad ?? '';
-                    return (
-                      <td key={c.combustible_id} className="px-1 py-1">
-                        <input
-                          type="number"
-                          step="0.001"
-                          min="0"
-                          value={v}
-                          disabled={!puedeCrear}
-                          onChange={(e) => {
-                            const raw = e.target.value;
-                            const n = raw === '' ? null : parseFloat(raw);
-                            setCelda(p, c.combustible_id, n);
-                          }}
-                          className="w-24 px-1.5 py-0.5 text-right border rounded text-sm focus:ring-1 focus:ring-blue-400 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500"
-                        />
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

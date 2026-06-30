@@ -389,6 +389,7 @@ CREATE TABLE lov_bit.combustible (
         CONSTRAINT CK_combustible_tipo CHECK (tipo IN ('ALIMENTADOR','CALIZA','ACPM')),
     orden           INT          NOT NULL DEFAULT 0, -- orden visual en la grilla
     activo          BIT          NOT NULL DEFAULT 1,
+    cantidad_max    DECIMAL(12,3) NULL,               -- D-034 (F28.A1): tope físico por celda; NULL=sin tope
     CONSTRAINT UQ_combustible_planta_codigo UNIQUE (planta_id, codigo)
 );
 
@@ -418,7 +419,9 @@ CREATE INDEX IX_combustible_planta_orden
 
 El campo `tipo` es el discriminador semántico que usa la vista `v_consumo_periodo` (§4.9) para calcular el **Total Carbón** como `SUM(cantidad) WHERE tipo='ALIMENTADOR'` por (planta, fecha, periodo) — sin almacenar el total derivado en la tabla transaccional.
 
-**Cross-ref:** ADR [[D-027]]. Catálogo se siembra en `db.js::initDB()` bloque F26.B1 vía `MERGE` por `UQ(planta_id, codigo)` (idempotente).
+**`cantidad_max` (D-034, migración F28.A1):** tope físico por celda/periodo, data-driven. Sembrado por tipo: `ALIMENTADOR=25` Ton, `CALIZA=40` Ton, `ACPM=25000` Gal (`NULL` = sin tope). Lo exponen los GET `/catalogo` y `/consumos`; el POST rechaza `cantidad > cantidad_max` con `400 cantidad_excede_max` (boundary inclusivo); el front marca la celda y bloquea Guardar. Para cambiar un tope: editar el `UPDATE` del bloque F28.A1 en `db.js` + redeploy.
+
+**Cross-ref:** ADR [[D-027]], [[D-034]]. Catálogo se siembra en `db.js::initDB()` bloque F26.B1 vía `MERGE` por `UQ(planta_id, codigo)` (idempotente); `cantidad_max` se agrega en F28.A1 (`ALTER` + `UPDATE` por tipo).
 
 ---
 
@@ -997,7 +1000,7 @@ GROUP BY c.planta_id, c.fecha, c.periodo;
 
 1. Validar permiso `puede_crear` en bitácora COMB. 403 si no.
 2. Validar `planta_id ∈ {GEC3, GEC32}`, `fecha` formato `YYYY-MM-DD`, `fecha <= hoyBogota`, `celdas: Array`.
-3. Pre-load del catálogo activo de la planta. Validar cada celda: `periodo ∈ [1,24]`, `combustible_id ∈ catálogo`, `cantidad >= 0` o null/0.
+3. Pre-load del catálogo activo de la planta (incluye `cantidad_max`). Validar cada celda: `periodo ∈ [1,24]` (`periodo_fuera_rango`), `combustible_id ∈ catálogo` (`combustible_no_pertenece_planta`), `cantidad` número finito `>= 0` (`cantidad_invalida`), y `cantidad <= cantidad_max` si el combustible tiene tope (`cantidad_excede_max`, D-034; boundary inclusivo, `NULL`=sin tope).
 4. Si hay errores estructurados → `400 { errores: [{periodo, combustible_id, motivo}] }` sin ejecutar nada.
 5. Transacción única: por celda, lookup por UQ → si `cantidad` vacío y existe ⇒ DELETE (`eliminados++`); si nuevo ⇒ INSERT (`creados++`); si existe y `cantidad` cambió ⇒ UPDATE + setear `modificado_por` (`actualizados++`); si solo cambió `detalle` ⇒ UPDATE detalle sin tocar audit (`actualizados++`); si idéntico ⇒ no-op.
 6. Response `200 { resumen: { creados, actualizados, eliminados } }`.

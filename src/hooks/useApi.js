@@ -8,23 +8,44 @@ export function setUnauthorizedHandler(fn) {
   unauthorizedHandler = fn;
 }
 
+// Etiqueta amigable para "no se pudo siquiera contactar al servidor". `fetch` rechaza con un
+// TypeError crudo ("Failed to fetch" / "NetworkError…") cuando el backend está caído o la red no
+// tiene ruta — texto técnico e incomprensible. Lo traducimos a un Error con codigo estable.
+const MSG_SIN_CONEXION = 'No se pudo contactar al servidor. Verifica tu conexión a la red corporativa e intenta de nuevo.';
+function errorSinConexion() {
+  const err = new Error(MSG_SIN_CONEXION);
+  err.codigo = 'sin_conexion';
+  err.status = 0;
+  err.body = { error: MSG_SIN_CONEXION, codigo: 'sin_conexion', mensaje: MSG_SIN_CONEXION };
+  return err;
+}
+
 async function request(url, { method = 'GET', body, skipAuth = false } = {}) {
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  const res = await fetch(url, {
-    method,
-    headers,
-    credentials: 'include',
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers,
+      credentials: 'include',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw errorSinConexion();
+  }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && !skipAuth && unauthorizedHandler) {
     try { unauthorizedHandler(); } catch {}
   }
   if (!res.ok) {
-    const err = new Error(data.error || `HTTP ${res.status}`);
+    // `data.error` ya viene saneado por el backend (texto apto para usuario final). Adjuntamos
+    // `codigo` (slug estable) y `body` para que los consumidores puedan ramificar sin parsear texto.
+    const err = new Error(data.error || data.mensaje || `Error ${res.status}`);
     if (Array.isArray(data?.errores)) err.errores = data.errores;
     err.status = res.status;
+    err.codigo = data.codigo;
+    err.body = data;
     throw err;
   }
   return data;

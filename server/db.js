@@ -1934,6 +1934,52 @@ export async function initDB() {
     }
   }
 
+  // F28.A1 (D-034): límite físico por combustible. Columna lov_bit.combustible.cantidad_max
+  // (data-driven, fuente única) usada por el front (input max + marcar/bloquear) y el back
+  // (validación cantidad_excede_max en POST /api/combustibles/consumos). Topes por tipo:
+  // ALIMENTADOR=25 Ton, CALIZA=40 Ton, ACPM=25000 Gal. cantidad_max NULL = "sin tope"
+  // (el server omite el chequeo) para no romper combustibles futuros que no lo seteen.
+  // Patrón idempotente F26.B1/F27.A1. Documentado en docs/decisions.md D-034 y BIT-MODBD §4.9.
+  const f28A1Aplicada = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F28.A1'`
+  );
+  if (!f28A1Aplicada.recordset[0]) {
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    try {
+      // 1. Columna cantidad_max (idempotente).
+      await new sql.Request(tx).batch(`
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+          WHERE object_id=OBJECT_ID('lov_bit.combustible') AND name='cantidad_max')
+          ALTER TABLE lov_bit.combustible ADD cantidad_max DECIMAL(12,3) NULL;
+      `);
+
+      // 2. Sembrar topes por tipo en las filas existentes (solo donde aún es NULL, para no
+      //    pisar ajustes manuales futuros si alguien quita el flag y reaplica).
+      await new sql.Request(tx).batch(`
+        UPDATE lov_bit.combustible
+        SET cantidad_max = CASE tipo
+              WHEN 'ALIMENTADOR' THEN 25
+              WHEN 'CALIZA'      THEN 40
+              WHEN 'ACPM'        THEN 25000
+            END
+        WHERE cantidad_max IS NULL;
+      `);
+
+      // 3. Flag de migración aplicada (último statement antes del COMMIT). Mismo shape que
+      //    F26.B1/F27.A1: la tabla migracion_aplicada solo recibe (codigo).
+      await new sql.Request(tx).batch(`
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F28.A1');
+      `);
+
+      await tx.commit();
+      console.log('[F28.A1] cantidad_max sembrado en lov_bit.combustible (25/40/25000 por tipo)');
+    } catch (err) {
+      try { await tx.rollback(); } catch {}
+      throw err;
+    }
+  }
+
   // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de
   // auditoría interna (CIET).
   await db.request().batch(`
