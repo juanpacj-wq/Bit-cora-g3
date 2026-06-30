@@ -534,6 +534,8 @@ async function legacyHandler(req, res) {
 
     // GET /api/catalogos/jdt-actual?planta_id=GEC3
     if (pathname === '/api/catalogos/jdt-actual' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const planta_id = url.searchParams.get('planta_id');
       if (!planta_id) {
         return sendJSON(res, 400, { error: 'planta_id es requerido' });
@@ -566,6 +568,8 @@ async function legacyHandler(req, res) {
 
     // GET /api/catalogos/jefe
     if (pathname === '/api/catalogos/jefe' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const db = await getDB();
       const result = await db.request().query(`
         SELECT TOP 1 usuario_id, nombre_completo, email, es_jefe_planta, es_jdt_default
@@ -580,6 +584,8 @@ async function legacyHandler(req, res) {
 
     // GET /api/registros/activos?planta_id=&bitacora_id=
     if (pathname === '/api/registros/activos' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const planta_id = url.searchParams.get('planta_id');
       const bitacora_id = url.searchParams.get('bitacora_id');
       const estado = url.searchParams.get('estado');
@@ -2096,6 +2102,8 @@ async function legacyHandler(req, res) {
     // GET /api/historicos/resumen?planta_id=&fecha=
     // F10: oculta=0 esconde bitácoras de auditoría interna (CIET) del histórico visible.
     if (pathname === '/api/historicos/resumen' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const planta_id = url.searchParams.get('planta_id');
       const fecha = url.searchParams.get('fecha');
       if (!planta_id || !fecha) {
@@ -2126,6 +2134,8 @@ async function legacyHandler(req, res) {
     // F10: rechaza el registro si su bitácora es oculta — coherente con "no aparece en histórico".
     const histIdMatch = pathname.match(/^\/api\/historicos\/(\d+)$/);
     if (histIdMatch && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const registro_id = parseInt(histIdMatch[1], 10);
       const db = await getDB();
       const result = await db.request()
@@ -2139,6 +2149,8 @@ async function legacyHandler(req, res) {
 
     // GET /api/historicos?filtros&page&limit
     if (pathname === '/api/historicos' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       const params = url.searchParams;
       const page = Math.max(1, parseInt(params.get('page') || '1', 10));
       const limit = Math.min(500, Math.max(1, parseInt(params.get('limit') || '50', 10)));
@@ -2188,6 +2200,8 @@ async function legacyHandler(req, res) {
     // vía la vista compat `bitacora.autorizacion_dashboard`.
     // F9: marcado deprecated. El dashboard ya consume /api/eventos-dashboard. Próximo release lo borra.
     if (pathname === '/api/autorizaciones' && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       console.warn('[deprecated] GET /api/autorizaciones — usar /api/eventos-dashboard?tipo=AUTH');
       const planta_id = url.searchParams.get('planta_id');
       const fecha = url.searchParams.get('fecha');
@@ -2212,6 +2226,8 @@ async function legacyHandler(req, res) {
     // F9: deprecated — usar /api/eventos-dashboard.
     const authLookup = pathname.match(/^\/api\/autorizaciones\/([^/]+)\/([0-9]{4}-[0-9]{2}-[0-9]{2})\/(\d+)$/);
     if (authLookup && method === 'GET') {
+      const sesion = await loadSession(req);
+      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
       console.warn('[deprecated] GET /api/autorizaciones/:p/:f/:per — usar /api/eventos-dashboard');
       const [, planta_id, fecha, periodoStr] = authLookup;
       const db = await getDB();

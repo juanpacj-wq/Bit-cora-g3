@@ -1,6 +1,20 @@
 import sql from 'mssql';
 import { getDB } from '../db.js';
 
+// AUD-06: el backdoor de test (resolver identidad por header X-Sesion-Id, entero enumerable) SOLO
+// puede activarse en entornos no-productivos. Función pura y exportada para poder testearla aislada.
+export function bypassHabilitado(env = process.env) {
+  return env.AUTH_TEST_BYPASS === '1' && env.NODE_ENV !== 'production';
+}
+
+// Fail-closed: si alguien arranca con el bypass encendido en producción, abortamos el proceso en la
+// carga del módulo en vez de degradar silenciosamente a un backdoor enumerable.
+if (process.env.AUTH_TEST_BYPASS === '1' && process.env.NODE_ENV === 'production') {
+  throw new Error(
+    'AUTH_TEST_BYPASS=1 está prohibido con NODE_ENV=production: el backdoor de test por X-Sesion-Id no puede activarse en producción.'
+  );
+}
+
 // Login Entra ID: la identidad ya NO viaja en el header X-Sesion-Id (entero exfiltrable), sino
 // en la cookie httpOnly de sesión (req.session.user.oid, poblada por express-session). Desde el
 // oid resolvemos la sesión de app vigente (sesion_activa.activa=1). El objeto devuelto mantiene
@@ -37,7 +51,7 @@ async function loadBySesionIdTest(db, sesion_id) {
 export async function loadSession(req) {
   const db = await getDB();
   let row = null;
-  if (process.env.AUTH_TEST_BYPASS === '1' && req.headers?.['x-sesion-id'] != null) {
+  if (bypassHabilitado() && req.headers?.['x-sesion-id'] != null) {
     row = await loadBySesionIdTest(db, parseInt(req.headers['x-sesion-id'], 10));
   } else {
     const oid = req.session?.user?.oid;
