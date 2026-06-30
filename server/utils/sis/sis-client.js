@@ -10,7 +10,7 @@
 //   [11]    HBK10CT651_AVG  (sensor de servicio)
 //   [12]    MPAFLOW         (flujo, sensor de servicio)
 
-import { parseXls } from "./xls-parser.js";
+import { parseXlsIsolated } from "./parse-isolated.js"; // AUD-08: parseo en worker_thread aislado
 
 // AUD-26 (BIT-AUDSEG-2026-001): SIS_HOST viene de env sin validar → un override malicioso podía
 // apuntar el scraper a un destino arbitrario (SSRF), cuyos datos se escriben a la BD como SISTEMA.
@@ -131,7 +131,7 @@ export async function fetchPeriod(f1, h1, f2, h2, opts = {}) {
     if (buf.length > MAX_XLS_BYTES) {
       throw new Error(`respuesta SIS demasiado grande: ${buf.length} bytes`);
     }
-    const parsed = parseXls(buf);
+    const parsed = await parseXlsIsolated(buf); // AUD-08: fuera del event loop, con timeout + tope de heap
     return { status: resp.status, bytes: buf.length, ...parsed };
   } finally {
     if (timer) clearTimeout(timer);
