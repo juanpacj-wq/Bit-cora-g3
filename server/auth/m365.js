@@ -118,9 +118,22 @@ export async function acquireTokenByCode(session, { code, pkceVerifier, nonce })
     codeVerifier: pkceVerifier,
   });
 
-  // Validación de nonce (defensa contra token injection / replay)
-  if (nonce && result.idTokenClaims && result.idTokenClaims.nonce !== nonce) {
+  const claims = result.idTokenClaims || {};
+
+  // Validación de nonce (defensa contra token injection / replay). El nonce SIEMPRE se genera en
+  // getAuthCodeUrl y se guarda en la sesión hasta el callback; si aquí llega ausente, la sesión se
+  // perdió o fue manipulada → error DURO, en vez de saltarnos silenciosamente la verificación.
+  if (!nonce || claims.nonce !== nonce) {
     throw new Error('nonce_mismatch');
+  }
+
+  // AUD-22: cuando el tenant está FIJADO (M365_TENANT_ID seteado y distinto de 'common'), exigimos
+  // que el id_token provenga de ESE tenant. Cierra el riesgo de que, en una configuración
+  // multi-tenant accidental, un token emitido por otro tenant pase el canje. No filtramos detalle
+  // (el handler de /auth/redirect lo traduce a un redirect genérico — D-032).
+  const expectedTid = process.env.M365_TENANT_ID;
+  if (expectedTid && expectedTid !== 'common' && claims.tid !== expectedTid) {
+    throw new Error('tenant_mismatch');
   }
   return result;
 }

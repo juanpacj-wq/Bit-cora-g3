@@ -20,6 +20,17 @@ function buildSqlConfig() {
   let server = rawHost;
   let instanceName;
   if (rawHost.includes('\\')) [server, instanceName] = rawHost.split('\\');
+  // AUD-07: mismo patrón env-driven que db.js. Default NO-rompedor (encrypt=false +
+  // trustServerCertificate=true = comportamiento actual). En prod, endurecer con un certificado
+  // válido en SQL Server + DB_ENCRYPT=true DB_TRUST_SERVER_CERT=false.
+  const encrypt = process.env.DB_ENCRYPT === 'true';
+  const trustServerCertificate = process.env.DB_TRUST_SERVER_CERT !== 'false';
+  if (process.env.NODE_ENV === 'production' && !encrypt) {
+    console.warn(
+      '  ⚠  PRODUCCIÓN con tráfico SQL en CLARO (DB_ENCRYPT≠true): el blob de sesión con tokens MSAL ' +
+      'viaja sin cifrar. Instala un certificado en SQL Server y configura DB_ENCRYPT=true DB_TRUST_SERVER_CERT=false.'
+    );
+  }
   return {
     server,
     database: process.env.DB_NAME,
@@ -27,8 +38,8 @@ function buildSqlConfig() {
     password: process.env.DB_PASSWORD,
     port: instanceName ? undefined : Number(process.env.DB_PORT || 1433),
     options: {
-      encrypt: false,
-      trustServerCertificate: true,
+      encrypt,
+      trustServerCertificate,
       ...(instanceName ? { instanceName } : {}),
     },
   };

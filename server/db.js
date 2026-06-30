@@ -13,6 +13,19 @@ if (rawHost.includes('\\')) {
   instanceName = instance;
 }
 
+// AUD-07: cifrado del canal a SQL Server, env-driven con default NO-rompedor (el server prod
+// corre hoy contra una BD por IP interna sin certificado TLS). Default: encrypt=false +
+// trustServerCertificate=true = comportamiento actual. Para endurecer en prod: instalar un
+// certificado válido en SQL Server y arrancar con DB_ENCRYPT=true DB_TRUST_SERVER_CERT=false.
+const DB_ENCRYPT = process.env.DB_ENCRYPT === 'true';
+const DB_TRUST_SERVER_CERT = process.env.DB_TRUST_SERVER_CERT !== 'false';
+if (process.env.NODE_ENV === 'production' && !DB_ENCRYPT) {
+  console.warn(
+    '  ⚠  PRODUCCIÓN con tráfico SQL en CLARO (DB_ENCRYPT≠true): credenciales y datos viajan sin cifrar. ' +
+    'Instala un certificado en SQL Server y configura DB_ENCRYPT=true DB_TRUST_SERVER_CERT=false.'
+  );
+}
+
 const poolConfig = {
   server,
   database: process.env.DB_NAME,
@@ -20,8 +33,8 @@ const poolConfig = {
   password: process.env.DB_PASSWORD,
   port: instanceName ? undefined : parseInt(process.env.DB_PORT || '1433', 10),
   options: {
-    encrypt: false,
-    trustServerCertificate: true,
+    encrypt: DB_ENCRYPT,
+    trustServerCertificate: DB_TRUST_SERVER_CERT,
     ...(instanceName ? { instanceName } : {}),
   },
   pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
