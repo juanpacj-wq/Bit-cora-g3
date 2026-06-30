@@ -31,6 +31,8 @@
 - **🟡 7** parcial + runbook: AUD-01 (rotación/purga historial), AUD-07 (cert TLS), AUD-13 (cifrado sesión), AUD-18 (token cross-repo), AUD-12 (split logins BD), AUD-08 (worker/canal SIS), AUD-21 (handshake WS por cookie). + AUD-02/03 (archivo fuera del árbol; purga de historial = checkpoint AUD-01). + AUD-33 (BD test dedicada = infra).
 - **⬜ 2** diferidos (refactor arq. grande): AUD-34 (split server.js), AUD-35 (unificar routing).
 - Tests puros nuevos: 51/51 verde. Build prod verde. server npm audit: 0 vulns.
+- **`/security-review` final (gate de cierre):** revisó toda la rama (SQLi, bypass auth, CORS/CSRF/CSWSH, OIDC, XXE, SSRF, escalada de revalidación) → **0 vulnerabilidades de alta confianza introducidas**. La remediación no agrega regresiones; los puntos débiles restantes son los 🟡/⬜ ya documentados.
+- **PIPELINE COMPLETO.** Acciones humanas pendientes (irreversibles/infra/cross-repo) listadas en los runbooks de las fichas 🟡.
 
 ## Bitácora por ítem (rellenar a medida)
 <!-- AUD-NN | estado | commit | verificación | residual humano/infra -->
