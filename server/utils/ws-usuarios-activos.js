@@ -1,6 +1,7 @@
 import { WebSocketServer } from 'ws';
 import sql from 'mssql';
 import { getDB } from '../db.js';
+import { resolveWsPlanta } from '../auth/wsSession.js';
 
 // ws -> { planta_id }  (AUD-42: cada cliente recuerda su planta para acotar el snapshot)
 const clients = new Map();
@@ -109,19 +110,6 @@ export async function broadcastUsuariosActivos() {
   }
 }
 
-async function validateSesionGetPlanta(sesion_id) {
-  if (!Number.isFinite(sesion_id)) return null;
-  const db = await getDB();
-  const r = await db.request()
-    .input('sesion_id', sql.Int, sesion_id)
-    .query(`
-      SELECT planta_id
-      FROM bitacora.sesion_activa
-      WHERE sesion_id = @sesion_id AND activa = 1
-    `);
-  return r.recordset[0]?.planta_id || null;
-}
-
 export function attachWSS(httpServer) {
   const wss = new WebSocketServer({ noServer: true });
 
@@ -142,19 +130,18 @@ export function attachWSS(httpServer) {
       return;
     }
 
-    // AUD-21 follow-up: la autenticación ideal del handshake es por la cookie de
-    // sesión Entra (parsear req.headers.cookie + resolver contra el store MSSQL
-    // [auth].[AppSessions]); el upgrade corre fuera del middleware Express, así
-    // que hoy solo se valida el sesion_id (entero IDENTITY). Pendiente de una
-    // ronda dedicada por su complejidad.
-    const sesion_id = parseInt(url.searchParams.get('sesion_id'), 10);
-    let planta_id = null;
-    try { planta_id = await validateSesionGetPlanta(sesion_id); } catch { planta_id = null; }
-    if (!planta_id) {
+    // AUD-21: autenticación del handshake por la cookie de sesión Entra (no por el sesion_id
+    // enumerable del cliente). resolveWsPlanta verifica la cookie firmada contra el store de sesión
+    // y deriva la planta de la sesión de app ACTIVA del usuario. Sin cookie válida o sin sesión de
+    // app → 401. El sesion_id del query string ya NO se usa para autorizar.
+    let auth = null;
+    try { auth = await resolveWsPlanta(req); } catch { auth = null; }
+    if (!auth) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
     }
+    const planta_id = auth.planta_id;
 
     wss.handleUpgrade(req, socket, head, async (ws) => {
       clients.set(ws, { planta_id });

@@ -21,6 +21,7 @@ import { loadSession } from '../middleware/auth.js';
 import { provisionEntraUser } from './provision.js';
 import { buildSessionStore } from './sessionStore.js';
 import { revalidate, REVALIDATE_INTERVAL_MS } from './revalidate.js';
+import { setWsSessionContext } from './wsSession.js';
 import { detectRoles } from './roles.js';
 import {
   isConfigured as m365Configured, m365Config,
@@ -57,6 +58,9 @@ export async function buildAuthApp(legacyHandler) {
   // operador recuerde poner la env). `trust proxy` (arriba) hace que express-session reconozca la
   // terminación TLS del proxy y no descarte la cookie por verse "sobre HTTP".
   const { store, kind: storeKind } = await buildSessionStore();
+  // AUD-21: comparte store + secreto + nombre de cookie con el resolver del handshake WS, que corre
+  // fuera de este middleware y necesita verificar la MISMA cookie de sesión.
+  setWsSessionContext({ store, secret: sessionSecret, cookieName: SESSION_COOKIE_NAME });
   app.use(session({
     name: SESSION_COOKIE_NAME,
     secret: sessionSecret,
