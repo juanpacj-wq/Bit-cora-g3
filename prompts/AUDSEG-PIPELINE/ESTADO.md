@@ -66,6 +66,16 @@ chocaron con el setup de dev y se corrigieron:
   El endurecimiento del parser (validaciones OLE2/BIFF8) ya estaba. Tests: 3/3 (transfer+resolve,
   propagación de error, timeout). **Residual (infra/red, fuera de código):** el canal SIS sigue siendo
   HTTP plano no autenticado (MITM) — eso es endurecimiento de red del host SIS, no del backend.
+- **AUD-13 ✅ (completado)**: cifrado en reposo del blob de sesión en `[auth].[AppSessions]` (antes en
+  claro, con tokens MSAL + identidad). `server/auth/sessionCrypto.js` (AES-256-GCM, clave de
+  `SESSION_ENC_KEY` o derivada de `SESSION_SECRET`) + subclase del store mssql que cifra en `set` /
+  descifra en `get`; filas legacy en claro siguen leyéndose → migración sin downtime. Verificado:
+  5/5 tests puros (round-trip, GCM detecta tampering, legacy passthrough, la fila no lleva identidad en
+  claro) y EN VIVO contra la BD — la columna `session` guarda `{"cookie":…,"__enc":"enc1:…"}` sin oid/token
+  en claro, y `/api/me` con la cookie descifra y responde `authenticated:true`. Solo aplica al store mssql
+  (el de memoria es dev). **Hallazgo lateral (anotado, NO de AUD-13):** si el store mssql falla la conexión,
+  el error sube al handler por defecto de Express y filtra el host de BD en HTML — el saneo D-032 cubre el
+  if-chain pero no la capa Express/express-session. Candidato a una pasada de error-handler en `auth/app.js`.
 
 ## Bitácora por ítem (rellenar a medida)
 <!-- AUD-NN | estado | commit | verificación | residual humano/infra -->
