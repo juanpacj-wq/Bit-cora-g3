@@ -440,6 +440,23 @@ Razón de la vista en vez de query inline: encapsula la unión `activo + histór
 
 ---
 
+## D-036 — Ronda de remediación de seguridad (auditoría BIT-AUDSEG-2026-001)
+
+**Fecha:** 2026-06-30
+
+**Contexto:** una auditoría estricta de principio a fin (`BIT-AUDSEG-2026-001.md`, 42 hallazgos AUD-01..42 en 7 olas) detectó vulnerabilidades de seguridad y deuda de arquitectura. Se ejecutó un pipeline de remediación en la rama `sec/audseg-remediation`, ítem por ítem con contexto aislado por subagente, verificación con tests y commit por hallazgo.
+
+**Decisión:** resolver por orden de prioridad+dependencias, con tres clases de cierre: ✅ resuelto en código+test; 🟡 parcial (la parte de código hecha + un runbook para la acción de infra/ops o cross-repo que el pipeline no puede/debe hacer solo); ⬜ diferido (refactor arquitectónico grande que no se hace a ciegas sin la suite plena). Cambios clave:
+- **Auth/identidad:** sesión exigida en 8 endpoints que la omitían (AUD-05); backdoor de test fail-closed en prod (AUD-06); cookie `Secure` forzada + `SESSION_SECRET` obligatorio + validación `tid`/`nonce` (AUD-09/22); revalidación de privilegios efectiva que re-deriva el cargo y mata la sesión ante downgrade (AUD-10); scope de planta en DISP (AUD-11).
+- **Transporte/datos:** cifrado SQL env-driven con default no-rompedor (AUD-07, encender = infra/cert); rate-limit + tope de body + CORS allowlist + Origin-check anti-CSRF (AUD-15/16/19/20); `campos_extra` sin mass-assignment (AUD-39).
+- **Scraper SIS/WS:** parser BIFF8 endurecido contra `.xls` maliciosos (ciclos/sectorSize/topes) cortando el DoS del backend (AUD-08); validación de rango de datos SIS (AUD-14); handshake WS con validación de `Origin` anti-CSWSH + snapshot por planta (AUD-21/42); SSRF allowlist + escape XML (AUD-25/26).
+- **Robustez BD:** `HOLDLOCK` en el MERGE de provisión, `XACT_ABORT`/transacción en `enforceSingletonFlag`, guards por datos antes de borrados destructivos (AUD-29/30/31).
+- **Higiene:** secretos/PII/screenshot sacados del árbol + `dist` untrackeado (AUD-01/02/03/04, con runbook de rotación de clave + purga de historial como acción humana); `ws` 8.18→8.21 (CVE) y `engines` (AUD-37); drift de docs (AUD-38).
+
+**Consecuencias:** (a) **24 hallazgos ✅** (código+test verde), **7 🟡** (con runbook: rotación/purga de historial AUD-01, cert TLS AUD-07, cifrado-at-rest de sesión AUD-13, token cross-repo AUD-18, split de logins BD AUD-12, worker/canal del scraper AUD-08, cookie-handshake WS AUD-21), **3 ⬜** diferidos (BD de test dedicada AUD-33 —login sin `dbcreator`—, split de `server.js` AUD-34, unificación de routing AUD-35). (b) **8 suites de tests puros nuevas, 51+ casos verde**, sin tocar la BD productiva; la verificación HTTP plena queda atada a AUD-33 (BD de test dedicada). (c) Se introdujeron varias env de seguridad: `DB_ENCRYPT`/`DB_TRUST_SERVER_CERT`, `CORS_ALLOWED_ORIGINS`, `WS_ALLOWED_ORIGINS`, `DASHBOARD_API_TOKEN`, `TEST_DB_DEDICATED`, `REVALIDATE_MAX_FALLOS` (todas con default no-rompedor). (d) El tablero vivo y el detalle por ítem están en `BIT-AUDSEG-2026-001.md` y `prompts/AUDSEG-PIPELINE/ESTADO.md`. Cross-ref: [[D-031]] (auth Entra), [[D-032]] (saneo de errores), [[D-030]] (planta TST).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

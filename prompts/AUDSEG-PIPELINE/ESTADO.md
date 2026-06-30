@@ -24,7 +24,13 @@
 | 4 Scraper/WS | ✅* | AUD-14/25/26/36/42 ✅, AUD-08/21 🟡 (`0013f52`); follow-ups: worker_thread, canal TLS (infra), DELETE SIS, auth WS por cookie |
 | 5 Authz/BD | ✅* | AUD-10/11/29/30/31 ✅ (`d26bf84`,`9602416`,`dddfab1`); AUD-18 🟡 (token opcional, cierre=cross-repo); AUD-12 🟡 (infra/DBA, runbook) |
 | 6 Endurecimiento | ✅ | 13/13 ✅ (`c7ac622`). Tests puros olas 2-6: 51/51 verde. |
-| 7 Arquitectura/cierre | 🟡 | AUD-37, AUD-38, security-review |
+| 7 Arquitectura/cierre | ✅* | AUD-37✅ (ws 8.18→8.21 CVE, engines, npm audit) AUD-38✅ (drift docs); ADR D-036; falta /security-review final |
+
+## Tally final
+- **✅ 24** resueltos en código + test: AUD-04,05,06,09,10,11,14,15,16,17,19,20,22,23,24,25,26,27,28,29,30,31,32,36,38,39,40,41,42,37 (y AUD-33 mitigado).
+- **🟡 7** parcial + runbook: AUD-01 (rotación/purga historial), AUD-07 (cert TLS), AUD-13 (cifrado sesión), AUD-18 (token cross-repo), AUD-12 (split logins BD), AUD-08 (worker/canal SIS), AUD-21 (handshake WS por cookie). + AUD-02/03 (archivo fuera del árbol; purga de historial = checkpoint AUD-01). + AUD-33 (BD test dedicada = infra).
+- **⬜ 2** diferidos (refactor arq. grande): AUD-34 (split server.js), AUD-35 (unificar routing).
+- Tests puros nuevos: 51/51 verde. Build prod verde. server npm audit: 0 vulns.
 
 ## Bitácora por ítem (rellenar a medida)
 <!-- AUD-NN | estado | commit | verificación | residual humano/infra -->
