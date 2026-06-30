@@ -79,7 +79,11 @@ export async function buildSessionStore() {
     );
     await pool.close();
 
-    const store = new MSSQLStore(sqlConfig, {
+    // AUD-13: cifrado en reposo del blob de sesión (tokens MSAL + identidad). Subclase del store
+    // que cifra en set / descifra en get; filas legacy en claro siguen leyéndose (migración suave).
+    const { makeEncryptedStoreClass } = await import('./sessionCrypto.js');
+    const EncryptedMSSQLStore = makeEncryptedStoreClass(MSSQLStore);
+    const store = new EncryptedMSSQLStore(sqlConfig, {
       table: qualified,
       ttl: MAX_AGE_MS,
       autoRemove: true,
