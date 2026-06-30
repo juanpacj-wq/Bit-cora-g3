@@ -49,7 +49,7 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 |---|---|---|---|---|
 | AUD-05 | ✅ | **Crítica** | Autenticación opt-in: endpoints de datos/PII sin `loadSession` | `server.js:582,2098,2127,2141,2190,2213,536,568,2270` |
 | AUD-06 | ✅ | **Alta** | Backdoor `AUTH_TEST_BYPASS` suplanta por `X-Sesion-Id` enumerable | `middleware/auth.js:26-46`, `utils/http.js:4` |
-| AUD-07 | ⬜ | **Alta** | SQL Server sin cifrado (`encrypt:false` + `trustServerCertificate:true`) | `db.js:22-26`, `auth/sessionStore.js:29-34` |
+| AUD-07 | 🟡 | **Alta** | SQL Server sin cifrado (`encrypt:false` + `trustServerCertificate:true`) | `db.js:22-26`, `auth/sessionStore.js:29-34` |
 | AUD-08 | ⬜ | **Alta** | Cadena SIS HTTP plano + parser binario hecho a mano sin límites → DoS de todo el backend | `sis/sis-client.js:15`, `sis/xls-parser.js:13,36,44-56,84-114` |
 | AUD-21 | ⬜ | **Alta** | Handshake WS fuera de Express: sin cookie ni `Origin` → Cross-Site WebSocket Hijacking | `ws-usuarios-activos.js:59-86`, `ws-conteo-bitacoras.js:60-86`, `server.js:2707-2709` |
 
@@ -57,11 +57,11 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 
 | ID | Estado | Severidad | Título | Evidencia |
 |---|---|---|---|---|
-| AUD-09 | ⬜ | Media | Cookie de sesión sin `Secure` forzado en prod (solo `console.warn`) | `auth/app.js:54,63-64`, `entra-config.js:33-34` |
+| AUD-09 | ✅ | Media | Cookie de sesión sin `Secure` forzado en prod (solo `console.warn`) | `auth/app.js:54,63-64`, `entra-config.js:33-34` |
 | AUD-10 | ⬜ | Media | Privilegio (`cargo_id`) congelado sobrevive a revocación en Entra; revalidación fail-open | `auth/revalidate.js:34-56`, `server.js:141` |
 | AUD-11 | ⬜ | Media | IDOR cross-planta en DISP (escritura sin `plantaMatch`) | `server.js:659-768,958-1092,2035-2094` |
 | AUD-12 | ⬜ | Media | Login de la app con privilegios DDL/DROP (initDB acoplado al arranque) | `db.js:329-2067` |
-| AUD-13 | ⬜ | Media | Tokens Entra (incl. refresh) en claro en `[auth].[AppSessions]` | `auth/sessionStore.js:56-69` |
+| AUD-13 | 🟡 | Media | Tokens Entra (incl. refresh) en claro en `[auth].[AppSessions]` | `auth/sessionStore.js:56-69` |
 | AUD-14 | ⬜ | Media | Scraper escribe a BD como SISTEMA sin validar rango (NaN/Infinity/`>cantidad_max`/DELETE) | `sis/sis-client.js:84-96`, `sis/carbon-scraper.js:127-145,202-233` |
 | AUD-15 | ⬜ | Media | `parseBody` sin límite de tamaño → DoS por memoria | `utils/http.js:7-21` |
 | AUD-16 | ⬜ | Media | CORS wildcard `Access-Control-Allow-Origin: *` global | `utils/http.js:1-5`, `server.js:109-112` |
@@ -74,7 +74,7 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 |---|---|---|---|---|
 | AUD-19 | ⬜ | Baja | Sin defensa anti-CSRF (todo recae en `SameSite=lax`) | `auth/app.js:51-56`; mutadores del if-chain |
 | AUD-20 | ⬜ | Baja | Sin rate limiting; búsqueda histórica `LIKE '%..%'` (scan) | global; `server.js:2162` |
-| AUD-22 | ⬜ | Baja | Endurecimiento OIDC residual + cierre de hallazgos heredados | `m365.js:22,28,122`, `provision.js:37-48`, `auth/app.js:46` |
+| AUD-22 | ✅ | Baja | Endurecimiento OIDC residual + cierre de hallazgos heredados | `m365.js:22,28,122`, `provision.js:37-48`, `auth/app.js:46` |
 | AUD-39 | ⬜ | Media | `validateCamposExtra` sin tope de tamaño/claves → mass-assignment + DoS de storage | `utils/campos.js:6-55` (esp. `:18`) |
 | AUD-40 | ⬜ | Media | Usuarios `test_*` con password `'1234'` + `activo=1` residentes en BD productiva | `tests/helpers.js:46` |
 | AUD-41 | ⬜ | Baja | `IN (...)` por concatenación de enteros en el turno-sweeper (latente) | `utils/turno-sweeper.js:52-54,124-128` |
@@ -348,6 +348,9 @@ y datos, o monta un MITM.
 **Verificación.** Captura de red al puerto 1433 cifrada; conexión con cert inválido rechazada.
 
 **Cross-ref.** AUD-01, AUD-13, memoria `db-host-override-local`.
+> **Estado (pipeline):** 🟡 código env-driven listo (`1903579`): `DB_ENCRYPT`/`DB_TRUST_SERVER_CERT` en
+> `db.js` + `sessionStore.js`, default no-rompedor + warn fuerte en prod. **Pendiente (🧑 infra):**
+> instalar cert TLS válido en el SQL Server y arrancar con `DB_ENCRYPT=true DB_TRUST_SERVER_CERT=false`.
 
 ---
 
@@ -484,6 +487,13 @@ caché MSAL server-side), o cifrar el blob de sesión en reposo. Confirmar qué 
 `auth/app.js` en la sesión.
 
 **Cross-ref.** AUD-07 (canal), AUD-22.
+> **Estado (pipeline):** 🟡 **no implementado a propósito** (ronda dedicada). `connect-mssql-v2` hace
+> `JSON.stringify/parse` del blob internamente, sin hook `serializer` → cifrar-at-rest exige subclasear
+> el store e invalidaría las sesiones ya guardadas en claro. **Diseño recomendado:** subclase
+> `EncryptedMSSQLStore` que override `set/get/all/touch` con AES-256-GCM (IV por escritura, sobre
+> `{v,iv,tag,ct}`), gateada por `SESSION_STORE_ENC_KEY`, con fallback a parse plano para migración
+> suave; conservar el refresh token dentro del blob (lo usa `revalidate.js`). El refuerzo del canal
+> (AUD-07) mitiga el vector de red mientras tanto.
 
 ---
 
