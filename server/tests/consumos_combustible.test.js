@@ -308,3 +308,70 @@ test('12. F26.B1 idempotente: flag presente + 18 combustibles + 1 fila COMB', as
   const n2 = (await db.request().query(`SELECT COUNT(*) AS n FROM lov_bit.combustible`)).recordset[0].n;
   assert.equal(n2, n, 'conteo de combustibles estable tras re-initDB');
 });
+
+test('13. F28.A1: GET catalogo expone cantidad_max por tipo (25/40/25000)', async () => {
+  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
+  const alim = cat.combustibles.find((c) => c.tipo === 'ALIMENTADOR');
+  const caliza = cat.combustibles.find((c) => c.tipo === 'CALIZA');
+  const acpm = cat.combustibles.find((c) => c.tipo === 'ACPM');
+  assert.equal(Number(alim.cantidad_max), 25, 'ALIMENTADOR max = 25');
+  assert.equal(Number(caliza.cantidad_max), 40, 'CALIZA max = 40');
+  assert.equal(Number(acpm.cantidad_max), 25000, 'ACPM max = 25000');
+});
+
+test('14. POST rechaza ALIMENTADOR > 25 (cantidad_excede_max) y acepta exactamente 25', async () => {
+  await cleanConsumos('GEC3', TEST_FECHA);
+  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon })).data;
+  const alimA = cat.combustibles.find((c) => c.tipo === 'ALIMENTADOR').combustible_id;
+
+  // 25.001 → rechazo
+  const over = await call('POST', '/api/combustibles/consumos', {
+    sesion_id: sesionOpCarbon,
+    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: alimA, cantidad: 25.001 },
+    ]},
+  });
+  assert.equal(over.status, 400);
+  assert.ok(over.data.errores?.some((e) => e.motivo === 'cantidad_excede_max'),
+    `esperado motivo cantidad_excede_max, recibido ${JSON.stringify(over.data.errores)}`);
+
+  // 25 exacto → OK (boundary inclusivo)
+  const ok = await call('POST', '/api/combustibles/consumos', {
+    sesion_id: sesionOpCarbon,
+    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: alimA, cantidad: 25 },
+    ]},
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.data.resumen.creados, 1);
+});
+
+test('15. POST rechaza CALIZA > 40 y ACPM > 25000; acepta límites exactos', async () => {
+  await cleanConsumos('GEC3', TEST_FECHA);
+  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon })).data;
+  const caliza = cat.combustibles.find((c) => c.tipo === 'CALIZA').combustible_id;
+  const acpm = cat.combustibles.find((c) => c.tipo === 'ACPM').combustible_id;
+
+  const over = await call('POST', '/api/combustibles/consumos', {
+    sesion_id: sesionOpCarbon,
+    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
+      { periodo: 2, combustible_id: caliza, cantidad: 40.5 },
+      { periodo: 2, combustible_id: acpm, cantidad: 25001 },
+    ]},
+  });
+  assert.equal(over.status, 400);
+  const motivos = over.data.errores.map((e) => e.motivo);
+  assert.ok(motivos.every((m) => m === 'cantidad_excede_max'),
+    `todos cantidad_excede_max, recibido ${JSON.stringify(over.data.errores)}`);
+  assert.equal(over.data.errores.length, 2, 'una por celda fuera de rango');
+
+  const ok = await call('POST', '/api/combustibles/consumos', {
+    sesion_id: sesionOpCarbon,
+    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
+      { periodo: 2, combustible_id: caliza, cantidad: 40 },
+      { periodo: 2, combustible_id: acpm, cantidad: 25000 },
+    ]},
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.data.resumen.creados, 2);
+});

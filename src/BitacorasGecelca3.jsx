@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 import CierrePendientesModal from "./components/CierrePendientesModal";
+import LogoutModal from "./components/LogoutModal";
 import SalaDeMandoGrid from "./components/SalaDeMando/SalaDeMandoGrid";
 import DisponibilidadDashboard from "./components/Disponibilidad/DisponibilidadDashboard";
 import ConsumosGrid from "./components/Combustibles/ConsumosGrid";
@@ -26,6 +27,8 @@ import { useUsuariosActivos } from "./hooks/useUsuariosActivos";
 import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
 import { useFlipReorder } from "./hooks/useFlipReorder";
 import { useBitacoraSesion, useFinalizarTurno } from "./hooks/useBitacoraSesion";
+import { useAppRoute } from "./hooks/useAppRoute";
+import { buildHash } from "./routing/appRoute";
 import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
 
 const COLORS = {
@@ -243,7 +246,7 @@ function LoginScreen({ auth, plantas, onReady, showToast }) {
     if (a === "no_acceso") {
       showToast("Tu cuenta no tiene acceso a Bitácoras en Microsoft Entra.", "error");
     } else if (a === "error" || a === "state_invalido") {
-      showToast("No se pudo completar el inicio de sesión. Intentá de nuevo.", "error");
+      showToast("No se pudo completar el inicio de sesión. Intenta de nuevo.", "error");
     }
     params.delete("auth");
     const qs = params.toString();
@@ -299,7 +302,7 @@ function LoginScreen({ auth, plantas, onReady, showToast }) {
           {paso === "microsoft" && (
             <div className="space-y-5 max-w-sm mx-auto w-full">
               <p className="text-center text-sm" style={{ color: COLORS.grayText }}>
-                Accedé con tu cuenta corporativa de Microsoft. Tu rol se asigna automáticamente.
+                Accede con tu cuenta corporativa de Microsoft. Tu rol se asigna automáticamente.
               </p>
               <button
                 type="button"
@@ -1403,8 +1406,18 @@ export default function App() {
   useEffect(() => { sessionStorage.setItem('bitacoras.filtroTurno', filtroTurno); }, [filtroTurno]);
   const [toast, setToast] = useState(null);
   const [modal, setModal] = useState(null);
+  const [logoutOpen, setLogoutOpen] = useState(false);
   const [draftLocal, setDraftLocal] = useState(null);
   const [vista, setVista] = useState('bitacoras');
+
+  // D-035: subestado de las secciones con UI propia, lifted al dashboard para que la URL pueda
+  // deep-linkearlo (DISP=planta, COMB=fecha). La URL es la fuente única de verdad; estos states
+  // son su espejo en React. COMB arranca en hoy (Bogotá); DISP se siembra al entrar (ver derive).
+  const [dispPlanta, setDispPlanta] = useState(null);
+  const [combFecha, setCombFecha] = useState(() => getTodayBogota());
+
+  // D-035: routing por hash. `route` (parseado) es la lectura; `navigate` empuja estado→URL.
+  const { route, navigate } = useAppRoute();
 
   // F2: marca participación cuando el usuario abre una bitácora. Idempotente — reabrir tras
   // finalizar el turno crea una nueva ventana de participación sin requerir re-login.
@@ -1478,12 +1491,71 @@ export default function App() {
   const permisoActivo = catalogos.permisos.find((p) => p.bitacora_id === activeBitacora);
   const puedeCrear = !!permisoActivo?.puede_crear;
 
-  // Selecciona primera bitácora permitida al iniciar
+  // D-035: sincronización ruta ↔ estado. El dashboard es dueño del estado; los dos efectos de
+  // abajo lo mantienen en espejo con la URL (fuente única de verdad, permission-gated). Refs para
+  // leer el estado actual dentro del "derive" SIN meterlo en deps: así un cambio de estado (ej.
+  // clic en un tab) no dispara una re-derivación desde la ruta vieja que lo revierta.
+  const activeBitacoraRef = useRef(activeBitacora);
+  const dispPlantaRef = useRef(dispPlanta);
+  const combFechaRef = useRef(combFecha);
+  activeBitacoraRef.current = activeBitacora;
+  dispPlantaRef.current = dispPlanta;
+  combFechaRef.current = combFecha;
+
+  const codigoActivo = useMemo(
+    () => bitacorasPermitidas.find((b) => b.bitacora_id === activeBitacora)?.codigo || null,
+    [bitacorasPermitidas, activeBitacora]
+  );
+
+  // (a) Derivar estado DESDE la ruta: corre en el primer load (deep-link), al volver de "Cambiar
+  // unidad" (cambia `sesion`) y ante navegación externa (back/forward, edición manual del hash).
+  // Reemplaza el viejo init "primera permitida": el fallback de ruta vacía/desconocida/no-permitida
+  // hace exactamente eso. Cuando la ruta cambió porque la escribimos nosotros (efecto b), aplicar
+  // es no-op por los guards de igualdad → sin loop.
   useEffect(() => {
-    if (!activeBitacora && bitacorasPermitidas.length > 0) {
-      setActiveBitacora(bitacorasPermitidas[0].bitacora_id);
+    if (!sesion || bitacorasPermitidas.length === 0) return;
+    if (route.vista === 'historicos') {
+      setVista('historicos');
+      if (activeBitacoraRef.current == null) setActiveBitacora(bitacorasPermitidas[0].bitacora_id);
+      return;
     }
-  }, [bitacorasPermitidas, activeBitacora]);
+    setVista('bitacoras');
+    let target = route.codigo
+      ? bitacorasPermitidas.find((b) => b.codigo === route.codigo)
+      : null;
+    if (!target) target = bitacorasPermitidas[0]; // fallback: codigo nulo o no permitido
+    if (target.bitacora_id !== activeBitacoraRef.current) {
+      setActiveBitacora(target.bitacora_id);
+      setFiltroTexto(''); setFiltroTipo(''); setDraftLocal(null);
+    }
+    if (target.codigo === 'DISP') {
+      // Sembrar planta: param de la ruta → planta ya elegida → unidad del login (default).
+      const next = route.params.planta || dispPlantaRef.current || sesion.planta_id;
+      if (next && next !== dispPlantaRef.current) setDispPlanta(next);
+    }
+    if (target.codigo === 'COMB' && route.params.fecha && route.params.fecha !== combFechaRef.current) {
+      setCombFecha(route.params.fecha);
+    }
+  }, [route, sesion, bitacorasPermitidas]);
+
+  // (b) Escribir estado HACIA la ruta. Subestado (planta/fecha) y el primer write canónico usan
+  // replaceState (no inundan el historial); el cambio de sección/vista usa pushState (back/forward
+  // navega). Sin sesión (LoginScreen) NO escribe: el routing solo vive en el dashboard.
+  const prevSectionKey = useRef(null);
+  useEffect(() => {
+    if (!sesion || bitacorasPermitidas.length === 0) return;
+    let desired = null;
+    if (vista === 'historicos') desired = { vista: 'historicos', codigo: null, params: {} };
+    else if (codigoActivo === 'DISP') desired = { vista: 'bitacoras', codigo: 'DISP', params: { planta: dispPlanta } };
+    else if (codigoActivo === 'COMB') desired = { vista: 'bitacoras', codigo: 'COMB', params: { fecha: combFecha } };
+    else if (codigoActivo) desired = { vista: 'bitacoras', codigo: codigoActivo, params: {} };
+    if (!desired) return;
+    const sectionKey = `${desired.vista}:${desired.codigo}`;
+    const replace = prevSectionKey.current === null || prevSectionKey.current === sectionKey;
+    prevSectionKey.current = sectionKey;
+    if (buildHash(desired) === window.location.hash) return;
+    navigate(desired, { replace });
+  }, [sesion, bitacorasPermitidas, vista, codigoActivo, dispPlanta, combFecha, navigate]);
 
   // Carga tipos evento cuando cambia la bitácora
   useEffect(() => {
@@ -1691,33 +1763,30 @@ export default function App() {
     });
   }, [finalizarTurno, showToast]);
 
-  // F4: popup defensivo en logout — pregunta si quiere finalizar antes de salir.
-  // 3 opciones: Sí, finalizar y salir / No, salir directo / Cancelar.
-  // "Salir sin finalizar" hace solo cleanup local (D-003): sesion_activa.activa=1 queda
-  // como antes (equivalente a cerrar pestaña). "Sí, finalizar y salir" finaliza turno
-  // y dispara logout backend (activa=0).
-  const handleLogout = useCallback(() => {
-    setModal({
-      title: 'Cerrar sesión',
-      message: '¿Finalizas tu turno antes de salir? Si lo haces, se registra en histórico que terminaste tu participación.',
-      confirmLabel: 'Sí, finalizar y salir',
-      confirmColor: 'green',
-      icon: LogOut,
-      secondaryLabel: 'No, salir sin finalizar',
-      onSecondary: () => {
-        auth.logoutLocal();
-        setModal(null);
-        setActiveBitacora(null);
-        setDraftLocal(null);
-      },
-      onConfirm: async () => {
-        try { await finalizarTurno(); } catch {}
-        await auth.logout();
-        setModal(null);
-        setActiveBitacora(null);
-        setDraftLocal(null);
-      },
-    });
+  // F4 + D-035: popup defensivo en logout. "Operar otra unidad" reemplaza al viejo "salir sin
+  // finalizar": conserva el login Entra pero **mata la sesión de app** (`clearSesion` → POST
+  // /api/auth/cerrar-app, activa=0) para que una persona no quede iniciada en 2 unidades; el
+  // render cae en LoginScreen paso "planta" para elegir GEC3/GEC32 y select-context crea una
+  // sesión limpia. "Sí, finalizar y salir" finaliza turno + logout backend (cookie incluida).
+  // Igual que la navegación SPA de hoy, descarta los buffers no guardados del cliente sin aviso
+  // cross-componente (beforeunload no aplica sin reload).
+  const handleCambiarUnidad = useCallback(() => {
+    setLogoutOpen(false);
+    setActiveBitacora(null);
+    setDraftLocal(null);
+    auth.clearSesion();
+  }, [auth]);
+
+  // Abre el modal rediseñado (LogoutModal): ilustración hero + 3 acciones (Cancelar | Cambiar
+  // unidad como enlace inline | Sí, finalizar y salir). La lógica de cada acción se pasa por props.
+  const handleLogout = useCallback(() => setLogoutOpen(true), []);
+
+  const handleLogoutConfirm = useCallback(async () => {
+    try { await finalizarTurno(); } catch {}
+    await auth.logout(); // navega fuera (window.location); el desmontaje limpia el resto
+    setLogoutOpen(false);
+    setActiveBitacora(null);
+    setDraftLocal(null);
   }, [auth, finalizarTurno]);
 
   // ==================== RENDER ====================
@@ -1809,7 +1878,8 @@ export default function App() {
           ) : bitacoraActiva?.codigo === 'DISP' ? (
             <DisponibilidadDashboard
               bitacoraId={bitacoraActiva.bitacora_id}
-              plantaInicial={sesion?.planta_id}
+              planta={dispPlanta || sesion?.planta_id}
+              onPlantaChange={setDispPlanta}
               puedeEditar={puedeCrear}
               showToast={showToast}
             />
@@ -1817,6 +1887,8 @@ export default function App() {
             <ConsumosGrid
               bitacora={bitacoraActiva}
               plantaId={sesion?.planta_id}
+              fecha={combFecha}
+              onFechaChange={setCombFecha}
               puedeCrear={puedeCrear}
               showToast={showToast}
             />
@@ -1853,6 +1925,14 @@ export default function App() {
           onCancel={() => setModal(null)}
         />
       )}
+
+      <LogoutModal
+        open={logoutOpen}
+        userName={user?.nombre_completo}
+        onCancel={() => setLogoutOpen(false)}
+        onConfirm={handleLogoutConfirm}
+        onCambiarUnidad={handleCambiarUnidad}
+      />
 
       {pendientesModal && (
         <CierrePendientesModal

@@ -62,7 +62,7 @@ export async function buildAuthApp(legacyHandler) {
   }
   if (process.env.NODE_ENV === 'production') {
     if (!SESSION_COOKIE_SECURE) console.warn('  ⚠  PRODUCCIÓN sin SESSION_COOKIE_SECURE=true: la cookie viajaría por HTTP.');
-    if (storeKind === 'memory') console.warn('  ⚠  PRODUCCIÓN con store en MEMORIA: usá SESSION_STORE=mssql.');
+    if (storeKind === 'memory') console.warn('  ⚠  PRODUCCIÓN con store en MEMORIA: usa SESSION_STORE=mssql.');
   }
 
   // ── Paso 1: arranca el login OIDC ──────────────────────────────────────────
@@ -82,8 +82,10 @@ export async function buildAuthApp(legacyHandler) {
       req.session.silent = silent;
       req.session.save(() => res.redirect(url));
     } catch (err) {
+      // No filtramos err.message (puede contener config/secretos del flujo OIDC). Detalle al log.
       console.error('[auth/login]', err);
-      res.status(500).json({ ok: false, reason: 'error_auth_url', detail: err.message });
+      res.status(500).json({ ok: false, reason: 'error_auth_url',
+        detail: 'No se pudo iniciar sesión con Microsoft. Intenta de nuevo; si continúa, contacta a soporte.' });
     }
   });
 

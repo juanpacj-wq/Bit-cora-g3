@@ -6,18 +6,34 @@ import { api } from './useApi';
 // y el `n_menos_1` (mismo_estado_que_anterior). Wrapper local que adjunta el body
 // al Error para que el modal pueda construir popups específicos. Autenticación por cookie
 // Entra (credentials:'include'), igual que useApi.
+// Etiqueta amigable cuando el backend está caído / la red no tiene ruta (fetch rechaza con un
+// TypeError crudo). `.body.mensaje` es lo que lee CambiarEstadoModal.buildPopup en su rama default.
+const MSG_SIN_CONEXION_DISP = 'No se pudo contactar al servidor. Verifica tu conexión a la red corporativa e intenta de nuevo.';
+
 async function requestWithBody(url, { method = 'POST', body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
-  const res = await fetch(url, {
-    method,
-    headers,
-    credentials: 'include',
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers,
+      credentials: 'include',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    const err = new Error(MSG_SIN_CONEXION_DISP);
+    err.status = 0;
+    err.codigo = 'sin_conexion';
+    err.body = { error: MSG_SIN_CONEXION_DISP, codigo: 'sin_conexion', mensaje: MSG_SIN_CONEXION_DISP };
+    throw err;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.error || data.mensaje || `HTTP ${res.status}`);
+    // `data.error`/`data.mensaje` ya vienen saneados por el backend para los 5xx; los 409 de DISP
+    // traen además `codigo`/`vigente`/`n_menos_1` que buildPopup usa para popups específicos.
+    const err = new Error(data.error || data.mensaje || `Error ${res.status}`);
     err.status = res.status;
+    err.codigo = data.codigo;
     err.body = data;
     throw err;
   }

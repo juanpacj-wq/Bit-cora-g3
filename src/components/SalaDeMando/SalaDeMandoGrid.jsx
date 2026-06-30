@@ -11,7 +11,7 @@ const TIPOS = [
 const TIPO_KEYS = TIPOS.map((t) => t.key);
 
 const MOTIVO_MSG = {
-  fecha_no_es_hoy: 'La fecha no es hoy. Recargá la página.',
+  fecha_no_es_hoy: 'La fecha no es hoy. Recarga la página.',
   tipo_invalido: 'Tipo de fila no reconocido',
   periodos_invalido: 'Lista de periodos inválida',
   periodo_fuera_rango: 'Periodo fuera de rango (1-24)',
@@ -176,7 +176,7 @@ export default function SalaDeMandoGrid({
     } catch (e) {
       if (Array.isArray(e?.errores)) {
         setErrores(e.errores);
-        onErrorRef.current?.('Hay errores en el formulario. Corregí las celdas resaltadas.');
+        onErrorRef.current?.('Hay errores en el formulario. Corrige las celdas resaltadas.');
       } else {
         onErrorRef.current?.(e.message);
       }
@@ -340,7 +340,7 @@ export default function SalaDeMandoGrid({
         <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-3">
           <div className="flex items-center gap-2 text-sm font-semibold text-red-800 mb-2">
             <AlertTriangle size={16} />
-            Corregí estos errores antes de guardar
+            Corrige estos errores antes de guardar
           </div>
           <ul className="text-xs text-red-700 list-disc pl-5 space-y-1">
             {errores.map((e, i) => (

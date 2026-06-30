@@ -30,7 +30,7 @@ export default function CierrePendientesModal({
             <p className="text-sm text-gray-500 mt-1">
               {total === 0
                 ? 'No hay nada pendiente. ¿Cerrar de todas formas?'
-                : 'Hay elementos pendientes. Si cerrás, los ingenieros listados serán finalizados de forma forzada.'}
+                : 'Hay elementos pendientes. Si cierras, los ingenieros listados serán finalizados de forma forzada.'}
             </p>
           </div>
           <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">

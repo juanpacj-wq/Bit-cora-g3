@@ -6,6 +6,7 @@ import { initDB, getDB, TEST_PLANTA_ID } from './db.js';
 // está cargado.
 import * as dbBindings from './db.js';
 import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
+import { responderError, mensajeUsuario } from './utils/errores.js';
 import { resolveCargo } from './utils/entra-roles.js';
 import { getTurnoColombia, periodoFromFechaBogota, turnoFromPeriodo, ventanaTurno, fechaBogotaStr } from './utils/turno.js';
 import { loadSession } from './middleware/auth.js';
@@ -139,8 +140,11 @@ async function legacyHandler(req, res) {
       // Cargo automático desde los roles del token (precedencia). Sin rol conocido → 403.
       const elegido = resolveCargo(sUser.roles);
       if (!elegido) {
+        // `error` debe ser texto amigable (los flujos genéricos lo muestran como Error.message);
+        // el slug estable va en `codigo`. `detail`/`roles` quedan para diagnóstico (no se muestran).
         return sendJSON(res, 403, {
-          error: 'sin_cargo_asignado',
+          error: 'Tu cuenta aún no tiene un rol de bitácoras asignado. Pide al administrador que te asigne uno para poder ingresar.',
+          codigo: 'sin_cargo_asignado',
           detail: 'Tu cuenta no tiene un App Role de bitácoras asignado en Entra.',
           roles: sUser.roles || [],
         });
@@ -161,7 +165,12 @@ async function legacyHandler(req, res) {
       const cargo_id = valid.recordset[0].cargo_id;
       if (!cargo_id) {
         // El App Role existe en el mapa pero el cargo no está sembrado: configuración inconsistente.
-        return sendJSON(res, 500, { error: `Cargo '${elegido.cargoNombre}' no existe en lov_bit.cargo` });
+        // No filtramos el nombre de tabla/cargo al cliente; el detalle va al log.
+        console.error(`[ERROR] config: cargo '${elegido.cargoNombre}' no existe en lov_bit.cargo`);
+        return sendJSON(res, 500, {
+          error: 'Hay un problema de configuración del sistema. Contacta a soporte.',
+          codigo: 'config_sistema',
+        });
       }
 
       const turno = getTurnoColombia();
@@ -179,6 +188,15 @@ async function legacyHandler(req, res) {
           .input('cargo_id', sql.Int, cargo_id)
           .input('turno', sql.TinyInt, turno)
           .query(`
+            -- D-035 (fix: sesión única por persona): al entrar a una unidad, desactivar cualquier
+            -- OTRA sesión de app activa de este usuario (otra planta/cargo). Garantiza que una
+            -- misma persona NO quede con la sesión iniciada en 2 unidades al tiempo.
+            UPDATE bitacora.sesion_activa
+               SET activa = 0, cerrada_en = SYSUTCDATETIME()
+             WHERE usuario_id = @usuario_id
+               AND activa = 1
+               AND NOT (planta_id = @planta_id AND cargo_id = @cargo_id);
+
             DECLARE @sesion_id INT;
             SELECT TOP 1 @sesion_id = sesion_id
             FROM bitacora.sesion_activa WITH (UPDLOCK, HOLDLOCK)
@@ -221,6 +239,26 @@ async function legacyHandler(req, res) {
       }
       broadcastUsuariosActivos().catch(() => {});
       return sendJSON(res, 200, { sesion: result.recordset[0] });
+    }
+
+    // POST /api/auth/cerrar-app
+    // Cierra (activa=0) TODAS las sesiones de app del usuario Entra actual SIN tocar la cookie
+    // Entra ni hacer logout. Lo usa "Operar otra unidad" (D-035): mata la sesión activa para que
+    // una misma persona no quede iniciada en 2 unidades. Identidad por cookie (req.session.user),
+    // no por X-Sesion-Id. Idempotente (si no hay sesión activa, no hace nada).
+    if (pathname === '/api/auth/cerrar-app' && method === 'POST') {
+      const sUser = req.session?.user;
+      if (!sUser?.usuario_id) return sendJSON(res, 401, { error: 'No autenticado con Microsoft' });
+      const db = await getDB();
+      await db.request()
+        .input('usuario_id', sql.Int, sUser.usuario_id)
+        .query(`
+          UPDATE bitacora.sesion_activa
+             SET activa = 0, cerrada_en = SYSUTCDATETIME()
+           WHERE usuario_id = @usuario_id AND activa = 1;
+        `);
+      broadcastUsuariosActivos().catch(() => {});
+      return sendJSON(res, 200, { ok: true });
     }
 
     // GET /api/auth/usuarios-activos  (todas las plantas, requiere sesion)
@@ -823,7 +861,7 @@ async function legacyHandler(req, res) {
         const ingenieros_snapshot = await snapshotIngenieros(reqFactory, { planta_id });
         if (jefes_snapshot === '[]') {
           await transaction.rollback();
-          return sendJSON(res, 500, { error: 'No hay jefe de planta activo' });
+          return sendJSON(res, 409, { error: 'No hay un Jefe de Planta activo en el sistema. No se puede registrar hasta que se asigne uno.', codigo: 'sin_jefe_planta' });
         }
 
         if (notificar && camposFinal) {
@@ -1310,7 +1348,8 @@ async function legacyHandler(req, res) {
         WHERE b.codigo = 'MAND'
       `);
       if (meta.recordset.length === 0) {
-        return sendJSON(res, 500, { error: 'Bitácora MAND no encontrada' });
+        console.error('[ERROR] config: bitácora MAND no encontrada en lov_bit.bitacora');
+        return sendJSON(res, 500, { error: 'Hay un problema de configuración del sistema. Contacta a soporte.', codigo: 'config_sistema' });
       }
       const MAND_ID = meta.recordset[0].mand_id;
       const tipoMap = {};
@@ -1321,7 +1360,8 @@ async function legacyHandler(req, res) {
         };
       }
       if (!tipoMap.AUTH || !tipoMap.PRUEBA || !tipoMap.REDESP) {
-        return sendJSON(res, 500, { error: 'Mapeo de tipos MAND incompleto en lov_bit.tipo_evento' });
+        console.error('[ERROR] config: mapeo de tipos MAND incompleto en lov_bit.tipo_evento');
+        return sendJSON(res, 500, { error: 'Hay un problema de configuración del sistema. Contacta a soporte.', codigo: 'config_sistema' });
       }
 
       // Permiso: puede_crear en MAND. plantaMatch ya validado arriba.
@@ -1398,7 +1438,7 @@ async function legacyHandler(req, res) {
         const ingenieros_snapshot = await snapshotIngenieros(reqFactory, { planta_id });
         if (jefes_snapshot === '[]') {
           await transaction.rollback();
-          return sendJSON(res, 500, { error: 'No hay jefe de planta activo' });
+          return sendJSON(res, 409, { error: 'No hay un Jefe de Planta activo en el sistema. No se puede registrar hasta que se asigne uno.', codigo: 'sin_jefe_planta' });
         }
 
         let creados = 0, actualizados = 0, eliminados = 0;
@@ -1585,7 +1625,7 @@ async function legacyHandler(req, res) {
         broadcastConteoBitacoras(planta_id).catch(() => {});
         return sendJSON(res, 200, result);
       } catch (err) {
-        return sendJSON(res, 500, { error: err.message });
+        return responderError(res, err, 'POST /api/sala-de-mando/cierre-diario');
       }
     }
 
@@ -1874,7 +1914,9 @@ async function legacyHandler(req, res) {
           resumen.push({ bitacora_id: row.bitacora_id, nombre: row.nombre, registros_cerrados });
         } catch (err) {
           await transaction.rollback();
-          resumen.push({ bitacora_id: row.bitacora_id, nombre: row.nombre, error: err.message });
+          // Va dentro de un 200 (resultado por bitácora); saneamos igual para no filtrar internals.
+          console.error(`[ERROR] cierre masivo bitacora=${row.bitacora_id} →`, err);
+          resumen.push({ bitacora_id: row.bitacora_id, nombre: row.nombre, error: mensajeUsuario(err) });
         }
       }
       broadcastConteoBitacoras(planta_id).catch(() => {});
@@ -1926,7 +1968,7 @@ async function legacyHandler(req, res) {
 
       const db = await getDB();
       const dispBitacoraId = await getDispBitacoraId(db);
-      if (!dispBitacoraId) return sendJSON(res, 500, { error: 'bitácora DISP no configurada' });
+      if (!dispBitacoraId) return sendJSON(res, 500, { error: 'Hay un problema de configuración del sistema. Contacta a soporte.', codigo: 'config_sistema' });
       if (!(await hasPermisoBitacora(sesion, dispBitacoraId, 'puede_ver'))) {
         return sendJSON(res, 403, { error: 'Sin permiso para ver Disponibilidad' });
       }
@@ -1961,7 +2003,7 @@ async function legacyHandler(req, res) {
       }
 
       const dispBitacoraId = await getDispBitacoraId(db);
-      if (!dispBitacoraId) return sendJSON(res, 500, { error: 'bitácora DISP no configurada' });
+      if (!dispBitacoraId) return sendJSON(res, 500, { error: 'Hay un problema de configuración del sistema. Contacta a soporte.', codigo: 'config_sistema' });
       if (!(await hasPermisoBitacora(sesion, dispBitacoraId, 'puede_ver'))) {
         return sendJSON(res, 403, { error: 'Sin permiso para ver Disponibilidad' });
       }
@@ -1998,7 +2040,7 @@ async function legacyHandler(req, res) {
 
       const db = await getDB();
       const dispBitacoraId = await getDispBitacoraId(db);
-      if (!dispBitacoraId) return sendJSON(res, 500, { error: 'bitácora DISP no configurada' });
+      if (!dispBitacoraId) return sendJSON(res, 500, { error: 'Hay un problema de configuración del sistema. Contacta a soporte.', codigo: 'config_sistema' });
       if (!(await hasPermisoBitacora(sesion, dispBitacoraId, 'puede_crear'))) {
         return sendJSON(res, 403, { error: 'Sin permiso para deshacer en Disponibilidad' });
       }
@@ -2381,7 +2423,7 @@ async function legacyHandler(req, res) {
       const { fin: ventanaFin } = ventanaTurno(turno, fechaRef);
       if (!forceQuery && new Date() < ventanaFin) {
         return sendJSON(res, 400, {
-          error: 'La ventana del turno aún no cerró. Use ?force=true si querés disparar sobre un turno en curso (snapshot puede ser incompleto).',
+          error: 'La ventana del turno aún no cerró. Use ?force=true si quieres disparar sobre un turno en curso (snapshot puede ser incompleto).',
           ventana_fin: ventanaFin.toISOString(),
         });
       }
@@ -2398,8 +2440,7 @@ async function legacyHandler(req, res) {
           disparado_por: { usuario_id: sesion.usuario_id, nombre: sesion.nombre_completo },
         });
       } catch (err) {
-        console.error('[POST /api/conformacion-turno/trigger]', err);
-        return sendJSON(res, 500, { error: 'Fallo interno', detalle: err.message });
+        return responderError(res, err, 'POST /api/conformacion-turno/trigger');
       }
     }
 
@@ -2424,7 +2465,7 @@ async function legacyHandler(req, res) {
       const r = await db.request()
         .input('p', sql.VarChar(10), planta_id)
         .query(`
-          SELECT combustible_id, codigo, nombre, unidad, tipo, orden
+          SELECT combustible_id, codigo, nombre, unidad, tipo, orden, cantidad_max
           FROM lov_bit.combustible
           WHERE planta_id = @p AND activo = 1
           ORDER BY orden, codigo
@@ -2454,7 +2495,7 @@ async function legacyHandler(req, res) {
       const catRes = await db.request()
         .input('p', sql.VarChar(10), planta_id)
         .query(`
-          SELECT combustible_id, codigo, nombre, unidad, tipo, orden
+          SELECT combustible_id, codigo, nombre, unidad, tipo, orden, cantidad_max
           FROM lov_bit.combustible
           WHERE planta_id = @p AND activo = 1
           ORDER BY orden, codigo
@@ -2535,12 +2576,13 @@ async function legacyHandler(req, res) {
       const db = await getDB();
 
       // Pre-load catálogo activo de la planta — el frontend podría mandar IDs de la otra
-      // planta por bug; rechazamos con motivo específico.
-      const cat = (await db.request()
+      // planta por bug; rechazamos con motivo específico. cantidad_max (D-034) gobierna el
+      // tope físico por combustible: ALIMENTADOR=25, CALIZA=40, ACPM=25000 (NULL = sin tope).
+      const catRows = (await db.request()
         .input('p', sql.VarChar(10), planta_id)
-        .query(`SELECT combustible_id FROM lov_bit.combustible WHERE planta_id=@p AND activo=1`)
-      ).recordset.map(r => r.combustible_id);
-      const catSet = new Set(cat);
+        .query(`SELECT combustible_id, cantidad_max FROM lov_bit.combustible WHERE planta_id=@p AND activo=1`)
+      ).recordset;
+      const catMax = new Map(catRows.map(r => [r.combustible_id, r.cantidad_max === null ? null : Number(r.cantidad_max)]));
 
       const errores = [];
       for (const c of celdas) {
@@ -2548,13 +2590,19 @@ async function legacyHandler(req, res) {
           errores.push({ periodo: c.periodo, combustible_id: c.combustible_id, motivo: 'periodo_fuera_rango' });
           continue;
         }
-        if (!catSet.has(c.combustible_id)) {
+        if (!catMax.has(c.combustible_id)) {
           errores.push({ periodo: c.periodo, combustible_id: c.combustible_id, motivo: 'combustible_no_pertenece_planta' });
           continue;
         }
         if (c.cantidad !== null && c.cantidad !== 0 && c.cantidad !== undefined) {
           if (typeof c.cantidad !== 'number' || !Number.isFinite(c.cantidad) || c.cantidad < 0) {
             errores.push({ periodo: c.periodo, combustible_id: c.combustible_id, motivo: 'cantidad_invalida' });
+            continue;
+          }
+          // Tope físico (D-034): cantidad_max NULL = sin límite; boundary inclusivo (=max OK).
+          const max = catMax.get(c.combustible_id);
+          if (max !== null && c.cantidad > max) {
+            errores.push({ periodo: c.periodo, combustible_id: c.combustible_id, motivo: 'cantidad_excede_max' });
             continue;
           }
         }
@@ -2643,8 +2691,10 @@ async function legacyHandler(req, res) {
 
     sendJSON(res, 404, { error: 'Not Found' });
   } catch (err) {
-    console.error('[ERROR]', err);
-    sendJSON(res, 500, { error: err.message });
+    // Saneamiento central: clasifica el error (conexión BD caída, timeout, parse, etc.) en una
+    // etiqueta apta para usuario final + codigo estable. NUNCA devuelve err.message crudo (era una
+    // brecha de seguridad: filtraba host/instancia/puerto de la BD) ni texto técnico incomprensible.
+    responderError(res, err, `${method} ${pathname}`);
   }
 }
 

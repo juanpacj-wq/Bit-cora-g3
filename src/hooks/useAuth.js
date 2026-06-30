@@ -72,6 +72,19 @@ export function useAuth() {
     setSesion(null);
   }, []);
 
+  // D-035 "Operar otra unidad": limpia la sesión de app conservando la identidad Entra (user), y
+  // además MATA la sesión de app server-side (`activa=0`) sin tocar la cookie Entra — para que una
+  // misma persona no quede iniciada en 2 unidades al tiempo. El render cae naturalmente en
+  // LoginScreen paso "planta"; al elegir la nueva unidad, select-context crea/activa una sesión
+  // limpia (y de paso desactiva cualquier otra activa del usuario). El kill es best-effort: la
+  // transición de UI se hace de inmediato (estado de cliente) y no se bloquea por la red.
+  const clearSesion = useCallback(() => {
+    sesionRef.current = null;
+    persistAuth(userRef.current, null);
+    setSesion(null);
+    api.post('/api/auth/cerrar-app', {}, { skipAuth: true }).catch(() => {});
+  }, []);
+
   // Logout explícito: cierra la sesión de app, destruye la cookie y navega al front-channel logout
   // de Microsoft (cierra también la sesión M365 del navegador).
   const logout = useCallback(async () => {
@@ -107,6 +120,6 @@ export function useAuth() {
 
   return {
     user, sesion, loading, error, ready, ultimaPlanta,
-    loginWithMicrosoft, selectContext, logout, logoutLocal,
+    loginWithMicrosoft, selectContext, logout, logoutLocal, clearSesion,
   };
 }
