@@ -7,7 +7,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clasificarError, mensajeUsuario, ETIQUETAS } from '../utils/errores.js';
+import express from 'express';
+import { clasificarError, mensajeUsuario, ETIQUETAS, expressErrorHandler } from '../utils/errores.js';
 
 test('error de conexión a la BD (el del screenshot) → 503 db_no_disponible, sin filtrar internals', () => {
   const err = Object.assign(
@@ -61,4 +62,58 @@ test('toda etiqueta es texto amigable en español, no un slug', () => {
   for (const [codigo, texto] of Object.entries(ETIQUETAS)) {
     assert.ok(texto.length > 15 && /\s/.test(texto), `etiqueta ${codigo} parece un slug: "${texto}"`);
   }
+});
+
+// ── expressErrorHandler: capa Express (D-032) — integración end-to-end ──────────
+// El error-handler real montado de último en auth/app.js. Antes, un error propagado por el
+// middleware de express-session (store mssql sin BD) subía al handler por defecto de Express y
+// filtraba el host de la BD en HTML. Levantamos un Express mínimo con el MISMO handler exportado.
+
+function levantarApp() {
+  const app = express();
+  app.get('/boom-conexion', (req, res, next) => {
+    next(Object.assign(
+      new Error('Failed to connect to 192.168.17.20\\mssqlg3 in 15000ms'),
+      { name: 'ConnectionError', code: 'ETIMEOUT' },
+    ));
+  });
+  app.get('/boom-generico', (req, res, next) => next(new Error('detalle interno sensible: secreto=abc')));
+  app.get('/ok', (req, res) => res.json({ ok: true }));
+  app.use(expressErrorHandler);
+  return new Promise((resolve) => {
+    const srv = app.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port }));
+  });
+}
+
+test('expressErrorHandler: fallo de conexión del store → 503 saneado, sin filtrar el host de BD', async () => {
+  const { srv, port } = await levantarApp();
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/boom-conexion`);
+    const body = await r.json();
+    assert.equal(r.status, 503);
+    assert.equal(body.codigo, 'db_no_disponible');
+    assert.equal(body.error, ETIQUETAS.db_no_disponible);
+    assert.doesNotMatch(JSON.stringify(body), /192\.168|mssqlg3|15000ms|Failed to connect/i,
+      'la respuesta NO debe filtrar host/instancia/puerto de la BD');
+  } finally { srv.close(); }
+});
+
+test('expressErrorHandler: error genérico → 500 error_interno, sin filtrar el detalle', async () => {
+  const { srv, port } = await levantarApp();
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/boom-generico`);
+    const body = await r.json();
+    assert.equal(r.status, 500);
+    assert.equal(body.codigo, 'error_interno');
+    assert.doesNotMatch(JSON.stringify(body), /sensible|secreto=abc/i);
+  } finally { srv.close(); }
+});
+
+test('expressErrorHandler: una ruta sin error responde normal (no intercepta el camino feliz)', async () => {
+  const { srv, port } = await levantarApp();
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/ok`);
+    assert.equal(r.status, 200);
+    assert.deepEqual(await r.json(), { ok: true });
+  } finally { srv.close(); }
 });

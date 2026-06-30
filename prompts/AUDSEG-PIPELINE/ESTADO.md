@@ -76,6 +76,14 @@ chocaron con el setup de dev y se corrigieron:
   (el de memoria es dev). **Hallazgo lateral (anotado, NO de AUD-13):** si el store mssql falla la conexión,
   el error sube al handler por defecto de Express y filtra el host de BD en HTML — el saneo D-032 cubre el
   if-chain pero no la capa Express/express-session. Candidato a una pasada de error-handler en `auth/app.js`.
+- **D-032 / capa Express ✅ (hallazgo lateral cerrado)**: nuevo `expressErrorHandler` en
+  `server/utils/errores.js` (error-middleware de 4 args, reusa `responderError`) registrado de ÚLTIMO en
+  `buildAuthApp` (`auth/app.js`), después del catch-all que delega al if-chain. Cierra el hueco: un error
+  propagado por el middleware de express-session (store mssql sin BD) ya NO sube al handler por defecto de
+  Express (que renderizaba el stack en HTML y filtraba `Failed to connect to 192.168...\mssqlg3`); ahora se
+  clasifica → loguea server-side → responde `{ error, codigo, mensaje }` saneado (503 `db_no_disponible`).
+  Verificado: 3 tests end-to-end nuevos en `errores.test.js` (Express real + el handler exportado: conexión
+  → 503 sin filtrar host; genérico → 500 sin filtrar detalle; camino feliz intacto). Suite `errores` 10/10.
 
 ## Bitácora por ítem (rellenar a medida)
 <!-- AUD-NN | estado | commit | verificación | residual humano/infra -->
