@@ -103,8 +103,8 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 | AUD-34 | ⬜ | Media (arq.) | `server.js` monolítico (~2700 líneas, if-chain único) | `server/server.js` |
 | AUD-35 | ⬜ | Media (arq.) | Modelo de routing partido http-nativo + wrapper Express tras D-031 | `auth/app.js`, `server.js` |
 | AUD-36 | ✅ | Baja (arq.) | Parser binario duplicado (ESM servidor ≡ CommonJS CLI, divergibles) | `sis/xls-parser.js` ≡ `js-scraper-carbon-g32/xls.js` |
-| AUD-37 | ⬜ | Baja (arq.) | Sin `engines.node`; lockfile del scraper standalone ausente | `package.json`, `server/package.json`, `js-scraper-carbon-g32/package.json` |
-| AUD-38 | ⬜ | Baja (arq.) | Drift de documentación (`architecture.md` vs. estado real post D-031/D-035) | `docs/architecture.md:14,269` |
+| AUD-37 | ✅ | Baja (arq.) | Sin `engines.node`; lockfile del scraper standalone ausente | `package.json`, `server/package.json`, `js-scraper-carbon-g32/package.json` |
+| AUD-38 | ✅ | Baja (arq.) | Drift de documentación (`architecture.md` vs. estado real post D-031/D-035) | `docs/architecture.md:14,269` |
 
 ---
 
