@@ -58,15 +58,15 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 | ID | Estado | Severidad | Título | Evidencia |
 |---|---|---|---|---|
 | AUD-09 | ✅ | Media | Cookie de sesión sin `Secure` forzado en prod (solo `console.warn`) | `auth/app.js:54,63-64`, `entra-config.js:33-34` |
-| AUD-10 | ⬜ | Media | Privilegio (`cargo_id`) congelado sobrevive a revocación en Entra; revalidación fail-open | `auth/revalidate.js:34-56`, `server.js:141` |
-| AUD-11 | ⬜ | Media | IDOR cross-planta en DISP (escritura sin `plantaMatch`) | `server.js:659-768,958-1092,2035-2094` |
-| AUD-12 | ⬜ | Media | Login de la app con privilegios DDL/DROP (initDB acoplado al arranque) | `db.js:329-2067` |
+| AUD-10 | ✅ | Media | Privilegio (`cargo_id`) congelado sobrevive a revocación en Entra; revalidación fail-open | `auth/revalidate.js:34-56`, `server.js:141` |
+| AUD-11 | ✅ | Media | IDOR cross-planta en DISP (escritura sin `plantaMatch`) | `server.js:659-768,958-1092,2035-2094` |
+| AUD-12 | 🟡 | Media | Login de la app con privilegios DDL/DROP (initDB acoplado al arranque) | `db.js:329-2067` |
 | AUD-13 | 🟡 | Media | Tokens Entra (incl. refresh) en claro en `[auth].[AppSessions]` | `auth/sessionStore.js:56-69` |
 | AUD-14 | ✅ | Media | Scraper escribe a BD como SISTEMA sin validar rango (NaN/Infinity/`>cantidad_max`/DELETE) | `sis/sis-client.js:84-96`, `sis/carbon-scraper.js:127-145,202-233` |
 | AUD-15 | ⬜ | Media | `parseBody` sin límite de tamaño → DoS por memoria | `utils/http.js:7-21` |
 | AUD-16 | ⬜ | Media | CORS wildcard `Access-Control-Allow-Origin: *` global | `utils/http.js:1-5`, `server.js:109-112` |
 | AUD-17 | ⬜ | Media | Topología de red interna hardcodeada (IPs BD/SIS) | `sis/sis-client.js:5,15`, `scrape.js:7`, `docs/`, `prompts/` |
-| AUD-18 | ⬜ | Media | `eventos-dashboard` expone snapshots de personal (PII) sin auth | `server.js:2270-2317` |
+| AUD-18 | 🟡 | Media | `eventos-dashboard` expone snapshots de personal (PII) sin auth | `server.js:2270-2317` |
 
 ### P3 — Seguridad baja / endurecimiento
 
@@ -90,9 +90,9 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 
 | ID | Estado | Severidad | Título | Evidencia |
 |---|---|---|---|---|
-| AUD-29 | ⬜ | Media-baja | Guards de borrado destructivo por presencia de objeto/flag, no por datos | `db.js:997-1008,1308-1323` |
-| AUD-30 | ⬜ | Media-baja | `MERGE` de aprovisionamiento sin `HOLDLOCK` (race en primer login) | `auth/provision.js:34-51` |
-| AUD-31 | ⬜ | Baja | `enforceSingletonFlag`: TX explícita sin `XACT_ABORT`/rollback | `db.js:2084-2091` |
+| AUD-29 | ✅ | Media-baja | Guards de borrado destructivo por presencia de objeto/flag, no por datos | `db.js:997-1008,1308-1323` |
+| AUD-30 | ✅ | Media-baja | `MERGE` de aprovisionamiento sin `HOLDLOCK` (race en primer login) | `auth/provision.js:34-51` |
+| AUD-31 | ✅ | Baja | `enforceSingletonFlag`: TX explícita sin `XACT_ABORT`/rollback | `db.js:2084-2091` |
 | AUD-32 | ⬜ | Baja | Tabla de sesión sin índice en `[expires]`; README con TTL obsoleto | `auth/sessionStore.js:56-61`, `sql/snippets/README.md:65-82` |
 
 ### P5 — Arquitectura y mantenibilidad
@@ -468,6 +468,14 @@ solo CRUD.
 2. **E2:** desacoplar `initDB` del arranque del servicio (paso de deploy explícito).
 
 **Cross-ref.** AUD-29/30/31 (robustez de migraciones), AUD-33 (tests).
+> **Estado (pipeline):** 🟡 **infra/DBA — fuera del alcance de código.** El login `user_portalg3` es
+> `db_owner` (corre todo el DDL de `initDB`). Runbook para el DBA:
+> 1. Crear un login de **deploy** (privilegiado: `db_ddladmin`+`db_owner`) que corra las migraciones.
+> 2. Crear un login de **runtime** restringido a `SELECT/INSERT/UPDATE/DELETE/EXECUTE` sobre los
+>    esquemas `lov_bit`/`bitacora`/`auth` (sin DDL/DROP).
+> 3. Apuntar el backend al login de runtime; correr `initDB` como paso de deploy con el login de deploy
+>    (gateado por env `RUN_MIGRATIONS=1`, ejecutando `initDB()` solo en ese paso, no en cada arranque).
+> Sin el split de logins, un compromiso de la app hereda `DROP`/alterar esquema sobre producción.
 
 ---
 
@@ -581,6 +589,10 @@ compartido; o no incluir snapshots de personal en el shape cross-repo si el dash
 **Coordinar con `dashboard-gen-gec3`** antes de tocar el shape (ver `docs/interfaces-cross-repo.md`).
 
 **Cross-ref.** AUD-05, D-006/D-009 (contrato), `docs/interfaces-cross-repo.md`.
+> **Estado (pipeline):** 🟡 gate de token **opcional** implementado (`d26bf84`): si `DASHBOARD_API_TOKEN`
+> está seteado, exige `X-Dashboard-Token` (timingSafeEqual); sin la env, abierto (no rompe al consumidor).
+> **Pendiente (🔗 cross-repo):** coordinar con `dashboard-gen-gec3` para que envíe el header, setear la
+> env en ambos lados, y entonces cerrar el endpoint. No se hace solo porque rompería el dashboard.
 
 ---
 
