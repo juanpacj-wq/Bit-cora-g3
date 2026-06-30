@@ -63,28 +63,28 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 | AUD-12 | 🟡 | Media | Login de la app con privilegios DDL/DROP (initDB acoplado al arranque) | `db.js:329-2067` |
 | AUD-13 | 🟡 | Media | Tokens Entra (incl. refresh) en claro en `[auth].[AppSessions]` | `auth/sessionStore.js:56-69` |
 | AUD-14 | ✅ | Media | Scraper escribe a BD como SISTEMA sin validar rango (NaN/Infinity/`>cantidad_max`/DELETE) | `sis/sis-client.js:84-96`, `sis/carbon-scraper.js:127-145,202-233` |
-| AUD-15 | ⬜ | Media | `parseBody` sin límite de tamaño → DoS por memoria | `utils/http.js:7-21` |
-| AUD-16 | ⬜ | Media | CORS wildcard `Access-Control-Allow-Origin: *` global | `utils/http.js:1-5`, `server.js:109-112` |
-| AUD-17 | ⬜ | Media | Topología de red interna hardcodeada (IPs BD/SIS) | `sis/sis-client.js:5,15`, `scrape.js:7`, `docs/`, `prompts/` |
+| AUD-15 | ✅ | Media | `parseBody` sin límite de tamaño → DoS por memoria | `utils/http.js:7-21` |
+| AUD-16 | ✅ | Media | CORS wildcard `Access-Control-Allow-Origin: *` global | `utils/http.js:1-5`, `server.js:109-112` |
+| AUD-17 | ✅ | Media | Topología de red interna hardcodeada (IPs BD/SIS) | `sis/sis-client.js:5,15`, `scrape.js:7`, `docs/`, `prompts/` |
 | AUD-18 | 🟡 | Media | `eventos-dashboard` expone snapshots de personal (PII) sin auth | `server.js:2270-2317` |
 
 ### P3 — Seguridad baja / endurecimiento
 
 | ID | Estado | Severidad | Título | Evidencia |
 |---|---|---|---|---|
-| AUD-19 | ⬜ | Baja | Sin defensa anti-CSRF (todo recae en `SameSite=lax`) | `auth/app.js:51-56`; mutadores del if-chain |
-| AUD-20 | ⬜ | Baja | Sin rate limiting; búsqueda histórica `LIKE '%..%'` (scan) | global; `server.js:2162` |
+| AUD-19 | ✅ | Baja | Sin defensa anti-CSRF (todo recae en `SameSite=lax`) | `auth/app.js:51-56`; mutadores del if-chain |
+| AUD-20 | ✅ | Baja | Sin rate limiting; búsqueda histórica `LIKE '%..%'` (scan) | global; `server.js:2162` |
 | AUD-22 | ✅ | Baja | Endurecimiento OIDC residual + cierre de hallazgos heredados | `m365.js:22,28,122`, `provision.js:37-48`, `auth/app.js:46` |
-| AUD-39 | ⬜ | Media | `validateCamposExtra` sin tope de tamaño/claves → mass-assignment + DoS de storage | `utils/campos.js:6-55` (esp. `:18`) |
-| AUD-40 | ⬜ | Media | Usuarios `test_*` con password `'1234'` + `activo=1` residentes en BD productiva | `tests/helpers.js:46` |
-| AUD-41 | ⬜ | Baja | `IN (...)` por concatenación de enteros en el turno-sweeper (latente) | `utils/turno-sweeper.js:52-54,124-128` |
+| AUD-39 | ✅ | Media | `validateCamposExtra` sin tope de tamaño/claves → mass-assignment + DoS de storage | `utils/campos.js:6-55` (esp. `:18`) |
+| AUD-40 | ✅ | Media | Usuarios `test_*` con password `'1234'` + `activo=1` residentes en BD productiva | `tests/helpers.js:46` |
+| AUD-41 | ✅ | Baja | `IN (...)` por concatenación de enteros en el turno-sweeper (latente) | `utils/turno-sweeper.js:52-54,124-128` |
 | AUD-42 | ✅ | Baja | WS `usuarios-activos` emite snapshot global cross-planta a cualquier sesión | `ws-usuarios-activos.js:8-24,83` |
-| AUD-23 | ⬜ | Baja | Interpolación de nombre de columna en `hasPermisoBitacora` | `middleware/permissions.js:6,12` |
-| AUD-24 | ⬜ | Baja | `bitacora/abrir` no valida existencia/permiso de `bitacora_id` | `server.js:291-312` |
+| AUD-23 | ✅ | Baja | Interpolación de nombre de columna en `hasPermisoBitacora` | `middleware/permissions.js:6,12` |
+| AUD-24 | ✅ | Baja | `bitacora/abrir` no valida existencia/permiso de `bitacora_id` | `server.js:291-312` |
 | AUD-25 | ✅ | Baja | `buildUrl` interpola params en XML/URL sin escapar (latente) | `sis/sis-client.js:26-35`, `scrape.js:15-24` |
 | AUD-26 | ✅ | Baja | SSRF de baja exposición: `SIS_HOST` sin allowlist; `fetch` sigue redirects | `sis/sis-client.js:15,71` |
-| AUD-27 | ⬜ | Baja | Confianza ciega en `logoutUrl` del backend (open-redirect latente) | `useAuth.js:90-97` |
-| AUD-28 | ⬜ | Baja | `xlsx-write` escribe en `..` sin validar ruta (utilitario standalone) | `xlsx-write.js:85,133`, `scrape.js:94-95` |
+| AUD-27 | ✅ | Baja | Confianza ciega en `logoutUrl` del backend (open-redirect latente) | `useAuth.js:90-97` |
+| AUD-28 | ✅ | Baja | `xlsx-write` escribe en `..` sin validar ruta (utilitario standalone) | `xlsx-write.js:85,133`, `scrape.js:94-95` |
 
 ### P4 — Robustez de BD / migraciones
 
@@ -93,7 +93,7 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 | AUD-29 | ✅ | Media-baja | Guards de borrado destructivo por presencia de objeto/flag, no por datos | `db.js:997-1008,1308-1323` |
 | AUD-30 | ✅ | Media-baja | `MERGE` de aprovisionamiento sin `HOLDLOCK` (race en primer login) | `auth/provision.js:34-51` |
 | AUD-31 | ✅ | Baja | `enforceSingletonFlag`: TX explícita sin `XACT_ABORT`/rollback | `db.js:2084-2091` |
-| AUD-32 | ⬜ | Baja | Tabla de sesión sin índice en `[expires]`; README con TTL obsoleto | `auth/sessionStore.js:56-61`, `sql/snippets/README.md:65-82` |
+| AUD-32 | ✅ | Baja | Tabla de sesión sin índice en `[expires]`; README con TTL obsoleto | `auth/sessionStore.js:56-61`, `sql/snippets/README.md:65-82` |
 
 ### P5 — Arquitectura y mantenibilidad
 
