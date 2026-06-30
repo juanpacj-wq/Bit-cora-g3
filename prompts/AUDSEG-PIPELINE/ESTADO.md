@@ -19,7 +19,7 @@
 |---|---|---|
 | 0 Precondiciones | ✅ | PRE-1✅ PRE-2✅ conectividad✅ AUD-33🟡(mitigado+runbook) |
 | 1 P0 secretos/PII | ✅ | AUD-04✅ · AUD-01/02/03🟡 (código `4a96531`; rotación+purga = checkpoint humano, runbook en ficha) |
-| 2 Auth/routing | ⬜ | AUD-35, AUD-34, AUD-05, AUD-06 |
+| 2 Auth/routing | ✅* | AUD-05✅ AUD-06✅ (`30b9447`); AUD-34/AUD-35 ⬜ diferidos (refactor arq. grande, no a ciegas) |
 | 3 Transporte/sesión | ⬜ | AUD-07, AUD-09, AUD-13, AUD-22 |
 | 4 Scraper/WS | ⬜ | AUD-08, AUD-36, AUD-14, AUD-25, AUD-26, AUD-21, AUD-42 |
 | 5 Authz/BD | ⬜ | AUD-11, AUD-18, AUD-10, AUD-12, AUD-29, AUD-30, AUD-31 |
