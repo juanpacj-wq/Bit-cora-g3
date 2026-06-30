@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --env-file=../.env --watch server.js",
     "start": "node --env-file=../.env server.js",
-    "test": "node --env-file=../.env --test --test-concurrency=1 tests/auth_bypass_gate.test.js tests/entra_roles.test.js tests/fechas_bogota.test.js tests/auth_middleware.test.js tests/auth_reactivate.test.js tests/disponibilidad.test.js tests/cierre_y_fechas.test.js tests/sala_de_mando_batch.test.js tests/conformacion_turno.test.js tests/consumos_combustible.test.js tests/rol_coordinador_carbon_maquinaria.test.js tests/sis_schema.test.js tests/sis_parser.test.js tests/sis_scraper_ownership.test.js",
+    "test": "node --env-file=../.env --test --test-concurrency=1 tests/ws_origin.test.js tests/auth_bypass_gate.test.js tests/entra_roles.test.js tests/fechas_bogota.test.js tests/auth_middleware.test.js tests/auth_reactivate.test.js tests/disponibilidad.test.js tests/cierre_y_fechas.test.js tests/sala_de_mando_batch.test.js tests/conformacion_turno.test.js tests/consumos_combustible.test.js tests/rol_coordinador_carbon_maquinaria.test.js tests/sis_schema.test.js tests/sis_parser.test.js tests/sis_parser_hardening.test.js tests/sis_scraper_ownership.test.js",
     "test:reset-db": "node --env-file=../.env tests/reset-db.js"
   },
   "dependencies": {

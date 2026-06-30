@@ -12,13 +12,35 @@ const TAGS = [
   "DCS_20CFE01CE21", "DCS_20HBK10CT659_AVG", "DCS_20HBK10CT651_AVG", "DCS_MPAFLOW",
 ];
 
+// AUD-25 (BIT-AUDSEG-2026-001): escape de entidades XML + validación de formato dentro de
+// buildUrl (mirror de server/utils/sis/sis-client.js; mantener en sync).
+function escapeXml(s) {
+  return String(s).replace(/[&<>"']/g, (ch) =>
+    ch === "&" ? "&amp;" :
+    ch === "<" ? "&lt;" :
+    ch === ">" ? "&gt;" :
+    ch === '"' ? "&quot;" : "&apos;"
+  );
+}
+
+const RE_FECHA = /^\d{4}-\d{2}-\d{2}$/;
+const RE_HORA = /^([01]\d|2[0-4])$/; // 00..24
+
 function buildUrl(f1, h1, f2, h2) {
-  const tags = TAGS.map((t) => `<tg n='${t}'/>`).join("");
+  for (const [k, v] of [["f1", f1], ["f2", f2]]) {
+    if (!RE_FECHA.test(String(v))) throw new Error(`buildUrl: ${k} no es una fecha YYYY-MM-DD: ${v}`);
+  }
+  for (const [k, v] of [["h1", h1], ["h2", h2]]) {
+    if (!RE_HORA.test(String(v))) throw new Error(`buildUrl: ${k} fuera de rango 00..24: ${v}`);
+  }
+  const srv = escapeXml(SERVER);
+  const tags = TAGS.map((t) => `<tg n='${escapeXml(t)}'/>`).join("");
+  const f1e = escapeXml(f1), h1e = escapeXml(h1), f2e = escapeXml(f2), h2e = escapeXml(h2);
   const params =
     `<Data><Action>GETDATASERIAL</Action><PROTOCOL><p><a>h</a>` +
-    `<t1>${f1} ${h1}:00:00</t1><t2>${f2} ${h2}:00:00</t2>` +
-    `<ts>1</ts><sis server='${SERVER}'>${tags}</sis></p></PROTOCOL>` +
-    `<BTIME>${f1} ${h1}:00:00</BTIME><ETIME>${f2} ${h2}:00:00</ETIME><TS>1</TS></Data>`;
+    `<t1>${f1e} ${h1e}:00:00</t1><t2>${f2e} ${h2e}:00:00</t2>` +
+    `<ts>1</ts><sis server='${srv}'>${tags}</sis></p></PROTOCOL>` +
+    `<BTIME>${f1e} ${h1e}:00:00</BTIME><ETIME>${f2e} ${h2e}:00:00</ETIME><TS>1</TS></Data>`;
   return `${SIS_HOST}/SIS/SisMonitor/JsFrame/TagData/ExportDialog.aspx?params=` +
     encodeURIComponent(params);
 }
@@ -35,12 +57,23 @@ function nowBogota() {
 
 const num = (v) => (typeof v === "number" ? v : 0);
 
+const TIMEOUT_MS = 30000;
+const MAX_XLS_BYTES = 10 * 1024 * 1024;
+
 async function fetchPeriod(f1, h1, f2, h2) {
-  const resp = await fetch(buildUrl(f1, h1, f2, h2));
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const buf = Buffer.from(await resp.arrayBuffer());
-  const parsed = parseXls(buf);
-  return { status: resp.status, bytes: buf.length, ...parsed };
+  // AUD-08/26: timeout (el standalone no tenía), redirect:'error' (anti-SSRF) y tope de descarga.
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+  try {
+    const resp = await fetch(buildUrl(f1, h1, f2, h2), { signal: ac.signal, redirect: "error" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    if (buf.length > MAX_XLS_BYTES) throw new Error(`respuesta SIS demasiado grande: ${buf.length} bytes`);
+    const parsed = parseXls(buf);
+    return { status: resp.status, bytes: buf.length, ...parsed };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 (async () => {

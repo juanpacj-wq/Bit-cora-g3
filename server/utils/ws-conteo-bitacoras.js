@@ -1,6 +1,7 @@
 import { WebSocketServer } from 'ws';
 import sql from 'mssql';
 import { getDB } from '../db.js';
+import { originPermitido } from './ws-usuarios-activos.js'; // AUD-21: misma lógica de allowlist
 
 const clients = new Map();
 
@@ -66,6 +67,18 @@ export function attachWSConteoBitacoras(httpServer) {
     }
     if (url.pathname !== '/ws/conteo-bitacoras') return;
 
+    // AUD-21: validar Origin ANTES del upgrade (anti-CSWSH). Cheap, sin BD.
+    if (!originPermitido(req.headers.origin, req.headers.host)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    // AUD-21 follow-up: la autenticación ideal del handshake es por la cookie de
+    // sesión Entra (parsear req.headers.cookie + resolver contra el store MSSQL
+    // [auth].[AppSessions]); el upgrade corre fuera del middleware Express, así
+    // que hoy solo se valida el sesion_id (entero IDENTITY). Pendiente de una
+    // ronda dedicada por su complejidad.
     const sesion_id = parseInt(url.searchParams.get('sesion_id'), 10);
     let planta_id = null;
     try { planta_id = await validateSesionAndGetPlanta(sesion_id); } catch { planta_id = null; }
