@@ -592,8 +592,11 @@ async function legacyHandler(req, res) {
 
     // GET /api/catalogos/jdt-actual?planta_id=GEC3
     if (pathname === '/api/catalogos/jdt-actual' && method === 'GET') {
-      const sesion = await loadSession(req);
-      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      // AUD-05 (ajuste post-incidente): este catálogo expone PII (nombre del JdT) y por eso exige
+      // identidad, PERO se consulta ANTES de elegir planta (no hay sesion_activa todavía). El gate
+      // correcto es por AUTENTICACIÓN Entra (cookie), no por loadSession: éste devolvía null
+      // pre-contexto → 401 → logout en bucle. Ver fix de login 2026-06-30.
+      if (!req.session?.user?.oid) return sendJSON(res, 401, { error: 'No autenticado' });
       const planta_id = url.searchParams.get('planta_id');
       if (!planta_id) {
         return sendJSON(res, 400, { error: 'planta_id es requerido' });
@@ -626,8 +629,10 @@ async function legacyHandler(req, res) {
 
     // GET /api/catalogos/jefe
     if (pathname === '/api/catalogos/jefe' && method === 'GET') {
-      const sesion = await loadSession(req);
-      if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      // AUD-05 (ajuste post-incidente): mismo criterio que jdt-actual — gate por autenticación Entra,
+      // no por sesion_activa. useCatalogos pide /jefe en la pantalla de selección de planta (sin
+      // sesión de app), y loadSession=null disparaba 401 → logout en bucle.
+      if (!req.session?.user?.oid) return sendJSON(res, 401, { error: 'No autenticado' });
       const db = await getDB();
       const result = await db.request().query(`
         SELECT TOP 1 usuario_id, nombre_completo, email, es_jefe_planta, es_jdt_default

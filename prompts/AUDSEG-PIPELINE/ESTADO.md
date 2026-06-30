@@ -34,5 +34,18 @@
 - **`/security-review` final (gate de cierre):** revisó toda la rama (SQLi, bypass auth, CORS/CSRF/CSWSH, OIDC, XXE, SSRF, escalada de revalidación) → **0 vulnerabilidades de alta confianza introducidas**. La remediación no agrega regresiones; los puntos débiles restantes son los 🟡/⬜ ya documentados.
 - **PIPELINE COMPLETO.** Acciones humanas pendientes (irreversibles/infra/cross-repo) listadas en los runbooks de las fichas 🟡.
 
+## Regresión post-remediación corregida (2026-06-30)
+El login en dev quedó roto (bucle de logout / no se podía entrar). Dos cambios de la remediación
+chocaron con el setup de dev y se corrigieron:
+- **AUD-05** puso gate `loadSession` (sesión de app) en `/api/catalogos/jefe` y `/api/catalogos/jdt-actual`,
+  pero `useCatalogos` los pide en la pantalla de **selección de planta**, ANTES de que exista `sesion_activa`
+  → `loadSession`=null → 401 → `useApi` dispara `logout()` global → bucle. **Fix:** esos dos catálogos
+  ahora se gatean por **autenticación Entra** (`req.session.user.oid`), no por sesión de app (siguen sin
+  exponer PII a anónimos). Los endpoints operativos (registros/históricos/autorizaciones) conservan `loadSession`.
+- **AUD-19/AUD-21** (CSRF mutadores + anti-CSWSH WS) comparan `Origin` contra el `Host` del request. El proxy
+  de Vite con `changeOrigin:true` reescribía `Host` a `:3002` mientras el navegador manda `Origin :5174`
+  → 403 en todo POST / WS rechazado. **Fix:** `changeOrigin:false` en `vite.config.js` (dev) → `Host==Origin`.
+  Prod (same-origin real) no se toca y los checks siguen estrictos (verificado: cross-site → 403).
+
 ## Bitácora por ítem (rellenar a medida)
 <!-- AUD-NN | estado | commit | verificación | residual humano/infra -->
