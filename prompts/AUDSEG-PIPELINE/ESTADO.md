@@ -47,5 +47,17 @@ chocaron con el setup de dev y se corrigieron:
   → 403 en todo POST / WS rechazado. **Fix:** `changeOrigin:false` en `vite.config.js` (dev) → `Host==Origin`.
   Prod (same-origin real) no se toca y los checks siguen estrictos (verificado: cross-site → 403).
 
+## Avance post-cierre (uno por uno con el usuario)
+- **AUD-01 ✅ (completado)**: secreto purgado de TODO el historial con `git filter-repo` + force-push;
+  `.env.example` quedó en blanco en cada commit; `G3c3lc4` no aparece en `origin/main`. (El usuario
+  decidió no rotar la clave en vivo; ya no está expuesta en git.)
+- **AUD-21 ✅ (completado)**: handshake WS autenticado por la **cookie de sesión Entra** (no por el
+  `sesion_id` IDENTITY enumerable). Nuevo `server/auth/wsSession.js` resuelve la cookie firmada contra
+  el MISMO store+secreto de express-session (compartidos vía `setWsSessionContext`), y deriva la planta
+  de la sesión de app ACTIVA del usuario. Ambos canales (`/ws/usuarios-activos`, `/ws/conteo-bitacoras`)
+  rechazan sin cookie (401) y cross-origin (403). MemoryStore de dev ahora es instancia explícita para
+  poder compartirse. Verificado: 10/10 tests puros (cookie manipulada/secreto erróneo → rechazada),
+  y EN VIVO contra el backend — sin cookie→401, origin ajeno→403, con cookie válida→snapshot por planta.
+
 ## Bitácora por ítem (rellenar a medida)
 <!-- AUD-NN | estado | commit | verificación | residual humano/infra -->

@@ -89,6 +89,9 @@ export async function buildSessionStore() {
     return { store, kind };
   }
 
-  // memory (DEV)
-  return { store: undefined, kind: 'memory' };
+  // memory (DEV). AUD-21: devolvemos una instancia EXPLÍCITA de MemoryStore (no undefined) para
+  // poder COMPARTIRLA con el resolver de sesión del WebSocket (auth/wsSession.js). Si dejáramos que
+  // express-session creara su MemoryStore interno, el handshake WS no tendría cómo leer la sesión.
+  const { default: session } = await import('express-session');
+  return { store: new session.MemoryStore(), kind: 'memory' };
 }
