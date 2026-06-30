@@ -92,3 +92,13 @@ export function responderError(res, err, ctx = '') {
   res.end(JSON.stringify({ error: mensaje, codigo, mensaje }));
   return undefined;
 }
+
+// Error-handling middleware para la capa Express (auth/app.js). express-session (store mssql) y los
+// handlers de /auth pueden propagar errores vía next(err) — p.ej. la BD caída al cargar la sesión.
+// Sin esto, el error subía al handler POR DEFECTO de Express, que renderiza el stack en HTML y FILTRA
+// internals (el host/instancia de la BD: "Failed to connect to 192.168...\\mssqlg3"). Reusa el mismo
+// saneamiento del if-chain (D-032). Debe registrarse de ÚLTIMO (firma de 4 args = error-handler).
+export function expressErrorHandler(err, req, res, next) {
+  if (res.headersSent) return next(err);
+  responderError(res, err, `[auth-layer] ${req?.method || ''} ${req?.originalUrl || req?.url || ''}`);
+}

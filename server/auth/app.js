@@ -22,6 +22,7 @@ import { provisionEntraUser } from './provision.js';
 import { buildSessionStore } from './sessionStore.js';
 import { revalidate, REVALIDATE_INTERVAL_MS } from './revalidate.js';
 import { setWsSessionContext } from './wsSession.js';
+import { expressErrorHandler } from '../utils/errores.js';
 import { detectRoles } from './roles.js';
 import {
   isConfigured as m365Configured, m365Config,
@@ -234,6 +235,15 @@ export async function buildAuthApp(legacyHandler) {
 
   // ── Delegación: TODO lo demás al if-chain nativo (req.session ya está poblado) ──
   app.use((req, res) => legacyHandler(req, res));
+
+  // ── Error-handler de la capa Express (D-032) ────────────────────────────────
+  // Debe ir de ÚLTIMO. Express enruta acá (firma de 4 args) cualquier error propagado vía
+  // next(err) por un middleware previo — en la práctica, el middleware de express-session cuando
+  // el store mssql NO puede conectar a la BD al cargar la sesión. Sin este handler, ese error subía
+  // al handler POR DEFECTO de Express, que responde el stack en HTML y FILTRA el host/instancia de
+  // la BD ("Failed to connect to 192.168...\mssqlg3"). expressErrorHandler lo sanea con el mismo
+  // criterio del if-chain (clasifica → loguea server-side → { error, codigo, mensaje } amigable).
+  app.use(expressErrorHandler);
 
   console.log(`  [auth] Entra ID ${m365Config().configured ? 'CONFIGURADO (tenant ' + m365Config().tenant + ')' : 'NO configurado (faltan M365_* en .env)'}`);
   console.log(`  [auth] store de sesión: ${storeKind}${storeKind === 'memory' ? ' (solo dev)' : ''} · revalidación cada ${Math.round(REVALIDATE_INTERVAL_MS / 60000)} min`);
