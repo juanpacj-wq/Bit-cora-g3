@@ -99,7 +99,7 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 
 | ID | Estado | Severidad | Título | Evidencia |
 |---|---|---|---|---|
-| AUD-33 | ⬜ | Alta (arq.) | Suite de tests corre contra la BD productiva con borrados por `planta_id='GEC3'` | `db.js:38-56`; `CLAUDE.md` conv. #14 (riesgo residual) |
+| AUD-33 | 🟡 | Alta (arq.) | Suite de tests corre contra la BD productiva con borrados por `planta_id='GEC3'` | `db.js:38-56`; `CLAUDE.md` conv. #14 (riesgo residual) |
 | AUD-34 | ⬜ | Media (arq.) | `server.js` monolítico (~2700 líneas, if-chain único) | `server/server.js` |
 | AUD-35 | ⬜ | Media (arq.) | Modelo de routing partido http-nativo + wrapper Express tras D-031 | `auth/app.js`, `server.js` |
 | AUD-36 | ⬜ | Baja (arq.) | Parser binario duplicado (ESM servidor ≡ CommonJS CLI, divergibles) | `sis/xls-parser.js` ≡ `js-scraper-carbon-g32/xls.js` |
@@ -751,6 +751,12 @@ apuntar la suite a esa BD vía env. E3 (puente, mientras tanto): migrar los clea
 (`helpers.js:146-161` y los helpers de `sala_de_mando_batch`/`auth_middleware`/`cierre_y_fechas`/
 `fechas_bogota`) al patrón `TEST_PLANTA_ID='TST'` y prohibir borrar por `'GEC3'`.
 **Cross-ref.** D-030, AUD-12, AUD-40.
+> **Estado (pipeline):** 🟡 mitigado en código — los dos `DELETE` sin tag sobre GEC3 quedaron
+> gateados tras `TEST_DB_DEDICATED=1` (`helpers.js`), así una corrida contra prod **no destruye**
+> `mand_cierre_log`/`evento_dashboard` reales (verificado: cleanup sin flag deja GEC3 intacto).
+> **Pendiente (🧑 DBA/infra):** crear `PortalG3_test` (el login `user_portalg3` no tiene
+> `dbcreator`/`sysadmin`) y correr la suite con `DB_NAME=
+> aislamiento total. Hasta entonces, los tests HTTP de MAND/AUTH **no** se corren contra prod.
 
 ### AUD-34 — `server.js` monolítico (~2700 líneas, if-chain único) · Media (arq.)
 **Problema.** Todos los endpoints viven en un if-chain gigante en un solo archivo (`server/routes/` está
