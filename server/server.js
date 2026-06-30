@@ -6,7 +6,7 @@ import { initDB, getDB, TEST_PLANTA_ID } from './db.js';
 // binding live de ESM permite usarlo después; al momento de los handlers del request ya
 // está cargado.
 import * as dbBindings from './db.js';
-import { CORS_HEADERS, parseBody, sendJSON } from './utils/http.js';
+import { CORS_HEADERS, parseBody, sendJSON, corsHeadersFor, csrfOriginAllowed, rateLimitCheck } from './utils/http.js';
 import { responderError, mensajeUsuario } from './utils/errores.js';
 import { resolveCargo } from './utils/entra-roles.js';
 import { getTurnoColombia, periodoFromFechaBogota, turnoFromPeriodo, ventanaTurno, fechaBogotaStr } from './utils/turno.js';
@@ -98,6 +98,36 @@ function mapDispRowToLegacyShape(row, bitacoraId) {
   };
 }
 
+// AUD-20: estado del rate limiter en memoria (Map<`${tag}:${ip}`, {count, resetAt}>). Una sola
+// instancia compartida; el `tag` aísla el conteo por endpoint sensible.
+const _rateLimitMap = new Map();
+
+function clientIp(req) {
+  // `trust proxy` está activo en el wrapper Express; respetamos X-Forwarded-For si llega.
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return String(xff).split(',')[0].trim();
+  return req.socket?.remoteAddress || 'desconocida';
+}
+
+// Aplica rate limiting a un endpoint sensible. Devuelve true si la request pasa; si excede el
+// límite responde 429 (con Retry-After) y devuelve false — el handler debe `return` sin seguir.
+function aplicarRateLimit(req, res, tag, { max, windowMs }) {
+  const r = rateLimitCheck(_rateLimitMap, `${tag}:${clientIp(req)}`, Date.now(), { max, windowMs });
+  if (!r.allowed) {
+    res.writeHead(429, {
+      'Content-Type': 'application/json',
+      'Retry-After': String(Math.ceil(r.retryAfterMs / 1000)),
+      ...CORS_HEADERS,
+    });
+    res.end(JSON.stringify({
+      error: 'Demasiadas solicitudes. Espera unos segundos e intenta de nuevo.',
+      codigo: 'rate_limit',
+    }));
+    return false;
+  }
+  return true;
+}
+
 // El cuerpo del router nativo (if-chain). Antes era el callback de http.createServer; ahora es
 // una función a la que el wrapper Express (auth/app.js) delega todo lo que no sea ruta de auth.
 // express-session ya pobló req.session antes de llegar acá, así que loadSession() puede leer la
@@ -108,12 +138,25 @@ async function legacyHandler(req, res) {
   const pathname = url.pathname;
 
   if (method === 'OPTIONS') {
-    res.writeHead(204, CORS_HEADERS);
+    // AUD-16: el preflight refleja el Origin del request según la allowlist (corsHeadersFor).
+    res.writeHead(204, corsHeadersFor(req.headers.origin));
     res.end();
     return;
   }
 
   try {
+    // AUD-19: CSRF defense-in-depth sobre SameSite=lax. Para mutadores (POST/PUT/DELETE), si viene
+    // header Origin y NO es de confianza (ni same-origin ni allowlist) → 403. Origin ausente
+    // (server-to-server: el dashboard cross-repo que solo hace GET, o curl) se permite para no
+    // romper integraciones server-side. GET y las rutas /auth/* (que manejan su propio state en
+    // auth/app.js, fuera de este if-chain) quedan exentos por construcción.
+    if (method === 'POST' || method === 'PUT' || method === 'DELETE') {
+      const origin = req.headers.origin;
+      if (origin && !csrfOriginAllowed(origin, req.headers.host)) {
+        return sendJSON(res, 403, { error: 'Origen no permitido', codigo: 'origen_no_permitido' });
+      }
+    }
+
     if (method === 'GET' && pathname === '/health') {
       return sendJSON(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
     }
@@ -129,6 +172,8 @@ async function legacyHandler(req, res) {
     // Deriva usuario_id de la cookie Entra (req.session.user) y cargo_id de los App Roles del
     // token por precedencia. NO recibe usuario_id ni cargo_id del cliente (no son confiables).
     if (pathname === '/api/auth/select-context' && method === 'POST') {
+      // AUD-20: endpoint sensible (crea sesión de app). Límite generoso para no estorbar uso normal.
+      if (!aplicarRateLimit(req, res, 'select-context', { max: 60, windowMs: 60_000 })) return;
       const sUser = req.session?.user;
       if (!sUser?.oid || !sUser?.usuario_id) {
         return sendJSON(res, 401, { error: 'No autenticado con Microsoft' });
@@ -295,6 +340,18 @@ async function legacyHandler(req, res) {
       const { bitacora_id } = await parseBody(req);
       if (!bitacora_id) return sendJSON(res, 400, { error: 'bitacora_id es requerido' });
       const db = await getDB();
+      // AUD-24: antes el MERGE aceptaba cualquier bitacora_id del body sin validar. Verificamos
+      // que la bitácora exista (activa) y que el cargo de la sesión tenga `puede_ver` sobre ella
+      // antes de tocar sesion_bitacora.
+      const existe = await db.request()
+        .input('bitacora_id', sql.Int, bitacora_id)
+        .query(`SELECT 1 AS ok FROM lov_bit.bitacora WHERE bitacora_id = @bitacora_id AND activa = 1`);
+      if (!existe.recordset[0]) {
+        return sendJSON(res, 404, { error: 'Bitácora no encontrada' });
+      }
+      if (!(await hasPermisoBitacora(sesion, bitacora_id, 'puede_ver'))) {
+        return sendJSON(res, 403, { error: 'Sin permiso para abrir esta bitácora' });
+      }
       const result = await db.request()
         .input('sesion_id', sql.Int, sesion.sesion_id)
         .input('bitacora_id', sql.Int, bitacora_id)
@@ -2169,6 +2226,8 @@ async function legacyHandler(req, res) {
     if (pathname === '/api/historicos' && method === 'GET') {
       const sesion = await loadSession(req);
       if (!sesion) return sendJSON(res, 401, { error: 'Sesión no válida' });
+      // AUD-20: búsqueda paginada (consulta pesada). Límite generoso para no estorbar el filtrado.
+      if (!aplicarRateLimit(req, res, 'historicos', { max: 120, windowMs: 60_000 })) return;
       const params = url.searchParams;
       const page = Math.max(1, parseInt(params.get('page') || '1', 10));
       const limit = Math.min(500, Math.max(1, parseInt(params.get('limit') || '50', 10)));

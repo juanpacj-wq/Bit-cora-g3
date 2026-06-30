@@ -24,6 +24,7 @@ export const ETIQUETAS = {
   db_timeout: 'La base de datos tardó demasiado en responder. Intenta de nuevo en unos segundos.',
   db_error: 'Ocurrió un problema al procesar la información en la base de datos. Intenta de nuevo; si persiste, contacta a soporte.',
   cuerpo_invalido: 'La información enviada no tiene un formato válido. Recarga la página e intenta de nuevo.',
+  cuerpo_demasiado_grande: 'La información enviada es demasiado grande. Reduce el tamaño e intenta de nuevo.',
   config_sistema: 'Hay un problema de configuración del sistema. Contacta a soporte.',
   error_interno: 'Ocurrió un error inesperado. Intenta de nuevo; si el problema continúa, contacta a soporte.',
 };
@@ -61,12 +62,17 @@ export function clasificarError(err) {
     return { status: 500, codigo: 'db_error' };
   }
 
-  // 4) Cuerpo de la petición no es JSON válido (parseBody rechaza con SyntaxError).
+  // 4) Cuerpo de la petición excede el tope de tamaño (AUD-15: parseBody aborta con este code).
+  if (code === 'cuerpo_demasiado_grande') {
+    return { status: 413, codigo: 'cuerpo_demasiado_grande' };
+  }
+
+  // 5) Cuerpo de la petición no es JSON válido (parseBody rechaza con SyntaxError).
   if (name === 'SyntaxError' || err instanceof SyntaxError) {
     return { status: 400, codigo: 'cuerpo_invalido' };
   }
 
-  // 5) Desconocido: nunca exponemos el mensaje crudo.
+  // 6) Desconocido: nunca exponemos el mensaje crudo.
   return { status: 500, codigo: 'error_interno' };
 }
 

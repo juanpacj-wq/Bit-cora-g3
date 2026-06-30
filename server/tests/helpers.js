@@ -1,4 +1,5 @@
 import sql from 'mssql';
+import { randomBytes } from 'node:crypto';
 import { initDB, getDB, TEST_PLANTA_ID } from '../db.js';
 import { hashPassword } from '../utils/password.js';
 
@@ -44,7 +45,11 @@ const USER_CARGO = {
 export async function setupSessions({ planta = PLANTA_ID } = {}) {
   await initDB();
   const db = await getDB();
-  const password_hash = await hashPassword('1234');
+  // AUD-40 (BIT-AUDSEG-2026-001): password aleatorio fuerte por corrida en vez del literal '1234'.
+  // El login local ya no existe (D-031, Entra-only), así que el hash es INERTE — pero un valor
+  // conocido en usuarios test_* activos sobre la BD productiva es mala higiene. Aleatorizarlo lo
+  // mantiene inerte y deja de ser un valor conocido. NO se toca activo=1 (los tests lo necesitan).
+  const password_hash = await hashPassword(randomBytes(24).toString('hex'));
 
   // D-030: si las sesiones van a una planta distinta de las productivas (típicamente TEST_PLANTA),
   // sembrarla idempotentemente. Necesaria por la FK de sesion_activa/disponibilidad_estado y por la

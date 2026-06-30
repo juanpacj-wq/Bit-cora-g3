@@ -3,6 +3,26 @@ import { api, setUnauthorizedHandler } from './useApi';
 
 const STORAGE_KEY = 'bitacoras_auth';
 
+// AUD-27 (BIT-AUDSEG-2026-001): el backend devuelve la logoutUrl del front-channel logout de
+// Microsoft, pero no confiamos ciegamente en ella antes de un redirect top-level (defensa ante
+// open-redirect si el valor se corrompiera). Aceptamos solo: (a) rutas relativas que empiecen con
+// '/' (y no '//', que el navegador trata como protocol-relative externo), o (b) URLs absolutas
+// cuyo host esté en la allowlist de Microsoft. Si no valida, caemos a '/'.
+const LOGOUT_HOST_ALLOWLIST = new Set(['login.microsoftonline.com', 'login.microsoft.com']);
+
+function safeLogoutUrl(candidate) {
+  if (typeof candidate !== 'string' || candidate === '') return '/';
+  // Relativa: debe empezar con un único '/' (descarta '//host' protocol-relative).
+  if (candidate.startsWith('/') && !candidate.startsWith('//')) return candidate;
+  try {
+    const u = new URL(candidate);
+    if ((u.protocol === 'https:' || u.protocol === 'http:') && LOGOUT_HOST_ALLOWLIST.has(u.hostname)) {
+      return candidate;
+    }
+  } catch {}
+  return '/';
+}
+
 // Login Entra ID: la IDENTIDAD ya no se persiste como token (vive en la cookie httpOnly). Solo
 // guardamos en sessionStorage los campos NO secretos de la sesión de app que algunos componentes
 // leen rápido en el primer render (cargo/planta/turno/sesion_id para WS). La fuente de verdad es
@@ -91,7 +111,7 @@ export function useAuth() {
     let logoutUrl = '/';
     try {
       const r = await api.post('/api/logout', {}, { skipAuth: true });
-      if (r?.logoutUrl) logoutUrl = r.logoutUrl;
+      if (r?.logoutUrl) logoutUrl = safeLogoutUrl(r.logoutUrl);
     } catch {}
     logoutLocal();
     window.location.href = logoutUrl;

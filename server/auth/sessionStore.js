@@ -70,6 +70,13 @@ export async function buildSessionStore() {
       `CREATE TABLE ${qualified}([sid] nvarchar(255) NOT NULL PRIMARY KEY, ` +
       `[session] nvarchar(max) NOT NULL, [expires] datetime NOT NULL);`
     );
+    // AUD-32 (BIT-AUDSEG-2026-001): índice sobre [expires] — `autoRemove` barre las sesiones
+    // vencidas filtrando por esta columna; sin índice es un scan completo de la tabla. Idempotente.
+    await pool.request().batch(
+      `IF NOT EXISTS (SELECT 1 FROM sys.indexes ` +
+      `WHERE name = 'IX_${table}_expires' AND object_id = OBJECT_ID('${qualified}')) ` +
+      `CREATE INDEX [IX_${table}_expires] ON ${qualified}([expires]);`
+    );
     await pool.close();
 
     const store = new MSSQLStore(sqlConfig, {
