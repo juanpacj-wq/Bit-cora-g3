@@ -138,27 +138,31 @@ export async function cleanupTestRegistros() {
       DELETE FROM bitacora.registro_activo WHERE detalle LIKE @tag;
       DELETE FROM bitacora.registro_historico WHERE detalle LIKE @tag;
     `);
-  // F16 + D5: limpia mand_cierre_log para la planta de test. El log no tiene un campo "tag";
-  // borrar por (planta_id, fecha_cerrada >= 2026-05-01) cubre fechas determinísticas usadas
-  // en cierre_y_fechas.test.js (D5) y cualquier futuro día Bogotá donde el sweeper haya
-  // disparado durante el run. El rango guarda contra borrar mand_cierre_log histórico previo
-  // a este branch (no debería existir en GEC3, pero queda como safety net).
-  await db.request()
-    .input('planta', sql.VarChar(10), PLANTA_ID)
-    .query(`
-      DELETE FROM bitacora.mand_cierre_log
-      WHERE planta_id = @planta AND fecha_cerrada >= '2026-05-01';
-    `);
-  // F16: limpia evento_dashboard MAND remanente (los soft-deleted ya quedan así, pero por
-  // si algun test deja filas activas tras un fallo).
-  await db.request()
-    .input('planta', sql.VarChar(10), PLANTA_ID)
-    .query(`
-      DELETE FROM bitacora.evento_dashboard
-      WHERE planta_id = @planta
-        AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_activo)
-        AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_historico);
-    `);
+  // AUD-33 (seguridad): estos dos borrados NO están tagueados y, sobre la BD PRODUCTIVA, destruyen
+  // el cierre MAND real y los eventos-dashboard reales de GEC3 (la suite corre contra prod, D-030).
+  // Sólo deben ejecutarse contra una BD de test DEDICADA. Se gatean tras `TEST_DB_DEDICATED=1`:
+  // sin el flag (default, incl. cualquier corrida accidental contra prod) se OMITEN → cero
+  // destrucción de datos reales. Para la suite plena, crear `PortalG3_test` (runbook AUD-33 en
+  // BIT-AUDSEG) y correr con `TEST_DB_DEDICATED=1`. Ver también AUD-40 (usuarios test).
+  if (process.env.TEST_DB_DEDICATED === '1') {
+    // F16 + D5: limpia mand_cierre_log para la planta de test. El log no tiene "tag"; borrar por
+    // (planta_id, fecha_cerrada >= 2026-05-01) cubre fechas determinísticas de cierre_y_fechas (D5).
+    await db.request()
+      .input('planta', sql.VarChar(10), PLANTA_ID)
+      .query(`
+        DELETE FROM bitacora.mand_cierre_log
+        WHERE planta_id = @planta AND fecha_cerrada >= '2026-05-01';
+      `);
+    // F16: limpia evento_dashboard MAND remanente dejado por un test fallido.
+    await db.request()
+      .input('planta', sql.VarChar(10), PLANTA_ID)
+      .query(`
+        DELETE FROM bitacora.evento_dashboard
+        WHERE planta_id = @planta
+          AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_activo)
+          AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_historico);
+      `);
+  }
   const usernames = TEST_USERS.map((u) => `'${u.username}'`).join(',');
   await db.request().query(`
     UPDATE bitacora.sesion_activa SET activa = 0
