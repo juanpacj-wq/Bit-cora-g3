@@ -1017,12 +1017,36 @@ export async function initDB() {
   `);
   const dispPristine = tablaCreadaCheck.recordset[0].pristine === 1;
   if (dispPristine) {
-    await db.request()
+    // AUD-29: segunda barrera por presencia de datos productivos reales. El gate primario
+    // (ausencia de bitacora.disponibilidad_dashboard) asume "primer arranque post-F12 = solo
+    // datos de prueba". Pero si alguien dropea esa tabla más tarde, el gate se re-arma y este
+    // bloque borraría DISP productivo en silencio. Si hay rows DISP de plantas reales
+    // (GEC3/GEC32) en registro_activo/historico, abortamos el wipe y avisamos en vez de borrar.
+    const dispRealCheck = await db.request()
       .input('bitacora_id', sql.Int, DISP_BITACORA_ID)
       .query(`
-        DELETE FROM bitacora.registro_historico WHERE bitacora_id = @bitacora_id;
-        DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @bitacora_id;
+        SELECT CASE WHEN EXISTS (
+          SELECT 1 FROM bitacora.registro_activo
+           WHERE bitacora_id = @bitacora_id AND planta_id IN ('GEC3','GEC32')
+          UNION ALL
+          SELECT 1 FROM bitacora.registro_historico
+           WHERE bitacora_id = @bitacora_id AND planta_id IN ('GEC3','GEC32')
+        ) THEN 1 ELSE 0 END AS tiene_datos_reales
       `);
+    if (dispRealCheck.recordset[0].tiene_datos_reales === 1) {
+      console.warn(
+        '[initDB][AUD-29] Wipe DISP one-shot (F12.A1) OMITIDO: hay registros DISP de plantas ' +
+        'reales (GEC3/GEC32) en registro_activo/historico. El gate primario ' +
+        '(falta bitacora.disponibilidad_dashboard) se re-armó pero NO se borran datos productivos.'
+      );
+    } else {
+      await db.request()
+        .input('bitacora_id', sql.Int, DISP_BITACORA_ID)
+        .query(`
+          DELETE FROM bitacora.registro_historico WHERE bitacora_id = @bitacora_id;
+          DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @bitacora_id;
+        `);
+    }
   }
 
   // F12.A4: reemplaza los 3 tipos de evento viejos (Cambio de Estado / Redespacho /
@@ -1324,20 +1348,45 @@ export async function initDB() {
   // de evento_dashboard por registro_origen_id antes de borrar registro_activo + histórico.
   // Una sola vez: el flag F16.A1 protege contra re-ejecución en restart.
   if (MAND_BITACORA_ID) {
-    await db.request()
+    // AUD-29: segunda barrera por presencia de datos productivos reales. El gate primario es la
+    // ausencia del flag 'F16.A1' en migracion_aplicada. Si un operador borra esa fila de flag,
+    // el gate se re-arma y este bloque re-ejecutaría el TRUNCATE de MAND productivo en silencio.
+    // En un arranque limpio (registro_activo vacío — initDB siembra catálogos, no datos
+    // transaccionales) no hay rows GEC3/GEC32 → procede. Si hay MAND real de plantas reales,
+    // abortamos y avisamos en vez de borrar.
+    const mandRealCheck = await db.request()
       .input('mand', sql.Int, MAND_BITACORA_ID)
-      .batch(`
-        IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F16.A1')
-        BEGIN
-          UPDATE bitacora.evento_dashboard SET activa = 0
-            WHERE registro_origen_id IN (
-              SELECT registro_id FROM bitacora.registro_activo WHERE bitacora_id = @mand
-            );
-          DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @mand;
-          DELETE FROM bitacora.registro_historico WHERE bitacora_id = @mand;
-          INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F16.A1');
-        END
+      .query(`
+        SELECT CASE WHEN EXISTS (
+          SELECT 1 FROM bitacora.registro_activo
+           WHERE bitacora_id = @mand AND planta_id IN ('GEC3','GEC32')
+          UNION ALL
+          SELECT 1 FROM bitacora.registro_historico
+           WHERE bitacora_id = @mand AND planta_id IN ('GEC3','GEC32')
+        ) THEN 1 ELSE 0 END AS tiene_datos_reales
       `);
+    if (mandRealCheck.recordset[0].tiene_datos_reales === 1) {
+      console.warn(
+        '[initDB][AUD-29] TRUNCATE MAND one-shot (F16.A1) OMITIDO: hay registros MAND de plantas ' +
+        'reales (GEC3/GEC32) en registro_activo/historico. El gate primario (flag F16.A1 ausente) ' +
+        'se re-armó pero NO se borran datos productivos. El flag NO se marca como aplicado.'
+      );
+    } else {
+      await db.request()
+        .input('mand', sql.Int, MAND_BITACORA_ID)
+        .batch(`
+          IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F16.A1')
+          BEGIN
+            UPDATE bitacora.evento_dashboard SET activa = 0
+              WHERE registro_origen_id IN (
+                SELECT registro_id FROM bitacora.registro_activo WHERE bitacora_id = @mand
+              );
+            DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @mand;
+            DELETE FROM bitacora.registro_historico WHERE bitacora_id = @mand;
+            INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F16.A1');
+          END
+        `);
+    }
   }
 
   // F16.A2: limpia funcionariocnd remanente en PRUEBA/REDESP en histórico (los activos
@@ -2095,16 +2144,27 @@ async function enforceSingletonFlag(db, columna, upns, legacyUsername) {
       .query(`UPDATE lov_bit.usuario SET ${columna} = 0 WHERE ${columna} = 1 AND username <> @u;`);
     return;
   }
-  const req = db.request();
-  const placeholders = upns.map((u, i) => { req.input('u' + i, sql.VarChar(200), u); return '@u' + i; }).join(',');
-  // SET=1 para los UPN configurados; SET=0 para cualquier otro row con el flag (incluye rows
-  // legacy con azure_upn NULL), garantizando un único titular vigente: el row Entra del UPN.
-  await req.query(`
-    BEGIN TRAN;
+  // AUD-31: los dos UPDATE corren atómicos dentro de una sql.Transaction con rollback en
+  // catch (mismo patrón que matrizTx / F26-F28). Antes era un batch `BEGIN TRAN; …; COMMIT;`
+  // sin XACT_ABORT ni manejo de error: si el 2º UPDATE fallaba, la transacción quedaba abierta
+  // sobre la conexión del pool (locks colgados, conexión envenenada). El driver mssql hace
+  // rollback explícito y devuelve la conexión limpia.
+  const tx = new sql.Transaction(db);
+  await tx.begin();
+  try {
+    const req = new sql.Request(tx);
+    const placeholders = upns.map((u, i) => { req.input('u' + i, sql.VarChar(200), u); return '@u' + i; }).join(',');
+    // SET=1 para los UPN configurados; SET=0 para cualquier otro row con el flag (incluye rows
+    // legacy con azure_upn NULL), garantizando un único titular vigente: el row Entra del UPN.
+    await req.query(`
       UPDATE lov_bit.usuario SET ${columna} = 1
        WHERE LOWER(azure_upn) IN (${placeholders}) AND ${columna} = 0;
       UPDATE lov_bit.usuario SET ${columna} = 0
        WHERE ${columna} = 1 AND (azure_upn IS NULL OR LOWER(azure_upn) NOT IN (${placeholders}));
-    COMMIT;
-  `);
+    `);
+    await tx.commit();
+  } catch (err) {
+    try { await tx.rollback(); } catch {}
+    throw err;
+  }
 }
