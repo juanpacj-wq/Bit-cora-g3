@@ -58,6 +58,14 @@ chocaron con el setup de dev y se corrigieron:
   rechazan sin cookie (401) y cross-origin (403). MemoryStore de dev ahora es instancia explícita para
   poder compartirse. Verificado: 10/10 tests puros (cookie manipulada/secreto erróneo → rechazada),
   y EN VIVO contra el backend — sin cookie→401, origin ajeno→403, con cookie válida→snapshot por planta.
+- **AUD-08 ✅ (parte de código completada)**: el parser `.xls` ahora corre en un `worker_thread`
+  (`server/utils/sis/parse-isolated.js` + `xls-parser-worker.js`) con tope de heap
+  (`maxOldGenerationSizeMb`, env `SIS_PARSE_MAX_HEAP_MB`) y timeout que TERMINA un parseo runaway
+  (env `SIS_PARSE_TIMEOUT_MS`). Un `.xls` hostil ya no puede colgar el event loop ni reventar la
+  memoria del proceso; en el peor caso muere el worker. `sis-client.js` usa `await parseXlsIsolated`.
+  El endurecimiento del parser (validaciones OLE2/BIFF8) ya estaba. Tests: 3/3 (transfer+resolve,
+  propagación de error, timeout). **Residual (infra/red, fuera de código):** el canal SIS sigue siendo
+  HTTP plano no autenticado (MITM) — eso es endurecimiento de red del host SIS, no del backend.
 
 ## Bitácora por ítem (rellenar a medida)
 <!-- AUD-NN | estado | commit | verificación | residual humano/infra -->
