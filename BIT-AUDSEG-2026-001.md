@@ -47,8 +47,8 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 
 | ID | Estado | Severidad | Título | Evidencia |
 |---|---|---|---|---|
-| AUD-05 | ⬜ | **Crítica** | Autenticación opt-in: endpoints de datos/PII sin `loadSession` | `server.js:582,2098,2127,2141,2190,2213,536,568,2270` |
-| AUD-06 | ⬜ | **Alta** | Backdoor `AUTH_TEST_BYPASS` suplanta por `X-Sesion-Id` enumerable | `middleware/auth.js:26-46`, `utils/http.js:4` |
+| AUD-05 | ✅ | **Crítica** | Autenticación opt-in: endpoints de datos/PII sin `loadSession` | `server.js:582,2098,2127,2141,2190,2213,536,568,2270` |
+| AUD-06 | ✅ | **Alta** | Backdoor `AUTH_TEST_BYPASS` suplanta por `X-Sesion-Id` enumerable | `middleware/auth.js:26-46`, `utils/http.js:4` |
 | AUD-07 | ⬜ | **Alta** | SQL Server sin cifrado (`encrypt:false` + `trustServerCertificate:true`) | `db.js:22-26`, `auth/sessionStore.js:29-34` |
 | AUD-08 | ⬜ | **Alta** | Cadena SIS HTTP plano + parser binario hecho a mano sin límites → DoS de todo el backend | `sis/sis-client.js:15`, `sis/xls-parser.js:13,36,44-56,84-114` |
 | AUD-21 | ⬜ | **Alta** | Handshake WS fuera de Express: sin cookie ni `Origin` → Cross-Site WebSocket Hijacking | `ws-usuarios-activos.js:59-86`, `ws-conteo-bitacoras.js:60-86`, `server.js:2707-2709` |
@@ -787,6 +787,10 @@ autenticación sea opt-in y fácil de olvidar.**
 **Remediación.** Extraer handlers a módulos por dominio bajo `routes/` con un dispatcher que aplique
 auth/permiso **por defecto** (cruza AUD-05 E1). Refactor incremental, una familia de endpoints por etapa,
 con la suite como red.
+> **Estado (pipeline):** ⬜ **diferido a propósito.** La urgencia de *seguridad* (endpoints sin auth)
+> se resolvió puntualmente en AUD-05 (`30b9447`). El split del god-file es un refactor grande que
+> requiere correr la suite completa contra una instancia real para no romper rutas; se hace como ronda
+> arquitectónica deliberada (idealmente tras la BD de test, AUD-33), no en un pase autónomo a ciegas.
 
 ### AUD-35 — Modelo de routing partido http-nativo + wrapper Express tras D-031 · Media (arq.)
 **Problema.** D-031 introdujo un wrapper Express delgado solo para `/auth`, delegando el resto al
@@ -799,6 +803,8 @@ de seguridad (límites de body, CORS, auth) y de carga cognitiva. `CLAUDE.md`/`a
 unificado es lo natural dado que Express ya está dentro), o aislar limpiamente las dos capas con un
 contrato explícito. Volcar la decisión a `decisions.md`.
 **Cross-ref.** AUD-15, AUD-16, AUD-34, D-031.
+> **Estado (pipeline):** ⬜ **diferido** junto con AUD-34 (mismo refactor estructural). Sus síntomas de
+> seguridad concretos se atacan puntualmente en otras olas (AUD-15 body, AUD-16 CORS, AUD-21 handshake WS).
 
 ### AUD-36 — Parser binario duplicado (ESM servidor ≡ CommonJS CLI) · Baja (arq.)
 **Problema.** `sis/xls-parser.js` y `js-scraper-carbon-g32/xls.js` son el mismo algoritmo byte a byte;
