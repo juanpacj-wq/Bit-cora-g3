@@ -11,14 +11,14 @@
 |---|---|---|
 | PRE-1 commit WIP | ✅ | `ed83d85` checkpoint feat/login-entra-id (39 archivos). Árbol limpio. |
 | PRE-2 rama + scaffolding | ✅ | rama `sec/audseg-remediation` desde `423591c`; baseline auditoría versionado; este tracker. |
-| Conectividad BD (verificación) | ⬜ | Por sondear: ¿este entorno alcanza `192.168.17.20:1433`? Define estrategia de verificación. |
-| AUD-33 (enabler) | ⬜ | Migrar cleanups MAND/AUTH `GEC3`→`TST` (corta la destrucción de prod). BD de test dedicada = infra (humano). |
+| Conectividad BD (verificación) | ✅ | BD alcanzable (`SELECT 1` ok). Login `db_owner` pero SIN `dbcreator/sysadmin` → no puedo crear `PortalG3_test`. |
+| AUD-33 (enabler) | 🟡 | Borrados destructivos GEC3 gateados tras `TEST_DB_DEDICATED=1` (`cd9fb8f`). BD de test dedicada = infra (DBA). |
 
 ## Avance por olas
 | Ola | Estado | Ítems |
 |---|---|---|
-| 0 Precondiciones | 🟡 | PRE-1✅ PRE-2✅ conectividad⬜ AUD-33⬜ |
-| 1 P0 secretos/PII | ⬜ | AUD-04, AUD-01, AUD-02, AUD-03, PURGA |
+| 0 Precondiciones | ✅ | PRE-1✅ PRE-2✅ conectividad✅ AUD-33🟡(mitigado+runbook) |
+| 1 P0 secretos/PII | ✅ | AUD-04✅ · AUD-01/02/03🟡 (código `4a96531`; rotación+purga = checkpoint humano, runbook en ficha) |
 | 2 Auth/routing | ⬜ | AUD-35, AUD-34, AUD-05, AUD-06 |
 | 3 Transporte/sesión | ⬜ | AUD-07, AUD-09, AUD-13, AUD-22 |
 | 4 Scraper/WS | ⬜ | AUD-08, AUD-36, AUD-14, AUD-25, AUD-26, AUD-21, AUD-42 |

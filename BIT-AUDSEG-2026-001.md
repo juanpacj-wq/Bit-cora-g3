@@ -38,10 +38,10 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 
 | ID | Estado | Severidad | Título | Evidencia |
 |---|---|---|---|---|
-| AUD-01 | ⬜ | **Crítica** | Credenciales productivas de BD en `.env.example` | `.env.example:1-4` |
-| AUD-02 | ⬜ | **Alta** | PII de ~80 empleados versionada (código muerto post-D-031) | `server/data/personal-2026.json`, `_build_personal_json.py` |
-| AUD-03 | ⬜ | **Alta** | Screenshot de sesión autenticada en sistema externo (XM RIO) | `aut_redesp_y_pruebas.png` |
-| AUD-04 | ⬜ | Media | `dist/index.html` versionado pese a `.gitignore` | `dist/index.html`, `.gitignore:2` |
+| AUD-01 | 🟡 | **Crítica** | Credenciales productivas de BD en `.env.example` | `.env.example:1-4` |
+| AUD-02 | 🟡 | **Alta** | PII de ~80 empleados versionada (código muerto post-D-031) | `server/data/personal-2026.json`, `_build_personal_json.py` |
+| AUD-03 | 🟡 | **Alta** | Screenshot de sesión autenticada en sistema externo (XM RIO) | `aut_redesp_y_pruebas.png` |
+| AUD-04 | ✅ | Media | `dist/index.html` versionado pese a `.gitignore` | `dist/index.html`, `.gitignore:2` |
 
 ### P1 — Seguridad crítica/alta de la aplicación
 
@@ -167,6 +167,26 @@ e instancia internos de la BD productiva. **Asumir la credencial comprometida.**
 tras la purga; intento de conexión con la credencial vieja debe fallar.
 
 **Cross-ref.** AUD-07 (cifrado del canal), AUD-17 (IPs internas), memoria `db-host-override-local`.
+> **Estado (pipeline):** 🟡 `.env.example` ya tiene placeholders (commit `4a96531`). **El secreto
+> sigue en el historial remoto** (`origin` = `github.com/juanpacj-wq/Bit-cora-g3`, `main` pusheado) →
+> faltan las DOS acciones irreversibles, que NO ejecuta el pipeline (rompen prod / reescriben historia
+> compartida). Runbook para el humano:
+>
+> **1. Rotar la clave SQL (primero, coordinando ventana — la app en vivo usa la clave actual):**
+> ```sql
+> ALTER LOGIN [user_portalg3] WITH PASSWORD = '<nueva-clave-fuerte>';
+> ```
+> Luego actualizar el `.env` real (no versionado) de cada despliegue y reiniciar el backend.
+> **2. Purgar el secreto + PII + screenshot del historial (una sola pasada, con backup):**
+> ```bash
+> git clone --mirror https://github.com/juanpacj-wq/Bit-cora-g3.git backup-pre-purge.git   # respaldo
+> pip install git-filter-repo
+> git filter-repo --path .env.example --path server/data/personal-2026.json \
+>   --path server/data/_build_personal_json.py --path aut_redesp_y_pruebas.png --invert-paths
+> git push origin --force --all && git push origin --force --tags
+> ```
+> Avisar a todo colaborador que re-clone (historia reescrita). Rotar también el `M365_CLIENT_SECRET`
+> si alguna vez estuvo en un `.env` commiteado (no es el caso hoy: el ejemplo siempre lo tuvo vacío).
 
 ---
 
