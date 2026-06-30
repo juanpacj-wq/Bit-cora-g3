@@ -1,4 +1,5 @@
 import http from 'http';
+import crypto from 'node:crypto';
 import sql from 'mssql';
 import { initDB, getDB, TEST_PLANTA_ID } from './db.js';
 // F16: USUARIO_SISTEMA_ID es un export `let` que se inicializa al final de initDB(). El
@@ -668,6 +669,12 @@ async function legacyHandler(req, res) {
         if (!(await hasPermisoBitacora(sesion, bitacora_id, 'puede_crear'))) {
           return sendJSON(res, 403, { error: 'Sin permiso para crear en esta bitácora' });
         }
+        // AUD-11: IDOR cross-planta. D-035 fija que una persona opera UNA sola unidad, así que
+        // un operador con sesión en GEC3 no puede crear disponibilidad de GEC32. La rama DISP
+        // antes omitía plantaMatch (de ahí el comentario de F12 arriba); ahora lo exige.
+        if (!plantaMatch(sesion, planta_id)) {
+          return sendJSON(res, 403, { error: 'No autorizado para esta planta' });
+        }
         const plantaCheck = await db.request()
           .input('p', sql.VarChar(10), planta_id)
           .query(`SELECT 1 AS ok FROM lov_bit.planta WHERE planta_id=@p AND activa=1`);
@@ -973,6 +980,12 @@ async function legacyHandler(req, res) {
         }
         if (!(await hasPermisoBitacora(sesion, dispBid, 'puede_crear'))) {
           return sendJSON(res, 403, { error: 'Sin permiso para editar registros de Disponibilidad' });
+        }
+        // AUD-11: IDOR cross-planta. La planta del registro vigente debe coincidir con la
+        // sesión (D-035: una persona = una unidad). Sin esto, un operador de GEC3 podría
+        // editar la disponibilidad de GEC32 conociendo su disponibilidad_id.
+        if (!plantaMatch(sesion, reg.planta_id)) {
+          return sendJSON(res, 403, { error: 'No autorizado para esta planta' });
         }
         const { planta_id: bodyPlanta } = body;
         if (bodyPlanta != null && bodyPlanta !== reg.planta_id) {
@@ -2050,6 +2063,11 @@ async function legacyHandler(req, res) {
       if (!(await hasPermisoBitacora(sesion, dispBitacoraId, 'puede_crear'))) {
         return sendJSON(res, 403, { error: 'Sin permiso para deshacer en Disponibilidad' });
       }
+      // AUD-11: IDOR cross-planta. Solo se puede deshacer la disponibilidad de la propia unidad
+      // (D-035: una persona opera UNA unidad); evita revertir el estado vigente de otra planta.
+      if (!plantaMatch(sesion, planta_id)) {
+        return sendJSON(res, 403, { error: 'No autorizado para esta planta' });
+      }
 
       const transaction = new sql.Transaction(db);
       await transaction.begin();
@@ -2284,6 +2302,27 @@ async function legacyHandler(req, res) {
     // silencioso. Vite proxy + Nginx (`/api/eventos-dashboard → 3002`) ya cubren el routing
     // desde F8 — F15 solo necesita agregar el hook + componente <BadgeDisponibilidad>.
     if (pathname === '/api/eventos-dashboard' && method === 'GET') {
+      // AUD-18: este endpoint es el borde del contrato cross-repo con dashboard-gen-gec3 y hoy
+      // es ABIERTO a propósito (el dashboard aún no envía credenciales) — pero devuelve snapshots
+      // de personal (PII). Gate OPCIONAL y no-rompedor:
+      //   - Si DASHBOARD_API_TOKEN NO está seteado → comportamiento actual (abierto), para no
+      //     romper al consumidor antes de coordinar.
+      //   - Si está seteado → se exige el header X-Dashboard-Token igual a ese valor; si falta o
+      //     no coincide → 401.
+      // Camino para CERRAR el endpoint: coordinar con dashboard-gen-gec3 para que envíe el header,
+      // y luego setear DASHBOARD_API_TOKEN (mismo valor) en AMBOS lados.
+      const dashboardToken = process.env.DASHBOARD_API_TOKEN;
+      if (dashboardToken) {
+        const provisto = req.headers['x-dashboard-token'];
+        // Comparación en tiempo constante (server-to-server). Si las longitudes difieren,
+        // timingSafeEqual lanza, así que comparamos longitud antes.
+        const esperado = Buffer.from(dashboardToken);
+        const recibido = Buffer.from(typeof provisto === 'string' ? provisto : '');
+        const ok = recibido.length === esperado.length && crypto.timingSafeEqual(recibido, esperado);
+        if (!ok) {
+          return sendJSON(res, 401, { error: 'Token de servicio inválido o ausente' });
+        }
+      }
       const planta_id = url.searchParams.get('planta_id');
       const fecha = url.searchParams.get('fecha');
       const tipo = url.searchParams.get('tipo');
