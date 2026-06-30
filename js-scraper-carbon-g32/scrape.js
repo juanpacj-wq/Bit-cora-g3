@@ -4,7 +4,9 @@ const path = require("path");
 const { parseXls } = require("./xls");
 const { writeXlsx } = require("./xlsx-write");
 
-const SIS_HOST = "http://192.168.18.201";
+// AUD-17 (BIT-AUDSEG-2026-001): IP del SIS configurable por env (mirror de
+// server/utils/sis/sis-client.js). Default conservado para no romper la corrida diaria.
+const SIS_HOST = process.env.SIS_HOST || "http://192.168.18.201";
 const SERVER = "NEWSYNCBASE";
 const TAGS = [
   "DCS_20HFY10FU013", "DCS_20HFY20FU013", "DCS_20HFY30FU013", "DCS_20HFY40FU013",
@@ -124,6 +126,8 @@ async function fetchPeriod(f1, h1, f2, h2) {
     );
   }
 
+  // AUD-28: `fechaCompact` son solo dígitos (sin traversal). writeXlsx además valida que la ruta
+  // quede contenida en el repo raíz (padre del scraper) antes de escribir.
   const out = path.join(__dirname, "..", `scraping_ge32_js_${fechaCompact}.xlsx`);
   writeXlsx(out, "GE32 SIS", rows);
   console.log(`\nArchivo generado: ${path.resolve(out)}`);

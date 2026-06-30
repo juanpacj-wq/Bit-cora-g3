@@ -47,11 +47,18 @@ export async function sweepTurnosVencidos(pool) {
     await transaction.begin();
     try {
       // UPDATE solo las que siguen NULL (idempotente entre runs concurrentes).
-      const idsCsv = ids.join(',');
-      const upd = await new sql.Request(transaction).query(`
+      // AUD-41 (BIT-AUDSEG-2026-001): lista parametrizada (@id0,@id1,...) en vez de CSV concatenado.
+      // `ids` siempre trae >=1 (se pobló al agrupar por sesión), pero guardamos el caso vacío igual.
+      const reqUpd = new sql.Request(transaction);
+      const placeholdersUpd = ids.map((id, i) => {
+        reqUpd.input('id' + i, sql.Int, id);
+        return '@id' + i;
+      }).join(',');
+      if (placeholdersUpd.length === 0) { await transaction.commit(); continue; }
+      const upd = await reqUpd.query(`
         UPDATE bitacora.sesion_bitacora
         SET finalizada_en = SYSUTCDATETIME()
-        WHERE sesion_bitacora_id IN (${idsCsv}) AND finalizada_en IS NULL
+        WHERE sesion_bitacora_id IN (${placeholdersUpd}) AND finalizada_en IS NULL
       `);
       const n = upd.rowsAffected[0] || 0;
       if (n > 0) {
@@ -121,10 +128,16 @@ export async function sweepTurnosVencidos(pool) {
       if (ahora >= fin) expirados.push(s.sesion_id);
     }
     if (expirados.length > 0) {
-      await pool.request().query(`
+      // AUD-41: lista parametrizada (@id0,@id1,...) en vez de CSV concatenado.
+      const reqExp = pool.request();
+      const placeholdersExp = expirados.map((id, i) => {
+        reqExp.input('id' + i, sql.Int, id);
+        return '@id' + i;
+      }).join(',');
+      await reqExp.query(`
         UPDATE bitacora.sesion_activa
            SET activa = 0, cerrada_en = SYSUTCDATETIME()
-         WHERE activa = 1 AND sesion_id IN (${expirados.join(',')})
+         WHERE activa = 1 AND sesion_id IN (${placeholdersExp})
       `);
       console.log(`[turno-sweeper] ${expirados.length} sesion_activa expulsadas a fin de turno`);
     }

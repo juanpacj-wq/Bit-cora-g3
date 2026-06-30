@@ -2,6 +2,20 @@
 // Escritor XLSX mínimo sin dependencias: ZIP (stored) + CRC32 + XML básico.
 
 const fs = require("fs");
+const path = require("path");
+
+// AUD-28 (BIT-AUDSEG-2026-001): valida que la ruta de escritura quede CONTENIDA dentro del
+// directorio designado (por defecto el repo raíz, padre de este script). Rechaza traversal (`..`)
+// o rutas absolutas que escapen. Cambio defensivo: la escritura normal del día (repo raíz) pasa.
+function assertWithinDir(filePath, baseDir) {
+  const resolved = path.resolve(filePath);
+  const base = path.resolve(baseDir);
+  const rel = path.relative(base, resolved);
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`writeXlsx: ruta fuera del directorio permitido (${base}): ${resolved}`);
+  }
+  return resolved;
+}
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -82,7 +96,9 @@ const colRef = (n) => {
 };
 
 // rows: array de arrays (celdas: number | string). Primera fila = encabezado.
-function writeXlsx(path, sheetName, rows) {
+// AUD-28: `baseDir` designa el directorio permitido para la escritura (default: repo raíz).
+function writeXlsx(filePath, sheetName, rows, baseDir = path.resolve(__dirname, "..")) {
+  const safePath = assertWithinDir(filePath, baseDir);
   let sheetData = "";
   rows.forEach((row, r) => {
     const cells = row
@@ -130,7 +146,7 @@ function writeXlsx(path, sheetName, rows) {
     { name: "xl/_rels/workbook.xml.rels", data: Buffer.from(wbRels) },
     { name: "xl/worksheets/sheet1.xml", data: Buffer.from(sheetXml) },
   ]);
-  fs.writeFileSync(path, buf);
+  fs.writeFileSync(safePath, buf);
 }
 
 module.exports = { writeXlsx };

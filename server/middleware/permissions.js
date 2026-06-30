@@ -1,15 +1,21 @@
 import sql from 'mssql';
 import { getDB } from '../db.js';
 
+// AUD-23 (BIT-AUDSEG-2026-001): el nombre de columna NUNCA debe provenir del valor recibido,
+// ni siquiera tras la allowlist. Mapeamos accion → literal de columna vía objeto fijo: el string
+// que se interpola es un literal del código (COL), nunca la entrada `accion`.
+const COL_PERMISO = { puede_ver: 'puede_ver', puede_crear: 'puede_crear' };
+
 export async function hasPermisoBitacora(sesion, bitacora_id, accion = 'puede_crear') {
   if (!sesion || !bitacora_id) return false;
-  if (accion !== 'puede_ver' && accion !== 'puede_crear') return false;
+  const COL = COL_PERMISO[accion];
+  if (!COL) return false;
   const db = await getDB();
   const r = await db.request()
     .input('cargo_id', sql.Int, sesion.cargo_id)
     .input('bitacora_id', sql.Int, bitacora_id)
     .query(`
-      SELECT ${accion} AS ok
+      SELECT ${COL} AS ok
       FROM lov_bit.cargo_bitacora_permiso
       WHERE cargo_id = @cargo_id AND bitacora_id = @bitacora_id
     `);
