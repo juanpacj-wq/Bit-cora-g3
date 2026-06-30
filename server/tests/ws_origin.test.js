@@ -21,11 +21,26 @@ test('Origin de otro host sin estar en allowlist → rechazado', () => {
     originPermitido('https://evil.example.com', 'bitacora.gecelca.com', undefined),
     false,
   );
-  // mismo nombre, distinto puerto = distinto host → rechazado
+  // host no-loopback distinto → rechazado (la tolerancia dev es SOLO loopback↔loopback)
   assert.equal(
-    originPermitido('http://localhost:9999', 'localhost:3002', undefined),
+    originPermitido('https://otro.gecelca.com', 'bitacora.gecelca.com', undefined),
     false,
   );
+});
+
+test('DEV: loopback↔loopback (proxy Vite, distinto puerto) → permitido; PROD → estricto', () => {
+  // En dev el proxy de Vite (changeOrigin) manda Origin :5174 con Host :3002; ambos son loopback
+  // del mismo equipo → se tolera como same-origin (si no, todo WS/POST del front de dev daría 403).
+  assert.equal(originPermitido('http://localhost:5174', 'localhost:3002', undefined), true);
+  assert.equal(originPermitido('http://127.0.0.1:5174', 'localhost:3002', undefined), true);
+  // En producción el atajo NO aplica: distinto host = rechazado.
+  const prev = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    assert.equal(originPermitido('http://localhost:5174', 'localhost:3002', undefined), false);
+  } finally {
+    process.env.NODE_ENV = prev;
+  }
 });
 
 test('Origin en WS_ALLOWED_ORIGINS → permitido (origin completo)', () => {

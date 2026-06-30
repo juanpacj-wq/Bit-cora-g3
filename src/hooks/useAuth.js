@@ -117,10 +117,16 @@ export function useAuth() {
     window.location.href = logoutUrl;
   }, [logoutLocal]);
 
+  // Un 401 inesperado en cualquier request NO debe arrastrar al usuario al front-channel logout de
+  // Microsoft (la página "Cerró la sesión de su cuenta" + cierre de TODA la sesión M365 del
+  // navegador). Eso convertía un solo 401 — p.ej. un endpoint consultado antes de elegir planta —
+  // en un bucle irrecuperable. Hacemos un logout LOCAL: limpiamos el estado de cliente y volvemos a
+  // la pantalla de login (de la que se reentra con un clic, reusando la sesión Entra viva). El
+  // logout COMPLETO de Microsoft queda reservado al botón explícito de "Cerrar sesión" (logout()).
   useEffect(() => {
-    setUnauthorizedHandler(() => { logout(); });
+    setUnauthorizedHandler(() => { logoutLocal(); });
     return () => setUnauthorizedHandler(null);
-  }, [logout]);
+  }, [logoutLocal]);
 
   // Crea/reactiva la sesión de app para la planta elegida. El cargo lo deriva el backend de los
   // App Roles del token (no se envía). Autenticado por cookie.

@@ -56,12 +56,26 @@ export const CORS_HEADERS = corsHeadersFor(undefined);
 // con el Host del request: el propio front) o si está en la allowlist de CORS. El llamador solo
 // invoca esto cuando HAY header Origin; Origin ausente (server-to-server, p.ej. el dashboard
 // cross-repo o curl) se permite aguas arriba para no romper integraciones server-side. Pura.
+function esLoopback(hostname) {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+}
+
 export function csrfOriginAllowed(origin, host, allowedOrigins = ALLOWED_ORIGINS) {
   if (!origin) return true;
   if (allowedOrigins.includes(origin)) return true;
   try {
     const o = new URL(origin);
     if (host && o.host === host) return true;
+    // DEV ONLY: detrás del proxy de Vite con changeOrigin:true, el Host se reescribe al target
+    // (localhost:3002) mientras el navegador sigue mandando Origin localhost:5174. Ambos son
+    // loopback del MISMO equipo, así que en entornos NO productivos lo tratamos como same-origin
+    // (si no, todo POST del front de dev daría 403). En producción NO aplica: front y back comparten
+    // host real, así que `o.host === host` ya basta y este atajo queda inerte.
+    if (process.env.NODE_ENV !== 'production') {
+      let hostName = '';
+      try { hostName = new URL(`http://${host}`).hostname; } catch { /* host inválido */ }
+      if (esLoopback(o.hostname) && esLoopback(hostName)) return true;
+    }
   } catch {
     // origin malformado → no es de confianza
   }

@@ -108,6 +108,23 @@ test('csrfOriginAllowed: Origin malformado se bloquea', () => {
   assert.equal(csrfOriginAllowed('no-es-url', 'bitacora.local', []), false);
 });
 
+test('csrfOriginAllowed: DEV tolera loopback↔loopback (proxy Vite); PROD estricto', () => {
+  // Dev: el proxy de Vite (changeOrigin) reescribe Host a :3002 mientras el navegador manda
+  // Origin :5174; ambos loopback → se permite (si no, todo POST del front de dev daría 403).
+  assert.equal(csrfOriginAllowed('http://localhost:5174', 'localhost:3002', []), true);
+  assert.equal(csrfOriginAllowed('http://127.0.0.1:5174', 'localhost:3002', []), true);
+  // Loopback vs no-loopback NO se tolera ni en dev.
+  assert.equal(csrfOriginAllowed('http://localhost:5174', 'bitacora.local', []), false);
+  // En producción el atajo no aplica.
+  const prev = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    assert.equal(csrfOriginAllowed('http://localhost:5174', 'localhost:3002', []), false);
+  } finally {
+    process.env.NODE_ENV = prev;
+  }
+});
+
 // ── AUD-16: reflejo CORS según allowlist ────────────────────────────────────
 test('corsHeadersFor refleja según la allowlist activa o cae a wildcard', () => {
   if (ALLOWED_ORIGINS.length === 0) {

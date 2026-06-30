@@ -37,6 +37,17 @@ export function originPermitido(origin, host, allowEnv = process.env.WS_ALLOWED_
 
   if (host && originHost === host) return true; // same-origin
 
+  // DEV ONLY: el proxy de Vite (changeOrigin:true) reescribe el Host a localhost:3002 mientras el
+  // navegador manda Origin localhost:5174. Ambos loopback del mismo equipo → same-origin en dev. En
+  // producción no aplica (front y back comparten host real).
+  if (process.env.NODE_ENV !== 'production') {
+    const loop = (h) => h === 'localhost' || h === '127.0.0.1' || h === '::1';
+    let oH = '', hH = '';
+    try { oH = new URL(origin).hostname; } catch { /* ya validado arriba */ }
+    try { hH = new URL(`http://${host}`).hostname; } catch { /* host inválido */ }
+    if (loop(oH) && loop(hH)) return true;
+  }
+
   if (allowEnv) {
     for (const raw of allowEnv.split(',')) {
       const a = raw.trim();
