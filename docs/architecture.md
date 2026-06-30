@@ -11,7 +11,7 @@ Documentos autoritativos para el modelo de datos y RFs detallados: `BIT-MODBD-20
 | Capa | Tecnología |
 |---|---|
 | Frontend | React 19, Vite 5, TailwindCSS 3, lucide-react |
-| Backend | Node.js ≥20 ESM, `http` nativo (sin Express), `--env-file` |
+| Backend | Node.js ≥20 ESM, `http` nativo (if-chain `legacyHandler`) + wrapper Express delgado acotado a `/auth` para el login OIDC (D-031), `--env-file` |
 | BD | SQL Server 2019+ (driver `mssql` con `useUTC=true`) |
 | Tests | `node:test` (backend), Vitest (frontend, pendiente) |
 | Build frontend | Vite (`npm run dev`, `npm run build`) |
@@ -64,8 +64,7 @@ Bit-cora-g3/server/
 │   └── permissions.js         puedeCrear, puedeVer, puedeCerrarTurno, etc.
 ├── routes/                    Endpoints organizados por dominio
 ├── utils/
-│   ├── turno.js               colombiaParts, getTurnoColombia, turnoFromPeriodo, ventanaTurno, periodoFromFechaBogota
-│   ├── fecha.js               (canónico TZ Bogotá — F19/F20)
+│   ├── turno.js               colombiaParts, getTurnoColombia, turnoFromPeriodo, ventanaTurno + helpers de fecha/TZ Bogotá (consolidados en F19; NO existe server/utils/fecha.js)
 │   ├── snapshots.js           snapshotJDTs/Jefes/Ingenieros (JSON agregado)
 │   ├── notificador.js         find/upsert sobre evento_dashboard y disponibilidad_dashboard
 │   ├── ciet.js                registrarEventoCierre (helper compartido)
@@ -266,7 +265,7 @@ Todo en una transacción única. Si algo falla, rollback completo. Devuelve `{ r
 - `TiempoEnEstado.jsx`: counter live `setInterval(1000ms)`. Formato fijo (D-024): unidades `años, meses, d, hr, min, s`. Plural correcto en `años`/`meses`; abreviaturas invariantes. Omite unidades con valor 0 **excepto segundos** (siempre presentes). Aproximaciones `1 año = 365.25 d`, `1 mes = 30.44 d`. Sin semanas. Exporta `formatDiff` y `useTiempoTranscurrido` para reuso (D-028).
 - `HistorialList.jsx`: paginación "Ver más" (+20 vía `historial_offset`).
 - `CambiarEstadoModal.jsx`: 3 modos (crear / editar / deshacer-confirm). Manejo de 409 con popups reactivos.
-- `sessionStorage('disponibilidad.plantaSeleccionada')`: persiste el toggle entre tabs.
+- Planta activa: la persiste el **routing por hash** (`#/disp?planta=GEC3|GEC32`, D-035), fuente única de verdad. El viejo `sessionStorage('disponibilidad.plantaSeleccionada')` se retiró (doble fuente).
 
 ### Otras bitácoras (formulario_especial=0)
 

@@ -26,5 +26,8 @@
   },
   "devDependencies": {
     "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
