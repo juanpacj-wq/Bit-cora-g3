@@ -29,6 +29,11 @@ const poolConfig = {
 
 const pool = new sql.ConnectionPool(poolConfig);
 const poolConnect = pool.connect();
+// El consumidor real es getDB() (await poolConnect, que sí propaga el error). Este .catch no-op
+// solo evita que un fallo de conexión en la carga del módulo se vuelva un unhandledRejection
+// global (p.ej. al importar este módulo en un test puro sin BD). No altera el comportamiento:
+// getDB() sigue lanzando ante un fallo real de conexión.
+poolConnect.catch(() => {});
 
 export async function getDB() {
   await poolConnect;
