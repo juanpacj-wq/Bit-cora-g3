@@ -24,6 +24,7 @@ import { revalidate, REVALIDATE_INTERVAL_MS } from './revalidate.js';
 import { setWsSessionContext } from './wsSession.js';
 import { expressErrorHandler } from '../utils/errores.js';
 import { corsMiddleware, csrfMiddleware, requireEntra } from '../routes/_middleware.js';
+import catalogosRouter from '../routes/catalogos.js';
 import { detectRoles } from './roles.js';
 import {
   isConfigured as m365Configured, m365Config,
@@ -244,6 +245,11 @@ export async function buildAuthApp(legacyHandler) {
   // Va DESPUÉS de las rutas de auth (login/me/logout son self-gating) y ANTES de los routers de
   // datos + el catch-all. Todo lo que no esté en la allowlist pública exige identidad Entra.
   app.use(requireEntra);
+
+  // ── Routers de dominio (AUD-34/35) — se montan aquí, antes del catch-all ─────────────────────
+  // Cada dominio migrado del if-chain vive en routes/<dominio>.js. Express matchea estos primero;
+  // lo aún no migrado cae al legacyHandler de abajo.
+  app.use('/api/catalogos', catalogosRouter);   // E2
 
   // ── Delegación: TODO lo demás al if-chain nativo (req.session ya está poblado) ──
   // Transitorio (AUD-34/35): a medida que cada dominio migre a routes/<dominio>.js montado arriba,
