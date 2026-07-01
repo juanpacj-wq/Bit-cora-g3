@@ -1,13 +1,7 @@
 // Helpers compartidos por los routers de dominio (AUD-34/35). Consolidan piezas que vivían como
 // estado/funciones module-level del if-chain (server.js) para que los routers Express las reusen.
 
-import express from 'express';
 import { CORS_HEADERS, rateLimitCheck } from '../utils/http.js';
-
-// Body parser JSON para routers con mutadores (POST/PUT/DELETE). Mismo tope que parseBody del
-// if-chain (AUD-15: 1 MB). Se monta por router — NO global — mientras el legacyHandler siga
-// leyendo el stream crudo con parseBody para las rutas aún no migradas.
-export const jsonBody = express.json({ limit: '1mb' });
 
 // D-026: cache lazy del bitacora_id de DISP. Lo usan el router de disponibilidad (E8) y la rama
 // DISP de registros (E10) para devolver shape compat (registro.bitacora_id). Movido de server.js.

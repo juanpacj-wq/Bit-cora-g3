@@ -18,7 +18,7 @@ import {
 } from '../utils/snapshots.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { asyncH, loadAppSession } from './_middleware.js';
-import { jsonBody, getDispBitacoraId } from './_shared.js';
+import { getDispBitacoraId } from './_shared.js';
 
 // ── Helpers DISP (movidos de server.js — solo los usan las ramas DISP de POST/PUT) ──────────────
 // F12/D-024: catálogo cerrado de estados DISP. Indisponible y Mantenimiento comparten codigo=-1 a
@@ -63,7 +63,6 @@ function mapDispRowToLegacyShape(row, bitacoraId) {
 }
 
 const router = express.Router();
-router.use(jsonBody);
 router.use(loadAppSession);
 
 // GET /api/registros/activos?planta_id=&bitacora_id=&estado=

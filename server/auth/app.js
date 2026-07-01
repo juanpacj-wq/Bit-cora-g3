@@ -1,15 +1,13 @@
 /**
- * Surface de autenticación Entra ID montado como wrapper Express delgado.
+ * Compositor de la app Express (AUD-34/35). Modelo de routing ÚNICO — ya no hay if-chain nativo.
  *
- * El backend de bitácoras es http nativo (un if-chain en server.js). Para reusar el patrón
- * probado de la implementación de referencia (express-session + @azure/msal-node + store MSSQL)
- * montamos un Express que:
- *   1. corre el middleware de sesión (cookie httpOnly) para TODA request → req.session,
- *   2. resuelve las rutas de auth (/auth/login, /auth/redirect, /api/me, /api/logout),
- *   3. delega TODO lo demás al if-chain actual (legacyHandler), que ahora puede leer req.session.
+ * Pipeline, en orden:
+ *   session → cors → csrf → /health → auth (login/redirect/me/logout) → requireEntra →
+ *   express.json (global, post-auth) → routers de dominio (routes/*.js) → 404 → errorHandler.
  *
- * `express.json()` se monta ACOTADO a las rutas de auth: el if-chain usa parseBody() (lee el
- * stream crudo) y un body-parser global lo rompería.
+ * `express.json({ limit: '1mb' })` se monta GLOBAL después de requireEntra (AUD-15: tope de 1 MB
+ * → 413 vía clasificarError). Antes se acotaba por router mientras convivía el if-chain con su
+ * parseBody crudo; migrados todos los dominios, se unificó a un solo body parser.
  */
 import express from 'express';
 import session from 'express-session';
@@ -51,7 +49,7 @@ function clearAuthTransients(s) {
   delete s.pkceVerifier; delete s.authState; delete s.authNonce; delete s.silent;
 }
 
-export async function buildAuthApp(legacyHandler) {
+export async function buildAuthApp() {
   const app = express();
   app.set('trust proxy', 1);
 
@@ -103,6 +101,9 @@ export async function buildAuthApp(legacyHandler) {
   if (isProduction && storeKind === 'memory') {
     console.warn('  ⚠  PRODUCCIÓN con store en MEMORIA: usa SESSION_STORE=mssql.');
   }
+
+  // ── Healthcheck (público, antes del gate) ────────────────────────────────────
+  app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
   // ── Paso 1: arranca el login OIDC ──────────────────────────────────────────
   app.get('/auth/login', async (req, res) => {
@@ -257,9 +258,13 @@ export async function buildAuthApp(legacyHandler) {
   // datos + el catch-all. Todo lo que no esté en la allowlist pública exige identidad Entra.
   app.use(requireEntra);
 
-  // ── Routers de dominio (AUD-34/35) — se montan aquí, antes del catch-all ─────────────────────
-  // Cada dominio migrado del if-chain vive en routes/<dominio>.js. Express matchea estos primero;
-  // lo aún no migrado cae al legacyHandler de abajo.
+  // Body parser JSON GLOBAL (post-auth). AUD-15: tope de 1 MB → express.json lanza
+  // entity.too.large, que clasificarError mapea a 413. Sustituye el jsonBody por-router.
+  app.use(express.json({ limit: '1mb' }));
+
+  // ── Routers de dominio (AUD-34/35) ───────────────────────────────────────────────────────────
+  // Todo el backend de datos vive en routes/<dominio>.js. No queda if-chain: lo que ningún router
+  // matchee cae al 404 de abajo.
   app.use('/api/catalogos', catalogosRouter);              // E2
   app.use('/api/cierre', cierreRouter);                    // E6
   app.use('/api/historicos', historicosRouter);            // E5
@@ -273,10 +278,8 @@ export async function buildAuthApp(legacyHandler) {
   app.use('/api/bitacora', bitacoraRouter);                // E10 (abrir, finalizar, counts, ...)
   app.use('/api/registros', registrosRouter);              // E10 (activos, POST/PUT/DELETE + rama DISP)
 
-  // ── Delegación: TODO lo demás al if-chain nativo (req.session ya está poblado) ──
-  // Transitorio (AUD-34/35): a medida que cada dominio migre a routes/<dominio>.js montado arriba,
-  // el if-chain se encoge hasta quedar vacío y este catch-all se elimina.
-  app.use((req, res) => legacyHandler(req, res));
+  // ── 404: ninguna ruta ni router matcheó ──────────────────────────────────────────────────────
+  app.use((req, res) => res.status(404).json({ error: 'Not Found' }));
 
   // ── Error-handler de la capa Express (D-032) ────────────────────────────────
   // Debe ir de ÚLTIMO. Express enruta acá (firma de 4 args) cualquier error propagado vía

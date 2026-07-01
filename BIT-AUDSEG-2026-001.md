@@ -100,8 +100,8 @@ Leyenda estado: ⬜ pendiente · 🟡 en progreso · ✅ resuelto.
 | ID | Estado | Severidad | Título | Evidencia |
 |---|---|---|---|---|
 | AUD-33 | 🟡 | Alta (arq.) | Suite de tests corre contra la BD productiva con borrados por `planta_id='GEC3'` | `db.js:38-56`; `CLAUDE.md` conv. #14 (riesgo residual) |
-| AUD-34 | ⬜ | Media (arq.) | `server.js` monolítico (~2700 líneas, if-chain único) | `server/server.js` |
-| AUD-35 | ⬜ | Media (arq.) | Modelo de routing partido http-nativo + wrapper Express tras D-031 | `auth/app.js`, `server.js` |
+| AUD-34 | ✅ | Media (arq.) | `server.js` monolítico (~2700 líneas, if-chain único) | `server/server.js` |
+| AUD-35 | ✅ | Media (arq.) | Modelo de routing partido http-nativo + wrapper Express tras D-031 | `auth/app.js`, `server.js` |
 | AUD-36 | ✅ | Baja (arq.) | Parser binario duplicado (ESM servidor ≡ CommonJS CLI, divergibles) | `sis/xls-parser.js` ≡ `js-scraper-carbon-g32/xls.js` |
 | AUD-37 | ✅ | Baja (arq.) | Sin `engines.node`; lockfile del scraper standalone ausente | `package.json`, `server/package.json`, `js-scraper-carbon-g32/package.json` |
 | AUD-38 | ✅ | Baja (arq.) | Drift de documentación (`architecture.md` vs. estado real post D-031/D-035) | `docs/architecture.md:14,269` |
@@ -809,10 +809,11 @@ autenticación sea opt-in y fácil de olvidar.**
 **Remediación.** Extraer handlers a módulos por dominio bajo `routes/` con un dispatcher que aplique
 auth/permiso **por defecto** (cruza AUD-05 E1). Refactor incremental, una familia de endpoints por etapa,
 con la suite como red.
-> **Estado (pipeline):** ⬜ **diferido a propósito.** La urgencia de *seguridad* (endpoints sin auth)
-> se resolvió puntualmente en AUD-05 (`30b9447`). El split del god-file es un refactor grande que
-> requiere correr la suite completa contra una instancia real para no romper rutas; se hace como ronda
-> arquitectónica deliberada (idealmente tras la BD de test, AUD-33), no en un pase autónomo a ciegas.
+> **Estado (pipeline):** ✅ **resuelto (D-037).** Migración strangler del if-chain a routers Express
+> por dominio (E1–E10): handlers extraídos a `server/routes/<dominio>.js`; `server.js` pasó de ~2849 a
+> ~73 líneas (bootstrap puro). El fix estructural es el middleware global `requireEntra` (auth-por-defecto
+> con allowlist pública) → un endpoint nuevo nace cerrado. Verificado por etapa con `node --check` + tests
+> puros + smoke autenticado sobre la planta `'TST'` (D-030); la suite HTTP plena sigue atada a AUD-33.
 
 ### AUD-35 — Modelo de routing partido http-nativo + wrapper Express tras D-031 · Media (arq.)
 **Problema.** D-031 introdujo un wrapper Express delgado solo para `/auth`, delegando el resto al
@@ -825,8 +826,10 @@ de seguridad (límites de body, CORS, auth) y de carga cognitiva. `CLAUDE.md`/`a
 unificado es lo natural dado que Express ya está dentro), o aislar limpiamente las dos capas con un
 contrato explícito. Volcar la decisión a `decisions.md`.
 **Cross-ref.** AUD-15, AUD-16, AUD-34, D-031.
-> **Estado (pipeline):** ⬜ **diferido** junto con AUD-34 (mismo refactor estructural). Sus síntomas de
-> seguridad concretos se atacan puntualmente en otras olas (AUD-15 body, AUD-16 CORS, AUD-21 handshake WS).
+> **Estado (pipeline):** ✅ **resuelto (D-037)** junto con AUD-34 (mismo refactor). Modelo único = Express:
+> se borró `legacyHandler` y `parseBody`; pipeline `session → cors → csrf → /health → auth → requireEntra →
+> express.json (global, 1 MB) → routers → 404 → expressErrorHandler`. Body parsing unificado en `express.json`
+> (tope AUD-15 → 413 vía `clasificarError`). `CLAUDE.md`/`architecture.md` actualizados al modelo Express.
 
 ### AUD-36 — Parser binario duplicado (ESM servidor ≡ CommonJS CLI) · Baja (arq.)
 **Problema.** `sis/xls-parser.js` y `js-scraper-carbon-g32/xls.js` son el mismo algoritmo byte a byte;

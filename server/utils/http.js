@@ -6,12 +6,6 @@ const ALLOW_HEADERS = bypassActivo
   ? 'Content-Type, Authorization, X-Sesion-Id'
   : 'Content-Type, Authorization';
 
-// AUD-15: tope de tamaño del body para parseBody. Sin esto, `data += chunk` acumulaba sin
-// límite y un POST muy grande podía agotar la memoria del proceso (DoS). 1 MB es holgado para
-// el batch más grande del sistema (MAND: 24 periodos × 3 tipos × 2 plantas; COMB: 24 × 10
-// combustibles). Exportado para que el test lo referencie sin hardcodear.
-export const MAX_BODY_BYTES = 1_000_000;
-
 // AUD-16: CORS allowlist-driven. `CORS_ALLOWED_ORIGINS` es un CSV de orígenes permitidos
 // (ej. "https://bitacora.gecelca.com,https://otro.host").
 //  - Si NO está seteada: se conserva el comportamiento actual (Access-Control-Allow-Origin: '*')
@@ -103,37 +97,9 @@ export function rateLimitCheck(map, key, now, { max, windowMs }) {
   };
 }
 
-export function parseBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    let size = 0;
-    let aborted = false;
-    req.on('data', (chunk) => {
-      if (aborted) return;
-      // AUD-15: medir bytes reales y cortar si excede el tope.
-      size += Buffer.byteLength(chunk);
-      if (size > MAX_BODY_BYTES) {
-        aborted = true;
-        const err = new Error('Cuerpo de la petición demasiado grande');
-        err.code = 'cuerpo_demasiado_grande';
-        req.destroy();
-        return reject(err);
-      }
-      data += chunk;
-    });
-    req.on('end', () => {
-      if (aborted) return;
-      if (!data) return resolve({});
-      try {
-        resolve(JSON.parse(data));
-      } catch (err) {
-        reject(err);
-      }
-    });
-    req.on('error', (err) => { if (!aborted) reject(err); });
-  });
-}
-
+// AUD-34/35: parseBody (lector de stream crudo del if-chain) fue eliminado. El body JSON lo parsea
+// express.json({ limit: '1mb' }) global (auth/app.js); su tope de 1 MB (AUD-15) → 413 vía
+// clasificarError (type 'entity.too.large'). sendJSON sigue vivo: los routers lo usan para responder.
 export function sendJSON(res, status, payload, corsHeaders = CORS_HEADERS) {
   res.writeHead(status, { 'Content-Type': 'application/json', ...corsHeaders });
   res.end(JSON.stringify(payload));

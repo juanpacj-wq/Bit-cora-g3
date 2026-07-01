@@ -11,7 +11,7 @@ Documentos autoritativos para el modelo de datos y RFs detallados: `BIT-MODBD-20
 | Capa | Tecnología |
 |---|---|
 | Frontend | React 19, Vite 5, TailwindCSS 3, lucide-react |
-| Backend | Node.js ≥20 ESM, `http` nativo (if-chain `legacyHandler`) + wrapper Express delgado acotado a `/auth` para el login OIDC (D-031), `--env-file` |
+| Backend | Node.js ≥20 ESM, **Express** (modelo de routing único, D-037): `session → cors → csrf → auth OIDC (D-031) → requireEntra → express.json → routers de dominio (`routes/*.js`) → 404 → errorHandler`; `--env-file` |
 | BD | SQL Server 2019+ (driver `mssql` con `useUTC=true`) |
 | Tests | `node:test` (backend), Vitest (frontend, pendiente) |
 | Build frontend | Vite (`npm run dev`, `npm run build`) |
@@ -57,12 +57,13 @@ Dos esquemas en la base `bitacora_gec3`:
 
 ```
 Bit-cora-g3/server/
-├── server.js                  Router HTTP + handlers (no usa Express)
+├── server.js                  Bootstrap: initDB → buildAuthApp → http.Server (WS) → sweepers → listen (D-037)
+├── auth/app.js                Compositor Express: sesión + /auth OIDC + requireEntra + montaje de routers
 ├── db.js                      Conexión + initDB() idempotente (DDL, seeds, migraciones)
 ├── middleware/
-│   ├── auth.js                loadSession() lee token de cookie/header, hidrata sesión
+│   ├── auth.js                loadSession() lee la sesión de app (sesion_activa) por identidad Entra
 │   └── permissions.js         puedeCrear, puedeVer, puedeCerrarTurno, etc.
-├── routes/                    Endpoints organizados por dominio
+├── routes/                    Endpoints por dominio (Express); _middleware.js (requireEntra/loadAppSession/asyncH), _shared.js
 ├── utils/
 │   ├── turno.js               colombiaParts, getTurnoColombia, turnoFromPeriodo, ventanaTurno + helpers de fecha/TZ Bogotá (consolidados en F19; NO existe server/utils/fecha.js)
 │   ├── snapshots.js           snapshotJDTs/Jefes/Ingenieros (JSON agregado)
