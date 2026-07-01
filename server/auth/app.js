@@ -25,6 +25,11 @@ import { setWsSessionContext } from './wsSession.js';
 import { expressErrorHandler } from '../utils/errores.js';
 import { corsMiddleware, csrfMiddleware, requireEntra } from '../routes/_middleware.js';
 import catalogosRouter from '../routes/catalogos.js';
+import cierreRouter from '../routes/cierre.js';
+import historicosRouter from '../routes/historicos.js';
+import autorizacionesRouter from '../routes/autorizaciones.js';
+import eventosDashboardRouter from '../routes/eventos-dashboard.js';
+import conformacionRouter from '../routes/conformacion.js';
 import { detectRoles } from './roles.js';
 import {
   isConfigured as m365Configured, m365Config,
@@ -249,7 +254,12 @@ export async function buildAuthApp(legacyHandler) {
   // ── Routers de dominio (AUD-34/35) — se montan aquí, antes del catch-all ─────────────────────
   // Cada dominio migrado del if-chain vive en routes/<dominio>.js. Express matchea estos primero;
   // lo aún no migrado cae al legacyHandler de abajo.
-  app.use('/api/catalogos', catalogosRouter);   // E2
+  app.use('/api/catalogos', catalogosRouter);              // E2
+  app.use('/api/cierre', cierreRouter);                    // E6
+  app.use('/api/historicos', historicosRouter);            // E5
+  app.use('/api/autorizaciones', autorizacionesRouter);    // E4 (deprecated)
+  app.use('/api/eventos-dashboard', eventosDashboardRouter); // E4
+  app.use('/api/conformacion-turno', conformacionRouter);  // E3
 
   // ── Delegación: TODO lo demás al if-chain nativo (req.session ya está poblado) ──
   // Transitorio (AUD-34/35): a medida que cada dominio migre a routes/<dominio>.js montado arriba,
