@@ -10,10 +10,8 @@ import { puedeVerConformacion, puedeTriggerConformacion } from '../middleware/pe
 import { ventanaTurno } from '../utils/turno.js';
 import { buildConformacionSnapshot, persistConformacionSnapshot } from '../utils/conformacion-snapshot.js';
 import { asyncH, loadAppSession } from './_middleware.js';
-import { jsonBody } from './_shared.js';
 
 const router = express.Router();
-router.use(jsonBody);        // no-op en GET; parsea el body del POST trigger
 router.use(loadAppSession);
 
 // GET /api/conformacion-turno?fecha=&turno=&planta_id=

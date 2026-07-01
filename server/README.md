@@ -108,6 +108,6 @@ Desde 2026-04, los registros y autorizaciones guardan los roles presentes como J
 
 - Todas las respuestas incluyen headers CORS (ver `utils/http.js`).
 - Queries parametrizados con `.input(name, sql.Tipo, value)`. No hay interpolación de strings en SQL.
-- `parseBody(req)` rechaza en JSON malformado → capturado por try/catch global (500).
-- Params de URL se extraen con regex; el router es manual en `server.js` (sin Express).
+- El body JSON lo parsea `express.json({ limit: '1mb' })` global (D-037): malformado → 400 `cuerpo_invalido`, >1 MB → 413 `cuerpo_demasiado_grande` (vía `clasificarError`). `parseBody` fue eliminado.
+- Routing en **Express** (D-037): un router por dominio en `routes/*.js`, montados por `auth/app.js`. Params por `:param`/`req.params`, query por `req.query`. Auth cerrada por defecto (`requireEntra`).
 - Dentro de transacciones `mssql` no lanzar queries en paralelo (`Promise.all`): serializar con `await`.

@@ -19,7 +19,7 @@
 |---|---|---|
 | 0 Precondiciones | ✅ | PRE-1✅ PRE-2✅ conectividad✅ AUD-33🟡(mitigado+runbook) |
 | 1 P0 secretos/PII | ✅ | AUD-04✅ · AUD-01/02/03🟡 (código `4a96531`; rotación+purga = checkpoint humano, runbook en ficha) |
-| 2 Auth/routing | ✅* | AUD-05✅ AUD-06✅ (`30b9447`); AUD-34/AUD-35 ⬜ diferidos (refactor arq. grande, no a ciegas) |
+| 2 Auth/routing | ✅ | AUD-05✅ AUD-06✅ (`30b9447`); AUD-34/AUD-35 ✅ (D-037, ronda arq. dedicada — routing unificado en Express) |
 | 3 Transporte/sesión | ✅* | AUD-09✅ AUD-22✅ (`1903579`); AUD-07🟡 (código+warn, cert=infra); AUD-13🟡 (documentado, ronda dedicada) |
 | 4 Scraper/WS | ✅* | AUD-14/25/26/36/42 ✅, AUD-08/21 🟡 (`0013f52`); follow-ups: worker_thread, canal TLS (infra), DELETE SIS, auth WS por cookie |
 | 5 Authz/BD | ✅* | AUD-10/11/29/30/31 ✅ (`d26bf84`,`9602416`,`dddfab1`); AUD-18 🟡 (token opcional, cierre=cross-repo); AUD-12 🟡 (infra/DBA, runbook) |
@@ -29,7 +29,7 @@
 ## Tally final
 - **✅ 24** resueltos en código + test: AUD-04,05,06,09,10,11,14,15,16,17,19,20,22,23,24,25,26,27,28,29,30,31,32,36,38,39,40,41,42,37 (y AUD-33 mitigado).
 - **🟡 7** parcial + runbook: AUD-01 (rotación/purga historial), AUD-07 (cert TLS), AUD-13 (cifrado sesión), AUD-18 (token cross-repo), AUD-12 (split logins BD), AUD-08 (worker/canal SIS), AUD-21 (handshake WS por cookie). + AUD-02/03 (archivo fuera del árbol; purga de historial = checkpoint AUD-01). + AUD-33 (BD test dedicada = infra).
-- **⬜ 2** diferidos (refactor arq. grande): AUD-34 (split server.js), AUD-35 (unificar routing).
+- **✅ AUD-34/AUD-35** (refactor arq., cerrado post-pipeline en **D-037**): split de `server.js` + routing unificado en Express.
 - Tests puros nuevos: 51/51 verde. Build prod verde. server npm audit: 0 vulns.
 - **`/security-review` final (gate de cierre):** revisó toda la rama (SQLi, bypass auth, CORS/CSRF/CSWSH, OIDC, XXE, SSRF, escalada de revalidación) → **0 vulnerabilidades de alta confianza introducidas**. La remediación no agrega regresiones; los puntos débiles restantes son los 🟡/⬜ ya documentados.
 - **PIPELINE COMPLETO.** Acciones humanas pendientes (irreversibles/infra/cross-repo) listadas en los runbooks de las fichas 🟡.
@@ -84,6 +84,18 @@ chocaron con el setup de dev y se corrigieron:
   clasifica → loguea server-side → responde `{ error, codigo, mensaje }` saneado (503 `db_no_disponible`).
   Verificado: 3 tests end-to-end nuevos en `errores.test.js` (Express real + el handler exportado: conexión
   → 503 sin filtrar host; genérico → 500 sin filtrar detalle; camino feliz intacto). Suite `errores` 10/10.
+- **AUD-34 / AUD-35 ✅ (completados — ADR D-037)**: ronda arquitectónica dedicada. Migración strangler del
+  if-chain (`legacyHandler`) a **routers Express por dominio** (E1–E10): `server/routes/*.js` (catálogos,
+  cierre, históricos, autorizaciones, eventos-dashboard, conformación, combustibles, disponibilidad, MAND,
+  registros —con rama DISP inline, D-026—, bitácora, sesión) montados en `auth/app.js` antes del catch-all.
+  E11 borró `legacyHandler` + `parseBody`, hoistó `express.json` a global (post-auth, 1 MB) y dejó
+  `server.js` en **bootstrap** (~73 líneas, era ~2849). **Fix estructural de AUD-05:** middleware global
+  `requireEntra` (`routes/_middleware.js`) cierra el acceso anónimo salvo allowlist pública → auth por
+  defecto. Pipeline único: `session → cors → csrf → /health → auth → requireEntra → express.json → routers
+  → 404 → expressErrorHandler`. **Verificación "proceder ahora"** (decisión del usuario): por etapa
+  `node --check` + tests puros (`routes_middleware` 8/8, suite pura 68/68) + smoke autenticado en `:3099`
+  contra planta `'TST'` (D-030, sin tocar `:3002` ni datos reales). **Residual:** la suite HTTP completa
+  (`server npm test`) sigue diferida a la BD de test dedicada (AUD-33). Commits `19ed9ae` (E10) + E11.
 
 ## Bitácora por ítem (rellenar a medida)
 <!-- AUD-NN | estado | commit | verificación | residual humano/infra -->

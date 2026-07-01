@@ -12,10 +12,9 @@ import { resolveCargo } from '../utils/entra-roles.js';
 import { getTurnoColombia } from '../utils/turno.js';
 import { broadcastUsuariosActivos } from '../utils/ws-usuarios-activos.js';
 import { asyncH, loadAppSession } from './_middleware.js';
-import { jsonBody, aplicarRateLimit } from './_shared.js';
+import { aplicarRateLimit } from './_shared.js';
 
 const router = express.Router();
-router.use(jsonBody);
 
 // POST /api/auth/select-context { planta_id }
 // Deriva usuario_id de la cookie Entra (req.session.user) y cargo_id de los App Roles del token por

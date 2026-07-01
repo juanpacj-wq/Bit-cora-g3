@@ -9,10 +9,8 @@ import { sendJSON } from '../utils/http.js';
 import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch } from '../middleware/permissions.js';
 import { registrarEventoCierre } from '../utils/ciet.js';
 import { asyncH, loadAppSession } from './_middleware.js';
-import { jsonBody } from './_shared.js';
 
 const router = express.Router();
-router.use(jsonBody);
 router.use(loadAppSession);
 
 // POST /api/bitacora/abrir { bitacora_id }  (F2, idempotente UPSERT en sesion_bitacora)

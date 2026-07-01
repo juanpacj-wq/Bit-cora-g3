@@ -1,6 +1,6 @@
 // Router de cierre de bitácoras (E6, AUD-34/35). Preview + cierre individual/masivo por turno.
 // Montado bajo /api/cierre tras requireEntra. Todas las rutas exigen sesión de app (loadAppSession)
-// y cargos con puede_cerrar_turno para las de mutación. Los mutadores llevan jsonBody (req.body).
+// y cargos con puede_cerrar_turno para las de mutación. El body JSON lo parsea express.json global.
 
 import express from 'express';
 import sql from 'mssql';
@@ -12,10 +12,8 @@ import { ventanaTurno } from '../utils/turno.js';
 import { registrarEventoCierre } from '../utils/ciet.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { asyncH, loadAppSession } from './_middleware.js';
-import { jsonBody } from './_shared.js';
 
 const router = express.Router();
-router.use(jsonBody);        // no-op en GET (sin body); parsea el body de los POST
 router.use(loadAppSession);  // req.sesion garantizado en todos los handlers
 
 // GET /api/cierre/preview?planta_id=&bitacora_id=

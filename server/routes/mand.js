@@ -14,10 +14,8 @@ import { upsertEventoDashboard } from '../utils/notificador.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { asyncH, loadAppSession } from './_middleware.js';
-import { jsonBody } from './_shared.js';
 
 const router = express.Router();
-router.use(jsonBody);        // no-op en GET; parsea el body de los POST
 router.use(loadAppSession);
 
 // GET /api/sala-de-mando?planta_id=&fecha=

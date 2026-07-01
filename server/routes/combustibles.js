@@ -10,10 +10,8 @@ import { sendJSON } from '../utils/http.js';
 import { hasPermisoBitacora } from '../middleware/permissions.js';
 import { fechaBogotaStr } from '../utils/turno.js';
 import { asyncH, loadAppSession } from './_middleware.js';
-import { jsonBody } from './_shared.js';
 
 const router = express.Router();
-router.use(jsonBody);        // no-op en GET; parsea el body del POST batch
 router.use(loadAppSession);
 
 // GET /api/combustibles/catalogo?planta_id=GEC3|GEC32

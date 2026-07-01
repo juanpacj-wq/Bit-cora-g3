@@ -14,10 +14,9 @@ import {
 import { registrarDeshacerDisponibilidad } from '../utils/ciet.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { asyncH, loadAppSession } from './_middleware.js';
-import { jsonBody, getDispBitacoraId } from './_shared.js';
+import { getDispBitacoraId } from './_shared.js';
 
 const router = express.Router();
-router.use(jsonBody);        // no-op en GET; parsea el body del POST deshacer
 router.use(loadAppSession);
 
 // GET /api/disponibilidad?planta_id=&historial_limit=20&historial_offset=0

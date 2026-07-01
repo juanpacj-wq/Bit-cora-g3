@@ -1,48 +1,22 @@
 // Tests de lógica pura del endurecimiento (BIT-AUDSEG): NO tocan BD ni red.
-// Cubren: tope de body (AUD-15), rate limiter (AUD-20), check de Origin/CSRF (AUD-19),
-// reflejo CORS por allowlist (AUD-16) y la clasificación 413 en errores.js.
+// Cubren: rate limiter (AUD-20), check de Origin/CSRF (AUD-19), reflejo CORS por allowlist (AUD-16)
+// y la clasificación 413/400 de los errores de express.json en errores.js (AUD-15/34/35).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
-import {
-  MAX_BODY_BYTES, parseBody, rateLimitCheck, csrfOriginAllowed, corsHeadersFor, ALLOWED_ORIGINS,
-} from '../utils/http.js';
+import { rateLimitCheck, csrfOriginAllowed, corsHeadersFor, ALLOWED_ORIGINS } from '../utils/http.js';
 import { clasificarError } from '../utils/errores.js';
 
-// ── AUD-15: parseBody con tope ──────────────────────────────────────────────
-test('MAX_BODY_BYTES es un entero positivo razonable', () => {
-  assert.equal(typeof MAX_BODY_BYTES, 'number');
-  assert.ok(MAX_BODY_BYTES >= 1000);
-});
-
-test('parseBody rechaza body que excede MAX_BODY_BYTES', async () => {
-  const req = new EventEmitter();
-  req.destroy = () => {};
-  const p = parseBody(req);
-  req.emit('data', Buffer.alloc(MAX_BODY_BYTES + 1, 0x61)); // 'a' * (límite + 1)
-  await assert.rejects(p, (err) => err.code === 'cuerpo_demasiado_grande');
-});
-
-test('parseBody parsea JSON válido bajo el límite', async () => {
-  const req = new EventEmitter();
-  req.destroy = () => {};
-  const p = parseBody(req);
-  req.emit('data', '{"a":1}');
-  req.emit('end');
-  assert.deepEqual(await p, { a: 1 });
-});
-
-test('parseBody resuelve {} con body vacío', async () => {
-  const req = new EventEmitter();
-  req.destroy = () => {};
-  const p = parseBody(req);
-  req.emit('end');
-  assert.deepEqual(await p, {});
-});
-
-test('clasificarError mapea cuerpo_demasiado_grande a 413', () => {
-  const err = Object.assign(new Error('big'), { code: 'cuerpo_demasiado_grande' });
+// ── AUD-15/34/35: el tope de body lo enforcea express.json (limit '1mb'); su error se clasifica ──
+// parseBody (lector de stream del if-chain) fue eliminado en E11. El límite hoy vive en el body
+// parser global; acá verificamos que errores.js mapee sus errores a 413/400.
+test('clasificarError mapea entity.too.large (express.json) a 413', () => {
+  const err = Object.assign(new Error('request entity too large'), { type: 'entity.too.large', status: 413 });
   assert.deepEqual(clasificarError(err), { status: 413, codigo: 'cuerpo_demasiado_grande' });
+});
+
+test('clasificarError mapea entity.parse.failed (express.json) a 400', () => {
+  const err = Object.assign(new Error('Unexpected token'), { type: 'entity.parse.failed', status: 400 });
+  assert.deepEqual(clasificarError(err), { status: 400, codigo: 'cuerpo_invalido' });
 });
 
 // ── AUD-20: rate limiter ────────────────────────────────────────────────────
