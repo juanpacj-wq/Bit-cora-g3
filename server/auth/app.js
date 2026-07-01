@@ -33,6 +33,9 @@ import conformacionRouter from '../routes/conformacion.js';
 import combustiblesRouter from '../routes/combustibles.js';
 import disponibilidadRouter from '../routes/disponibilidad.js';
 import mandRouter from '../routes/mand.js';
+import sesionRouter from '../routes/sesion.js';
+import bitacoraRouter from '../routes/bitacora.js';
+import registrosRouter from '../routes/registros.js';
 import { detectRoles } from './roles.js';
 import {
   isConfigured as m365Configured, m365Config,
@@ -266,6 +269,9 @@ export async function buildAuthApp(legacyHandler) {
   app.use('/api/combustibles', combustiblesRouter);        // E7
   app.use('/api/disponibilidad', disponibilidadRouter);    // E8
   app.use('/api/sala-de-mando', mandRouter);               // E9
+  app.use('/api/auth', sesionRouter);                      // E10 (select-context, cerrar-app, usuarios-activos)
+  app.use('/api/bitacora', bitacoraRouter);                // E10 (abrir, finalizar, counts, ...)
+  app.use('/api/registros', registrosRouter);              // E10 (activos, POST/PUT/DELETE + rama DISP)
 
   // ── Delegación: TODO lo demás al if-chain nativo (req.session ya está poblado) ──
   // Transitorio (AUD-34/35): a medida que cada dominio migre a routes/<dominio>.js montado arriba,
