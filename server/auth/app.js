@@ -30,6 +30,8 @@ import historicosRouter from '../routes/historicos.js';
 import autorizacionesRouter from '../routes/autorizaciones.js';
 import eventosDashboardRouter from '../routes/eventos-dashboard.js';
 import conformacionRouter from '../routes/conformacion.js';
+import combustiblesRouter from '../routes/combustibles.js';
+import disponibilidadRouter from '../routes/disponibilidad.js';
 import { detectRoles } from './roles.js';
 import {
   isConfigured as m365Configured, m365Config,
@@ -260,6 +262,8 @@ export async function buildAuthApp(legacyHandler) {
   app.use('/api/autorizaciones', autorizacionesRouter);    // E4 (deprecated)
   app.use('/api/eventos-dashboard', eventosDashboardRouter); // E4
   app.use('/api/conformacion-turno', conformacionRouter);  // E3
+  app.use('/api/combustibles', combustiblesRouter);        // E7
+  app.use('/api/disponibilidad', disponibilidadRouter);    // E8
 
   // ── Delegación: TODO lo demás al if-chain nativo (req.session ya está poblado) ──
   // Transitorio (AUD-34/35): a medida que cada dominio migre a routes/<dominio>.js montado arriba,
