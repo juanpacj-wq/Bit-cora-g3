@@ -6,7 +6,7 @@ import { initDB, getDB, TEST_PLANTA_ID } from './db.js';
 // binding live de ESM permite usarlo después; al momento de los handlers del request ya
 // está cargado.
 import * as dbBindings from './db.js';
-import { CORS_HEADERS, parseBody, sendJSON, corsHeadersFor, csrfOriginAllowed, rateLimitCheck } from './utils/http.js';
+import { CORS_HEADERS, parseBody, sendJSON, rateLimitCheck } from './utils/http.js';
 import { responderError, mensajeUsuario } from './utils/errores.js';
 import { resolveCargo } from './utils/entra-roles.js';
 import { getTurnoColombia, periodoFromFechaBogota, turnoFromPeriodo, ventanaTurno, fechaBogotaStr } from './utils/turno.js';
@@ -137,26 +137,11 @@ async function legacyHandler(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
 
-  if (method === 'OPTIONS') {
-    // AUD-16: el preflight refleja el Origin del request según la allowlist (corsHeadersFor).
-    res.writeHead(204, corsHeadersFor(req.headers.origin));
-    res.end();
-    return;
-  }
+  // AUD-34/35: el preflight OPTIONS (CORS) y el check CSRF de mutadores (AUD-16/AUD-19) ahora los
+  // aplica middleware Express global (corsMiddleware/csrfMiddleware en routes/_middleware.js), antes
+  // de delegar acá. Este handler ya recibe solo requests no-OPTIONS con Origin validado.
 
   try {
-    // AUD-19: CSRF defense-in-depth sobre SameSite=lax. Para mutadores (POST/PUT/DELETE), si viene
-    // header Origin y NO es de confianza (ni same-origin ni allowlist) → 403. Origin ausente
-    // (server-to-server: el dashboard cross-repo que solo hace GET, o curl) se permite para no
-    // romper integraciones server-side. GET y las rutas /auth/* (que manejan su propio state en
-    // auth/app.js, fuera de este if-chain) quedan exentos por construcción.
-    if (method === 'POST' || method === 'PUT' || method === 'DELETE') {
-      const origin = req.headers.origin;
-      if (origin && !csrfOriginAllowed(origin, req.headers.host)) {
-        return sendJSON(res, 403, { error: 'Origen no permitido', codigo: 'origen_no_permitido' });
-      }
-    }
-
     if (method === 'GET' && pathname === '/health') {
       return sendJSON(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
     }
