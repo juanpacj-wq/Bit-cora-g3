@@ -62,13 +62,16 @@ export function clasificarError(err) {
     return { status: 500, codigo: 'db_error' };
   }
 
-  // 4) Cuerpo de la petición excede el tope de tamaño (AUD-15: parseBody aborta con este code).
-  if (code === 'cuerpo_demasiado_grande') {
+  // 4) Cuerpo de la petición excede el tope de tamaño. `parseBody` (if-chain) aborta con code
+  //    'cuerpo_demasiado_grande'; `express.json({ limit })` (routers, AUD-34/35) lanza con
+  //    type 'entity.too.large'. Ambos → 413.
+  if (code === 'cuerpo_demasiado_grande' || err?.type === 'entity.too.large') {
     return { status: 413, codigo: 'cuerpo_demasiado_grande' };
   }
 
-  // 5) Cuerpo de la petición no es JSON válido (parseBody rechaza con SyntaxError).
-  if (name === 'SyntaxError' || err instanceof SyntaxError) {
+  // 5) Cuerpo de la petición no es JSON válido. `parseBody` rechaza con SyntaxError; `express.json()`
+  //    lanza con type 'entity.parse.failed'. Ambos → 400.
+  if (name === 'SyntaxError' || err instanceof SyntaxError || err?.type === 'entity.parse.failed') {
     return { status: 400, codigo: 'cuerpo_invalido' };
   }
 

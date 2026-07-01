@@ -23,6 +23,7 @@ import { buildSessionStore } from './sessionStore.js';
 import { revalidate, REVALIDATE_INTERVAL_MS } from './revalidate.js';
 import { setWsSessionContext } from './wsSession.js';
 import { expressErrorHandler } from '../utils/errores.js';
+import { corsMiddleware, csrfMiddleware, requireEntra } from '../routes/_middleware.js';
 import { detectRoles } from './roles.js';
 import {
   isConfigured as m365Configured, m365Config,
@@ -76,6 +77,12 @@ export async function buildAuthApp(legacyHandler) {
       maxAge: SESSION_MAX_AGE_MS,
     },
   }));
+
+  // ── Cross-cutting global (AUD-34/35): CORS+preflight y CSRF de mutadores ──────────────────────
+  // Antes vivían dentro del if-chain (legacyHandler); ahora son middleware Express único que aplica
+  // a TODAS las rutas (incluidas las de /auth y los routers de dominio). Van justo tras la sesión.
+  app.use(corsMiddleware);
+  app.use(csrfMiddleware);
 
   // Avisos de hardening
   if (!process.env.SESSION_SECRET) {
@@ -233,7 +240,14 @@ export async function buildAuthApp(legacyHandler) {
     });
   });
 
+  // ── Gate de autenticación por defecto (AUD-05/AUD-34): cierra el acceso anónimo ──────────────
+  // Va DESPUÉS de las rutas de auth (login/me/logout son self-gating) y ANTES de los routers de
+  // datos + el catch-all. Todo lo que no esté en la allowlist pública exige identidad Entra.
+  app.use(requireEntra);
+
   // ── Delegación: TODO lo demás al if-chain nativo (req.session ya está poblado) ──
+  // Transitorio (AUD-34/35): a medida que cada dominio migre a routes/<dominio>.js montado arriba,
+  // el if-chain se encoge hasta quedar vacío y este catch-all se elimina.
   app.use((req, res) => legacyHandler(req, res));
 
   // ── Error-handler de la capa Express (D-032) ────────────────────────────────
