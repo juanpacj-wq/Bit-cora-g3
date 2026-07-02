@@ -2,6 +2,8 @@
 // sessionStorage, que era exfiltrable por XSS). `credentials:'include'` adjunta la cookie en cada
 // request (same-origin vía proxy Vite en dev / mismo host en prod). `skipAuth` ya no inyecta nada;
 // solo sirve para que un 401 esperado (ej. el bootstrap GET /api/me) NO dispare el logout global.
+import { withBase } from '../config/paths';
+
 let unauthorizedHandler = null;
 
 export function setUnauthorizedHandler(fn) {
@@ -25,7 +27,9 @@ async function request(url, { method = 'GET', body, skipAuth = false } = {}) {
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   let res;
   try {
-    res = await fetch(url, {
+    // withBase antepone el sub-path de despliegue (/bitacora en prod, '' en dev) a las rutas
+    // /api/... que pasan todos los consumidores. Punto único: no se prefija en cada call site.
+    res = await fetch(withBase(url), {
       method,
       headers,
       credentials: 'include',

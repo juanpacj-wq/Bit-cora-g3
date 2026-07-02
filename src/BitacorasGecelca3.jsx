@@ -30,6 +30,7 @@ import { useBitacoraSesion, useFinalizarTurno } from "./hooks/useBitacoraSesion"
 import { useAppRoute } from "./hooks/useAppRoute";
 import { buildHash } from "./routing/appRoute";
 import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
+import { asset } from "./config/paths";
 
 const COLORS = {
   greenPrimary: "#31a354", greenDark: "#006f36",
@@ -231,6 +232,12 @@ function EstadoBadge({ estado }) {
 // Login (email/password → planta → cargo)
 // ============================================================
 
+// URL del dashboard hermano (dashboard-gen-gec3). En el despliegue unificado vive en /dashboard
+// del MISMO dominio; en dev corre en su propio server (localhost:5173, mientras bitácora está en
+// 5174). Default inteligente por entorno; se puede forzar con VITE_DASHBOARD_URL en el .env.
+const DASHBOARD_URL = import.meta.env.VITE_DASHBOARD_URL
+  || (import.meta.env.DEV ? 'http://localhost:5173/' : '/dashboard/');
+
 function LoginScreen({ auth, plantas, onReady, showToast }) {
   // Login Entra ID: dos pasos. 'microsoft' (sin sesión Entra) → 'planta' (autenticado, elige
   // planta). El cargo lo asigna Entra automáticamente desde los App Roles; ya NO hay paso de
@@ -280,7 +287,7 @@ function LoginScreen({ auth, plantas, onReady, showToast }) {
         {/* PANEL IZQUIERDO — Form */}
         <div className="flex-1 flex flex-col justify-center px-8 py-7 lg:px-12 lg:py-9">
           <div className="text-center mb-5">
-            <img src="/gecelca3-logo.png" alt="Gecelca3" className="h-11 mx-auto mb-3"
+            <img src={asset("/gecelca3-logo.png")} alt="Gecelca3" className="h-11 mx-auto mb-3"
               onError={(e) => { e.target.style.display = "none"; }} />
             {paso === "microsoft" ? (
               <>
@@ -371,7 +378,7 @@ function LoginScreen({ auth, plantas, onReady, showToast }) {
           {/* Foto de la planta enmarcada */}
           <div className="relative w-full max-w-sm">
             <div className="relative rounded-3xl overflow-hidden shadow-2xl ring-1 ring-white/20">
-              <img src="/planta-gecelca3.jpg" alt="Planta Gecelca3"
+              <img src={asset("/planta-gecelca3.jpg")} alt="Planta Gecelca3"
                 className="w-full h-[460px] object-cover"
                 onError={(e) => { e.target.style.display = "none"; }} />
               <div className="absolute inset-0 pointer-events-none"
@@ -395,13 +402,15 @@ function LoginScreen({ auth, plantas, onReady, showToast }) {
         </div>
       </div>
 
-      {/* Pill decorativa "dashboard" */}
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 inline-flex items-center gap-2 px-5 py-2 rounded-full text-white shadow-xl select-none"
+      {/* Acceso al dashboard de generación (app hermana). Navegación top-level al otro app. */}
+      <a href={DASHBOARD_URL}
+        className="absolute bottom-6 left-1/2 -translate-x-1/2 inline-flex items-center gap-2 px-5 py-2 rounded-full text-white shadow-xl select-none no-underline cursor-pointer hover:-translate-y-0.5 hover:shadow-2xl transition-all"
         style={{ backgroundColor: COLORS.blueDeepest, border: `1px solid ${COLORS.blueDark}` }}
-        aria-hidden="true">
+        aria-label="Ir al dashboard de generación"
+        title="Ir al dashboard de generación">
         <LayoutDashboard size={15} style={{ color: COLORS.greenPrimary }} />
         <span className="text-sm font-semibold">dashboard</span>
-      </div>
+      </a>
     </div>
   );
 }
@@ -479,7 +488,7 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
     <header className="text-white px-6 py-3 flex items-center justify-between shadow-lg relative z-10"
       style={{ background: `linear-gradient(90deg, ${COLORS.blueDeepest} 0%, ${COLORS.blueDark} 100%)` }}>
       <div className="flex items-center gap-4">
-        <img src="/G3 blanco.png" alt="Gecelca3" className="h-10" onError={(e) => { e.target.style.display = "none"; }} />
+        <img src={asset("/G3 blanco.png")} alt="Gecelca3" className="h-10" onError={(e) => { e.target.style.display = "none"; }} />
         <div>
           <h1 className="text-lg font-bold tracking-tight">Bitácoras de Planta</h1>
           <p className="text-xs text-blue-300 opacity-80">Sistema de Registro Operativo</p>

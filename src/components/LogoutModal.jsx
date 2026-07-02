@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
+import { asset } from "../config/paths";
 
 // Modal de cierre de sesión rediseñado (reemplaza al ConfirmModal genérico SOLO para el logout).
 // Más ancho/alto que el genérico, con ilustración hero y los botones en una sola fila. Las tres
@@ -52,7 +53,7 @@ export default function LogoutModal({ open, userName, onCancel, onConfirm, onCam
 
           <div className="px-8 pt-9 pb-8 flex flex-col items-center text-center">
             <img
-              src="/logout-ilustracion.png"
+              src={asset("/logout-ilustracion.png")}
               alt="Una persona abre la puerta mientras su gato sale"
               className="w-48 h-48 object-contain mb-1 select-none pointer-events-none"
               draggable="false"
