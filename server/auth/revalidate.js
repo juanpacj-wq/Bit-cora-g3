@@ -105,7 +105,7 @@ async function matarSesion(req, res, reason) {
 }
 
 export async function revalidate(req, res, next) {
-  if (!req.session.user) return next(); // sin sesión: lo resuelve el guard de la ruta
+  if (!req.session?.user) return next(); // sin sesión (o store aún no cargó req.session): lo resuelve el guard de la ruta
 
   const last = req.session.lastRevalidatedAt || 0;
   if (Date.now() - last < REVALIDATE_INTERVAL_MS) return next(); // dentro de la ventana: no revalida

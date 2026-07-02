@@ -21,7 +21,7 @@ import { buildSessionStore } from './sessionStore.js';
 import { revalidate, REVALIDATE_INTERVAL_MS } from './revalidate.js';
 import { setWsSessionContext } from './wsSession.js';
 import { expressErrorHandler } from '../utils/errores.js';
-import { corsMiddleware, csrfMiddleware, requireEntra } from '../routes/_middleware.js';
+import { corsMiddleware, csrfMiddleware, requireEntra, asyncH } from '../routes/_middleware.js';
 import catalogosRouter from '../routes/catalogos.js';
 import cierreRouter from '../routes/cierre.js';
 import historicosRouter from '../routes/historicos.js';
@@ -223,8 +223,8 @@ export async function buildAuthApp() {
   // ── Identidad + contexto de sesión de app ──────────────────────────────────
   // `revalidate` re-chequea en silencio contra Entra (cada REVALIDATE_INTERVAL_MS) que el
   // usuario sigue con acceso y actualiza sus roles; si lo revocaron, mata la sesión (401).
-  app.get('/api/me', revalidate, async (req, res) => {
-    const u = req.session.user;
+  app.get('/api/me', asyncH(revalidate), async (req, res) => {
+    const u = req.session?.user;
     if (!u) return res.status(401).json({ authenticated: false });
     // Adjuntamos la sesión de app vigente (sesion_activa.activa=1) si existe, y la última
     // planta usada (para que reentrar en un turno nuevo sea de un clic).
