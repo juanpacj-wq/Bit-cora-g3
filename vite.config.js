@@ -1,7 +1,16 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// Sub-path de despliegue. Configurable por env para no romper dev: sin APP_BASE_PATH el app
+// vive en la raíz '/' (dev, con el redirect OIDC localhost:5174/auth/redirect intacto); en
+// prod se construye con APP_BASE_PATH=/bitacora para convivir con el dashboard (/dashboard)
+// bajo un mismo dominio. Vite expone el valor en import.meta.env.BASE_URL (ver src/config/paths.js).
+// El backend debe recibir el MISMO APP_BASE_PATH en su .env (redirects OIDC + path de cookie).
+const rawBase = process.env.APP_BASE_PATH || '/'
+const base = rawBase.endsWith('/') ? rawBase : rawBase + '/'
+
 export default defineConfig({
+  base,
   plugins: [react()],
   server: {
     // Login Entra ID: fijamos el puerto (strictPort) para que el redirect URI registrado en la

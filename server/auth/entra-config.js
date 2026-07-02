@@ -28,6 +28,13 @@ function parseList(raw) {
 export const JEFE_PLANTA_UPNS = parseList(process.env.M365_JEFE_PLANTA_UPNS);
 export const JDT_DEFAULT_UPNS = parseList(process.env.M365_JDT_DEFAULT_UPNS);
 
+// Sub-path de despliegue (debe calzar con el `base` de Vite / import.meta.env.BASE_URL). Vacío
+// en dev (app en la raíz '/'), '/bitacora' en prod detrás del reverse proxy. Se usa para (a) los
+// redirects del callback OIDC (que deben volver al SPA bajo su ruta, no a la raíz del dominio,
+// que es del dashboard) y (b) el `path` de la cookie de sesión (la acota al namespace). Se
+// normaliza sin barra final para concatenar: `${APP_BASE_PATH}/?auth=ok`.
+export const APP_BASE_PATH = String(process.env.APP_BASE_PATH || '').replace(/\/+$/, '');
+
 export const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'bitacora.sid';
 export const SESSION_MAX_AGE_MS = Number(process.env.SESSION_MAX_AGE_MS || 30 * 24 * 60 * 60 * 1000);
 export const SESSION_COOKIE_SECURE =

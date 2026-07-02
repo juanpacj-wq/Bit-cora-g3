@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from './useApi';
+import { wsUrl } from '../config/paths';
 
 export function useBitacoraCounts(ready, sesionId, plantaId) {
   const [counts, setCounts] = useState({});
@@ -29,8 +30,7 @@ export function useBitacoraCounts(ready, sesionId, plantaId) {
 
     const connect = () => {
       if (unmountedRef.current) return;
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${window.location.host}/ws/conteo-bitacoras?sesion_id=${sesionId}`;
+      const url = wsUrl(`/ws/conteo-bitacoras?sesion_id=${sesionId}`);
       const ws = new WebSocket(url);
       wsRef.current = ws;
 

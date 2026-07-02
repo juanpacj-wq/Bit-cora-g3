@@ -39,7 +39,11 @@ import {
   isConfigured as m365Configured, m365Config,
   getAuthCodeUrl, acquireTokenByCode, getLogoutUrl,
 } from './m365.js';
-import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, SESSION_COOKIE_SECURE } from './entra-config.js';
+import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, SESSION_COOKIE_SECURE, APP_BASE_PATH } from './entra-config.js';
+
+// Destino de los redirects del callback OIDC: el SPA vive bajo APP_BASE_PATH (p. ej. /bitacora).
+// Volver a la raíz '/' del dominio aterrizaría en el dashboard, no en Bitácora.
+const home = (auth) => `${APP_BASE_PATH}/?auth=${auth}`;
 
 // Importado de forma perezosa para no crear ciclo con server.js (que importa este módulo).
 let _broadcast = () => Promise.resolve();
@@ -85,6 +89,9 @@ export async function buildAuthApp() {
       sameSite: 'lax',     // permite que la cookie viaje en la redirección OIDC (navegación top-level)
       secure: isProduction ? true : SESSION_COOKIE_SECURE,
       maxAge: SESSION_MAX_AGE_MS,
+      // Acota la cookie al namespace del app (/bitacora) para no colisionar con el dashboard,
+      // que cuelga de otra ruta del mismo dominio. En dev (APP_BASE_PATH vacío) queda en '/'.
+      path: APP_BASE_PATH || '/',
     },
   }));
 
@@ -137,23 +144,23 @@ export async function buildAuthApp() {
       const e = String(req.query.error);
       clearAuthTransients(req.session);
       if (e === 'login_required' || e === 'interaction_required' || e === 'consent_required') {
-        return req.session.save(() => res.redirect('/?auth=interactive_required'));
+        return req.session.save(() => res.redirect(home('interactive_required')));
       }
       const desc = String(req.query.error_description || '');
       if (desc.includes('AADSTS50105')) {
         // Autenticó (y pasó MFA) pero NO está asignado a la Enterprise App ("Asignación
         // requerida = Sí"). Este es el gate de acceso que reemplaza al allowlist local.
         console.warn(`[auth/redirect] usuario no asignado a la app (AADSTS50105)`);
-        return req.session.destroy(() => res.redirect('/?auth=no_acceso'));
+        return req.session.destroy(() => res.redirect(home('no_acceso')));
       }
       console.warn(`[auth/redirect] error de Entra: ${e} — ${desc}`);
-      return req.session.save(() => res.redirect('/?auth=error'));
+      return req.session.save(() => res.redirect(home('error')));
     }
 
     const { code, state } = req.query;
     if (!code || !state || state !== req.session.authState) {
       clearAuthTransients(req.session);
-      return req.session.save(() => res.redirect('/?auth=' + (wasSilent ? 'interactive_required' : 'state_invalido')));
+      return req.session.save(() => res.redirect(home(wasSilent ? 'interactive_required' : 'state_invalido')));
     }
 
     try {
@@ -180,7 +187,7 @@ export async function buildAuthApp() {
       } catch (err) {
         console.error('[auth/redirect] provisionEntraUser', err);
         clearAuthTransients(req.session);
-        return req.session.save(() => res.redirect('/?auth=error'));
+        return req.session.save(() => res.redirect(home('error')));
       }
 
       // Auditoría de login (oid, upn, roles): trazabilidad para cumplimiento.
@@ -199,17 +206,17 @@ export async function buildAuthApp() {
       req.session.regenerate((err) => {
         if (err) {
           console.error('[auth/redirect] regenerate', err);
-          return res.redirect('/?auth=error');
+          return res.redirect(home('error'));
         }
         req.session.user = user;
         req.session.msalCache = msalCache;
         req.session.lastRevalidatedAt = Date.now();
-        req.session.save(() => res.redirect('/?auth=ok'));
+        req.session.save(() => res.redirect(home('ok')));
       });
     } catch (err) {
       console.error('[auth/redirect]', err);
       clearAuthTransients(req.session);
-      req.session.save(() => res.redirect('/?auth=error'));
+      req.session.save(() => res.redirect(home('error')));
     }
   });
 
@@ -248,7 +255,8 @@ export async function buildAuthApp() {
       } catch (err) { console.error('[api/logout]', err.message); }
     }
     req.session.destroy(() => {
-      res.clearCookie(SESSION_COOKIE_NAME);
+      // clearCookie DEBE usar el mismo path con que se seteó la cookie, o el navegador no la borra.
+      res.clearCookie(SESSION_COOKIE_NAME, { path: APP_BASE_PATH || '/' });
       res.json({ ok: true, logoutUrl });
     });
   });

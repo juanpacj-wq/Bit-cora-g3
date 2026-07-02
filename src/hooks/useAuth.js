@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api, setUnauthorizedHandler } from './useApi';
+import { withBase } from '../config/paths';
 
 const STORAGE_KEY = 'bitacoras_auth';
 
@@ -80,7 +81,7 @@ export function useAuth() {
 
   // Inicia el login OIDC: navegación top-level a la ruta del backend (Microsoft → /auth/redirect).
   const loginWithMicrosoft = useCallback(() => {
-    window.location.href = '/auth/login';
+    window.location.href = withBase('/auth/login');
   }, []);
 
   // Cleanup de cliente sin tocar la cookie Entra ni la BD (cerrar pestaña / "salir sin finalizar").
@@ -108,7 +109,9 @@ export function useAuth() {
   // Logout explícito: cierra la sesión de app, destruye la cookie y navega al front-channel logout
   // de Microsoft (cierra también la sesión M365 del navegador).
   const logout = useCallback(async () => {
-    let logoutUrl = '/';
+    // Fallback bajo el sub-path (/bitacora/) por si el backend no devuelve logoutUrl; '/' llevaría
+    // al dashboard.
+    let logoutUrl = withBase('/');
     try {
       const r = await api.post('/api/logout', {}, { skipAuth: true });
       if (r?.logoutUrl) logoutUrl = safeLogoutUrl(r.logoutUrl);

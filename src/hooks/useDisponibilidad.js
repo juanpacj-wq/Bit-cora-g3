@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from 'react';
 import { api } from './useApi';
+import { withBase } from '../config/paths';
 
 // useApi.api hace `throw new Error(data.error)` y descarta el body — para los 409
 // del flujo DISP necesitamos el `vigente` (mismo_estado / fecha_anterior_a_vigente)
@@ -14,7 +15,9 @@ async function requestWithBody(url, { method = 'POST', body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   let res;
   try {
-    res = await fetch(url, {
+    // Mismo prefijo de sub-path que useApi (este wrapper existe solo para conservar el body de
+    // los 409 de DISP, no para saltarse el ruteo).
+    res = await fetch(withBase(url), {
       method,
       headers,
       credentials: 'include',

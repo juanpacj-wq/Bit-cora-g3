@@ -1,0 +1,20 @@
+[Unit]
+Description=Bitacora G3 API + WebSocket Server (Express + Entra OIDC)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/var/www/bitacora/server
+# Carga el .env con el parser dotenv de Node (mismo formato que en dev con --env-file), en vez
+# de EnvironmentFile de systemd, que tiene un parseo distinto (comillas/comentarios inline).
+# El .env vive en la raíz del repo desplegado y contiene DB_*, M365_*, SESSION_*, NODE_ENV y
+# APP_BASE_PATH=/bitacora (ver .env.example).
+ExecStart=/usr/bin/node --env-file=/var/www/bitacora/.env server.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
