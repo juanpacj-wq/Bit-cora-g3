@@ -2053,9 +2053,11 @@ export async function initDB() {
     CREATE OR ALTER VIEW bitacora.v_historico_busqueda AS
     SELECT h.registro_id, h.fecha_evento, h.turno, h.detalle,
            h.campos_extra, h.fecha_cierre_operativo,
+           h.bitacora_id,
            b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo,
            b.oculta AS bitacora_oculta,
            p.nombre AS planta_nombre, h.planta_id,
+           h.tipo_evento_id,
            te.nombre AS tipo_evento,
            h.ingenieros_snapshot, h.jdts_snapshot, h.jefes_snapshot,
            autor.nombre_completo AS creado_por_nombre,
