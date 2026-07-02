@@ -471,6 +471,37 @@ Razón de la vista en vez de query inline: encapsula la unión `activo + histór
 
 ---
 
+## D-038 — Despliegue bajo sub-path `/bitacora` en el reverse proxy compartido (pgen.gecelca.com.co)
+
+**Fecha:** 2026-07-01
+
+**Contexto:** Bitácora comparte servidor Ubuntu y nginx con `dashboard-gen-gec3` bajo un solo
+dominio (`pgen.gecelca.com.co`), separados por ruta (`/bitacora` con auth, `/dashboard` sin auth) —
+contrato en `../docs/deployment-unificado.md`. El backend compara `req.url` por string exacto y la
+cookie de sesión es `Secure` (OIDC exige HTTPS), así que el prefijo no puede llegar al backend ni
+la app puede asumir la raíz del dominio.
+
+**Decisión:** el sub-path es **configurable por env `APP_BASE_PATH`** (`/bitacora` en prod, vacío
+= `/` en dev) y se aplica en tres capas: (a) **build** — `vite.config.js` lo usa como `base` y
+`src/config/paths.js` centraliza `withBase`/`wsUrl`/`asset` sobre `import.meta.env.BASE_URL`
+(ningún literal `/api`, `/ws`, ni `src="/img"` en el código; `asset()` existe porque Vite NO
+reescribe string literals de JSX con el `base`); (b) **backend** — `entra-config.js` exporta
+`APP_BASE_PATH` para los redirects post-OIDC (`home()`) y el `path` de la cookie
+(`bitacora.sid` acotada a `path=/bitacora`); (c) **nginx** — `deploy/nginx-bitacora.conf` quita el
+prefijo (barra final en `proxy_pass`) y reenvía `Host`/`Origin`/`X-Forwarded-Proto` (CSRF/CSWSH +
+cookie Secure tras proxy; `trust proxy=1`). TLS con **certificado corporativo** (renovación
+manual, runbook `deploy/DEPLOY.md §6`). Fallback SPA con named location (pitfall
+`alias`+`try_files`).
+
+**Consecuencias:** (a) un solo build sirve cualquier base; dev queda intacto (base `/`, proxies
+Vite sin strip). (b) Azure App Registration necesita los Redirect URIs con el sub-path
+(`https://pgen.gecelca.com.co/bitacora/auth/redirect`). (c) El deploy es por runbook
+(`deploy/DEPLOY.md`, systemd `bitacora-api.service`, locations pegadas en el server block del
+dashboard). (d) La cookie no viaja a `/dashboard` (aislamiento entre apps). Cross-ref: [[D-031]]
+(OIDC), [[D-036]]/[[D-037]] (hardening del pipeline que este despliegue expone).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
