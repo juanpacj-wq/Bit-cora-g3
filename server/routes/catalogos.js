@@ -7,7 +7,7 @@
 
 import express from 'express';
 import sql from 'mssql';
-import { getDB } from '../db.js';
+import { getDB, TEST_PLANTA_ID } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { asyncH } from './_middleware.js';
 
@@ -16,10 +16,15 @@ const router = express.Router();
 // GET /api/catalogos/plantas
 router.get('/plantas', asyncH(async (req, res) => {
   const db = await getDB();
-  const result = await db.request().query(`
+  // D-030: la planta reservada de test (TEST_PLANTA_ID='TST') queda residente en lov_bit.planta
+  // cuando la suite corre contra la BD productiva. NUNCA debe aparecer en el selector de planta
+  // del login — solo GEC3/GEC32 son plantas reales operables.
+  const result = await db.request()
+    .input('testPlanta', sql.VarChar(10), TEST_PLANTA_ID)
+    .query(`
     SELECT planta_id, nombre, activa
     FROM lov_bit.planta
-    WHERE activa = 1
+    WHERE activa = 1 AND planta_id <> @testPlanta
     ORDER BY planta_id
   `);
   return sendJSON(res, 200, { plantas: result.recordset });
