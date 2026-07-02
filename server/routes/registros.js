@@ -8,7 +8,7 @@ import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { hasPermisoBitacora, plantaMatch, canEditarRegistro } from '../middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from '../utils/campos.js';
-import { periodoFromFechaBogota, turnoFromPeriodo } from '../utils/turno.js';
+import { periodoFromFechaBogota, turnoFromPeriodo, fechaBogotaStr } from '../utils/turno.js';
 import {
   findEventoDashboard, upsertEventoDashboard, hasNotificarDashboard,
   findVigente, findUltimoCerrado, insertNuevoEstado, cerrarVigente, actualizarVigente,
@@ -254,9 +254,16 @@ router.post('/', asyncH(async (req, res) => {
   const teRow = teCheck.recordset[0];
   const isMAND = teRow.bitacora_codigo === 'MAND';
 
-  // F6: check de fecha futura. MAND acepta cualquier hora del día; el resto guard de 5 min.
-  if (!isMAND && new Date(fecha_evento).getTime() - Date.now() > 5 * 60 * 1000) {
-    return sendJSON(res, 400, { error: 'fecha_evento no puede estar más de 5 min en el futuro' });
+  // F6/R3: check de fecha futura. MAND acepta cualquier hora del día; el resto no puede caer en un
+  // día posterior a hoy (Bogotá) — slug estable `fecha_futura`, paridad con COMB. Se conserva además
+  // el guard de 5 min como defensa intra-día (reloj adelantado / hora futura dentro de hoy).
+  if (!isMAND) {
+    if (fechaBogotaStr(new Date(fecha_evento)) > fechaBogotaStr(new Date())) {
+      return sendJSON(res, 400, { error: 'fecha_futura', mensaje: 'La fecha no puede ser futura' });
+    }
+    if (new Date(fecha_evento).getTime() - Date.now() > 5 * 60 * 1000) {
+      return sendJSON(res, 400, { error: 'fecha_evento no puede estar más de 5 min en el futuro' });
+    }
   }
 
   const bitRes = await db.request()
@@ -545,8 +552,14 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
   if (!(await canEditarRegistro(sesion, reg))) {
     return sendJSON(res, 403, { error: 'Sin permiso para editar este registro' });
   }
-  if (fecha_evento && new Date(fecha_evento).getTime() - Date.now() > 5 * 60 * 1000) {
-    return sendJSON(res, 400, { error: 'fecha_evento no puede estar más de 5 min en el futuro' });
+  // R3: día futuro bloqueado (slug `fecha_futura`, paridad COMB) + guard de 5 min intra-día.
+  if (fecha_evento) {
+    if (fechaBogotaStr(new Date(fecha_evento)) > fechaBogotaStr(new Date())) {
+      return sendJSON(res, 400, { error: 'fecha_futura', mensaje: 'La fecha no puede ser futura' });
+    }
+    if (new Date(fecha_evento).getTime() - Date.now() > 5 * 60 * 1000) {
+      return sendJSON(res, 400, { error: 'fecha_evento no puede estar más de 5 min en el futuro' });
+    }
   }
   if (tipo_evento_id) {
     const teCheck = await db.request()

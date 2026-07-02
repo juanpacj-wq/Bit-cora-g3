@@ -1002,11 +1002,17 @@ function BarraEstado({
   bitacora, registros, estadoBitacora, puedeCrear, esJefeTurno,
   onCerrarTurno, onCerrarMasivo, onFinalizarTurno, finalizandoTurno, turnoFinalizado,
   filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
-  filtroFecha, setFiltroFecha, filtroTurno, setFiltroTurno,
+  filtroFecha, setFiltroFecha, onCommitFecha, filtroTurno, setFiltroTurno,
   tiposEvento, onAddRegistro,
   mandDirty, mandGuardando, onGuardarMand,
 }) {
   const isMand = bitacora?.codigo === 'MAND';
+  // R1/R3: el selector de día usa un valor "pendiente" que solo se aplica al pulsar "Guardar"
+  // (o Enter, o las flechas/"Hoy" que son clics explícitos). `onCommitFecha` centraliza el commit
+  // (puede abrir el popup de borrador). El futuro queda bloqueado con max=hoy Bogotá.
+  const hoyBogota = getTodayBogota();
+  const [pendingFecha, setPendingFecha] = useState(filtroFecha);
+  useEffect(() => { setPendingFecha(filtroFecha); }, [filtroFecha]);
   const borradores = registros.filter((r) => r.estado === "borrador").length;
   const cerrados = registros.filter((r) => r.estado === "cerrado").length;
 
@@ -1035,7 +1041,7 @@ function BarraEstado({
         <div className="flex items-center gap-2 flex-wrap">
           <Calendar size={16} className="text-gray-400" />
           <button
-            onClick={() => setFiltroFecha(shiftDate(filtroFecha || getTodayBogota(), -1))}
+            onClick={() => onCommitFecha(shiftDate(filtroFecha || hoyBogota, -1))}
             title="Día anterior"
             className="p-1.5 rounded border border-gray-200 hover:bg-gray-50"
           >
@@ -1043,22 +1049,41 @@ function BarraEstado({
           </button>
           <input
             type="date"
-            value={filtroFecha}
-            onChange={(e) => setFiltroFecha(e.target.value)}
-            title={filtroFecha ? `Mostrando solo el ${filtroFecha}` : "Sin filtro de día: se muestran todos los registros"}
+            value={pendingFecha}
+            max={hoyBogota}
+            onChange={(e) => setPendingFecha(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && pendingFecha && pendingFecha <= hoyBogota && pendingFecha !== filtroFecha) {
+                onCommitFecha(pendingFecha);
+              }
+            }}
+            title={filtroFecha ? `Día de trabajo: ${filtroFecha}` : "Sin filtro de día: se muestran todos los registros"}
             className={`px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${
               filtroFecha ? "border-emerald-400 bg-emerald-50 font-medium" : "border-gray-300"
             }`}
           />
+          {pendingFecha && pendingFecha !== filtroFecha && (
+            <button
+              onClick={() => onCommitFecha(pendingFecha)}
+              disabled={pendingFecha > hoyBogota}
+              title="Aplicar el día seleccionado"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ backgroundColor: COLORS.greenPrimary }}
+            >
+              <Save size={14} />
+              Guardar
+            </button>
+          )}
           <button
-            onClick={() => setFiltroFecha(shiftDate(filtroFecha || getTodayBogota(), 1))}
+            onClick={() => onCommitFecha(shiftDate(filtroFecha || hoyBogota, 1))}
+            disabled={(filtroFecha || hoyBogota) >= hoyBogota}
             title="Día siguiente"
-            className="p-1.5 rounded border border-gray-200 hover:bg-gray-50"
+            className="p-1.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ChevronRight size={16} />
           </button>
           <button
-            onClick={() => setFiltroFecha(getTodayBogota())}
+            onClick={() => onCommitFecha(hoyBogota)}
             title="Saltar a hoy"
             className="px-3 py-2 rounded-xl border border-gray-300 text-sm font-medium hover:bg-gray-50"
           >
@@ -1353,6 +1378,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
               <input
                 type="datetime-local"
                 value={toBogotaLocal(reg.fecha_evento)}
+                max={nowBogotaLocal()}
                 onChange={(e) => {
                   const v = e.target.value;
                   onUpdate("fecha_evento", v);
@@ -1534,11 +1560,11 @@ export default function App() {
   const [tiposEvento, setTiposEvento] = useState([]);
   const [filtroTexto, setFiltroTexto] = useState("");
   const [filtroTipo, setFiltroTipo] = useState("");
-  // F11: filtros fecha+turno para bitácoras no-MAND. Sin persistencia (se retiró el
-  // sessionStorage): el default es SIEMPRE "todos los días" — un filtro de día solo existe
-  // mientras el usuario lo tenga seleccionado en la vista actual; se descarta al refrescar
-  // o cambiar de bitácora. Evita que un registro con otra fecha "desaparezca" sin aviso.
-  const [filtroFecha, setFiltroFecha] = useState('');
+  // F11/R2/R3: "día de trabajo" (antes solo filtro) para bitácoras no-MAND. Default = HOY (Bogotá):
+  // filtra la lista a ese día Y determina el día en que "Nuevo Registro" crea el borrador. Sin
+  // persistencia (se retiró el sessionStorage). "Borrar filtros" lo vacía a '' = todos los días
+  // (escape hatch de visualización). Nunca acepta días futuros.
+  const [filtroFecha, setFiltroFecha] = useState(() => getTodayBogota());
   const [filtroTurno, setFiltroTurno] = useState('');
   const limpiarFiltros = useCallback(() => {
     setFiltroTexto(''); setFiltroTipo(''); setFiltroFecha(''); setFiltroTurno('');
@@ -1680,7 +1706,7 @@ export default function App() {
     if (!target) target = bitacorasPermitidas[0]; // fallback: codigo nulo o no permitido
     if (target.bitacora_id !== activeBitacoraRef.current) {
       setActiveBitacora(target.bitacora_id);
-      setFiltroTexto(''); setFiltroTipo(''); setFiltroFecha(''); setFiltroTurno(''); setDraftLocal(null);
+      setFiltroTexto(''); setFiltroTipo(''); setFiltroFecha(getTodayBogota()); setFiltroTurno(''); setDraftLocal(null);
     }
     if (target.codigo === 'DISP') {
       // Sembrar planta: param de la ruta → planta ya elegida → unidad del login (default).
@@ -1752,13 +1778,16 @@ export default function App() {
   const handleAddRegistro = useCallback(() => {
     if (draftLocal) { showToast("Termina de guardar el registro en edición", "info"); return; }
     const defTipo = tiposEvento.find((t) => t.es_default) || tiposEvento[0];
+    // R2: el borrador nace en el día de trabajo seleccionado (hora actual Bogotá); si no hay día
+    // seleccionado ("todos los días"), cae en hoy. El futuro ya está bloqueado en el selector.
+    const fechaEventoNuevo = filtroFecha ? `${filtroFecha}T${nowBogotaLocal().slice(11)}` : nowBogotaLocal();
     setDraftLocal({
       _localId: `draft_${Date.now()}`,
       _dirty: true,
       bitacora_id: activeBitacora,
       planta_id: sesion.planta_id,
-      fecha_evento: nowBogotaLocal(),
-      turno: getTurnoActualNum(),
+      fecha_evento: fechaEventoNuevo,
+      turno: turnoFromFechaLocal(fechaEventoNuevo),
       detalle: "",
       tipo_evento_id: defTipo?.tipo_evento_id || null,
       tipo_evento_nombre: defTipo?.nombre,
@@ -1767,7 +1796,7 @@ export default function App() {
       creado_por_nombre: user.nombre_completo,
       bitacora_nombre: bitacorasPermitidas.find((b) => b.bitacora_id === activeBitacora)?.nombre,
     });
-  }, [draftLocal, tiposEvento, activeBitacora, sesion, user, bitacorasPermitidas, showToast]);
+  }, [draftLocal, tiposEvento, activeBitacora, sesion, user, bitacorasPermitidas, showToast, filtroFecha]);
 
   const handleUpdateLocal = useCallback((id, campo, valor) => {
     if (draftLocal && draftLocal._localId === id) {
@@ -1818,6 +1847,27 @@ export default function App() {
       return false;
     }
   }, [registrosHook, user, sesion, activeBitacora, showToast]);
+
+  // R4: cambiar el día de trabajo con un borrador sin guardar abre un popup (Guardar borrador /
+  // Descartar / Cancelar) para que el borrador no bloquee navegar a otro día y crear registros allí.
+  // Sin borrador dirty, aplica el nuevo día directo.
+  const intentarCambiarDia = useCallback((nuevoDia) => {
+    if (draftLocal?._dirty && nuevoDia !== filtroFecha) {
+      setModal({
+        title: "Registro borrador sin guardar",
+        message: `Tienes un registro en borrador sin guardar${filtroFecha ? ` en el día ${filtroFecha}` : ""}. ¿Qué deseas hacer antes de cambiar de día?`,
+        confirmLabel: "Guardar borrador", confirmColor: "green", icon: Save,
+        onConfirm: async () => {
+          const ok = await handleSaveRegistro(draftLocal);
+          if (ok) { setModal(null); setFiltroFecha(nuevoDia); }
+        },
+        secondaryLabel: "Descartar",
+        onSecondary: () => { setDraftLocal(null); setModal(null); setFiltroFecha(nuevoDia); },
+      });
+      return;
+    }
+    setFiltroFecha(nuevoDia);
+  }, [draftLocal, filtroFecha, handleSaveRegistro]);
 
   const handleDeleteRegistro = useCallback((reg) => {
     if (!reg.registro_id) {
@@ -2020,7 +2070,7 @@ export default function App() {
               turnoFinalizado={turnoFinalizado}
               filtroTexto={filtroTexto} setFiltroTexto={setFiltroTexto}
               filtroTipo={filtroTipo} setFiltroTipo={setFiltroTipo}
-              filtroFecha={filtroFecha} setFiltroFecha={setFiltroFecha}
+              filtroFecha={filtroFecha} setFiltroFecha={setFiltroFecha} onCommitFecha={intentarCambiarDia}
               filtroTurno={filtroTurno} setFiltroTurno={setFiltroTurno}
               tiposEvento={tiposEvento}
               onAddRegistro={handleAddRegistro}
