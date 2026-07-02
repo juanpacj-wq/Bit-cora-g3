@@ -6,7 +6,7 @@ import express from 'express';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
-import { hasPermisoBitacora, plantaMatch } from '../middleware/permissions.js';
+import { hasPermisoBitacora } from '../middleware/permissions.js';
 import {
   getEstadoCompleto, getMetricas,
   findVigente, findUltimoCerrado, eliminarPorId, restaurarComoVigente,
@@ -92,11 +92,9 @@ router.post('/deshacer', asyncH(async (req, res) => {
   if (!(await hasPermisoBitacora(sesion, dispBitacoraId, 'puede_crear'))) {
     return sendJSON(res, 403, { error: 'Sin permiso para deshacer en Disponibilidad' });
   }
-  // AUD-11: IDOR cross-planta. Solo se puede deshacer la disponibilidad de la propia unidad
-  // (D-035: una persona opera UNA unidad); evita revertir el estado vigente de otra planta.
-  if (!plantaMatch(sesion, planta_id)) {
-    return sendJSON(res, 403, { error: 'No autorizado para esta planta' });
-  }
+  // DISP es cross-planta a propósito: quien tiene puede_crear puede deshacer el último cambio
+  // de CUALQUIER planta, sin importar la unidad de su sesión (revierte el guard plantaMatch de
+  // AUD-11 solo para DISP; el permiso por cargo sigue vigente).
 
   const transaction = new sql.Transaction(db);
   await transaction.begin();

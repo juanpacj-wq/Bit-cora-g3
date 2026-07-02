@@ -117,10 +117,9 @@ router.post('/', asyncH(async (req, res) => {
     if (!(await hasPermisoBitacora(sesion, bitacora_id, 'puede_crear'))) {
       return sendJSON(res, 403, { error: 'Sin permiso para crear en esta bitácora' });
     }
-    // AUD-11: IDOR cross-planta. D-035: una persona opera UNA sola unidad.
-    if (!plantaMatch(sesion, planta_id)) {
-      return sendJSON(res, 403, { error: 'No autorizado para esta planta' });
-    }
+    // DISP es cross-planta a propósito: quien tiene puede_crear en Disponibilidad puede cambiar
+    // el estado de CUALQUIER planta, sin importar la unidad de su sesión (revierte el guard
+    // plantaMatch de AUD-11 solo para DISP; el permiso por cargo sigue vigente).
     const plantaCheck = await db.request()
       .input('p', sql.VarChar(10), planta_id)
       .query(`SELECT 1 AS ok FROM lov_bit.planta WHERE planta_id=@p AND activa=1`);
@@ -410,10 +409,9 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
     if (!(await hasPermisoBitacora(sesion, dispBid, 'puede_crear'))) {
       return sendJSON(res, 403, { error: 'Sin permiso para editar registros de Disponibilidad' });
     }
-    // AUD-11: IDOR cross-planta.
-    if (!plantaMatch(sesion, reg.planta_id)) {
-      return sendJSON(res, 403, { error: 'No autorizado para esta planta' });
-    }
+    // DISP es cross-planta a propósito: quien tiene puede_crear puede editar el vigente de
+    // CUALQUIER planta, sin importar la unidad de su sesión (revierte el guard plantaMatch de
+    // AUD-11 solo para DISP). El check de abajo sigue impidiendo MOVER el registro de planta.
     const { planta_id: bodyPlanta } = body;
     if (bodyPlanta != null && bodyPlanta !== reg.planta_id) {
       return sendJSON(res, 422, { error: 'planta_id no editable en DISP' });

@@ -3,15 +3,15 @@ import { X } from "lucide-react";
 import { asset } from "../config/paths";
 
 // Modal de cierre de sesión rediseñado (reemplaza al ConfirmModal genérico SOLO para el logout).
-// Más ancho/alto que el genérico, con ilustración hero y los botones en una sola fila. Las tres
-// acciones del flujo D-035 se reparten así:
+// Más ancho/alto que el genérico, con ilustración hero y los botones en una sola fila. Dos
+// acciones:
 //   · "Cancelar" / X / clic en backdrop / Esc  → onCancel
-//   · "Operar otra unidad" (enlace inline en el texto) → onCambiarUnidad (conserva el login Entra
-//     pero mata la sesión de app: una persona no puede quedar activa en 2 unidades)
 //   · "Sí, finalizar y salir" (botón primario)  → onConfirm (finaliza turno + logout backend)
+// "Cambiar de unidad" ya NO vive acá: se movió al menú (hamburguesa) del header; por eso el texto
+// solo la menciona como sugerencia, sin enlace interactivo.
 // onConfirm puede ser async (finalizarTurno + auth.logout); mostramos estado "Saliendo…".
 
-export default function LogoutModal({ open, userName, onCancel, onConfirm, onCambiarUnidad }) {
+export default function LogoutModal({ open, userName, onCancel, onConfirm }) {
   const [busy, setBusy] = useState(false);
 
   // Esc cierra (paridad con clic en backdrop / botón Cancelar). Solo mientras está abierto.
@@ -65,15 +65,7 @@ export default function LogoutModal({ open, userName, onCancel, onConfirm, onCam
 
             <p className="text-sm text-gray-500 mt-2 max-w-sm leading-relaxed">
               {userName ? <>Hasta pronto, <span className="font-semibold text-gray-700">{userName}</span>. </> : null}
-              Puedes volver a iniciar sesión cuando quieras. Si solo necesitas{" "}
-              <button
-                type="button"
-                onClick={() => { if (!busy) onCambiarUnidad(); }}
-                className="font-semibold text-emerald-700 underline underline-offset-2 hover:text-emerald-800 disabled:opacity-50"
-                disabled={busy}
-              >
-                operar otra unidad
-              </button>, puedes cambiarla sin cerrar sesión.
+              Puedes volver a iniciar sesión cuando quieras.
             </p>
 
             <div className="mt-7 flex flex-nowrap items-center justify-center gap-3 w-full">
