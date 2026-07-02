@@ -11,7 +11,7 @@ import {
   Search, Filter, FileText,
   Activity, Flame, Droplets, Zap, Gauge, Cpu, FlaskConical, Leaf,
   Settings, FileCheck, Edit3, Eye, XCircle, Check, Users, History,
-  LayoutDashboard, MonitorCog,
+  LayoutDashboard, MonitorCog, Menu, ArrowLeftRight,
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 import CierrePendientesModal from "./components/CierrePendientesModal";
@@ -421,7 +421,105 @@ function LoginScreen({ auth, plantas, onReady, showToast }) {
 // Header
 // ============================================================
 
-function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista }) {
+// Menú de navegación (hamburguesa) del header. Portal a document.body — mismo patrón que el
+// popup de usuarios conectados y los flyout de categorías — para no quedar clipeado por el
+// overflow del header. Agrupa las acciones globales antes dispersas: Dashboard (app hermana,
+// pestaña nueva), toggle Históricos/Bitácoras (antes botón suelto del nav), "Cambiar de unidad"
+// (antes enlace inline del LogoutModal) y "Cerrar sesión" (abre el LogoutModal).
+function HeaderMenu({ vista, onDashboard, onToggleVista, onCambiarUnidad, onLogout }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, right: 0 });
+  const buttonRef = useRef(null);
+
+  useEffect(() => {
+    if (!open || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 8, right: window.innerWidth - rect.right });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const onClickOutside = (e) => {
+      const btn = buttonRef.current;
+      const menu = document.getElementById('header-nav-menu');
+      if (btn?.contains(e.target)) return;
+      if (menu?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onScrollOrResize = () => setOpen(false);
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onClickOutside);
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onClickOutside);
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
+  }, [open]);
+
+  const run = (fn) => { setOpen(false); fn(); };
+  const enHistoricos = vista === 'historicos';
+
+  const items = [
+    { icon: LayoutDashboard, label: 'Dashboard', onClick: () => run(onDashboard) },
+    {
+      icon: enHistoricos ? FileText : History,
+      label: enHistoricos ? 'Ver bitácoras' : 'Ver históricos',
+      onClick: () => run(onToggleVista),
+    },
+    { icon: ArrowLeftRight, label: 'Cambiar de unidad', onClick: () => run(onCambiarUnidad) },
+    { divider: true },
+    { icon: LogOut, label: 'Cerrar sesión', onClick: () => run(onLogout), danger: true },
+  ];
+
+  return (
+    <div className="relative">
+      <button
+        ref={buttonRef}
+        onClick={() => setOpen((o) => !o)}
+        className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+        title="Menú"
+        aria-label="Abrir menú de navegación"
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        {open ? <X size={18} /> : <Menu size={18} />}
+      </button>
+      {open && createPortal(
+        <div
+          id="header-nav-menu"
+          role="menu"
+          className="bg-white text-gray-800 rounded-xl shadow-xl border border-gray-200 py-1.5 overflow-hidden"
+          style={{ position: 'fixed', top: pos.top, right: pos.right, width: '15rem', zIndex: 50 }}
+        >
+          {items.map((it, i) => {
+            if (it.divider) return <div key={`div-${i}`} className="my-1 border-t border-gray-100" />;
+            const Icon = it.icon;
+            return (
+              <button
+                key={it.label}
+                role="menuitem"
+                onClick={it.onClick}
+                className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm font-medium transition-colors ${
+                  it.danger ? 'text-red-600 hover:bg-red-50' : 'text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                <Icon size={17} className={it.danger ? 'text-red-500' : 'text-gray-400'} />
+                <span className="flex-1 text-left">{it.label}</span>
+              </button>
+            );
+          })}
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista, onDashboard, onCambiarUnidad }) {
   const [reloj, setReloj] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
@@ -509,19 +607,6 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
       </div>
 
       <div className="flex items-center gap-3">
-        {onToggleVista && (
-          <button
-            onClick={onToggleVista}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-sm font-semibold"
-            title={vista === 'historicos' ? 'Volver a bitácoras' : 'Ver históricos'}
-            aria-pressed={vista === 'historicos'}
-          >
-            {vista === 'historicos' ? <FileText size={18} /> : <History size={18} />}
-            <span className="hidden md:inline">
-              {vista === 'historicos' ? 'Bitácoras' : 'Históricos'}
-            </span>
-          </button>
-        )}
         <div className="relative">
           <button
             ref={buttonRef}
@@ -610,9 +695,13 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
           style={{ backgroundColor: COLORS.greenDark }}>
           {iniciales(user.nombre_completo)}
         </div>
-        <button onClick={onLogout} className="p-2 rounded-lg hover:bg-white/10 transition-colors" title="Cerrar sesión">
-          <LogOut size={18} />
-        </button>
+        <HeaderMenu
+          vista={vista}
+          onDashboard={onDashboard}
+          onToggleVista={onToggleVista}
+          onCambiarUnidad={onCambiarUnidad}
+          onLogout={onLogout}
+        />
       </div>
     </header>
   );
@@ -1788,9 +1877,15 @@ export default function App() {
     auth.clearSesion();
   }, [auth]);
 
-  // Abre el modal rediseñado (LogoutModal): ilustración hero + 3 acciones (Cancelar | Cambiar
-  // unidad como enlace inline | Sí, finalizar y salir). La lógica de cada acción se pasa por props.
+  // Abre el modal rediseñado (LogoutModal): ilustración hero + 2 acciones (Cancelar | Sí,
+  // finalizar y salir). "Cambiar de unidad" ya no vive acá — se movió al HeaderMenu.
   const handleLogout = useCallback(() => setLogoutOpen(true), []);
+
+  // Dashboard de generación (app hermana): pestaña nueva, igual que el enlace del LoginScreen.
+  // noopener corta la referencia window.opener hacia esta app.
+  const handleDashboard = useCallback(() => {
+    window.open(DASHBOARD_URL, '_blank', 'noopener,noreferrer');
+  }, []);
 
   const handleLogoutConfirm = useCallback(async () => {
     try { await finalizarTurno(); } catch {}
@@ -1838,6 +1933,8 @@ export default function App() {
         onLogout={handleLogout}
         vista={vista}
         onToggleVista={() => setVista((v) => (v === 'historicos' ? 'bitacoras' : 'historicos'))}
+        onDashboard={handleDashboard}
+        onCambiarUnidad={handleCambiarUnidad}
       />
 
       {vista === 'historicos' ? (
@@ -1942,7 +2039,6 @@ export default function App() {
         userName={user?.nombre_completo}
         onCancel={() => setLogoutOpen(false)}
         onConfirm={handleLogoutConfirm}
-        onCambiarUnidad={handleCambiarUnidad}
       />
 
       {pendientesModal && (

@@ -3,3 +3,9 @@ dist/
 .env
 server/.env
 
+CLAUDE.md
+BIT-MODBD-2026-001.md
+BIT-AUDSEG-2026-001.md
+docs
+
+deploy
