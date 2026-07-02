@@ -1045,7 +1045,10 @@ function BarraEstado({
             type="date"
             value={filtroFecha}
             onChange={(e) => setFiltroFecha(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+            title={filtroFecha ? `Mostrando solo el ${filtroFecha}` : "Sin filtro de día: se muestran todos los registros"}
+            className={`px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${
+              filtroFecha ? "border-emerald-400 bg-emerald-50 font-medium" : "border-gray-300"
+            }`}
           />
           <button
             onClick={() => setFiltroFecha(shiftDate(filtroFecha || getTodayBogota(), 1))}
@@ -1064,19 +1067,22 @@ function BarraEstado({
           <select
             value={filtroTurno}
             onChange={(e) => setFiltroTurno(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-gray-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400"
+            className={`px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${
+              filtroTurno ? "border-emerald-400 bg-emerald-50 font-medium" : "border-gray-300 bg-white"
+            }`}
           >
             <option value="">Todos los turnos</option>
             <option value="1">Turno 1 (Diurno)</option>
             <option value="2">Turno 2 (Nocturno)</option>
           </select>
-          {(filtroFecha || filtroTurno) && (
+          {(filtroFecha || filtroTurno || filtroTexto || filtroTipo) && (
             <button
-              onClick={() => { setFiltroFecha(''); setFiltroTurno(''); }}
-              title="Limpiar filtros de fecha y turno"
-              className="text-xs text-gray-500 hover:text-gray-700 underline"
+              onClick={() => { setFiltroFecha(''); setFiltroTurno(''); setFiltroTexto(''); setFiltroTipo(''); }}
+              title="Quitar todos los filtros y mostrar todos los registros"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-sm font-medium hover:bg-amber-100"
             >
-              Limpiar
+              <X size={14} />
+              Borrar filtros
             </button>
           )}
         </div>
@@ -1185,7 +1191,7 @@ function BarraEstado({
 function GrillaRegistros({
   registros, bitacora, tiposEvento, jefeNombre, jdtNombre,
   puedeCrear, onUpdateLocal, onSaveRegistro, onDeleteRegistro,
-  filtroTexto, filtroTipo, filtroFecha, filtroTurno,
+  filtroTexto, filtroTipo, filtroFecha, filtroTurno, onLimpiarFiltros,
 }) {
   const [editingId, setEditingId] = useState(null);
 
@@ -1218,22 +1224,43 @@ function GrillaRegistros({
 
   const hayFiltrosActivos = !!(filtroTexto || filtroTipo || filtroFecha || filtroTurno);
 
+  const ocultos = registros.length - regs.length;
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className="flex-1 overflow-auto px-6 py-4">
+        {hayFiltrosActivos && ocultos > 0 && regs.length > 0 && (
+          <div className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg border border-amber-200 bg-amber-50 text-xs text-amber-700">
+            <AlertTriangle size={14} className="shrink-0" />
+            <span>{ocultos} registro{ocultos === 1 ? "" : "s"} oculto{ocultos === 1 ? "" : "s"} por los filtros aplicados.</span>
+            <button onClick={onLimpiarFiltros} className="font-semibold underline hover:text-amber-900">
+              Mostrar todos
+            </button>
+          </div>
+        )}
         {regs.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-gray-400">
             <FileText size={48} className="mb-4 opacity-50" />
             {hayFiltrosActivos ? (
               <>
                 <p className="text-lg font-medium">No hay registros para los filtros aplicados</p>
-                <p className="text-sm mt-1">Prueba limpiar fecha, turno, tipo o texto.</p>
+                <p className="text-sm mt-1">
+                  {registros.length > 0
+                    ? `Hay ${registros.length} registro${registros.length === 1 ? "" : "s"} en otras fechas o turnos.`
+                    : "Esta bitácora no tiene registros activos."}
+                </p>
+                <button
+                  onClick={onLimpiarFiltros}
+                  className="mt-3 px-4 py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-sm font-medium hover:bg-amber-100"
+                >
+                  Borrar filtros y mostrar todos
+                </button>
               </>
             ) : (
               <>
                 <p className="text-lg font-medium">No hay registros aún</p>
                 <p className="text-sm mt-1">
-                  {puedeCrear ? "Haz clic en \"Nuevo Registro\" para comenzar" : "Esta bitácora no tiene registros del día"}
+                  {puedeCrear ? "Haz clic en \"Nuevo Registro\" para comenzar" : "Esta bitácora no tiene registros activos"}
                 </p>
               </>
             )}
@@ -1507,16 +1534,15 @@ export default function App() {
   const [tiposEvento, setTiposEvento] = useState([]);
   const [filtroTexto, setFiltroTexto] = useState("");
   const [filtroTipo, setFiltroTipo] = useState("");
-  // F11: filtros fecha+turno para bitácoras no-MAND. Persisten en sessionStorage para
-  // sobrevivir al cambio de tab y al refresh, no entre sesiones del navegador.
-  const [filtroFecha, setFiltroFecha] = useState(
-    () => sessionStorage.getItem('bitacoras.filtroFecha') || ''
-  );
-  const [filtroTurno, setFiltroTurno] = useState(
-    () => sessionStorage.getItem('bitacoras.filtroTurno') || ''
-  );
-  useEffect(() => { sessionStorage.setItem('bitacoras.filtroFecha', filtroFecha); }, [filtroFecha]);
-  useEffect(() => { sessionStorage.setItem('bitacoras.filtroTurno', filtroTurno); }, [filtroTurno]);
+  // F11: filtros fecha+turno para bitácoras no-MAND. Sin persistencia (se retiró el
+  // sessionStorage): el default es SIEMPRE "todos los días" — un filtro de día solo existe
+  // mientras el usuario lo tenga seleccionado en la vista actual; se descarta al refrescar
+  // o cambiar de bitácora. Evita que un registro con otra fecha "desaparezca" sin aviso.
+  const [filtroFecha, setFiltroFecha] = useState('');
+  const [filtroTurno, setFiltroTurno] = useState('');
+  const limpiarFiltros = useCallback(() => {
+    setFiltroTexto(''); setFiltroTipo(''); setFiltroFecha(''); setFiltroTurno('');
+  }, []);
   const [toast, setToast] = useState(null);
   const [modal, setModal] = useState(null);
   const [logoutOpen, setLogoutOpen] = useState(false);
@@ -1654,7 +1680,7 @@ export default function App() {
     if (!target) target = bitacorasPermitidas[0]; // fallback: codigo nulo o no permitido
     if (target.bitacora_id !== activeBitacoraRef.current) {
       setActiveBitacora(target.bitacora_id);
-      setFiltroTexto(''); setFiltroTipo(''); setDraftLocal(null);
+      setFiltroTexto(''); setFiltroTipo(''); setFiltroFecha(''); setFiltroTurno(''); setDraftLocal(null);
     }
     if (target.codigo === 'DISP') {
       // Sembrar planta: param de la ruta → planta ya elegida → unidad del login (default).
@@ -2047,6 +2073,7 @@ export default function App() {
               filtroTipo={filtroTipo}
               filtroFecha={filtroFecha}
               filtroTurno={filtroTurno}
+              onLimpiarFiltros={limpiarFiltros}
             />
           )}
         </>
