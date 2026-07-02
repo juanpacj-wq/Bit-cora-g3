@@ -402,12 +402,14 @@ function LoginScreen({ auth, plantas, onReady, showToast }) {
         </div>
       </div>
 
-      {/* Acceso al dashboard de generación (app hermana). Navegación top-level al otro app. */}
-      <a href={DASHBOARD_URL}
+      {/* Acceso al dashboard de generación (app hermana). Pestaña NUEVA (el navegador la
+          enfoca): la bitácora queda abierta en la pestaña original. noopener corta la
+          referencia window.opener hacia esta app. */}
+      <a href={DASHBOARD_URL} target="_blank" rel="noopener noreferrer"
         className="absolute bottom-6 left-1/2 -translate-x-1/2 inline-flex items-center gap-2 px-5 py-2 rounded-full text-white shadow-xl select-none no-underline cursor-pointer hover:-translate-y-0.5 hover:shadow-2xl transition-all"
         style={{ backgroundColor: COLORS.blueDeepest, border: `1px solid ${COLORS.blueDark}` }}
-        aria-label="Ir al dashboard de generación"
-        title="Ir al dashboard de generación">
+        aria-label="Abrir el dashboard de generación en una pestaña nueva"
+        title="Abrir el dashboard de generación en una pestaña nueva">
         <LayoutDashboard size={15} style={{ color: COLORS.greenPrimary }} />
         <span className="text-sm font-semibold">dashboard</span>
       </a>
