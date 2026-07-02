@@ -102,6 +102,15 @@ const getTurnoLabel = (turno) => (turno === 1 || turno === "1" ? "Turno 1" : "Tu
 // Canonical turno window (F1, server/utils/turno.js): 1=diurno [6,17], 2=nocturno [18,5].
 const turnoFromHora = (hora) => (hora >= 6 && hora < 18 ? 1 : 2);
 const getTurnoActualNum = () => turnoFromHora(Math.floor(horaBogota()));
+// Identidad estable de la ventana de turno vigente (cambia en cada borde 06:00/18:00 Bogotá).
+// La madrugada (h<6) pertenece a la T2 que arrancó AYER a las 18:00. Se usa para deshabilitar
+// "Finalizar Turno" hasta que inicie el siguiente turno (persistido en localStorage).
+const shiftInstanceId = () => {
+  const h = horaBogota();
+  const turno = turnoFromHora(Math.floor(h));
+  const fecha = (turno === 2 && h < 6) ? shiftDate(getTodayBogota(), -1) : getTodayBogota();
+  return `${fecha}:T${turno}`;
+};
 // `fechaLocal` es Bogotá wallclock "YYYY-MM-DDTHH:mm" — el slice de hora ya está en hora Bogotá.
 const turnoFromFechaLocal = (fechaLocal) => {
   if (!fechaLocal || fechaLocal.length < 13) return getTurnoActualNum();
@@ -991,7 +1000,7 @@ function CategoriaTab({ categoria, activeId, onSelect, registrosPorBitacora }) {
 
 function BarraEstado({
   bitacora, registros, estadoBitacora, puedeCrear, esJefeTurno,
-  onCerrarTurno, onCerrarMasivo, onFinalizarTurno, finalizandoTurno,
+  onCerrarTurno, onCerrarMasivo, onFinalizarTurno, finalizandoTurno, turnoFinalizado,
   filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
   filtroFecha, setFiltroFecha, filtroTurno, setFiltroTurno,
   tiposEvento, onAddRegistro,
@@ -1130,12 +1139,16 @@ function BarraEstado({
           globalmente todas sus sesion_bitacora y emite CIET. Convive con el popup de logout.
           F17: oculto en MAND (cierre del día es automático vía sweeper). */}
       {!isMand && onFinalizarTurno && (
-        <button onClick={onFinalizarTurno} disabled={finalizandoTurno}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
-          style={{ backgroundColor: COLORS.greenDark }}>
-          <CheckCircle2 size={16} />
-          {finalizandoTurno ? 'Finalizando…' : 'Finalizar Turno'}
-        </button>
+        // El title va en un <span> envolvente: un title en un <button disabled> no muestra
+        // tooltip de forma fiable en varios navegadores (el disabled corta los eventos de puntero).
+        <span title={turnoFinalizado ? 'turno finalizado' : undefined}>
+          <button onClick={onFinalizarTurno} disabled={finalizandoTurno || turnoFinalizado}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
+            style={{ backgroundColor: COLORS.greenDark }}>
+            <CheckCircle2 size={16} />
+            {finalizandoTurno ? 'Finalizando…' : turnoFinalizado ? 'Turno finalizado' : 'Finalizar Turno'}
+          </button>
+        </span>
       )}
 
       {/* "Cerrar Turno" individual: oculto en MAND. El cierre del día MAND es automático
@@ -1424,7 +1437,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
               <button onClick={onSave} className="p-2 rounded-lg text-white transition-colors" style={{ backgroundColor: COLORS.greenPrimary }} title="Guardar">
                 <Save size={16} />
               </button>
-              <button onClick={onCancelEdit} className="p-2 rounded-lg text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors" title="Cancelar">
+              <button onClick={reg.registro_id ? onCancelEdit : onDelete} className="p-2 rounded-lg text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors" title={reg.registro_id ? "Cancelar" : "Eliminar"}>
                 <X size={16} />
               </button>
             </>
@@ -1546,6 +1559,21 @@ export default function App() {
 
   const sesion = auth.sesion;
   const user = auth.user;
+
+  // Cambio 2: "Finalizar Turno" queda deshabilitado hasta que inicie el siguiente turno. Guardamos
+  // en localStorage (por usuario) la ventana de turno en que se finalizó, para que el deshabilitado
+  // sobreviva un F5 y se re-habilite solo cuando el reloj cruce al siguiente turno.
+  const finKey = `bitacora:turnoFinalizado:${sesion?.usuario_id ?? 'anon'}`;
+  const [finShift, setFinShift] = useState(() => localStorage.getItem(finKey));
+  // Re-lee al cambiar de usuario/unidad (en el primer render `sesion` aún es null → finKey 'anon').
+  useEffect(() => { setFinShift(localStorage.getItem(finKey)); }, [finKey]);
+  // Tick de 1 min: fuerza re-evaluar `turnoFinalizado` para re-habilitar al cruzar el borde de turno.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 60000);
+    return () => clearInterval(id);
+  }, []);
+  const turnoFinalizado = !!finShift && finShift === shiftInstanceId();
 
   // Las bitácoras visibles se separan en (a) categorías agrupadas en un solo botón fijo
   // a la izquierda y (b) bitácoras "sueltas" que siguen siendo tabs reordenables por count.
@@ -1854,6 +1882,9 @@ export default function App() {
       onConfirm: async () => {
         try {
           const r = await finalizarTurno();
+          const sid = shiftInstanceId();
+          localStorage.setItem(finKey, sid);
+          setFinShift(sid);
           setModal(null);
           showToast(`Turno finalizado en ${r.finalizadas?.length || 0} bitácora(s)`);
         } catch (e) {
@@ -1861,7 +1892,7 @@ export default function App() {
         }
       },
     });
-  }, [finalizarTurno, showToast]);
+  }, [finalizarTurno, showToast, finKey]);
 
   // F4 + D-035: popup defensivo en logout. "Operar otra unidad" reemplaza al viejo "salir sin
   // finalizar": conserva el login Entra pero **mata la sesión de app** (`clearSesion` → POST
@@ -1960,6 +1991,7 @@ export default function App() {
               onCerrarMasivo={handleCerrarMasivo}
               onFinalizarTurno={handleFinalizarTurno}
               finalizandoTurno={finalizandoTurno}
+              turnoFinalizado={turnoFinalizado}
               filtroTexto={filtroTexto} setFiltroTexto={setFiltroTexto}
               filtroTipo={filtroTipo} setFiltroTipo={setFiltroTipo}
               filtroFecha={filtroFecha} setFiltroFecha={setFiltroFecha}
