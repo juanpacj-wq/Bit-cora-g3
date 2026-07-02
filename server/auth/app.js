@@ -77,6 +77,21 @@ export async function buildAuthApp() {
   // AUD-21: comparte store + secreto + nombre de cookie con el resolver del handshake WS, que corre
   // fuera de este middleware y necesita verificar la MISMA cookie de sesión.
   setWsSessionContext({ store, secret: sessionSecret, cookieName: SESSION_COOKIE_NAME });
+
+  // nginx quita el prefijo APP_BASE_PATH antes de proxiar (barra final en proxy_pass), así que el
+  // backend ve las rutas SIN prefijo (/auth, /api, /ws). express-session (1.19, index.js:203) solo
+  // adjunta req.session si req.originalUrl empieza por cookie.path (=/bitacora); con el prefijo
+  // stripped nunca coincide → deja req.session undefined y rompe login y toda ruta con cookie.
+  // Reponemos el prefijo en originalUrl SOLO para ese chequeo; el routing sigue usando req.url
+  // (stripped) y el Set-Cookie conserva path=/bitacora. En dev (APP_BASE_PATH='') no aplica.
+  if (APP_BASE_PATH) {
+    app.use((req, _res, next) => {
+      req.originalUrl = APP_BASE_PATH + req.originalUrl;
+      delete req._parsedOriginalUrl; // invalida el cache de parseurl para que use el nuevo valor
+      next();
+    });
+  }
+
   app.use(session({
     name: SESSION_COOKIE_NAME,
     secret: sessionSecret,
