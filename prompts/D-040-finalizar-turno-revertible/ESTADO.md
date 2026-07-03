@@ -11,7 +11,7 @@
 | E0 — Andamiaje | ✅ | Scaffolding creado: `_CONTEXTO-BASE.md`, `PREGUNTAS-D-040.md`, `ESTADO.md`, `E1..E4`. |
 | E1 — Esquema + exposición del estado de sesión | ✅ | Columna `sesion_activa.turno_finalizado_en` (+ paridad `_bogota`) + tipo CIET 'Reapertura de turno' (orden 4); expuesta en `SELECT_SESION`/`select-context` (reset en reactivación). Sin cambio de comportamiento. |
 | E2 — Endpoints (finalizar/revertir/forzado) + fix del bug + write-gate + tests | ✅ | `finalizar`/`revertir-turno`/`finalizar-forzado` por `sesion_activa.turno_finalizado_en` (revertible, CIET idempotente); fix `ingenieros_no_finalizados` (deja de leer `sesion_bitacora`, `OUTER APPLY` conserva `bitacoras_abiertas`); write-gate 409 solo en rama genérica de `registros.js`; suite 218/217✔/1skip. |
-| E3 — Frontend: fuente de verdad backend + revertir + gate de UI | ⬜ | — |
+| E3 — Frontend: fuente de verdad backend + revertir + gate de UI | ✅ | `turnoFinalizado` deriva de `sesion.turno_finalizado_en` (fuera `localStorage`/`shiftInstanceId`/tick); `patchSesion` refleja finalizar/revertir; botón togglea a "Revertir finalización" + banner; gate de UI solo en genéricas (Nuevo Registro + `GrillaRegistros`); `npm run build` ✓. |
 | E4 — Docs + ADR D-040 + cleanup + commit | ⬜ | — |
 
 Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloqueado.
@@ -42,6 +42,18 @@ Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloquea
 - **E2 (cobertura COMB/MAND, sin impacto):** para "no gateado", los tests 4c/4d afirman
   `status≠404` (el endpoint existe) **y** `codigo≠'turno_finalizado'` — el claim preciso del scoping —
   en vez de un write válido completo (payloads pesados). DISP (4b) sí hace un POST válido → 201.
+- **E3 (front, decisión de scope del banner/botón):** el botón Finalizar/Revertir y el banner viven
+  en `BarraEstado`, que **solo se monta para bitácoras genéricas** (`!['DISP','COMB'].includes` y
+  además `!isMand`). Así, desde DISP/COMB/MAND no se ve el botón "Revertir" — igual que el "Finalizar"
+  original (siempre fue `!isMand`). Revertir es alcanzable desde cualquier tab genérica. Sin impacto:
+  respeta la UX previa y el bloqueo aplica solo a genéricas.
+- **E3 (verificación, sustitución justificada):** el smoke **visual** completo requiere login Entra
+  real (OIDC; la cookie no es forjable headless → sin sesión solo se ve `LoginScreen`). Se sustituyó
+  por: `npm run build` ✓ + verificación del **contrato de datos** (`/api/me` devuelve `sesion` desde
+  `loadSession`→`SELECT_SESION`, que incluye `turno_finalizado_en` — probado transitivamente por los
+  11 tests de E2, cuyo write-gate lee justamente `req.sesion.turno_finalizado_en`) + revisión del
+  render condicional. `/api/me` gatea por la **cookie Entra** (`req.session.user`), NO por el backdoor
+  `X-Sesion-Id` (por eso un hit con bypass da 401) — dato útil para futuros checks.
 
 ## Datos descubiertos en ejecución
 > Hechos que solo se conocen corriendo (números de línea exactos tras editar, baseline real
@@ -76,6 +88,16 @@ Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloquea
   - Los CIET **no** llevan `TEST_TAG` (detalle NULL): el cleanup de `finalizar_turno.test.js` borra
     `registro_activo` por `creado_por IN (uids test) AND planta_id='TST'` (cubre genérico + CIET) +
     `disponibilidad_estado` por planta TST.
+- **Datos E3 para E4:**
+  - **El tick de 1 min se ELIMINÓ** (solo servía a `turnoFinalizado`; ya no hace falta con estado
+    backend). También se borró `shiftInstanceId` y todo `finKey`/`finShift`/`localStorage`.
+  - `useAuth` expone ahora `patchSesion(patch)` (parche de sesión en cliente, reusa `sesionRef`/`persistAuth`).
+  - `useBitacoraSesion.js` agrega `useRevertirTurno()` (`{ revertir, loading }`), simétrico a `useFinalizarTurno`.
+  - Gate de UI: `puedeCrear && !turnoFinalizado` SOLO en el botón "Nuevo Registro" (rama `!isMand` de
+    `BarraEstado`) y en el prop `puedeCrear` de `GrillaRegistros`. `SalaDeMandoGrid`/`DisponibilidadDashboard`
+    (`puedeEditar`)/`ConsumosGrid` reciben `puedeCrear` **crudo**.
+  - `handleFinalizarTurno`/`handleRevertirTurno` usan `auth.patchSesion({ turno_finalizado_en: … })`.
+  - `handleLogoutConfirm`/`handleCambiarUnidad` siguen llamando `finalizarTurno()`/`clearSesion()` sin cambios.
 
 ## Bitácora por etapa
 ### E0 — Andamiaje  ✅
@@ -134,3 +156,23 @@ Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloquea
 **Desviaciones:** helper inline vs middleware para el gate en `registros.js`; cobertura COMB/MAND por
 "no-gateado" en vez de write completo; verificación contra server :3099 — todas sin impacto funcional,
 detalladas en "Decisiones / desviaciones acumuladas".
+
+### E3 — Frontend: fuente de verdad backend + revertir + gate de UI  ✅
+**Archivos tocados:**
+- `src/hooks/useAuth.js` — mutador `patchSesion` (parche de sesión en cliente sin refetch) + al `return`.
+- `src/hooks/useBitacoraSesion.js` — nuevo `useRevertirTurno()` simétrico a `useFinalizarTurno()`.
+- `src/BitacorasGecelca3.jsx` — `turnoFinalizado` derivado de `sesion.turno_finalizado_en` (se eliminó
+  `shiftInstanceId`, `finKey`/`finShift`/`localStorage` y el tick de 1 min); `handleFinalizarTurno` usa
+  `patchSesion` + copy nuevo; `handleRevertirTurno` nuevo (modal → revertir → `patchSesion(null)` → toast);
+  botón header togglea Finalizar↔"Revertir finalización" (ícono `RotateCcw`) + banner ámbar en genéricas;
+  gate `&& !turnoFinalizado` SOLO en "Nuevo Registro" y en `puedeCrear` de `GrillaRegistros`.
+
+**Verificación (real):**
+- `npm run build` → **✓ built in ~17 s** (sin errores). `shiftDate`/`getTodayBogota` siguen usados (no huérfanos).
+- Contrato de datos del front verificado (ver desviaciones): `/api/me.sesion` sale de `loadSession`→`SELECT_SESION`
+  con `turno_finalizado_en`, probado transitivamente por los 11 tests de E2.
+- Smoke visual completo sustituido por build + contrato + review (login Entra no forjable headless) — ver desviaciones.
+- No hay script `lint` en el `package.json` del front; el gate es el build.
+
+**Desviaciones:** scope del banner/botón a genéricas y sustitución del smoke visual — sin impacto funcional,
+en "Decisiones / desviaciones acumuladas".

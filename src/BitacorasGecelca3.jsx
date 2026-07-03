@@ -6,7 +6,7 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import {
-  LogIn, LogOut, Clock, Plus, Save, Trash2, Lock, CheckCircle2,
+  LogIn, LogOut, Clock, Plus, Save, Trash2, Lock, CheckCircle2, RotateCcw,
   AlertTriangle, X, ChevronDown, ChevronLeft, ChevronRight, Calendar,
   Search, Filter, FileText,
   Activity, Flame, Droplets, Zap, Gauge, Cpu, FlaskConical, Leaf,
@@ -26,7 +26,7 @@ import { useCierre } from "./hooks/useCierre";
 import { useUsuariosActivos } from "./hooks/useUsuariosActivos";
 import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
 import { useFlipReorder } from "./hooks/useFlipReorder";
-import { useBitacoraSesion, useFinalizarTurno } from "./hooks/useBitacoraSesion";
+import { useBitacoraSesion, useFinalizarTurno, useRevertirTurno } from "./hooks/useBitacoraSesion";
 import { useAppRoute } from "./hooks/useAppRoute";
 import { buildHash } from "./routing/appRoute";
 import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
@@ -124,15 +124,6 @@ const getTurnoLabel = (turno) => (turno === 1 || turno === "1" ? "Turno 1" : "Tu
 // Canonical turno window (F1, server/utils/turno.js): 1=diurno [6,17], 2=nocturno [18,5].
 const turnoFromHora = (hora) => (hora >= 6 && hora < 18 ? 1 : 2);
 const getTurnoActualNum = () => turnoFromHora(Math.floor(horaBogota()));
-// Identidad estable de la ventana de turno vigente (cambia en cada borde 06:00/18:00 Bogotá).
-// La madrugada (h<6) pertenece a la T2 que arrancó AYER a las 18:00. Se usa para deshabilitar
-// "Finalizar Turno" hasta que inicie el siguiente turno (persistido en localStorage).
-const shiftInstanceId = () => {
-  const h = horaBogota();
-  const turno = turnoFromHora(Math.floor(h));
-  const fecha = (turno === 2 && h < 6) ? shiftDate(getTodayBogota(), -1) : getTodayBogota();
-  return `${fecha}:T${turno}`;
-};
 // `fechaLocal` es Bogotá wallclock "YYYY-MM-DDTHH:mm" — el slice de hora ya está en hora Bogotá.
 const turnoFromFechaLocal = (fechaLocal) => {
   if (!fechaLocal || fechaLocal.length < 13) return getTurnoActualNum();
@@ -1024,6 +1015,7 @@ function CategoriaTab({ categoria, activeId, onSelect, registrosPorBitacora }) {
 function BarraEstado({
   bitacora, registros, estadoBitacora, puedeCrear, esJefeTurno,
   onCerrarTurno, onCerrarMasivo, onFinalizarTurno, finalizandoTurno, turnoFinalizado,
+  onRevertirTurno, revirtiendoTurno,
   filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
   filtroFecha, setFiltroFecha, onCommitFecha, filtroTurno, setFiltroTurno,
   tiposEvento, onAddRegistro,
@@ -1189,7 +1181,10 @@ function BarraEstado({
           </button>
         )
       ) : (
-        puedeCrear && (
+        // D-040: gate de UI acotado a genéricas. Este botón vive en la rama !isMand de una
+        // BarraEstado que solo se monta para no-DISP/COMB → es exclusivo de bitácoras genéricas.
+        // Restamos turnoFinalizado SOLO acá (MAND "Guardar" arriba y DISP/COMB quedan crudos).
+        puedeCrear && !turnoFinalizado && (
           <button onClick={onAddRegistro}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all"
             style={{ backgroundColor: COLORS.greenPrimary }}>
@@ -1199,20 +1194,25 @@ function BarraEstado({
         )
       )}
 
-      {/* F4: "Finalizar turno" para todo ingeniero logueado (preguntas3.md punto E). Finaliza
-          globalmente todas sus sesion_bitacora y emite CIET. Convive con el popup de logout.
-          F17: oculto en MAND (cierre del día es automático vía sweeper). */}
+      {/* F4/D-040: "Finalizar turno" para todo ingeniero logueado. Ahora es REVERTIBLE: cuando el
+          turno está finalizado el botón togglea a "Revertir finalización" (self-service, sin permiso
+          especial). F17: oculto en MAND (cierre del día es automático vía sweeper). */}
       {!isMand && onFinalizarTurno && (
-        // El title va en un <span> envolvente: un title en un <button disabled> no muestra
-        // tooltip de forma fiable en varios navegadores (el disabled corta los eventos de puntero).
-        <span title={turnoFinalizado ? 'turno finalizado' : undefined}>
-          <button onClick={onFinalizarTurno} disabled={finalizandoTurno || turnoFinalizado}
+        turnoFinalizado ? (
+          <button onClick={onRevertirTurno} disabled={revirtiendoTurno}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
+            style={{ backgroundColor: COLORS.blueDark }}>
+            <RotateCcw size={16} />
+            {revirtiendoTurno ? 'Revirtiendo…' : 'Revertir finalización'}
+          </button>
+        ) : (
+          <button onClick={onFinalizarTurno} disabled={finalizandoTurno}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
             style={{ backgroundColor: COLORS.greenDark }}>
             <CheckCircle2 size={16} />
-            {finalizandoTurno ? 'Finalizando…' : turnoFinalizado ? 'Turno finalizado' : 'Finalizar Turno'}
+            {finalizandoTurno ? 'Finalizando…' : 'Finalizar Turno'}
           </button>
-        </span>
+        )
       )}
 
       {/* "Cerrar Turno" individual: oculto en MAND. El cierre del día MAND es automático
@@ -1684,8 +1684,9 @@ export default function App() {
   // finalizar el turno crea una nueva ventana de participación sin requerir re-login.
   useBitacoraSesion(auth.sesion?.sesion_id ? activeBitacora : null);
 
-  // F4: hook para botón "Finalizar Turno" del header.
+  // F4/D-040: hooks para "Finalizar Turno" / "Revertir finalización" del header.
   const { finalizar: finalizarTurno, loading: finalizandoTurno } = useFinalizarTurno();
+  const { revertir: revertirTurno, loading: revirtiendoTurno } = useRevertirTurno();
   const [pendientesModal, setPendientesModal] = useState(null);
   // F17: estado lifted desde SalaDeMandoGrid para que el botón "Guardar" del header sepa
   // si hay diff pendiente y dispare la batch via ref. mandSaveRef.current es la fn que
@@ -1708,20 +1709,11 @@ export default function App() {
   const sesion = auth.sesion;
   const user = auth.user;
 
-  // Cambio 2: "Finalizar Turno" queda deshabilitado hasta que inicie el siguiente turno. Guardamos
-  // en localStorage (por usuario) la ventana de turno en que se finalizó, para que el deshabilitado
-  // sobreviva un F5 y se re-habilite solo cuando el reloj cruce al siguiente turno.
-  const finKey = `bitacora:turnoFinalizado:${sesion?.usuario_id ?? 'anon'}`;
-  const [finShift, setFinShift] = useState(() => localStorage.getItem(finKey));
-  // Re-lee al cambiar de usuario/unidad (en el primer render `sesion` aún es null → finKey 'anon').
-  useEffect(() => { setFinShift(localStorage.getItem(finKey)); }, [finKey]);
-  // Tick de 1 min: fuerza re-evaluar `turnoFinalizado` para re-habilitar al cruzar el borde de turno.
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 60000);
-    return () => clearInterval(id);
-  }, []);
-  const turnoFinalizado = !!finShift && finShift === shiftInstanceId();
+  // D-040: la finalización de turno es estado del BACKEND (sesion_activa.turno_finalizado_en),
+  // fuente única y revertible. Se deriva de la sesión de app (sobrevive F5 vía /api/me) — ya no
+  // vive en localStorage (divergía del backend y el reset de /abrir lo dejaba inconsistente). El
+  // turno-sweeper la muere sola a fin de turno; select-context la limpia al reactivar (turno nuevo).
+  const turnoFinalizado = sesion?.turno_finalizado_en != null;
 
   // Las bitácoras visibles se separan en (a) categorías agrupadas en un solo botón fijo
   // a la izquierda y (b) bitácoras "sueltas" que siguen siendo tabs reordenables por count.
@@ -2050,27 +2042,46 @@ export default function App() {
     }
   }, [pendientesModal, cierre, sesion, activeBitacora, registrosHook, showToast]);
 
-  // F4: botón "Finalizar Turno" — finaliza globalmente todas las sesion_bitacora del usuario
-  // actual y emite UN CIET. No cierra registros (eso es del JdT/IngOp).
+  // F4/D-040: "Finalizar Turno" — marca sesion_activa.turno_finalizado_en (fuente única) y emite
+  // un CIET. No cierra registros (eso es del JdT/IngOp). El estado se refleja en cliente con
+  // patchSesion (sin refetch); F5 rehidrata vía /api/me. Revertible con handleRevertirTurno.
   const handleFinalizarTurno = useCallback(async () => {
     setModal({
       title: 'Finalizar turno',
-      message: 'Esto registra que terminaste tu turno. Tu actividad se marcará como finalizada en todas las bitácoras donde participas. ¿Continuar?',
+      message: 'Esto registra que terminaste tu turno y bloquea el registro en las bitácoras generales hasta que lo reviertas. ¿Continuar?',
       confirmLabel: 'Finalizar', confirmColor: 'green', icon: CheckCircle2,
       onConfirm: async () => {
         try {
           const r = await finalizarTurno();
-          const sid = shiftInstanceId();
-          localStorage.setItem(finKey, sid);
-          setFinShift(sid);
+          auth.patchSesion({ turno_finalizado_en: r?.turno_finalizado_en ?? new Date().toISOString() });
           setModal(null);
-          showToast(`Turno finalizado en ${r.finalizadas?.length || 0} bitácora(s)`);
+          showToast('Finalizaste tu turno. El registro en bitácoras generales quedó bloqueado.');
         } catch (e) {
           showToast(e.message, 'error');
         }
       },
     });
-  }, [finalizarTurno, showToast, finKey]);
+  }, [finalizarTurno, showToast, auth]);
+
+  // D-040: "Revertir finalización" — self-service. Limpia turno_finalizado_en (+ CIET 'reapertura')
+  // y desbloquea el registro en bitácoras generales.
+  const handleRevertirTurno = useCallback(async () => {
+    setModal({
+      title: 'Revertir finalización',
+      message: 'Vas a reabrir tu turno para volver a registrar en las bitácoras generales. ¿Continuar?',
+      confirmLabel: 'Revertir', confirmColor: 'green', icon: RotateCcw,
+      onConfirm: async () => {
+        try {
+          await revertirTurno();
+          auth.patchSesion({ turno_finalizado_en: null });
+          setModal(null);
+          showToast('Reabriste tu turno. Ya puedes registrar de nuevo.');
+        } catch (e) {
+          showToast(e.message, 'error');
+        }
+      },
+    });
+  }, [revertirTurno, showToast, auth]);
 
   // F4 + D-035: popup defensivo en logout. "Operar otra unidad" reemplaza al viejo "salir sin
   // finalizar": conserva el login Entra pero **mata la sesión de app** (`clearSesion` → POST
@@ -2170,6 +2181,8 @@ export default function App() {
               onFinalizarTurno={handleFinalizarTurno}
               finalizandoTurno={finalizandoTurno}
               turnoFinalizado={turnoFinalizado}
+              onRevertirTurno={handleRevertirTurno}
+              revirtiendoTurno={revirtiendoTurno}
               filtroTexto={filtroTexto} setFiltroTexto={setFiltroTexto}
               filtroTipo={filtroTipo} setFiltroTipo={setFiltroTipo}
               filtroFecha={filtroFecha} setFiltroFecha={setFiltroFecha} onCommitFecha={intentarCambiarDia}
@@ -2180,6 +2193,17 @@ export default function App() {
               mandGuardando={mandGuardando}
               onGuardarMand={() => mandSaveRef.current?.()}
             />
+          )}
+
+          {/* D-040: aviso de turno finalizado. Solo en bitácoras GENÉRICAS (donde el registro
+              queda bloqueado). MAND/DISP/COMB siguen operables → no muestran el banner. */}
+          {bitacoraActiva && !['DISP', 'COMB', 'MAND'].includes(bitacoraActiva.codigo) && turnoFinalizado && (
+            <div role="status"
+              className="flex items-center gap-2 mt-3 rounded-xl border px-4 py-3 text-sm font-medium"
+              style={{ backgroundColor: '#FEF3C7', borderColor: '#FDE68A', color: '#92400E' }}>
+              <AlertTriangle size={16} className="shrink-0" />
+              <span>Finalizaste tu turno; el registro en bitácoras está bloqueado. Revierte para volver a registrar.</span>
+            </div>
           )}
 
           {bitacoraActiva?.codigo === 'MAND' ? (
@@ -2211,13 +2235,15 @@ export default function App() {
               showToast={showToast}
             />
           ) : (
+            /* D-040: la grilla genérica se bloquea cuando el turno está finalizado (paridad con el
+               write-gate del backend). MAND/DISP/COMB reciben el puedeCrear crudo. */
             <GrillaRegistros
               registros={registrosDeBitacora}
               bitacora={bitacoraActiva}
               tiposEvento={tiposEvento}
               jefeNombre={catalogos.jefe?.nombre_completo}
               jdtNombre={null}
-              puedeCrear={puedeCrear}
+              puedeCrear={puedeCrear && !turnoFinalizado}
               onUpdateLocal={handleUpdateLocal}
               onSaveRegistro={handleSaveRegistro}
               onDeleteRegistro={handleDeleteRegistro}
