@@ -1366,6 +1366,12 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
   };
   const borderColor = tipoBorderColor[tipoNombre] || COLORS.grayBorder;
   const estadoDisplay = reg.estado === "borrador" ? "Borrador" : reg.estado === "cerrado" ? "Cerrado" : "Borrador";
+  // Aviso suave contra typos de digitación en el datetime-local (ej. escribir 01/07 en un
+  // navegador con locale MM/DD produce enero 7): fecha a más de 7 días de hoy se resalta
+  // en ámbar con un hint, sin bloquear el guardado.
+  const fechaEventoDia = toBogotaDate(reg.fecha_evento);
+  const fechaSospechosa = !!fechaEventoDia
+    && Math.abs(new Date(fechaEventoDia) - new Date(getTodayBogota())) > 7 * 86_400_000;
   const hasExtras = camposExtraDef.length > 0;
   const camposExtraValores = parseCamposExtra(reg.campos_extra);
   const updateCampoExtra = (campo, valorRaw, tipo) => {
@@ -1407,8 +1413,17 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
                   onUpdate("fecha_evento", v);
                   onUpdate("turno", turnoFromFechaLocal(v));
                 }}
-                className="w-full px-3 py-1.5 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                className={`w-full px-3 py-1.5 rounded-lg border text-sm focus:outline-none focus:ring-2 ${
+                  fechaSospechosa
+                    ? "border-amber-400 bg-amber-50 focus:ring-amber-400"
+                    : "border-gray-300 focus:ring-emerald-400"
+                }`}
               />
+              {fechaSospechosa && (
+                <p className="text-[11px] text-amber-600 leading-tight">
+                  Fecha a más de 7 días de hoy — verifica día y mes.
+                </p>
+              )}
               <select
                 value={reg.turno || 1}
                 onChange={(e) => onUpdate("turno", parseInt(e.target.value, 10))}
