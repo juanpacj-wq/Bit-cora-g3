@@ -93,6 +93,32 @@ router.get('/metricas', asyncH(async (req, res) => {
   return sendJSON(res, 200, out);
 }));
 
+// GET /api/disponibilidad/anios — años (Bogotá) para el selector de AÑO del dashboard: rango
+// CONTIGUO desde el primer registro DISP hasta el año actual (incluye años sin datos para que el
+// selector refleje toda la operación). Descendente. Si no hay registros → solo el año actual.
+router.get('/anios', asyncH(async (req, res) => {
+  const sesion = req.sesion;
+  const db = await getDB();
+  const dispBitacoraId = await getDispBitacoraId(db);
+  if (!dispBitacoraId) return sendJSON(res, 500, { error: 'Hay un problema de configuración del sistema. Contacta a soporte.', codigo: 'config_sistema' });
+  if (!(await hasPermisoBitacora(sesion, dispBitacoraId, 'puede_ver'))) {
+    return sendJSON(res, 403, { error: 'Sin permiso para ver Disponibilidad' });
+  }
+
+  // Día Bogotá = UTC-5 (D-020). MIN del año de inicio sobre TODAS las plantas (selector estable).
+  const r = await db.request().query(`
+    SELECT MIN(YEAR(DATEADD(HOUR, -5, fecha_inicio_estado))) AS anio_min
+    FROM bitacora.disponibilidad_estado
+  `);
+  const anioActual = Number(
+    new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric' }).format(new Date())
+  );
+  const anioMin = Math.min(r.recordset[0]?.anio_min || anioActual, anioActual);
+  const anios = [];
+  for (let y = anioActual; y >= anioMin; y--) anios.push(y);
+  return sendJSON(res, 200, { anios });
+}));
+
 // POST /api/disponibilidad/deshacer { planta_id }  (F12/D-026)
 // Revierte el último cambio: borra el vigente y restaura el N-1 como vigente (o vacía la planta).
 // Emite CIET 'Deshacer disponibilidad'. AUD-11: plantaMatch (solo la propia unidad).
