@@ -23,6 +23,7 @@ if (process.env.AUTH_TEST_BYPASS === '1' && process.env.NODE_ENV === 'production
 // front pide selección de planta (que reactiva sesion_activa).
 const SELECT_SESION = `
   s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
+  s.turno_finalizado_en,
   u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
   c.nombre AS cargo_nombre, c.solo_lectura,
   CAST(c.puede_cerrar_turno AS BIT) AS puede_cerrar_turno

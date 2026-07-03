@@ -95,11 +95,15 @@ router.post('/select-context', asyncH(async (req, res) => {
         IF @sesion_id IS NOT NULL
         BEGIN
           UPDATE bitacora.sesion_activa
-             SET activa           = 1,
-                 cerrada_en       = NULL,
-                 inicio_sesion    = SYSUTCDATETIME(),
-                 turno            = @turno,
-                 ultima_actividad = SYSUTCDATETIME()
+             SET activa               = 1,
+                 cerrada_en           = NULL,
+                 inicio_sesion        = SYSUTCDATETIME(),
+                 turno                = @turno,
+                 ultima_actividad     = SYSUTCDATETIME(),
+                 -- D-040: reactivar = turno nuevo → limpiar la finalización. Sin este reset,
+                 -- un usuario que finalizó y volvió por "Operar otra unidad" a la misma planta
+                 -- seguiría "finalizado" (bug simétrico al reset accidental de /abrir).
+                 turno_finalizado_en  = NULL
            WHERE sesion_id = @sesion_id;
         END
         ELSE
@@ -110,7 +114,7 @@ router.post('/select-context', asyncH(async (req, res) => {
         END
 
         SELECT s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
-               s.inicio_sesion, s.ultima_actividad,
+               s.inicio_sesion, s.ultima_actividad, s.turno_finalizado_en,
                u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
                c.nombre AS cargo_nombre, c.solo_lectura,
                CAST(c.puede_cerrar_turno AS BIT) AS puede_cerrar_turno

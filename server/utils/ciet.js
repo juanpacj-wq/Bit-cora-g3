@@ -6,6 +6,7 @@ const CIET_CODE = 'CIET';
 const TIPO_NOMBRE = {
   finalizacion: 'Finalización de turno',
   cierre: 'Cierre de turno',
+  reapertura: 'Reapertura de turno', // D-040: revertir finalización de turno (self-service)
 };
 const TIPO_DESHACER_DISP = 'Deshacer disponibilidad';
 const TIPO_CIERRE_MAND = 'Cierre de turno';
