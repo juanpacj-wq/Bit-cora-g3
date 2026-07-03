@@ -8,7 +8,17 @@ import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { mensajeUsuario } from '../utils/errores.js';
 import { plantaMatch, puedeCerrarTurno } from '../middleware/permissions.js';
-import { ventanaTurno } from '../utils/turno.js';
+import { ventanaTurno, periodoFromFechaBogota, turnoFromPeriodo } from '../utils/turno.js';
+
+// Robustez del cierre cronológico: el turno de la ventana se DERIVA de la hora Bogotá del registro
+// más antiguo, NO de la columna `turno` guardada. Un registro con `turno` corrupto (p.ej. turno=2 a
+// las 09:37) hacía que ventanaTurno calculara una franja [18:00–06:00] que no contenía a NINGÚN
+// borrador → el cierre cerraba 0 registros en silencio ("no pasa nada" al cerrar turno). El cierre
+// solo opera sobre bitácoras genéricas, donde el turno SIEMPRE debe coincidir con la hora (lo valida
+// el POST de registros), así que derivarlo es idéntico para datos válidos y robusto ante corruptos.
+function turnoDeFecha(fecha_evento) {
+  return turnoFromPeriodo(periodoFromFechaBogota(fecha_evento));
+}
 import { registrarEventoCierre } from '../utils/ciet.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { asyncH, loadAppSession } from './_middleware.js';
@@ -161,8 +171,8 @@ router.post('/bitacora', asyncH(async (req, res) => {
 
     let registros_cerrados = 0;
     if (oldest.recordset.length > 0) {
-      const { fecha_evento, turno } = oldest.recordset[0];
-      const { inicio, fin } = ventanaTurno(turno, fecha_evento);
+      const { fecha_evento } = oldest.recordset[0];
+      const { inicio, fin } = ventanaTurno(turnoDeFecha(fecha_evento), fecha_evento);
 
       const insResult = await new sql.Request(transaction)
         .input('bitacora_id', sql.Int, bitacora_id)
@@ -259,8 +269,8 @@ router.post('/masivo', asyncH(async (req, res) => {
 
       let registros_cerrados = 0;
       if (oldest.recordset.length > 0) {
-        const { fecha_evento, turno } = oldest.recordset[0];
-        const { inicio, fin } = ventanaTurno(turno, fecha_evento);
+        const { fecha_evento } = oldest.recordset[0];
+        const { inicio, fin } = ventanaTurno(turnoDeFecha(fecha_evento), fecha_evento);
 
         const insResult = await new sql.Request(transaction)
           .input('bitacora_id', sql.Int, row.bitacora_id)

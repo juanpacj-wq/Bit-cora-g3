@@ -694,8 +694,11 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
                             <span className="ml-2 text-xs font-medium text-emerald-600">(tú)</span>
                           )}
                         </div>
-                        <div className="text-xs text-gray-500 truncate">
-                          {u.cargo_nombre} — {u.planta_nombre}
+                        {/* Cargo y planta en líneas separadas: un cargo largo (ej. "Coordinador de
+                            carbón y maquinaria") ya no trunca ni oculta la planta. */}
+                        <div className="text-xs text-gray-500">
+                          <div className="truncate">{u.cargo_nombre}</div>
+                          <div className="truncate">{u.planta_nombre}</div>
                         </div>
                       </div>
                       <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 whitespace-nowrap">
