@@ -1251,10 +1251,16 @@ function BarraEstado({
 
 function GrillaRegistros({
   registros, bitacora, tiposEvento, jefeNombre, jdtNombre,
-  puedeCrear, onUpdateLocal, onSaveRegistro, onDeleteRegistro,
+  puedeCrear, bloqueado = false, onUpdateLocal, onSaveRegistro, onDeleteRegistro,
   filtroTexto, filtroTipo, filtroFecha, filtroTurno, onLimpiarFiltros,
 }) {
   const [editingId, setEditingId] = useState(null);
+
+  // D-040: al finalizar el turno la grilla pasa a solo-lectura. Cerramos cualquier edición en curso
+  // para que ninguna fila quede con inputs/Guardar tras el bloqueo (y no se reabra sola al revertir).
+  useEffect(() => {
+    if (bloqueado) setEditingId(null);
+  }, [bloqueado]);
 
   const camposExtraDef = useMemo(
     () => getCamposExtraEditables(bitacora?.definicion_campos),
@@ -1363,8 +1369,8 @@ function GrillaRegistros({
                 jefeNombre={jefeNombre}
                 jdtNombre={jdtNombre}
                 camposExtraDef={camposExtraDef}
-                isEditing={editingId === (reg.registro_id || reg._localId) || (reg._dirty && !reg.registro_id)}
-                onStartEdit={() => setEditingId(reg.registro_id || reg._localId)}
+                isEditing={!bloqueado && (editingId === (reg.registro_id || reg._localId) || (reg._dirty && !reg.registro_id))}
+                onStartEdit={() => { if (!bloqueado) setEditingId(reg.registro_id || reg._localId); }}
                 onCancelEdit={() => setEditingId(null)}
                 onUpdate={(campo, valor) => onUpdateLocal(reg.registro_id || reg._localId, campo, valor)}
                 onSave={async () => {
@@ -1372,7 +1378,8 @@ function GrillaRegistros({
                   if (ok) setEditingId(null);
                 }}
                 onDelete={() => onDeleteRegistro(reg)}
-                puedeEditar={reg.estado === "borrador" || !reg.registro_id}
+                puedeEditar={!bloqueado && (reg.estado === "borrador" || !reg.registro_id)}
+                bloqueado={bloqueado}
               />
             ))}
           </div>
@@ -1403,7 +1410,7 @@ function AutoGrowTextarea({ value, className, ...props }) {
   );
 }
 
-function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre, camposExtraDef = [], isEditing, onStartEdit, onCancelEdit, onUpdate, onSave, onDelete, puedeEditar }) {
+function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre, camposExtraDef = [], isEditing, onStartEdit, onCancelEdit, onUpdate, onSave, onDelete, puedeEditar, bloqueado = false }) {
   const tipoNombre = reg.tipo_evento_nombre
     || tiposEvento.find((t) => t.tipo_evento_id === reg.tipo_evento_id)?.nombre
     || "";
@@ -1584,7 +1591,15 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
         </div>
 
         <div className="lg:col-span-2 flex items-center justify-end gap-2">
-          {isEditing ? (
+          {/* D-040: turno finalizado → solo lectura. Ninguna acción (editar/borrar/entrar en edición);
+              la fila muestra un indicador de bloqueo y todos los datos quedan visibles en modo lectura. */}
+          {bloqueado ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-400 bg-gray-50"
+              title="Turno finalizado: registro bloqueado. Revierte la finalización para editar.">
+              <Lock size={14} />
+              <span className="hidden sm:inline">Bloqueado</span>
+            </span>
+          ) : isEditing ? (
             <>
               <button onClick={onSave} className="p-2 rounded-lg text-white transition-colors" style={{ backgroundColor: COLORS.greenPrimary }} title="Guardar">
                 <Save size={16} />
@@ -2049,6 +2064,23 @@ export default function App() {
   // un CIET. No cierra registros (eso es del JdT/IngOp). El estado se refleja en cliente con
   // patchSesion (sin refetch); F5 rehidrata vía /api/me. Revertible con handleRevertirTurno.
   const handleFinalizarTurno = useCallback(async () => {
+    // D-040/blindaje: la finalización deja las bitácoras genéricas en solo-lectura, así que un
+    // borrador sin guardar quedaría atrapado (no se puede guardar ni descartar tras finalizar).
+    // Se BLOQUEA la finalización mientras haya cambios sin guardar en la bitácora activa —
+    // draftLocal nuevo o una edición en curso de un registro existente (ambos marcan `_dirty`).
+    // Solo puede haber estado sucio en la bitácora que se ve (cambiar de bitácora/día lo limpia),
+    // por eso basta revisar `registrosDeBitacora`. Garantiza el flujo pedido:
+    // guardar todo → finalizar → solo lectura.
+    const hayCambiosSinGuardar = registrosDeBitacora.some((r) => r._dirty);
+    if (hayCambiosSinGuardar) {
+      setModal({
+        title: 'Registro borrador sin guardar',
+        message: 'Hay un registro borrador sin guardar. Guárdalo o descártalo antes de finalizar el turno.',
+        confirmLabel: 'Entendido', confirmColor: 'blue', icon: AlertTriangle,
+        onConfirm: () => setModal(null),
+      });
+      return;
+    }
     setModal({
       title: 'Finalizar turno',
       message: 'Esto registra que terminaste tu turno y bloquea el registro en las bitácoras generales hasta que lo reviertas. ¿Continuar?',
@@ -2064,7 +2096,7 @@ export default function App() {
         }
       },
     });
-  }, [finalizarTurno, showToast, auth]);
+  }, [finalizarTurno, showToast, auth, registrosDeBitacora]);
 
   // D-040: "Revertir finalización" — self-service. Limpia turno_finalizado_en (+ CIET 'reapertura')
   // y desbloquea el registro en bitácoras generales.
@@ -2239,7 +2271,8 @@ export default function App() {
             />
           ) : (
             /* D-040: la grilla genérica se bloquea cuando el turno está finalizado (paridad con el
-               write-gate del backend). MAND/DISP/COMB reciben el puedeCrear crudo. */
+               write-gate del backend). `bloqueado` pone TODA la grilla en solo-lectura (sin editar,
+               borrar ni entrar en modo edición); MAND/DISP/COMB reciben el puedeCrear crudo. */
             <GrillaRegistros
               registros={registrosDeBitacora}
               bitacora={bitacoraActiva}
@@ -2247,6 +2280,7 @@ export default function App() {
               jefeNombre={catalogos.jefe?.nombre_completo}
               jdtNombre={null}
               puedeCrear={puedeCrear && !turnoFinalizado}
+              bloqueado={turnoFinalizado}
               onUpdateLocal={handleUpdateLocal}
               onSaveRegistro={handleSaveRegistro}
               onDeleteRegistro={handleDeleteRegistro}

@@ -169,6 +169,37 @@ test('4a. finalizado: POST a bitácora genérica → 409 turno_finalizado', asyn
   assert.equal(data.codigo, 'turno_finalizado', JSON.stringify(data));
 });
 
+test('4a2. finalizado: PUT a registro genérico → 409 turno_finalizado', async () => {
+  // Se crea el registro con el turno VIVO (POST 201), luego se finaliza y se intenta editar.
+  await setFinalizado(GEN_UID, false);
+  const creado = await call('POST', '/api/registros', { sesion_id: GEN_SESION, body: genBody() });
+  assert.equal(creado.status, 201, JSON.stringify(creado.data));
+  const rid = creado.data.registro.registro_id;
+  await setFinalizado(GEN_UID, true);
+  const { status, data } = await call('PUT', `/api/registros/${rid}`, {
+    sesion_id: GEN_SESION, body: { detalle: `${TEST_TAG} editado-finalizado` },
+  });
+  assert.equal(status, 409, JSON.stringify(data));
+  assert.equal(data.codigo, 'turno_finalizado', JSON.stringify(data));
+  // limpieza: revertir y borrar el registro creado.
+  await setFinalizado(GEN_UID, false);
+  await call('DELETE', `/api/registros/${rid}`, { sesion_id: GEN_SESION });
+});
+
+test('4a3. finalizado: DELETE a registro genérico → 409 turno_finalizado', async () => {
+  await setFinalizado(GEN_UID, false);
+  const creado = await call('POST', '/api/registros', { sesion_id: GEN_SESION, body: genBody() });
+  assert.equal(creado.status, 201, JSON.stringify(creado.data));
+  const rid = creado.data.registro.registro_id;
+  await setFinalizado(GEN_UID, true);
+  const { status, data } = await call('DELETE', `/api/registros/${rid}`, { sesion_id: GEN_SESION });
+  assert.equal(status, 409, JSON.stringify(data));
+  assert.equal(data.codigo, 'turno_finalizado', JSON.stringify(data));
+  // limpieza: revertir y borrar (ahora sí) el registro creado.
+  await setFinalizado(GEN_UID, false);
+  await call('DELETE', `/api/registros/${rid}`, { sesion_id: GEN_SESION });
+});
+
 test('4b. finalizado: DISP sigue operable (201)', async () => {
   await setFinalizado(ctx.usuarios.jdt.usuario_id, true);
   const fecha = new Date(Date.now() - 3600 * 1000);
