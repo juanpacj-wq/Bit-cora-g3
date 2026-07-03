@@ -7,8 +7,11 @@ const FECHA_FMT = new Intl.DateTimeFormat('es-CO', {
   day: '2-digit', month: '2-digit', year: 'numeric',
   hour: '2-digit', minute: '2-digit',
 });
+// fecha_cierre_operativo es un DATE calendario (día Bogotá del cierre, ya calculado en SQL
+// con DATEADD(HOUR,-5,...)). El driver lo serializa como medianoche UTC; formatearlo con
+// timeZone Bogotá le restaría 5h OTRA VEZ y mostraría el día anterior. Se lee en UTC tal cual.
 const FECHA_CORTA_FMT = new Intl.DateTimeFormat('es-CO', {
-  timeZone: 'America/Bogota',
+  timeZone: 'UTC',
   day: '2-digit', month: '2-digit', year: 'numeric',
 });
 
