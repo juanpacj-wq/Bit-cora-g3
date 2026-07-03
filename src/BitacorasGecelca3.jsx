@@ -1379,6 +1379,27 @@ function GrillaRegistros({
   );
 }
 
+// Textarea que crece con su contenido (sin scroll interno ni alto fijo).
+function AutoGrowTextarea({ value, className, ...props }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      rows={1}
+      className={className}
+      style={{ overflow: "hidden" }}
+      {...props}
+    />
+  );
+}
+
 function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre, camposExtraDef = [], isEditing, onStartEdit, onCancelEdit, onUpdate, onSave, onDelete, puedeEditar }) {
   const tipoNombre = reg.tipo_evento_nombre
     || tiposEvento.find((t) => t.tipo_evento_id === reg.tipo_evento_id)?.nombre
@@ -1503,12 +1524,11 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
         <div className={hasExtras ? "lg:col-span-3" : "lg:col-span-5"}>
           <label className="text-xs text-gray-400 lg:hidden">Descripción</label>
           {isEditing ? (
-            <textarea
+            <AutoGrowTextarea
               value={reg.detalle || ""}
               onChange={(e) => onUpdate("detalle", e.target.value)}
-              rows={3}
               placeholder="Describe el evento operativo..."
-              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none"
+              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none min-h-[4.5rem]"
             />
           ) : (
             <p className="text-sm text-gray-700 leading-relaxed line-clamp-2">
