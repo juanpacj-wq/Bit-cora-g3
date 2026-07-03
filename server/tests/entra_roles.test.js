@@ -2,13 +2,26 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveCargo, ROLE_TO_CARGO, PRECEDENCE } from '../utils/entra-roles.js';
 
-// Mapeo 1:1 — los 12 App Roles deben mapear a los 12 cargos sembrados en db.js.
-test('ROLE_TO_CARGO cubre los 12 App Roles y todos están en PRECEDENCE', () => {
-  assert.equal(Object.keys(ROLE_TO_CARGO).length, 12);
+// Mapeo 1:1 — los 13 App Roles deben mapear a los 13 cargos sembrados en db.js (D-038: +admin).
+test('ROLE_TO_CARGO cubre los 13 App Roles y todos están en PRECEDENCE', () => {
+  assert.equal(Object.keys(ROLE_TO_CARGO).length, 13);
   for (const role of Object.keys(ROLE_TO_CARGO)) {
     assert.ok(PRECEDENCE.includes(role), `${role} debe estar en PRECEDENCE`);
   }
-  assert.equal(PRECEDENCE.length, 12);
+  assert.equal(PRECEDENCE.length, 13);
+});
+
+// D-038: rol ADMIN.
+test('ADMINISTRADOR_DEBUGGING → cargo Administrador y Debugging', () => {
+  const r = resolveCargo(['ADMINISTRADOR_DEBUGGING']);
+  assert.equal(r.role, 'ADMINISTRADOR_DEBUGGING');
+  assert.equal(r.cargoNombre, 'Administrador y Debugging');
+});
+
+test('multi-rol → Admin gana sobre cualquier otro rol (máxima precedencia)', () => {
+  assert.equal(resolveCargo(['OPERADOR_PLANTA_CALDERA', 'ADMINISTRADOR_DEBUGGING']).role, 'ADMINISTRADOR_DEBUGGING');
+  assert.equal(resolveCargo(['ADMINISTRADOR_DEBUGGING', 'JEFE_DE_TURNO']).role, 'ADMINISTRADOR_DEBUGGING');
+  assert.equal(resolveCargo(['GERENTE_PRODUCCION', 'ADMINISTRADOR_DEBUGGING']).role, 'ADMINISTRADOR_DEBUGGING');
 });
 
 test('rol único → su cargo', () => {

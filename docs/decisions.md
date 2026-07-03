@@ -502,6 +502,22 @@ dashboard). (d) La cookie no viaja a `/dashboard` (aislamiento entre apps). Cros
 
 ---
 
+## D-039 — Rol ADMIN (`Administrador y Debugging`) con acceso total, data-driven
+
+**Fecha:** 2026-07-03
+
+**Contexto:** se necesitaba un rol de administrador/debugging para pruebas funcionales que pudiera **ver, crear, editar y borrar en todo lo que la app permite**, y quedar **blindado ante auditoría**. En Entra se creó el grupo de seguridad `AMINISTRADOR_DEBUGGING` (`dfc61859-cef1-45f9-8b89-8b4658bbf56f`). El control de acceso de Bitácora es 100% data-driven (App Role → `ROLE_TO_CARGO` → `lov_bit.cargo` → matriz `cargo_bitacora_permiso` + flags `puede_cerrar_turno`/`solo_lectura`), sin superusuarios por código.
+
+**Decisión:** modelar el admin como **un cargo real más** — NO un bypass. Cambios:
+- **Entra:** un App Role con `value = ADMINISTRADOR_DEBUGGING` (el grupo se asigna a ese App Role; "Assignment required = Yes" sigue siendo el gate de acceso). El claim `roles` transporta ese `value`, no el id del grupo.
+- **`entra-roles.js`:** `ROLE_TO_CARGO['ADMINISTRADOR_DEBUGGING'] = 'Administrador y Debugging'` y **primero** en `PRECEDENCE` (gana en multi-rol).
+- **`db.js`:** cargo sembrado con `solo_lectura=0`, `puede_cerrar_turno=1`; en la matriz (`WITH matriz AS`) una cláusula `WHEN c.nombre='Administrador y Debugging' THEN 1` como **primer WHEN** de `puede_ver` y `puede_crear` (gana sobre las de código). **Gotcha:** el override defensivo DISP (F12.A6) recomputa `puede_crear` de toda fila DISP, así que el admin también se agregó a ese `IN (...)` o quedaría en 0 en DISP.
+- **Sin cambios de frontend:** el sidebar filtra por `puede_ver`, los botones por `puede_crear`, y cerrar turno / conformación por `sesion.puede_cerrar_turno` — todo se activa solo con los datos del nuevo cargo.
+
+**Consecuencias:** (a) toda acción del admin pasa por los MISMOS gates (auth/CSRF/rate-limit/permiso) y queda **atribuida** (`creado_por`/`modificado_por`) — auditable, cero código de bypass. (b) El admin obtiene el **máximo borrado que la app ya soporta** (borradores, soft-deletes de eventos, celdas de MAND/COMB, cierre); **NO se añadió hard-delete de registros cerrados/históricos** — la app es append-only por diseño de auditoría y romper eso contradiría el requisito. (c) La bitácora `AUTH` (`activa=0`) queda fuera para todos, incluido admin (esperado). (d) Los singletons `es_jefe_planta`/`es_jdt_default` NO se tocan (son identidad por-UPN para snapshots, no gates; `puede_cerrar_turno` ya cubre lo que habilitan). (e) Tests: `entra_roles.test.js` (13 roles + precedencia admin) y `rol_admin_debugging.test.js` (matriz completa + regresión override DISP + idempotencia). Verificado end-to-end vía backdoor de test: crear (201) y borrar (200) en QUIM, bitácora ajena a operadores. Cross-ref: [[D-031]] (login Entra / rol automático), [[D-029]] (patrón de rol nuevo en matriz), [[D-037]] (auth-por-defecto).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

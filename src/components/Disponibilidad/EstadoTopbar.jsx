@@ -1,6 +1,7 @@
 import React from 'react';
-import { RefreshCw, Edit3, Undo2, CalendarRange } from 'lucide-react';
+import { RefreshCw, Edit3, Undo2 } from 'lucide-react';
 import { PLANTAS } from './colores';
+import YearDropdown from './YearDropdown';
 
 // Barra superior del rediseño (look dashboard.html): título + subtítulo a la izquierda;
 // filtro de año + toggle de planta (.seg) + acciones (.btn) a la derecha. Reemplaza los botones
@@ -27,18 +28,7 @@ export default function EstadoTopbar({
         </div>
       </div>
       <div className="toolbar">
-        <label className="yearsel" title="Filtrar el dashboard por año">
-          <CalendarRange />
-          <select
-            value={anio}
-            onChange={(e) => onChangeAnio?.(e.target.value)}
-            aria-label="Filtrar por año"
-          >
-            {anios.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </label>
+        <YearDropdown value={anio} options={anios} onChange={onChangeAnio} />
         <div className="seg" role="group" aria-label="Seleccionar planta">
           {PLANTAS.map((p) => (
             <button
