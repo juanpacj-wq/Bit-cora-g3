@@ -241,7 +241,7 @@ export default function DisponibilidadDashboard({
             puedeEditar={puedeEditar}
             tieneVigente={!!data?.vigente}
             anio={anio}
-            anios={ANIOS_OPTS}
+            anios={aniosOpts}
             onChangeAnio={setAnio}
             onChangePlanta={setPlantaSeleccionada}
             onCambiar={() => setModal({ mode: 'crear' })}
