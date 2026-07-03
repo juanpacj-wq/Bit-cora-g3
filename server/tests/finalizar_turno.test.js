@@ -78,6 +78,12 @@ async function cietCountSince(uid, tipoNombre, sinceId) {
 async function limpiar() {
   const db = await getDB();
   const inUids = Object.values(ctx.usuarios).map((u) => u.usuario_id).join(',');
+  // El test 2 llama POST /api/bitacora/abrir → inserta en sesion_bitacora. Hay que borrar esas
+  // filas o su FK (sesion_bitacora.sesion_id → sesion_activa) bloquea el DELETE de sesion_activa
+  // que hacen OTROS tests (p.ej. conformacion_turno purga sesiones test viejas) → suite roja.
+  await db.request().query(
+    `DELETE FROM bitacora.sesion_bitacora WHERE sesion_id IN
+       (SELECT sesion_id FROM bitacora.sesion_activa WHERE usuario_id IN (${inUids}))`);
   // Registros genéricos + CIET creados por usuarios de test EN la planta de test.
   await db.request().query(
     `DELETE FROM bitacora.registro_activo WHERE creado_por IN (${inUids}) AND planta_id='${TEST_PLANTA}'`);
