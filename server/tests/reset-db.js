@@ -16,7 +16,7 @@
 //   6. sesion_activa             ← sesiones de los test users.
 
 import sql from 'mssql';
-import { getDB } from '../db.js';
+import { getDB, TEST_PLANTA_ID } from '../db.js';
 
 const TEST_USERNAMES = ['test_jdt', 'test_ingop', 'test_gerente', 'test_ingquim'];
 const PLANTA_ID = 'GEC3';
@@ -61,19 +61,16 @@ async function main() {
     `);
   counts.evento_dashboard = r.rowsAffected[0];
 
-  // 2. disponibilidad_dashboard: filas asociadas a registro_activo test (FK lógico).
+  // 2. disponibilidad_estado (D-041): TABLA BASE, acotado a la PLANTA DE TEST. Los tests solo
+  // escriben DISP en TEST_PLANTA, así que ese es el único borrado seguro. NUNCA GEC3/GEC32.
+  // La versión anterior borraba a través de la VISTA disponibilidad_dashboard con planta_id=GEC3 y
+  // un join roto (`registro_activo_id` = disponibilidad_id, distinto id-space que registro_activo):
+  // podía eliminar el vigente REAL de GEC3 por colisión de ids. La vista ahora es de solo lectura
+  // (trigger en BD), así que ese DELETE ni siquiera compilaría.
   r = await db.request()
-    .input('tag', sql.NVarChar(200), `%${TAG_LIKE}%`)
-    .input('p', sql.VarChar(10), PLANTA_ID)
-    .query(`
-      DELETE FROM bitacora.disponibilidad_dashboard
-      WHERE planta_id = @p
-        AND (registro_activo_id IN (
-              SELECT registro_id FROM bitacora.registro_activo
-              WHERE creado_por IN (${idList}) OR detalle LIKE @tag
-            ) OR registro_activo_id IS NULL);
-    `);
-  counts.disponibilidad_dashboard = r.rowsAffected[0];
+    .input('tp', sql.VarChar(10), TEST_PLANTA_ID)
+    .query(`DELETE FROM bitacora.disponibilidad_estado WHERE planta_id = @tp;`);
+  counts.disponibilidad_estado = r.rowsAffected[0];
 
   // 3. registro_activo: TEST users + tagged.
   r = await db.request()

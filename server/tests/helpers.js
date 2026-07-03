@@ -2,6 +2,7 @@ import sql from 'mssql';
 import { randomBytes } from 'node:crypto';
 import { initDB, getDB, TEST_PLANTA_ID } from '../db.js';
 import { hashPassword } from '../utils/password.js';
+import { getTurnoColombia } from '../utils/turno.js';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3002';
 export const PLANTA_ID = 'GEC3';
@@ -14,6 +15,17 @@ export const TEST_PLANTA = TEST_PLANTA_ID;
 // con corchetes el patrón '%[TEST-RUN-N]%' NO matchea el literal '[TEST-RUN-N]' — el
 // cleanup quedaba inerte y los asserts con LIKE TEST_TAG fallaban silenciosamente.
 export const TEST_TAG = `TEST-RUN-${Date.now()}`;
+
+// D-041: ÚNICA vía autorizada para limpiar DISP en tests. Opera SIEMPRE sobre la planta de test
+// (hard-coded, sin parámetro → imposible pasar GEC3/GEC32 por error) y SIEMPRE sobre la tabla base
+// disponibilidad_estado (nunca la vista disponibilidad_dashboard, que además es de solo lectura por
+// trigger en la BD). Todo test que cree estados DISP debe limpiarlos con este helper.
+export async function cleanDispTestPlanta() {
+  const db = await getDB();
+  await db.request()
+    .input('tp', sql.VarChar(10), TEST_PLANTA_ID)
+    .query(`DELETE FROM bitacora.disponibilidad_estado WHERE planta_id = @tp;`);
+}
 
 export async function call(method, path, { body, sesion_id } = {}) {
   const headers = {};
@@ -93,6 +105,12 @@ export async function setupSessions({ planta = PLANTA_ID } = {}) {
   `);
   const cargoByName = Object.fromEntries(cargos.map(c => [c.nombre, c.cargo_id]));
 
+  // El turno de la sesión de test debe ser el turno ACTUAL (no un 1 hardcodeado): si se corre la
+  // suite en turno 2 (después de las 18:00 Bogotá), una sesión turno=1 tiene su ventana
+  // [06:00,18:00] ya vencida y el turno-sweeper la EXPULSA (activa=0) a los ≤60s → los tests
+  // empiezan a recibir 401 "Sesión no válida" a mitad de corrida. Con el turno actual la ventana
+  // contiene "ahora" y la sesión sobrevive toda la corrida, a cualquier hora del día.
+  const turnoActual = getTurnoColombia();
   async function ensureSesion(usuario_id, cargo_id) {
     await db.request()
       .input('usuario_id', sql.Int, usuario_id)
@@ -101,7 +119,7 @@ export async function setupSessions({ planta = PLANTA_ID } = {}) {
       .input('usuario_id', sql.Int, usuario_id)
       .input('planta_id', sql.VarChar(10), planta)
       .input('cargo_id', sql.Int, cargo_id)
-      .input('turno', sql.TinyInt, 1)
+      .input('turno', sql.TinyInt, turnoActual)
       .query(`
         INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno)
         OUTPUT INSERTED.sesion_id
@@ -131,15 +149,19 @@ export async function cleanupTestRegistros() {
   const db = await getDB();
   await db.request()
     .input('tag', sql.NVarChar(200), `%${TEST_TAG}%`)
+    .input('tp', sql.VarChar(10), TEST_PLANTA_ID)
     .query(`
-      UPDATE bitacora.autorizacion_dashboard SET activa = 0
-      WHERE registro_origen_id IN (
+      -- D-041 (blindaje anti-destrucción en prod): escribir SIEMPRE en la TABLA BASE, nunca a través
+      -- de una vista dashboard. autorizacion_dashboard es una VIEW actualizable sobre evento_dashboard
+      -- (tipo='AUTH'); un UPDATE/DELETE por la vista cascada silenciosamente a la base → footgun.
+      UPDATE bitacora.evento_dashboard SET activa = 0
+      WHERE tipo = 'AUTH' AND registro_origen_id IN (
         SELECT registro_id FROM bitacora.registro_activo WHERE detalle LIKE @tag
       );
-      -- D-026: DISP storage migró a bitacora.disponibilidad_estado. Borramos por TEST_TAG
-      -- en detalle para no acumular leftover entre runs (la vieja disponibilidad_dashboard
-      -- ahora es una VIEW derivada — no se escribe directamente).
-      DELETE FROM bitacora.disponibilidad_estado WHERE detalle LIKE @tag;
+      -- D-041: DISP se borra por PLANTA DE TEST (límite de aislamiento) además del tag. NUNCA por tag
+      -- global: una fila DISP de GEC3/GEC32 jamás debe caer aquí aunque por error quedara tagueada
+      -- (así, un POST DISP mal dirigido a una planta real no se amplifica a un borrado del vigente).
+      DELETE FROM bitacora.disponibilidad_estado WHERE planta_id = @tp AND detalle LIKE @tag;
       DELETE FROM bitacora.registro_activo WHERE detalle LIKE @tag;
       DELETE FROM bitacora.registro_historico WHERE detalle LIKE @tag;
     `);

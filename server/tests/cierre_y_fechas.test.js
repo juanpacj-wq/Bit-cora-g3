@@ -6,7 +6,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
-import { setupSessions, cleanupTestRegistros, call, PLANTA_ID, TEST_TAG } from './helpers.js';
+import { setupSessions, cleanupTestRegistros, call, TEST_PLANTA, TEST_TAG } from './helpers.js';
 
 let ctx;
 let DISP_ID, MAND_ID, CALDERA_ID;
@@ -15,14 +15,18 @@ let DISP_TIPO_EVENTO_ID, CALDERA_TIPO_EVENTO_ID;
 const HOUR = 3600 * 1000;
 
 async function cleanAll() {
+  // D-030/D-041: TODO opera sobre TEST_PLANTA (planta sintética), NUNCA sobre GEC3/GEC32 reales.
+  // Antes esto usaba PLANTA_ID='GEC3' y, peor, borraba a través de la VISTA disponibilidad_dashboard
+  // (updatable → cascada a disponibilidad_estado) → cada corrida dejaba a GEC3 sin estado vigente.
+  // Este archivo NO escribe DISP en disponibilidad_estado (inserta DISP legacy en registro_activo),
+  // así que NO toca esa tabla; limpia solo lo que crea, acotado a la planta de test.
   const db = await getDB();
   await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .input('disp', sql.Int, DISP_ID)
     .input('mand', sql.Int, MAND_ID)
     .input('cal', sql.Int, CALDERA_ID)
     .query(`
-      DELETE FROM bitacora.disponibilidad_dashboard WHERE planta_id = @p;
       DELETE FROM bitacora.registro_activo WHERE bitacora_id IN (@disp, @mand, @cal) AND planta_id = @p;
       DELETE FROM bitacora.registro_historico WHERE bitacora_id IN (@disp, @mand, @cal) AND planta_id = @p;
     `);
@@ -31,7 +35,7 @@ async function cleanAll() {
 // INSERT directo en activo, sin pasar por el endpoint POST (evita issues de permisos por
 // cargo). El test mide el comportamiento del cierre, no el de la creación.
 async function insertActivoDirecto({
-  bitacora_id, tipo_evento_id, fecha_evento, turno = 1, detalle, planta_id = PLANTA_ID,
+  bitacora_id, tipo_evento_id, fecha_evento, turno = 1, detalle, planta_id = TEST_PLANTA,
   campos_extra = null, fecha_fin_estado = null,
 }) {
   const db = await getDB();
@@ -57,7 +61,7 @@ async function insertActivoDirecto({
 }
 
 before(async () => {
-  ctx = await setupSessions();
+  ctx = await setupSessions({ planta: TEST_PLANTA });
   DISP_ID    = ctx.bitByCodigo.DISP;
   MAND_ID    = ctx.bitByCodigo.MAND;
   CALDERA_ID = ctx.bitByCodigo.CALDERA;
@@ -101,7 +105,7 @@ test('A1. /api/cierre/preview-masivo NO lista DISP', async () => {
     campos_extra: { evento: 'En Servicio', fecha_inicio_estado: new Date(Date.now() - 24 * HOUR).toISOString() },
   });
 
-  const { status, data } = await call('GET', `/api/cierre/preview-masivo?planta_id=${PLANTA_ID}`, {
+  const { status, data } = await call('GET', `/api/cierre/preview-masivo?planta_id=${TEST_PLANTA}`, {
     sesion_id: ctx.sesiones.jdt,
   });
   assert.equal(status, 200, JSON.stringify(data));
@@ -113,7 +117,7 @@ test('A1. /api/cierre/preview-masivo NO lista DISP', async () => {
 test('A2. POST /api/cierre/bitacora con bitacora_id=DISP retorna 422', async () => {
   const { status, data } = await call('POST', '/api/cierre/bitacora', {
     sesion_id: ctx.sesiones.jdt,
-    body: { bitacora_id: DISP_ID, planta_id: PLANTA_ID },
+    body: { bitacora_id: DISP_ID, planta_id: TEST_PLANTA },
   });
   assert.equal(status, 422, JSON.stringify(data));
   assert.equal(data.error, 'bitacora_no_cerrable');
@@ -122,7 +126,7 @@ test('A2. POST /api/cierre/bitacora con bitacora_id=DISP retorna 422', async () 
 test('A3. POST /api/cierre/bitacora con bitacora_id=MAND retorna 400 (F16)', async () => {
   const { status, data } = await call('POST', '/api/cierre/bitacora', {
     sesion_id: ctx.sesiones.jdt,
-    body: { bitacora_id: MAND_ID, planta_id: PLANTA_ID },
+    body: { bitacora_id: MAND_ID, planta_id: TEST_PLANTA },
   });
   // F16 cambió 422 → 400 con código específico para que el frontend pueda gatear el botón
   // sin ambigüedad. El cierre individual MAND quedó bloqueado: el cierre es automático vía
@@ -134,7 +138,7 @@ test('A3. POST /api/cierre/bitacora con bitacora_id=MAND retorna 400 (F16)', asy
 test('A4. /api/cierre/masivo NO mueve el vigente DISP al histórico', async () => {
   const db = await getDB();
   const before = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .input('bid', sql.Int, DISP_ID)
     .query(`
       SELECT registro_id FROM bitacora.registro_activo
@@ -145,7 +149,7 @@ test('A4. /api/cierre/masivo NO mueve el vigente DISP al histórico', async () =
 
   const { status, data } = await call('POST', '/api/cierre/masivo', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: PLANTA_ID },
+    body: { planta_id: TEST_PLANTA },
   });
   assert.equal(status, 200, JSON.stringify(data));
 
@@ -156,7 +160,7 @@ test('A4. /api/cierre/masivo NO mueve el vigente DISP al histórico', async () =
   assert.equal(after.recordset[0].fecha_fin_estado, null, 'fecha_fin_estado debe seguir NULL');
 
   const histDisp = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .input('bid', sql.Int, DISP_ID)
     .query(`SELECT COUNT(*) AS n FROM bitacora.registro_historico WHERE bitacora_id = @bid AND planta_id = @p`);
   assert.equal(histDisp.recordset[0].n, 0, 'No debe haber DISP en histórico tras el cierre masivo');
@@ -178,13 +182,13 @@ test('A5. /api/cierre/masivo SÍ mueve registros de bitácoras normales (CALDERA
 
   const { status, data } = await call('POST', '/api/cierre/masivo', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: PLANTA_ID },
+    body: { planta_id: TEST_PLANTA },
   });
   assert.equal(status, 200, JSON.stringify(data));
 
   const db = await getDB();
   const histCal = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .input('bid', sql.Int, CALDERA_ID)
     .input('tag', sql.NVarChar(200), `%${TEST_TAG} caldera-A5%`)
     .query(`SELECT COUNT(*) AS n FROM bitacora.registro_historico
@@ -234,14 +238,14 @@ test('B2. cerrado_en y fecha_cierre_operativo del histórico están en zona cons
   const tBefore = Date.now();
   const { status, data } = await call('POST', '/api/cierre/bitacora', {
     sesion_id: ctx.sesiones.jdt,
-    body: { bitacora_id: CALDERA_ID, planta_id: PLANTA_ID },
+    body: { bitacora_id: CALDERA_ID, planta_id: TEST_PLANTA },
   });
   const tAfter = Date.now();
   assert.equal(status, 200, JSON.stringify(data));
 
   const hist = await db.request()
     .input('bid', sql.Int, CALDERA_ID)
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .input('tag', sql.NVarChar(200), `%${TEST_TAG} caldera-B2%`)
     .query(`
       SELECT TOP 1 cerrado_en, fecha_cierre_operativo

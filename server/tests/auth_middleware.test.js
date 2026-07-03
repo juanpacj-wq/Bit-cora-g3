@@ -19,8 +19,10 @@ async function cleanDispTest() {
     .input('p', sql.VarChar(10), TEST_PLANTA)
     .input('bid', sql.Int, ctx.bitByCodigo.DISP)
     .query(`
+      -- D-041: solo la TABLA BASE (disponibilidad_estado). El DELETE por la vista
+      -- disponibilidad_dashboard (redundante) se retiró: escribir por vistas dashboard es el footgun
+      -- que dejaba plantas reales sin vigente. Acotado a TEST_PLANTA (@p).
       DELETE FROM bitacora.disponibilidad_estado WHERE planta_id = @p;
-      DELETE FROM bitacora.disponibilidad_dashboard WHERE planta_id = @p;
       DELETE FROM bitacora.registro_activo WHERE bitacora_id = @bid AND planta_id = @p;
       DELETE FROM bitacora.registro_historico WHERE bitacora_id = @bid AND planta_id = @p;
     `);

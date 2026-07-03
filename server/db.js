@@ -1781,6 +1781,35 @@ export async function initDB() {
     await db.request().batch(SQL_VIEW_DISPONIBILIDAD_DASHBOARD);
   }
 
+  // ---------- D-041 — vistas dashboard/reporting = SOLO LECTURA (backstop anti-destrucción) ----------
+  // disponibilidad_dashboard / autorizacion_dashboard / v_disponibilidad_estado son proyecciones de
+  // reporte sobre tablas base (disponibilidad_estado / evento_dashboard). En SQL Server una vista de
+  // una sola tabla es ACTUALIZABLE: un `DELETE FROM disponibilidad_dashboard WHERE planta_id='GEC3'`
+  // cascada SILENCIOSAMENTE a disponibilidad_estado y borra el vigente real (así un test de cleanup
+  // dejó a GEC3 "Sin estado registrado"). Un trigger INSTEAD OF que hace THROW convierte cualquier
+  // escritura por la vista (test, app, SSMS manual) en un error ruidoso; los SELECT no se ven
+  // afectados. Idempotente (CREATE OR ALTER; cada uno primer statement de su batch dinámico) y
+  // gateado por existencia de la vista. La app SIEMPRE escribe la tabla base (notificador.js), nunca
+  // estas vistas — verificado. Ver D-041.
+  const vistasReadOnly = [
+    ['disponibilidad_dashboard', 'trg_ro_disponibilidad_dashboard', 'la tabla base bitacora.disponibilidad_estado'],
+    ['autorizacion_dashboard',   'trg_ro_autorizacion_dashboard',   'la tabla base bitacora.evento_dashboard'],
+    ['v_disponibilidad_estado',  'trg_ro_v_disponibilidad_estado',  'la tabla base bitacora.disponibilidad_estado'],
+  ];
+  for (const [vista, trg, base] of vistasReadOnly) {
+    await db.request().batch(`
+      IF OBJECT_ID('bitacora.${vista}','V') IS NOT NULL
+        EXEC('CREATE OR ALTER TRIGGER bitacora.${trg}
+          ON bitacora.${vista}
+          INSTEAD OF INSERT, UPDATE, DELETE
+          AS
+          BEGIN
+            SET NOCOUNT ON;
+            THROW 50041, ''bitacora.${vista} es una VISTA de SOLO LECTURA (D-041): escribe en ${base}.'', 1;
+          END');
+    `);
+  }
+
   // ---------- F26.B1 — D-027: Combustibles → Consumos ----------
   // Módulo nuevo "Combustibles/Consumos" — report numérico horario por planta. NO es
   // bitácora con estado/turno; es long-format (1 fila por planta×fecha×periodo×combustible)

@@ -534,6 +534,18 @@ dashboard). (d) La cookie no viaja a `/dashboard` (aislamiento entre apps). Cros
 
 ---
 
+## D-041 — Vistas dashboard/reporting = SOLO LECTURA (fix "GEC3 sin disponibilidad tras tests" + blindaje anti-destrucción en prod)
+
+**Fecha:** 2026-07-03
+
+**Contexto:** la suite corre contra la BD **productiva** (D-030). Reportado (dos veces): tras correr los tests, **GEC3 quedaba sin estado de disponibilidad vigente** ("Sin estado registrado" en el dashboard). Causa raíz encontrada por auditoría: `bitacora.disponibilidad_dashboard` es una **VISTA actualizable de una sola tabla** (`SELECT … FROM disponibilidad_estado WHERE fecha_fin_estado IS NULL`, sin agregación ni `INSTEAD OF`). En SQL Server, `DELETE`/`UPDATE` a través de una vista así **cascada silenciosamente a la tabla base**. `cierre_y_fechas.test.js` corría con `setupSessions()` en la planta **default GEC3** y su `cleanAll()` (en `before` **y** `after`) ejecutaba `DELETE FROM bitacora.disponibilidad_dashboard WHERE planta_id='GEC3'` → borraba el **vigente real de GEC3** en cada corrida (además el test ni siquiera escribe DISP — daño colateral puro). Vectores gemelos: `auth_middleware.test.js` (mismo DELETE-por-vista, ya en TEST_PLANTA → inocuo), `reset-db.js` (utilitario manual, DELETE-por-vista en GEC3 con join roto `registro_activo_id`=`disponibilidad_id` de distinto id-space), y `cleanupTestRegistros` que borraba `disponibilidad_estado` por tag **sin acotar planta** (amplificador).
+
+**Decisión:** las vistas de reporte son **de solo lectura**, con defensa en profundidad en cuatro capas: (1) **Backstop en BD (blindaje real):** trigger `INSTEAD OF INSERT,UPDATE,DELETE` con `THROW 50041` en `disponibilidad_dashboard`, `autorizacion_dashboard` y `v_disponibilidad_estado` (idempotente en `initDB`, `CREATE OR ALTER`, gateado por existencia de la vista). Cualquier escritura por la vista —test, app o SSMS manual— ahora **falla ruidosamente**; los `SELECT` no se afectan. La app siempre escribe la tabla base (`notificador.js`), nunca la vista (verificado). (2) **Fix del test:** `cierre_y_fechas.test.js` migrado a `TEST_PLANTA` y su `cleanAll` ya no toca `disponibilidad_estado` (no la escribe). (3) **Cleanup blindado:** `cleanupTestRegistros` borra DISP acotado a `TEST_PLANTA` (no por tag global) y escribe la base `evento_dashboard` (no la vista `autorizacion_dashboard`); nuevo helper `cleanDispTestPlanta()` (hard-coded a la planta de test, sin parámetro → imposible pasar GEC3/GEC32). `reset-db.js` reescrito a `disponibilidad_estado` por `TEST_PLANTA`. (4) **Guardrail estático en CI:** `guard_no_prod_disp_destruction.test.js` escanea el fuente de los tests (comentarios stripped) y **falla** ante (A) cualquier DML por una vista dashboard, o (B) un `DELETE/UPDATE` de `disponibilidad_estado` con literal de planta real.
+
+**Consecuencias:** (a) **Reparación de datos:** se reabrió el último estado de GEC3 (`disponibilidad_id=475`, "En Reserva", `fecha_fin_estado=NULL`) restaurando su vigente; GEC32 estaba intacto. (b) Correr la suite ya no puede dejar una planta real sin disponibilidad (verificado: GEC3/GEC32 conservan su vigente tras la corrida). (c) La invariante "vistas dashboard = solo lectura" queda enforced a nivel BD, no solo por convención. (d) Deuda relacionada de D-030 (tests MAND/cierre que aún escriben `registro_activo` en GEC3 por tag) sigue pendiente pero **no** causa pérdida de disponibilidad (registros, no DISP); el guardrail no la cubre (fuera de alcance de este fix). Cross-ref: [[D-030]] (planta `TST` / suite sobre prod), [[D-026]] (DISP en `disponibilidad_estado` + vistas derivadas), [[D-020]] (TZ).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
