@@ -21,6 +21,31 @@ const HIST_PAGE = 20;
 
 const EMPTY_BY_PLANTA = PLANTAS.reduce((acc, p) => ({ ...acc, [p]: null }), {});
 
+// Filtro de AÑO (D-035 vive en la URL; el año es estado local del dashboard). `ANIO_TODOS` = sin
+// filtro (comportamiento histórico all-time). El año actual se calcula en Bogotá (UTC-5, sin DST).
+const ANIO_TODOS = 'todos';
+const ANIO_ACTUAL = Number(
+  new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric' }).format(new Date())
+);
+// Últimos 3 años + "Todos". La opción "Todos" cubre cualquier registro más antiguo.
+const ANIOS_OPTS = [
+  { value: String(ANIO_ACTUAL), label: String(ANIO_ACTUAL) },
+  { value: String(ANIO_ACTUAL - 1), label: String(ANIO_ACTUAL - 1) },
+  { value: String(ANIO_ACTUAL - 2), label: String(ANIO_ACTUAL - 2) },
+  { value: ANIO_TODOS, label: 'Todos' },
+];
+
+// Ventana [desde, hasta) en UTC ISO correspondiente al año Bogotá seleccionado. `ANIO_TODOS`
+// → sin ventana (undefined) para que el backend use su default all-time.
+function ventanaAnio(anio) {
+  if (anio === ANIO_TODOS) return { desde: undefined, hasta: undefined };
+  const y = Number(anio);
+  return {
+    desde: new Date(Date.UTC(y, 0, 1, 5, 0, 0)).toISOString(),      // 1-ene 00:00 Bogotá
+    hasta: new Date(Date.UTC(y + 1, 0, 1, 5, 0, 0)).toISOString(),  // 1-ene (y+1) 00:00 Bogotá
+  };
+}
+
 // D-035: `planta`/`onPlantaChange` son controlados por el dashboard (la URL es la fuente única
 // de verdad — se retiró el sessionStorage `disponibilidad.plantaSeleccionada` para evitar doble
 // fuente). El padre garantiza una planta válida; el resto de la lógica (SWR por planta, polling,
@@ -41,6 +66,8 @@ export default function DisponibilidadDashboard({
   // flag `loaded` (false hasta el primer fetch). Skeleton se muestra solo cuando
   // !dataByPlanta[planta].loaded — re-visitas son instantáneas + refresh silencioso.
   const [dataByPlanta, setDataByPlanta] = useState(EMPTY_BY_PLANTA);
+  // Filtro de AÑO: acota historial + acumulados. Default = año actual (Bogotá).
+  const [anio, setAnio] = useState(String(ANIO_ACTUAL));
   const [error, setError] = useState(null);
   const [modal, setModal] = useState(null); // { mode: 'crear' | 'editar' }
   const [confirmDeshacer, setConfirmDeshacer] = useState(false);
@@ -50,11 +77,13 @@ export default function DisponibilidadDashboard({
   const fetchEstado = useCallback(
     async (planta, { silent = false } = {}) => {
       try {
+        // Ventana del año seleccionado — acota historial (getEstado) y acumulados (getMetricas).
+        const { desde, hasta } = ventanaAnio(anio);
         // Estado vigente + acumulados en paralelo. metricas se degrada a null si falla (el
         // panel de acumulados simplemente no se muestra) — no debe tumbar la carga del estado.
         const [res, met] = await Promise.all([
-          getEstado(planta, { historial_limit: HIST_PAGE, historial_offset: 0 }),
-          getMetricas(planta).catch(() => null),
+          getEstado(planta, { historial_limit: HIST_PAGE, historial_offset: 0, desde, hasta }),
+          getMetricas(planta, { desde, hasta }).catch(() => null),
         ]);
         setDataByPlanta((prev) => ({
           ...prev,
@@ -71,7 +100,7 @@ export default function DisponibilidadDashboard({
         if (!silent) setError(e.message || 'Error al cargar disponibilidad');
       }
     },
-    [getEstado, getMetricas]
+    [getEstado, getMetricas, anio]
   );
 
   // Fetch al cambiar de planta. SWR: si ya hay cache, refrescamos en silencio.
@@ -96,9 +125,12 @@ export default function DisponibilidadDashboard({
     if (!cur) return;
     setLoadingMore(true);
     try {
+      const { desde, hasta } = ventanaAnio(anio);
       const res = await getEstado(plantaSeleccionada, {
         historial_limit: HIST_PAGE,
         historial_offset: cur.historial.length,
+        desde,
+        hasta,
       });
       setDataByPlanta((prev) => {
         const prevCur = prev[plantaSeleccionada];
@@ -117,10 +149,12 @@ export default function DisponibilidadDashboard({
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, dataByPlanta, plantaSeleccionada, getEstado, showToast]);
+  }, [loadingMore, dataByPlanta, plantaSeleccionada, getEstado, showToast, anio]);
 
   const data = dataByPlanta[plantaSeleccionada];
   const isFirstLoad = !data?.loaded;
+  // Solo el año en curso (o "Todos") crece en vivo; un año pasado muestra acumulados congelados.
+  const enVivo = anio === ANIO_TODOS || anio === String(ANIO_ACTUAL);
 
   const handleSubmitModal = useCallback(
     async (form) => {
@@ -193,6 +227,9 @@ export default function DisponibilidadDashboard({
             codigo={data?.vigente?.codigo}
             puedeEditar={puedeEditar}
             tieneVigente={!!data?.vigente}
+            anio={anio}
+            anios={ANIOS_OPTS}
+            onChangeAnio={setAnio}
             onChangePlanta={setPlantaSeleccionada}
             onCambiar={() => setModal({ mode: 'crear' })}
             onEditar={() => setModal({ mode: 'editar' })}
@@ -203,7 +240,7 @@ export default function DisponibilidadDashboard({
             <DashboardSkeleton />
           ) : data?.vigente ? (
             <>
-              <AcumuladosPorEstado metricas={data.metricas} vigente={data.vigente} />
+              <AcumuladosPorEstado metricas={data.metricas} vigente={data.vigente} enVivo={enVivo} />
               <div className="state-grid">
                 <TiempoEnEstadosDonut metricas={data.metricas} vigente={data.vigente} />
                 <EstadoActualCard

@@ -13,7 +13,9 @@ const ICONS = { CheckCircle2, Clock, XCircle, Wrench };
 //   - Estado vigente: crece en vivo en lockstep con "Tiempo en estado". Base cerrada
 //     `tiempo_ms[actual] − (ahora − inicio)` + intervalo vigente vivo (tick Date.now()-inicio).
 //     Así no hay salto en el borde ni doble conteo, y comparten reloj con el contador de la tarjeta.
-export default function AcumuladosPorEstado({ metricas, vigente }) {
+// `enVivo`: cuando el filtro de AÑO apunta a un año pasado (false), el estado vigente NO crece en
+// vivo — se muestra el acumulado congelado de esa ventana y se oculta el badge "en curso".
+export default function AcumuladosPorEstado({ metricas, vigente, enVivo = true }) {
   const estadoActual = vigente?.evento || null;
   const inicioMs = vigente?.fecha_inicio_estado ? Date.parse(vigente.fecha_inicio_estado) : NaN;
   const ahoraMs = metricas?.ahora ? Date.parse(metricas.ahora) : NaN;
@@ -28,7 +30,7 @@ export default function AcumuladosPorEstado({ metricas, vigente }) {
         const tokens = ESTADO_COLORS[estado];
         const Icon = ICONS[tokens.icon] || Clock;
         const totalMs = Number(metricas.tiempo_ms[estado]) || 0;
-        const esActual = estado === estadoActual;
+        const esActual = enVivo && estado === estadoActual;
 
         let displayMs = totalMs;
         if (esActual && Number.isFinite(inicioMs) && Number.isFinite(ahoraMs)) {

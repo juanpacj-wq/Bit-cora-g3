@@ -229,7 +229,10 @@ function safeJsonParseArr(s) {
 // `bitacora.disponibilidad_estado` (post D-026): vigente = fecha_fin_estado IS NULL,
 // histórico = fecha_fin_estado IS NOT NULL, ordenado DESC. Snapshots se devuelven como
 // arrays parseados (el frontend espera arrays, no strings JSON).
-export async function getEstadoCompleto(db, { planta_id, historial_limit = 20, historial_offset = 0 }) {
+// `desde`/`hasta` (Date | null) filtran el historial + su total por `fecha_inicio_estado`
+// dentro de la ventana [desde, hasta) — usado por el filtro de AÑO del dashboard. El VIGENTE
+// nunca se filtra (representa el estado vivo "ahora", independiente del año consultado).
+export async function getEstadoCompleto(db, { planta_id, historial_limit = 20, historial_offset = 0, desde = null, hasta = null }) {
   const vigRes = await db.request()
     .input('p', sql.VarChar(10), planta_id)
     .query(`
@@ -269,6 +272,8 @@ export async function getEstadoCompleto(db, { planta_id, historial_limit = 20, h
     .input('p', sql.VarChar(10), planta_id)
     .input('limit', sql.Int, historial_limit)
     .input('offset', sql.Int, historial_offset)
+    .input('desde', sql.DateTime2, desde)
+    .input('hasta', sql.DateTime2, hasta)
     .query(`
       SELECT de.disponibilidad_id, de.estado, de.codigo,
              de.fecha_inicio_estado, de.fecha_fin_estado, de.detalle,
@@ -277,6 +282,8 @@ export async function getEstadoCompleto(db, { planta_id, historial_limit = 20, h
       FROM bitacora.disponibilidad_estado de
       LEFT JOIN lov_bit.usuario autor ON autor.usuario_id = de.creado_por
       WHERE de.planta_id = @p AND de.fecha_fin_estado IS NOT NULL
+        AND (@desde IS NULL OR de.fecha_inicio_estado >= @desde)
+        AND (@hasta IS NULL OR de.fecha_inicio_estado <  @hasta)
       ORDER BY de.fecha_inicio_estado DESC
       OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
     `);
@@ -293,9 +300,13 @@ export async function getEstadoCompleto(db, { planta_id, historial_limit = 20, h
 
   const totalRes = await db.request()
     .input('p', sql.VarChar(10), planta_id)
+    .input('desde', sql.DateTime2, desde)
+    .input('hasta', sql.DateTime2, hasta)
     .query(`
       SELECT COUNT(*) AS total FROM bitacora.disponibilidad_estado
       WHERE planta_id = @p AND fecha_fin_estado IS NOT NULL
+        AND (@desde IS NULL OR fecha_inicio_estado >= @desde)
+        AND (@hasta IS NULL OR fecha_inicio_estado <  @hasta)
     `);
   return { vigente, historial, historial_total: totalRes.recordset[0].total };
 }

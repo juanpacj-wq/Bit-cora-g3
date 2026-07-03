@@ -1034,8 +1034,18 @@ function BarraEstado({
   // (o Enter, o las flechas/"Hoy" que son clics explícitos). `onCommitFecha` centraliza el commit
   // (puede abrir el popup de borrador). El futuro queda bloqueado con max=hoy Bogotá.
   const hoyBogota = getTodayBogota();
+  // `pendingFecha` = valor tecleado en el input, aún sin commitear (solo aplica al pulsar
+  // Guardar/Enter). Se resincroniza con `filtroFecha` DURANTE el render (patrón oficial de
+  // React "adjusting state when a prop changes"), NO en un useEffect post-paint: al navegar con
+  // las flechas/"Hoy" `onCommitFecha` cambia `filtroFecha` de inmediato, y un efecto tardío dejaba
+  // un frame con `pendingFecha` viejo ≠ `filtroFecha` nuevo → el botón "Guardar" parpadeaba. Ajustar
+  // en render corta ese frame antes de pintar.
   const [pendingFecha, setPendingFecha] = useState(filtroFecha);
-  useEffect(() => { setPendingFecha(filtroFecha); }, [filtroFecha]);
+  const [prevFiltroFecha, setPrevFiltroFecha] = useState(filtroFecha);
+  if (filtroFecha !== prevFiltroFecha) {
+    setPrevFiltroFecha(filtroFecha);
+    setPendingFecha(filtroFecha);
+  }
   const borradores = registros.filter((r) => r.estado === "borrador").length;
   const cerrados = registros.filter((r) => r.estado === "cerrado").length;
 

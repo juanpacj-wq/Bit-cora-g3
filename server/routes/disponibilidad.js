@@ -28,6 +28,21 @@ router.get('/', asyncH(async (req, res) => {
   const historial_limit = Math.min(100, Math.max(1, parseInt(req.query.historial_limit || '20', 10)));
   const historial_offset = Math.max(0, parseInt(req.query.historial_offset || '0', 10));
 
+  // Filtro de AÑO (opcional): ventana [desde, hasta) en UTC ISO que acota el historial + su total.
+  const desdeRaw = req.query.desde;
+  const hastaRaw = req.query.hasta;
+  const desde = desdeRaw ? new Date(desdeRaw) : null;
+  const hasta = hastaRaw ? new Date(hastaRaw) : null;
+  if (desdeRaw && Number.isNaN(desde.getTime())) {
+    return sendJSON(res, 400, { error: 'desde inválido (ISO 8601 requerido)' });
+  }
+  if (hastaRaw && Number.isNaN(hasta.getTime())) {
+    return sendJSON(res, 400, { error: 'hasta inválido (ISO 8601 requerido)' });
+  }
+  if (desde && hasta && desde.getTime() > hasta.getTime()) {
+    return sendJSON(res, 400, { error: 'desde debe ser <= hasta' });
+  }
+
   const db = await getDB();
   const dispBitacoraId = await getDispBitacoraId(db);
   if (!dispBitacoraId) return sendJSON(res, 500, { error: 'Hay un problema de configuración del sistema. Contacta a soporte.', codigo: 'config_sistema' });
@@ -35,7 +50,7 @@ router.get('/', asyncH(async (req, res) => {
     return sendJSON(res, 403, { error: 'Sin permiso para ver Disponibilidad' });
   }
 
-  const out = await getEstadoCompleto(db, { planta_id, historial_limit, historial_offset });
+  const out = await getEstadoCompleto(db, { planta_id, historial_limit, historial_offset, desde, hasta });
   return sendJSON(res, 200, out);
 }));
 
