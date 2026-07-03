@@ -12,10 +12,11 @@ function normaliza(s) {
 }
 
 // F20: render Bogotá explícito — `fecha_inicio_estado` es un instante UTC en BD.
+// Formato dd/mm/yyyy, hh:mm a. m./p. m. (12h) para que el año sea visible en el rango.
 const FECHA_FMT = new Intl.DateTimeFormat('es-CO', {
   timeZone: 'America/Bogota',
-  day: '2-digit', month: 'short',
-  hour: '2-digit', minute: '2-digit',
+  day: '2-digit', month: '2-digit', year: 'numeric',
+  hour: '2-digit', minute: '2-digit', hour12: true,
 });
 
 function formatFecha(iso) {
