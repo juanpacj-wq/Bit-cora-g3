@@ -69,8 +69,8 @@ export default function DisponibilidadDashboard({
   // flag `loaded` (false hasta el primer fetch). Skeleton se muestra solo cuando
   // !dataByPlanta[planta].loaded — re-visitas son instantáneas + refresh silencioso.
   const [dataByPlanta, setDataByPlanta] = useState(EMPTY_BY_PLANTA);
-  // Filtro de AÑO: acota historial + acumulados. Default = año actual (Bogotá).
-  const [anio, setAnio] = useState(String(ANIO_ACTUAL));
+  // Filtro de AÑO: acota historial + acumulados. Default = todos los años (all-time).
+  const [anio, setAnio] = useState(ANIO_TODOS);
   // Opciones del selector, data-driven: rango real desde el primer registro DISP. Fallback = año
   // actual hasta que llega la respuesta de /anios.
   const [aniosOpts, setAniosOpts] = useState(() => buildAniosOpts([ANIO_ACTUAL]));
