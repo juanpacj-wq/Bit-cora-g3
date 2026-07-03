@@ -17,7 +17,7 @@ import {
   snapshotJDTs, snapshotJefes, snapshotIngenieros, snapshotGerentesProduccion,
 } from '../utils/snapshots.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
-import { asyncH, loadAppSession } from './_middleware.js';
+import { asyncH, loadAppSession, bloquearSiTurnoFinalizado } from './_middleware.js';
 import { getDispBitacoraId } from './_shared.js';
 
 // ── Helpers DISP (movidos de server.js — solo los usan las ramas DISP de POST/PUT) ──────────────
@@ -225,6 +225,9 @@ router.post('/', asyncH(async (req, res) => {
   }
 
   // Resto: rama genérica (no-DISP)
+  // D-040: write-gate SOLO acá (genéricas). DISP salió arriba con su propio return; MAND/COMB tienen
+  // sus propios endpoints (sala-de-mando / combustibles), sin gate. Turno finalizado → 409.
+  if (bloquearSiTurnoFinalizado(req, res)) return;
   if (!fecha_evento || !tipo_evento_id) {
     return sendJSON(res, 400, { error: 'Campos requeridos faltantes (fecha_evento, tipo_evento_id)' });
   }
@@ -540,6 +543,8 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
   }
 
   // No-DISP: lookup tradicional en registro_activo.
+  // D-040: write-gate SOLO en la rama genérica (la rama DISP salió arriba con su propio return).
+  if (bloquearSiTurnoFinalizado(req, res)) return;
   const check = await db.request()
     .input('registro_id', sql.Int, registro_id)
     .query(`
@@ -688,6 +693,9 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
 router.delete('/:id(\\d+)', asyncH(async (req, res) => {
   const sesion = req.sesion;
   const registro_id = parseInt(req.params.id, 10);
+  // D-040: write-gate. DELETE opera sobre registro_activo (genéricas; DISP vive en otra tabla → 404).
+  // Turno finalizado → 409 antes de tocar nada.
+  if (bloquearSiTurnoFinalizado(req, res)) return;
   const db = await getDB();
   const check = await db.request()
     .input('registro_id', sql.Int, registro_id)

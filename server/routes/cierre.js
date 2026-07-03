@@ -74,18 +74,25 @@ router.get('/preview-masivo', asyncH(async (req, res) => {
       ORDER BY b.nombre
     `);
 
+  // D-040: FIX DEL BUG. El criterio de "no finalizado" pasa a ser sesion_activa.turno_finalizado_en
+  // (fuente única), NO sesion_bitacora.finalizada_en — que /abrir reseteaba en cada apertura, haciendo
+  // reaparecer al ingeniero como pendiente con solo VER una bitácora. bitacoras_abiertas sigue siendo
+  // informativo (lo pinta el modal) vía OUTER APPLY a la presencia por-bitácora.
   const usersRes = await db.request()
     .input('planta_id', sql.VarChar(10), planta_id)
     .query(`
       SELECT sa.usuario_id, u.nombre_completo,
-             STRING_AGG(CAST(sb.bitacora_id AS VARCHAR(20)), ',') AS bitacoras_csv
-      FROM bitacora.sesion_bitacora sb
-      INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
+             COALESCE(pres.bitacoras, '') AS bitacoras_csv
+      FROM bitacora.sesion_activa sa
       INNER JOIN lov_bit.usuario u ON u.usuario_id = sa.usuario_id
+      OUTER APPLY (
+        SELECT STRING_AGG(CONVERT(VARCHAR(10), sb.bitacora_id), ',') AS bitacoras
+        FROM bitacora.sesion_bitacora sb
+        WHERE sb.sesion_id = sa.sesion_id AND sb.finalizada_en IS NULL
+      ) pres
       WHERE sa.planta_id = @planta_id
         AND sa.activa = 1
-        AND sb.finalizada_en IS NULL
-      GROUP BY sa.usuario_id, u.nombre_completo
+        AND sa.turno_finalizado_en IS NULL
       ORDER BY u.nombre_completo
     `);
 

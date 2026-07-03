@@ -32,6 +32,12 @@ export function plantaMatch(sesion, planta_id) {
   return !!sesion && sesion.planta_id === planta_id;
 }
 
+// D-040: ¿la sesión de app tiene el turno finalizado? Fuente única = sesion_activa.turno_finalizado_en
+// (NULL = turno vivo). Base del write-gate de bitácoras genéricas. Puro y testeable.
+export function turnoFinalizado(sesion) {
+  return !!sesion && sesion.turno_finalizado_en != null;
+}
+
 export async function canEditarRegistro(sesion, registro) {
   if (!sesion || !registro) return false;
   if (registro.planta_id && registro.planta_id !== sesion.planta_id) return false;

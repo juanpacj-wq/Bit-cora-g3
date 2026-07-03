@@ -22,7 +22,7 @@ const TIPO_CIERRE_MAND = 'Cierre de turno';
 export async function registrarEventoCierre(transaction, { tipo, sesion, bitacora_origen_id = null, forzado = false, motivo = null }) {
   const tipoNombre = TIPO_NOMBRE[tipo];
   if (!tipoNombre) {
-    throw new Error(`registrarEventoCierre: tipo inválido '${tipo}' (esperado 'finalizacion' | 'cierre')`);
+    throw new Error(`registrarEventoCierre: tipo inválido '${tipo}' (esperado 'finalizacion' | 'cierre' | 'reapertura')`);
   }
 
   const ids = await new sql.Request(transaction)

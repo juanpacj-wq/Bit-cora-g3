@@ -46,7 +46,10 @@ router.post('/abrir', asyncH(async (req, res) => {
   return sendJSON(res, 200, { sesion_bitacora: result.recordset[0] });
 }));
 
-// POST /api/bitacora/finalizar (F2/F3) — finaliza TODAS las sesion_bitacora del usuario + 1 CIET.
+// POST /api/bitacora/finalizar (D-040) — marca la finalización del turno en la SESIÓN DE APP
+// (sesion_activa.turno_finalizado_en), fuente única y revertible. Ya NO toca sesion_bitacora
+// (esa columna quedó como SOLO presencia por-bitácora; la reseteaba /abrir → causa del bug de
+// reaparición). CIET 'finalizacion' solo si hubo cambio (idempotente: doble finalizar no re-emite).
 router.post('/finalizar', asyncH(async (req, res) => {
   const sesion = req.sesion;
   const pool = await getDB();
@@ -56,22 +59,20 @@ router.post('/finalizar', asyncH(async (req, res) => {
     const result = await new sql.Request(transaction)
       .input('usuario_id', sql.Int, sesion.usuario_id)
       .query(`
-        DECLARE @afectadas TABLE (sesion_bitacora_id INT, sesion_id INT, bitacora_id INT);
-
-        UPDATE sb SET finalizada_en = SYSUTCDATETIME()
-        OUTPUT inserted.sesion_bitacora_id, inserted.sesion_id, inserted.bitacora_id INTO @afectadas
-        FROM bitacora.sesion_bitacora sb
-        INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
-        WHERE sa.usuario_id = @usuario_id AND sb.finalizada_en IS NULL;
-
-        SELECT a.sesion_bitacora_id, a.sesion_id, a.bitacora_id,
-               b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo
-        FROM @afectadas a
-        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = a.bitacora_id;
+        UPDATE bitacora.sesion_activa
+          SET turno_finalizado_en = SYSUTCDATETIME()
+          OUTPUT INSERTED.sesion_id, INSERTED.turno_finalizado_en
+          WHERE usuario_id = @usuario_id AND activa = 1 AND turno_finalizado_en IS NULL;
       `);
 
+    const cambio = result.recordset.length > 0;
+    // Idempotencia: si ya estaba finalizado, devolvemos el valor vigente de la sesión sin re-emitir CIET.
+    const turno_finalizado_en = cambio
+      ? result.recordset[0].turno_finalizado_en
+      : sesion.turno_finalizado_en;
+
     let evento_ciet = null;
-    if (result.recordset.length > 0) {
+    if (cambio) {
       evento_ciet = await registrarEventoCierre(transaction, {
         tipo: 'finalizacion',
         sesion,
@@ -80,7 +81,42 @@ router.post('/finalizar', asyncH(async (req, res) => {
     }
 
     await transaction.commit();
-    return sendJSON(res, 200, { finalizadas: result.recordset, evento_ciet });
+    return sendJSON(res, 200, { turno_finalizado_en, evento_ciet });
+  } catch (err) {
+    try { await transaction.rollback(); } catch {}
+    throw err;
+  }
+}));
+
+// POST /api/bitacora/revertir-turno (D-040) — self-service: cualquier ingeniero limpia SU propia
+// finalización (turno_finalizado_en → NULL) para volver a registrar. Sin permiso especial. CIET
+// 'reapertura' solo si hubo cambio (idempotente: doble revertir no re-emite).
+router.post('/revertir-turno', asyncH(async (req, res) => {
+  const sesion = req.sesion;
+  const pool = await getDB();
+  const transaction = new sql.Transaction(pool);
+  await transaction.begin();
+  try {
+    const result = await new sql.Request(transaction)
+      .input('usuario_id', sql.Int, sesion.usuario_id)
+      .query(`
+        UPDATE bitacora.sesion_activa
+          SET turno_finalizado_en = NULL
+          OUTPUT DELETED.turno_finalizado_en AS antes
+          WHERE usuario_id = @usuario_id AND activa = 1 AND turno_finalizado_en IS NOT NULL;
+      `);
+
+    let evento_ciet = null;
+    if (result.recordset.length > 0) {
+      evento_ciet = await registrarEventoCierre(transaction, {
+        tipo: 'reapertura',
+        sesion,
+        forzado: false,
+      });
+    }
+
+    await transaction.commit();
+    return sendJSON(res, 200, { turno_finalizado_en: null, evento_ciet });
   } catch (err) {
     try { await transaction.rollback(); } catch {}
     throw err;
@@ -119,15 +155,15 @@ router.post('/finalizar-forzado', asyncH(async (req, res) => {
       const targetSesion = userSesRes.recordset[0];
       if (!targetSesion) continue;
 
+      // D-040: finalización forzada = marcar la SESIÓN DE APP del objetivo, igual que /finalizar.
+      // Ya no toca sesion_bitacora (solo presencia). CIET solo si cambió (idempotente).
       const upd = await new sql.Request(transaction)
         .input('usuario_id', sql.Int, usuario_id)
         .input('planta_id', sql.VarChar(10), sesion.planta_id)
         .query(`
-          UPDATE sb SET finalizada_en = SYSUTCDATETIME()
-          FROM bitacora.sesion_bitacora sb
-          INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
-          WHERE sa.usuario_id = @usuario_id AND sa.planta_id = @planta_id
-            AND sb.finalizada_en IS NULL;
+          UPDATE bitacora.sesion_activa SET turno_finalizado_en = SYSUTCDATETIME()
+          WHERE usuario_id = @usuario_id AND planta_id = @planta_id AND activa = 1
+            AND turno_finalizado_en IS NULL;
         `);
 
       if ((upd.rowsAffected[0] || 0) > 0) {

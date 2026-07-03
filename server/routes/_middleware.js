@@ -8,6 +8,7 @@
 
 import { corsHeadersFor, csrfOriginAllowed, sendJSON } from '../utils/http.js';
 import { bypassHabilitado, loadSession } from '../middleware/auth.js';
+import { turnoFinalizado } from '../middleware/permissions.js';
 
 // ── Allowlist de rutas públicas (sin identidad) ─────────────────────────────────────────────────
 // Único lugar donde una ruta queda expuesta sin autenticación. Todo lo que NO esté aquí exige
@@ -94,6 +95,32 @@ export function loadAppSession(req, res, next) {
       next();
     })
     .catch(next);
+}
+
+// ── Write-gate D-040 (turno finalizado) ─────────────────────────────────────────────────────────
+// Un ingeniero que finalizó su turno NO puede crear/editar/borrar registros en bitácoras GENÉRICAS
+// hasta revertir la finalización (POST /api/bitacora/revertir-turno). MAND/DISP/COMB quedan operables
+// (tienen sus propios endpoints, sin este gate). Cuerpo 409 con `codigo` estable (D-032) para que el
+// front ramifique por código, no por texto.
+function respTurnoFinalizado(res) {
+  return sendJSON(res, 409, {
+    error: 'turno_finalizado',
+    codigo: 'turno_finalizado',
+    mensaje: 'Finalizaste tu turno. Revierte la finalización para volver a registrar.',
+  });
+}
+
+// Middleware Express para routers 100% genéricos (uso futuro): 409 si el turno está finalizado.
+export function rechazarSiTurnoFinalizado(req, res, next) {
+  if (turnoFinalizado(req.sesion)) return respTurnoFinalizado(res);
+  next();
+}
+
+// Chequeo inline para routers que MEZCLAN ramas (registros.js: DISP + genérico) donde el gate no
+// puede ir como router.use. Devuelve true (y ya respondió 409) si debe bloquear; false si continúa.
+export function bloquearSiTurnoFinalizado(req, res) {
+  if (turnoFinalizado(req.sesion)) { respTurnoFinalizado(res); return true; }
+  return false;
 }
 
 // ── asyncH — envuelve un handler async y enruta el throw a expressErrorHandler (D-032) ──────────
