@@ -147,8 +147,20 @@ export function useAuth() {
     } finally { setLoading(false); }
   }, []);
 
+  // D-040: parche puntual de la sesión de app en cliente (sin refetch). Lo usa finalizar/revertir
+  // turno para reflejar `turno_finalizado_en` de inmediato. Reusa sesionRef/persistAuth para que el
+  // siguiente request no lea storage viejo; F5 rehidrata igual vía /api/me (fuente de verdad).
+  const patchSesion = useCallback((patch) => {
+    setSesion((prev) => {
+      const next = prev ? { ...prev, ...patch } : prev;
+      sesionRef.current = next;
+      persistAuth(userRef.current, next);
+      return next;
+    });
+  }, []);
+
   return {
     user, sesion, loading, error, ready, ultimaPlanta,
-    loginWithMicrosoft, selectContext, logout, logoutLocal, clearSesion,
+    loginWithMicrosoft, selectContext, logout, logoutLocal, clearSesion, patchSesion,
   };
 }
