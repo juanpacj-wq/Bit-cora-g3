@@ -487,6 +487,16 @@ export async function initDB() {
       ALTER TABLE bitacora.sesion_activa ADD cerrada_en DATETIME2 NULL;
   `);
 
+  // D-040: turno_finalizado_en es la fuente ÚNICA de la finalización de turno revertible.
+  // Vive en la sesión de app (por-usuario-por-turno), NO en sesion_bitacora.finalizada_en
+  // (que queda como SOLO presencia por-bitácora). NULL = turno vivo; no-NULL = finalizado.
+  // Muere sola: el sweeper expulsa activa=0 a fin de turno y select-context reactiva/crea
+  // sesión fresca con la columna en NULL. La lógica de negocio llega en E2.
+  await db.request().batch(`
+    IF COL_LENGTH('bitacora.sesion_activa', 'turno_finalizado_en') IS NULL
+      ALTER TABLE bitacora.sesion_activa ADD turno_finalizado_en DATETIME2 NULL;
+  `);
+
   // F3: detalle pasa a nullable en ambas tablas. CIET no usa detalle, MAND (F6) tampoco lo
   // requiere siempre. Se hace acá (después de la creación de la tabla) en lugar de en
   // migrateSchemaV2 para mantener la migración acotada a F3.
@@ -1089,6 +1099,20 @@ export async function initDB() {
       SELECT bitacora_id, 'Deshacer disponibilidad', 3 FROM lov_bit.bitacora WHERE codigo='CIET';
   `);
 
+  // D-040: tipo CIET 'Reapertura de turno' (orden 4, después de deshacer disponibilidad).
+  // POST /api/bitacora/revertir-turno lo emite cuando un ingeniero revierte su finalización
+  // (registrarEventoCierre con tipo:'reapertura'). El wiring del emisor llega en E2.
+  await db.request().batch(`
+    IF EXISTS (SELECT 1 FROM lov_bit.bitacora WHERE codigo='CIET')
+      AND NOT EXISTS (
+        SELECT 1 FROM lov_bit.tipo_evento te
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+        WHERE b.codigo='CIET' AND te.nombre = 'Reapertura de turno'
+      )
+      INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden)
+      SELECT bitacora_id, 'Reapertura de turno', 4 FROM lov_bit.bitacora WHERE codigo='CIET';
+  `);
+
   // F12.A6: DISP visible para TODOS los cargos; creación solo para JdT/IngOp (+ Administrador y
   // Debugging, D-039). La matriz INSERT de arriba ya cubre los cargos sembrados, pero forzamos
   // defensivamente para sobrevivir cargos nuevos o renumeraciones — el match es por nombre, no por id.
@@ -1540,6 +1564,8 @@ export async function initDB() {
       ALTER TABLE bitacora.sesion_activa ADD ultima_actividad_bogota AS DATEADD(HOUR, -5, ultima_actividad);
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_activa') AND name='cerrada_en_bogota')
       ALTER TABLE bitacora.sesion_activa ADD cerrada_en_bogota AS DATEADD(HOUR, -5, cerrada_en);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_activa') AND name='turno_finalizado_en_bogota')
+      ALTER TABLE bitacora.sesion_activa ADD turno_finalizado_en_bogota AS DATEADD(HOUR, -5, turno_finalizado_en);
 
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_bitacora') AND name='abierta_en_bogota')
       ALTER TABLE bitacora.sesion_bitacora ADD abierta_en_bogota AS DATEADD(HOUR, -5, abierta_en);
