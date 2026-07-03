@@ -935,8 +935,8 @@ export async function initDB() {
             CASE WHEN c.nombre IN ('Operador de Planta - Carbón y Caliza','Ingeniero Jefe de Turno','Coordinador de carbón y maquinaria') THEN 1 ELSE 0 END
           -- Gerente no crea en nada
           WHEN c.nombre = 'Gerente de Producción'                THEN 0
-          -- JdT e IngOp sólo crean en DISP y AUTH
-          WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN CASE WHEN b.codigo IN ('DISP','AUTH') THEN 1 ELSE 0 END
+          -- JdT e IngOp crean en DISP, AUTH y SALA (Sala de Mando Operativa).
+          WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN CASE WHEN b.codigo IN ('DISP','AUTH','SALA') THEN 1 ELSE 0 END
           -- IngQuímico sólo crea en QUIM
           WHEN c.nombre = 'Ingeniero Químico'                    THEN CASE WHEN b.codigo='QUIM'    THEN 1 ELSE 0 END
           -- Operadores crean sólo en su propia bitácora (igual que puede_ver)
