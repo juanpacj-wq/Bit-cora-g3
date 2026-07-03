@@ -2,19 +2,24 @@ import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
-import { setupSessions, cleanupTestRegistros, call, makeRegistroPayload, firstTipoEvento, PLANTA_ID } from './helpers.js';
+import { setupSessions, cleanupTestRegistros, call, makeRegistroPayload, firstTipoEvento, TEST_PLANTA } from './helpers.js';
 import { sweepTurnosVencidos } from '../utils/turno-sweeper.js';
 
 let ctx;
 
-// F12: limpiar DISP antes para no arrastrar residuo de runs anteriores (la nueva regla
-// "no consecutivos iguales" hace que un En Servicio viejo en activo bloquee el primer test).
-async function cleanDispGec3() {
+// D-030: TODO este archivo opera sobre TEST_PLANTA (planta sintética), NUNCA sobre GEC3/GEC32
+// reales. Antes usaba PLANTA_ID='GEC3': cada POST DISP cerraba el vigente REAL de GEC3 y creaba
+// un sucesor tagueado que `cleanupTestRegistros` borraba, dejando GEC3 sin vigente ("Sin estado
+// registrado" en el dashboard). Migrado a TEST_PLANTA como ya lo hace disponibilidad.test.js.
+// F12: limpiar DISP antes para no arrastrar residuo de runs anteriores (la regla "no consecutivos
+// iguales" hace que un En Servicio viejo en activo bloquee el primer test).
+async function cleanDispTest() {
   const db = await getDB();
   await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .input('bid', sql.Int, ctx.bitByCodigo.DISP)
     .query(`
+      DELETE FROM bitacora.disponibilidad_estado WHERE planta_id = @p;
       DELETE FROM bitacora.disponibilidad_dashboard WHERE planta_id = @p;
       DELETE FROM bitacora.registro_activo WHERE bitacora_id = @bid AND planta_id = @p;
       DELETE FROM bitacora.registro_historico WHERE bitacora_id = @bid AND planta_id = @p;
@@ -22,19 +27,19 @@ async function cleanDispGec3() {
 }
 
 before(async () => {
-  ctx = await setupSessions();
-  await cleanDispGec3();
+  ctx = await setupSessions({ planta: TEST_PLANTA });
+  await cleanDispTest();
 });
 
 // D6: cada test arranca con DISP limpio para que la regla "no consecutivos iguales" (RN-11)
 // no acople tests entre sí. before() global se mantiene — crea sesiones MERGE y no hace
 // falta repetirlo.
 beforeEach(async () => {
-  if (ctx) await cleanDispGec3();
+  if (ctx) await cleanDispTest();
 });
 
 after(async () => {
-  await cleanDispGec3();
+  await cleanDispTest();
   await cleanupTestRegistros();
 });
 
@@ -48,7 +53,7 @@ test('POST /api/registros sin header devuelve 401', async () => {
   const { sesiones, bitByCodigo } = ctx;
   const tipo_evento_id = await firstTipoEvento(bitByCodigo.DISP);
   const { status } = await call('POST', '/api/registros', {
-    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_EN_SERVICIO }),
+    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, planta_id: TEST_PLANTA, tipo_evento_id, extra: DISP_EN_SERVICIO }),
   });
   assert.equal(status, 401);
   // sesiones solo se usa para que setup corra antes del assert
@@ -60,7 +65,7 @@ test('POST /api/registros Ing. Químico a CALDERA devuelve 403', async () => {
   const tipo_evento_id = await firstTipoEvento(bitByCodigo.CALDERA);
   const { status } = await call('POST', '/api/registros', {
     sesion_id: sesiones.ingQuim,
-    body: makeRegistroPayload({ bitacora_id: bitByCodigo.CALDERA, tipo_evento_id }),
+    body: makeRegistroPayload({ bitacora_id: bitByCodigo.CALDERA, planta_id: TEST_PLANTA, tipo_evento_id }),
   });
   assert.equal(status, 403);
 });
@@ -70,7 +75,7 @@ test('POST /api/registros Ing. Operación a DISP devuelve 201 (permisos iguales 
   const tipo_evento_id = await firstTipoEvento(bitByCodigo.DISP);
   const { status, data } = await call('POST', '/api/registros', {
     sesion_id: sesiones.ingOp,
-    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_EN_SERVICIO }),
+    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, planta_id: TEST_PLANTA, tipo_evento_id, extra: DISP_EN_SERVICIO }),
   });
   assert.equal(status, 201, JSON.stringify(data));
 });
@@ -80,7 +85,7 @@ test('POST /api/registros JdT a DISP devuelve 201', async () => {
   const tipo_evento_id = await firstTipoEvento(bitByCodigo.DISP);
   const { status, data } = await call('POST', '/api/registros', {
     sesion_id: sesiones.jdt,
-    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_INDISPONIBLE }),
+    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, planta_id: TEST_PLANTA, tipo_evento_id, extra: DISP_INDISPONIBLE }),
   });
   assert.equal(status, 201, JSON.stringify(data));
   assert.ok(data.registro?.registro_id);
@@ -91,7 +96,7 @@ test('POST /api/registros devuelve snapshots JSON válidos', async () => {
   const tipo_evento_id = await firstTipoEvento(bitByCodigo.DISP);
   const { status, data } = await call('POST', '/api/registros', {
     sesion_id: sesiones.jdt,
-    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_RESERVA }),
+    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, planta_id: TEST_PLANTA, tipo_evento_id, extra: DISP_RESERVA }),
   });
   assert.equal(status, 201, JSON.stringify(data));
   const reg = data.registro;
@@ -108,7 +113,7 @@ test('POST /api/registros Gerente devuelve 403', async () => {
   const tipo_evento_id = await firstTipoEvento(bitByCodigo.DISP);
   const { status } = await call('POST', '/api/registros', {
     sesion_id: sesiones.gerente,
-    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, tipo_evento_id, extra: DISP_EN_SERVICIO }),
+    body: makeRegistroPayload({ bitacora_id: bitByCodigo.DISP, planta_id: TEST_PLANTA, tipo_evento_id, extra: DISP_EN_SERVICIO }),
   });
   assert.equal(status, 403);
 });
@@ -121,7 +126,7 @@ test('POST /api/cierre/bitacora Ing. Operación devuelve 200 (puede_cerrar_turno
   // CIET de cierre incluso si el SELECT oldest viene vacío.
   const { status } = await call('POST', '/api/cierre/bitacora', {
     sesion_id: sesiones.ingOp,
-    body: { bitacora_id: bitByCodigo.CALDERA, planta_id: PLANTA_ID },
+    body: { bitacora_id: bitByCodigo.CALDERA, planta_id: TEST_PLANTA },
   });
   assert.equal(status, 200);
 });
@@ -130,7 +135,7 @@ test('POST /api/cierre/bitacora Ing. Químico devuelve 403', async () => {
   const { sesiones, bitByCodigo } = ctx;
   const { status } = await call('POST', '/api/cierre/bitacora', {
     sesion_id: sesiones.ingQuim,
-    body: { bitacora_id: bitByCodigo.DISP, planta_id: PLANTA_ID },
+    body: { bitacora_id: bitByCodigo.DISP, planta_id: TEST_PLANTA },
   });
   assert.equal(status, 403);
 });
@@ -140,7 +145,7 @@ test('POST /api/cierre/bitacora JdT devuelve 200', async () => {
   // D6: idem comentario arriba — usamos CALDERA porque DISP devuelve 422 (no cerrable).
   const { status } = await call('POST', '/api/cierre/bitacora', {
     sesion_id: sesiones.jdt,
-    body: { bitacora_id: bitByCodigo.CALDERA, planta_id: PLANTA_ID },
+    body: { bitacora_id: bitByCodigo.CALDERA, planta_id: TEST_PLANTA },
   });
   assert.equal(status, 200);
 });
@@ -148,7 +153,7 @@ test('POST /api/cierre/bitacora JdT devuelve 200', async () => {
 test('POST /api/cierre/bitacora sin header devuelve 401', async () => {
   const { bitByCodigo } = ctx;
   const { status } = await call('POST', '/api/cierre/bitacora', {
-    body: { bitacora_id: bitByCodigo.DISP, planta_id: PLANTA_ID },
+    body: { bitacora_id: bitByCodigo.DISP, planta_id: TEST_PLANTA },
   });
   assert.equal(status, 401);
 });
