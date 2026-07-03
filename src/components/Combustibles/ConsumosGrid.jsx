@@ -14,7 +14,7 @@ import '@fontsource/jetbrains-mono/600.css';
 import '@fontsource/jetbrains-mono/700.css';
 import { useCombustibles } from '../../hooks/useCombustibles';
 import { SelectorFecha } from './SelectorFecha';
-import { HEATMAP_MAX_TON, HEATMAP_RAMP, tint } from './colores';
+import { HEATMAP_MAX_TON, HEATMAP_MAX_FALLBACK, temaHeatmap, tint } from './colores';
 import './combustibles.css';
 
 // D-027: grilla de Consumos de Combustibles. Patrón paralelo a SalaDeMandoGrid:
@@ -196,6 +196,9 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     return mx > 0 ? mx : HEATMAP_MAX_TON;
   }, [catalogo]);
 
+  // Tema por unidad: rampa del heatmap (azul GEC3 / verde GEC32) + acento del CSS.
+  const { rampa, accent } = useMemo(() => temaHeatmap(plantaId), [plantaId]);
+
   // Celdas del buffer cuyo valor supera su cantidad_max → bloquean el guardado (front).
   const celdasInvalidas = useMemo(() => {
     let n = 0;
@@ -215,7 +218,7 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     // es `h-screen flex flex-col`; sin esto, el grid (24 periodos × N combustibles) excede el
     // viewport y el page document hace scroll vertical, empujando BitacoraTabs fuera de vista
     // (softlock de navegación). Mismo patrón anti-softlock que SalaDeMando y DisponibilidadDashboard.
-    <div className="comb-root">
+    <div className="comb-root" style={{ '--accent': accent }}>
       <div className="comb-card">
         <div className="comb-topbar">
           <div className="comb-topbar-left">
@@ -225,11 +228,12 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
             <SelectorFecha fecha={fecha} onChange={onFechaChange} disabled={loading} />
           </div>
           <div className="comb-topbar-right">
-            {/* Leyenda de escala: chips desde HEATMAP_RAMP → coinciden con tint() siempre. */}
+            {/* Leyenda de escala: chips desde la rampa del tema → coinciden con tint() siempre.
+                Leyenda cualitativa (bajo→alto): cada tipo normaliza contra su propio tope. */}
             <div className="comb-legend">
               bajo
               <span className="comb-legend-bar">
-                {HEATMAP_RAMP.map((c) => (
+                {rampa.map((c) => (
                   <i key={c} style={{ background: c }} />
                 ))}
               </span>
@@ -289,9 +293,14 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                         );
                       }
                       const v = buffer[String(p)]?.[String(c.combustible_id)]?.cantidad ?? '';
-                      // Heatmap SOLO en columnas de alimentador (tint() es el único estilo inline);
-                      // escala desde cantidad_max del alimentador (D-034).
-                      const bg = c.tipo === 'ALIMENTADOR' ? tint(v, maxAlim) : 'transparent';
+                      // Heatmap en TODAS las columnas de combustible. Escala por columna:
+                      // los alimentadores comparten maxAlim (columnas hermanas comparables,
+                      // D-034); Caliza y ACPM (1 columna c/u) usan su propio cantidad_max,
+                      // con fallback por tipo si el catálogo no trae el dato.
+                      const maxHeat = c.tipo === 'ALIMENTADOR'
+                        ? maxAlim
+                        : (maxPorId.get(String(c.combustible_id)) ?? HEATMAP_MAX_FALLBACK[c.tipo]);
+                      const bg = tint(v, maxHeat, rampa);
                       // Límite físico por combustible (D-034): celda fuera de rango se marca y bloquea.
                       const max = maxPorId.get(String(c.combustible_id));
                       const invalida = max != null && v !== '' && Number(v) > max;
