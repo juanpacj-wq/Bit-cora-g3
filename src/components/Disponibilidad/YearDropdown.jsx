@@ -57,17 +57,19 @@ export default function YearDropdown({ value, options = [], onChange }) {
           {options.map((o) => {
             const activo = o.value === value;
             return (
-              <button
-                key={o.value}
-                type="button"
-                role="option"
-                aria-selected={activo}
-                className={`yeardd-item${activo ? ' active' : ''}`}
-                onClick={() => elegir(o.value)}
-              >
-                <span>{o.label}</span>
-                {activo && <Check className="yeardd-check" />}
-              </button>
+              <React.Fragment key={o.value}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={activo}
+                  className={`yeardd-item${activo ? ' active' : ''}`}
+                  onClick={() => elegir(o.value)}
+                >
+                  <span>{o.label}</span>
+                  {activo && <Check className="yeardd-check" />}
+                </button>
+                {o.sep && <div className="yeardd-sep" role="separator" />}
+              </React.Fragment>
             );
           })}
         </div>

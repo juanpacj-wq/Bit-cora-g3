@@ -83,6 +83,7 @@
 .disp-root .yeardd-item.active{background:var(--green);color:#fff}
 .disp-root .yeardd-item.active:hover{background:var(--green-deep)}
 .disp-root .yeardd-check{width:15px;height:15px;flex-shrink:0}
+.disp-root .yeardd-sep{height:1px;background:var(--line);margin:5px 8px}
 /* scrollbar fino para el menú */
 .disp-root .yeardd-menu::-webkit-scrollbar{width:8px}
 .disp-root .yeardd-menu::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px;border:2px solid #fff}

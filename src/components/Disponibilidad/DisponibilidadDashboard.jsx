@@ -27,12 +27,14 @@ const ANIO_TODOS = 'todos';
 const ANIO_ACTUAL = Number(
   new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric' }).format(new Date())
 );
-// Construye las opciones del selector desde una lista de años (desc) + "Todos" (all-time).
+// Construye las opciones del selector: "Todos los años" (all-time) primero y fijo arriba —
+// con `sep` para dibujar un divisor debajo — seguido de la lista de años (desc). Va primero para
+// que sea visible sin scrollear la lista larga de años.
 function buildAniosOpts(anios) {
   const lista = Array.isArray(anios) && anios.length ? anios : [ANIO_ACTUAL];
   return [
+    { value: ANIO_TODOS, label: 'Todos los años', sep: true },
     ...lista.map((y) => ({ value: String(y), label: String(y) })),
-    { value: ANIO_TODOS, label: 'Todos' },
   ];
 }
 
