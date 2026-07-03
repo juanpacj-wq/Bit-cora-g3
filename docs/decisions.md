@@ -518,6 +518,18 @@ dashboard). (d) La cookie no viaja a `/dashboard` (aislamiento entre apps). Cros
 
 ---
 
+## D-040 — Finalizar turno revertible (fuente única `sesion_activa.turno_finalizado_en`) + write-gate genérico
+
+**Fecha:** 2026-07-03
+
+**Contexto:** la finalización de turno estaba **sobrecargada** sobre `sesion_bitacora.finalizada_en`, que mezclaba dos cosas: *presencia por-bitácora* y *decisión de "terminé mi turno"*. Como `POST /api/bitacora/abrir` (disparado por `useBitacoraSesion` en CADA apertura/cambio de bitácora) hacía `MERGE ... UPDATE SET finalizada_en = NULL`, **con solo ver una bitácora el ingeniero se des-finalizaba** y reaparecía como pendiente en el cierre del JdT. Además el estado de finalización del front salía 100% de `localStorage`/`shiftInstanceId` (divergía del backend tras F5 y tras el reset de `/abrir`), no había forma de **revertir**, y finalizar no inhibía registrar.
+
+**Decisión:** la finalización de turno pasa a **`sesion_activa.turno_finalizado_en DATETIME2 NULL`** (fuente única; NULL = turno vivo, no-NULL = finalizado). `sesion_bitacora.finalizada_en` vuelve a ser **SOLO presencia por-bitácora** (nunca reusar uno por el otro). Es **revertible self-service** vía **`POST /api/bitacora/revertir-turno`** (sin permiso especial, CIET `reapertura`). `POST /api/bitacora/finalizar` y `finalizar-forzado` setean la columna (CIET idempotente, solo si cambió). El fix del bug: `ingenieros_no_finalizados` filtra por `sa.turno_finalizado_en IS NULL` (ya no lee `sesion_bitacora`), conservando `bitacoras_abiertas` vía `OUTER APPLY`. **Write-gate 409 `turno_finalizado` solo en la rama GENÉRICA de `registros.js`** (POST/PUT/DELETE); MAND/DISP/COMB quedan operables (endpoints propios). El front deriva `turnoFinalizado` de `sesion.turno_finalizado_en` (se eliminó `localStorage`/`shiftInstanceId`/tick), refleja finalizar/revertir con `useAuth.patchSesion` y rehidrata por `/api/me`; el botón togglea a "Revertir finalización" + banner, y el gate de UI se acota a "Nuevo Registro" + `GrillaRegistros`.
+
+**Consecuencias:** (a) el estado **muere solo**: el turno-sweeper expulsa `activa=0` a fin de turno y `select-context` reactiva/crea sesión fresca con la columna en NULL (reset explícito en la rama de reactivación — sin él, volver por "Operar otra unidad" a la misma planta dejaba el turno "finalizado", bug simétrico). (b) Revertir tras ser **forzado** es posible y NO traba el cierre del JdT (que opera sobre `registro_activo`, no sobre esta columna). (c) MAND/DISP/COMB no se bloquean, alineado front↔back. (d) Idempotencia: doble finalizar / doble revertir no duplican CIET (guardas `IS NULL`/`IS NOT NULL` + CIET solo si hubo fila). (e) Se sembró el tipo CIET `'Reapertura de turno'`. (f) Tests: `finalizar_turno.test.js` (11, incl. la regresión del bug: finalizar → `/abrir` → sigue finalizado y no reaparece en `preview-masivo`); suite canónica **218/217✔/1skip**. Cross-ref: [[D-031]] (sesión de app / sweeper / `select-context`), [[D-035]] (sesión única por persona / "Operar otra unidad"), [[D-032]] (shape `{error,codigo,mensaje}` del 409), [[D-037]] (auth-por-defecto + routers), [[D-030]] (tests planta `TST`).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

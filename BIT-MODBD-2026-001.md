@@ -5,13 +5,18 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 1.8 |
-| Fecha | 2026-05-21 |
+| Versión | 2.0 |
+| Fecha | 2026-07-03 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
 
 > **Convenciones:** las tablas de catálogos viven en `lov_bit`; las tablas operativas en `bitacora`. Los campos JSON usan `NVARCHAR(MAX)` y se validan en la capa de aplicación.
+
+> **Cambios v2.0 (2026-07-03) — Finalizar turno revertible (D-040):**
+> - **§3 `sesion_activa`**: nueva columna `turno_finalizado_en DATETIME2 NULL` (+ calculada `turno_finalizado_en_bogota`) como **fuente única** de la finalización de turno (NULL = vivo; no-NULL = finalizado). Revertible. La setea `POST /api/bitacora/finalizar`/`finalizar-forzado`; la limpia el nuevo `POST /api/bitacora/revertir-turno` (self-service) y `select-context` al reactivar.
+> - **§4.6 `sesion_bitacora`**: `finalizada_en` pasa a ser **SOLO presencia por-bitácora** — deja de representar la finalización de turno (estaba sobrecargada; `/abrir` la reseteaba → *ver* una bitácora des-finalizaba el turno). `GET /api/cierre/preview-masivo.ingenieros_no_finalizados` filtra ahora por `sa.turno_finalizado_en IS NULL`.
+> - **Tipo CIET nuevo** `'Reapertura de turno'` (emitido por `revertir-turno`). Write-gate 409 `turno_finalizado` en la rama genérica de `POST/PUT/DELETE /api/registros` (MAND/DISP/COMB exentos). Ver D-040.
 
 > **Cambios v1.9 (2026-06-26) — Login Microsoft Entra ID (D-031):**
 > - **§2.3 `lov_bit.usuario`**: nuevas columnas `azure_oid VARCHAR(64) NULL` (clave de auto-aprovisionamiento, índice único filtrado `UQ_usuario_oid`), `azure_upn VARCHAR(200) NULL`, `azure_tid VARCHAR(64) NULL`. `password_hash` pasa a **nullable** (los usuarios Entra se insertan con `NULL`; SISTEMA conserva el centinela `'!disabled!'`). El seed por `personal-2026.json` (`seedPersonal`) se **retiró**: la identidad se auto-aprovisiona en el primer login (`auth/provision.js`, MERGE por `azure_oid`). Los singletons `es_jefe_planta`/`es_jdt_default` se fijan por UPN (`M365_JEFE_PLANTA_UPNS`/`M365_JDT_DEFAULT_UPNS`), no por App Role.
@@ -435,22 +440,30 @@ El campo `tipo` es el discriminador semántico que usa la vista `v_consumo_perio
 -- cerrada_en (F2): distingue logout explícito (activa=0 + cerrada_en=NULL legacy o
 --                  cerrada_en=ts cuando el frontend manda LOGOUT) del cierre por
 --                  sweeper de turno (activa=0 + cerrada_en=ts SYSUTCDATETIME()).
+-- turno_finalizado_en (D-040): FUENTE ÚNICA de la finalización de turno REVERTIBLE. NULL =
+--                  turno vivo; no-NULL = el ingeniero declaró "terminé mi turno". Distinta de
+--                  sesion_bitacora.finalizada_en (§4.6), que es SOLO presencia por-bitácora —
+--                  nunca reusar uno por el otro. La setea POST /api/bitacora/finalizar y
+--                  finalizar-forzado; POST /api/bitacora/revertir-turno la vuelve a NULL (self-
+--                  service). El sweeper la mata sola (activa=0) y select-context la resetea a
+--                  NULL al reactivar (turno nuevo). Ver D-040 y §7.4.
 -- ultima_actividad: heartbeat de 60s y cada request autenticado lo refresca.
 --                   Sigue actualizándose para inspección operativa, pero post-F9 ya
 --                   NO se rechaza el request por TTL ni se purga la sesión al arranque.
 CREATE TABLE bitacora.sesion_activa (
-    sesion_id         INT           IDENTITY(1,1) PRIMARY KEY,
-    usuario_id        INT           NOT NULL
+    sesion_id            INT           IDENTITY(1,1) PRIMARY KEY,
+    usuario_id           INT           NOT NULL
         REFERENCES lov_bit.usuario(usuario_id),
-    planta_id         VARCHAR(10)   NOT NULL
+    planta_id            VARCHAR(10)   NOT NULL
         REFERENCES lov_bit.planta(planta_id),
-    cargo_id          INT           NOT NULL
+    cargo_id             INT           NOT NULL
         REFERENCES lov_bit.cargo(cargo_id),
-    turno             TINYINT       NOT NULL CHECK (turno IN (1, 2)),
-    inicio_sesion     DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
-    ultima_actividad  DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
-    activa            BIT           NOT NULL DEFAULT 1,
-    cerrada_en        DATETIME2     NULL
+    turno                TINYINT       NOT NULL CHECK (turno IN (1, 2)),
+    inicio_sesion        DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    ultima_actividad     DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    activa               BIT           NOT NULL DEFAULT 1,
+    cerrada_en           DATETIME2     NULL,
+    turno_finalizado_en  DATETIME2     NULL   -- D-040 (fuente única finalización de turno)
 );
 
 CREATE INDEX IX_sesion_lookup
@@ -718,8 +731,12 @@ ALTER TABLE bitacora.disponibilidad_dashboard
       actualizado_en_bogota      AS DATEADD(HOUR, -5, actualizado_en);
 
 ALTER TABLE bitacora.sesion_activa
-  ADD inicio_sesion_bogota    AS DATEADD(HOUR, -5, inicio_sesion),
-      ultima_actividad_bogota AS DATEADD(HOUR, -5, ultima_actividad);
+  ADD inicio_sesion_bogota       AS DATEADD(HOUR, -5, inicio_sesion),
+      ultima_actividad_bogota    AS DATEADD(HOUR, -5, ultima_actividad);
+-- cerrada_en_bogota (F2) y turno_finalizado_en_bogota (D-040) se agregan en batches propios
+-- (IF NOT EXISTS por columna) junto al resto de columnas *_bogota calculadas.
+ALTER TABLE bitacora.sesion_activa
+  ADD turno_finalizado_en_bogota AS DATEADD(HOUR, -5, turno_finalizado_en);
 
 ALTER TABLE bitacora.sesion_bitacora
   ADD abierta_en_bogota    AS DATEADD(HOUR, -5, abierta_en),
@@ -740,7 +757,9 @@ Las columnas calculadas son **virtuales** — no ocupan espacio, se calculan al 
 
 ### 4.6 `sesion_bitacora` — participación por bitácora (F2)
 
-Trackea la **participación de un login en cada bitácora individual**, desacoplado de la sesión global. `abierta_en` se setea al entrar a la vista de la bitácora; `finalizada_en` cuando el usuario clickea "Finalizar turno" en esa bitácora, o cuando el sweeper de turno (F4) lo hace en su nombre al agotarse la ventana del turno.
+Trackea la **participación de un login en cada bitácora individual** (presencia), desacoplado de la sesión global. `abierta_en` se setea al entrar a la vista de la bitácora; `finalizada_en` marca que esa presencia se cerró (el sweeper de turno F4 la puede setear al agotarse la ventana).
+
+> **D-040 — `finalizada_en` es SOLO presencia, NO finalización de turno.** Históricamente esta columna estaba sobrecargada: también representaba "el ingeniero terminó su turno". Como `POST /api/bitacora/abrir` la resetea a `NULL` en cada apertura de bitácora, *ver* una bitácora des-finalizaba el turno. Desde D-040 la **finalización de turno vive en `sesion_activa.turno_finalizado_en`** (§3, fuente única, revertible) y `sesion_bitacora.finalizada_en` queda como presencia por-bitácora. **Nunca reusar uno por el otro.** El criterio "ingeniero no finalizado" (`GET /api/cierre/preview-masivo`) filtra por `sa.turno_finalizado_en IS NULL`; la lista de bitácoras abiertas se conserva vía `OUTER APPLY` a esta tabla. Ver D-040.
 
 ```sql
 -- F2: una fila por (sesion_id, bitacora_id). Reabrir tras finalizar es UPSERT
