@@ -19,25 +19,24 @@ export function SelectorFecha({ fecha, onChange, disabled }) {
   };
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="comb-fecha">
       <button
         type="button"
         onClick={() => irDia(-1)}
         disabled={disabled}
         aria-label="Día anterior"
-        className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-50"
+        className="comb-fecha-nav"
       >
-        <ChevronLeft size={18} />
+        <ChevronLeft size={16} />
       </button>
-      <div className="flex items-center gap-1.5 px-3 py-1.5 border rounded-md bg-white">
-        <CalendarDays size={16} className="text-gray-500" />
+      <div className="comb-fecha-box">
+        <CalendarDays size={15} />
         <input
           type="date"
           value={fecha}
           max={today}
           onChange={onInputChange}
           disabled={disabled}
-          className="outline-none text-sm bg-transparent"
         />
       </div>
       <button
@@ -45,16 +44,16 @@ export function SelectorFecha({ fecha, onChange, disabled }) {
         onClick={() => irDia(1)}
         disabled={disabled || fecha >= today}
         aria-label="Día siguiente"
-        className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-50"
+        className="comb-fecha-nav"
       >
-        <ChevronRight size={18} />
+        <ChevronRight size={16} />
       </button>
       {fecha !== today && (
         <button
           type="button"
           onClick={() => onChange(today)}
           disabled={disabled}
-          className="text-sm text-blue-600 hover:underline ml-2"
+          className="comb-fecha-hoy"
         >
           Hoy
         </button>

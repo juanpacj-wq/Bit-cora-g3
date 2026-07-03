@@ -62,7 +62,12 @@ ORDER BY creado_en DESC;
 
 > Nota: `campos_extra.fecha_cerrada` y `fecha_revertida` están en hora Bogotá explícita post F19. CIETs anteriores a F19 quedaron en UTC; distinguir por `creado_en` si auditás históricos cruzados.
 
-## Ver sesiones activas dentro del TTL (5 min)
+## Ver sesiones de app activas
+
+Post D-031 (login Entra ID) **ya no existe TTL de 5 min** sobre `sesion_activa`. La sesión de app
+vive mientras `activa = 1`; el `turno-sweeper` la expulsa (`activa = 0`) a fin de turno, no por
+inactividad. `ultima_actividad` ya no rige expiración (queda como dato informativo). La identidad
+vive aparte en la cookie httpOnly de Entra (tabla `[auth].[AppSessions]`, con su propio `expires`).
 
 ```sql
 SELECT
@@ -77,8 +82,7 @@ FROM bitacora.sesion_activa s
 JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
 JOIN lov_bit.cargo c   ON c.cargo_id   = s.cargo_id
 WHERE s.activa = 1
-  AND s.ultima_actividad > DATEADD(MINUTE, -5, SYSUTCDATETIME())
-ORDER BY s.ultima_actividad DESC;
+ORDER BY s.inicio_sesion DESC;
 ```
 
 ## Ver cierres MAND del día anterior

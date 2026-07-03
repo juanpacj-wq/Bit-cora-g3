@@ -5,13 +5,24 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 1.8 |
-| Fecha | 2026-05-21 |
+| Versión | 2.0 |
+| Fecha | 2026-07-03 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
 
 > **Convenciones:** las tablas de catálogos viven en `lov_bit`; las tablas operativas en `bitacora`. Los campos JSON usan `NVARCHAR(MAX)` y se validan en la capa de aplicación.
+
+> **Cambios v2.0 (2026-07-03) — Finalizar turno revertible (D-040):**
+> - **§3 `sesion_activa`**: nueva columna `turno_finalizado_en DATETIME2 NULL` (+ calculada `turno_finalizado_en_bogota`) como **fuente única** de la finalización de turno (NULL = vivo; no-NULL = finalizado). Revertible. La setea `POST /api/bitacora/finalizar`/`finalizar-forzado`; la limpia el nuevo `POST /api/bitacora/revertir-turno` (self-service) y `select-context` al reactivar.
+> - **§4.6 `sesion_bitacora`**: `finalizada_en` pasa a ser **SOLO presencia por-bitácora** — deja de representar la finalización de turno (estaba sobrecargada; `/abrir` la reseteaba → *ver* una bitácora des-finalizaba el turno). `GET /api/cierre/preview-masivo.ingenieros_no_finalizados` filtra ahora por `sa.turno_finalizado_en IS NULL`.
+> - **Tipo CIET nuevo** `'Reapertura de turno'` (emitido por `revertir-turno`). Write-gate 409 `turno_finalizado` en la rama genérica de `POST/PUT/DELETE /api/registros` (MAND/DISP/COMB exentos). Ver D-040.
+
+> **Cambios v1.9 (2026-06-26) — Login Microsoft Entra ID (D-031):**
+> - **§2.3 `lov_bit.usuario`**: nuevas columnas `azure_oid VARCHAR(64) NULL` (clave de auto-aprovisionamiento, índice único filtrado `UQ_usuario_oid`), `azure_upn VARCHAR(200) NULL`, `azure_tid VARCHAR(64) NULL`. `password_hash` pasa a **nullable** (los usuarios Entra se insertan con `NULL`; SISTEMA conserva el centinela `'!disabled!'`). El seed por `personal-2026.json` (`seedPersonal`) se **retiró**: la identidad se auto-aprovisiona en el primer login (`auth/provision.js`, MERGE por `azure_oid`). Los singletons `es_jefe_planta`/`es_jdt_default` se fijan por UPN (`M365_JEFE_PLANTA_UPNS`/`M365_JDT_DEFAULT_UPNS`), no por App Role.
+> - **§3 `sesion_activa`**: cambia el ciclo de vida — el `turno-sweeper` ahora **expulsa** la sesión de app a fin de turno (`activa=0`, `cerrada_en`), separada de la cookie de login Entra (larga). La reactivación (`select-context`) refresca `inicio_sesion`+`turno`. La identidad ya no viaja en `X-Sesion-Id`; `loadSession` resuelve por `req.session.user.oid` (cookie). El login local (`/api/auth/login`, scrypt) y `/api/auth/logout` por `sesion_id` fueron eliminados; nuevos `/auth/login`, `/auth/redirect`, `/api/me`, `/api/logout`.
+> - **Nuevo esquema `auth`**: tabla `[auth].[AppSessions]` (store de `express-session`, auto-provisionada). Aislada de `lov_bit`/`bitacora`.
+> - **§2.6 matriz de permisos**: sin cambios estructurales — el cargo se deriva del App Role (`server/utils/entra-roles.js`, value→`cargo.nombre` 1:1, precedencia en multi-rol) en `select-context`, no de selección manual. Ver D-031.
 
 > **Cambios v1.8 (2026-05-21) — Consumos de Combustibles (D-027):**
 > - **Nueva §2.7 `lov_bit.combustible`** — catálogo por planta (`planta_id, codigo, nombre, unidad, tipo, orden, activo`). 18 seeds (8 GEC3 + 10 GEC32). Tipo discriminador `ALIMENTADOR/CALIZA/ACPM` usado por la vista `v_consumo_periodo` para derivar Total Carbón.
@@ -366,6 +377,8 @@ SELECT 4, bitacora_id, 1, 0 FROM lov_bit.bitacora;
 >
 > Esto garantiza que los permisos COMB sobreviven a restarts sin depender del bloque idempotente F26.B1 (que solo corre una vez y seedea los permisos como bootstrap del primer arranque).
 
+> **Nota D-039 (rol ADMIN):** se sembró el cargo `Administrador y Debugging` (App Role `ADMINISTRADOR_DEBUGGING`) con `solo_lectura=0`, `puede_cerrar_turno=1`. En la matriz canónica se agregó `WHEN c.nombre = 'Administrador y Debugging' THEN 1` como **primer WHEN** de `puede_ver` y `puede_crear` → ve+crea en TODAS las bitácoras activas. Acceso total data-driven, sin superusuario por código (toda acción atribuida). **Gotcha:** el override defensivo DISP (`db.js` F12.A6) recomputa `puede_crear` de toda fila DISP con un `CASE ... IN (...)`; el admin también se agregó a ese `IN` o quedaría en `puede_crear=0` en DISP. NO se añadió capacidad de hard-delete de registros cerrados/históricos (el modelo sigue append-only). Ver D-039.
+
 ---
 
 ### 2.7 `combustible` — catálogo por planta de Consumos (D-027)
@@ -383,6 +396,7 @@ CREATE TABLE lov_bit.combustible (
         CONSTRAINT CK_combustible_tipo CHECK (tipo IN ('ALIMENTADOR','CALIZA','ACPM')),
     orden           INT          NOT NULL DEFAULT 0, -- orden visual en la grilla
     activo          BIT          NOT NULL DEFAULT 1,
+    cantidad_max    DECIMAL(12,3) NULL,               -- D-034 (F28.A1): tope físico por celda; NULL=sin tope
     CONSTRAINT UQ_combustible_planta_codigo UNIQUE (planta_id, codigo)
 );
 
@@ -412,7 +426,9 @@ CREATE INDEX IX_combustible_planta_orden
 
 El campo `tipo` es el discriminador semántico que usa la vista `v_consumo_periodo` (§4.9) para calcular el **Total Carbón** como `SUM(cantidad) WHERE tipo='ALIMENTADOR'` por (planta, fecha, periodo) — sin almacenar el total derivado en la tabla transaccional.
 
-**Cross-ref:** ADR [[D-027]]. Catálogo se siembra en `db.js::initDB()` bloque F26.B1 vía `MERGE` por `UQ(planta_id, codigo)` (idempotente).
+**`cantidad_max` (D-034, migración F28.A1):** tope físico por celda/periodo, data-driven. Sembrado por tipo: `ALIMENTADOR=25` Ton, `CALIZA=40` Ton, `ACPM=25000` Gal (`NULL` = sin tope). Lo exponen los GET `/catalogo` y `/consumos`; el POST rechaza `cantidad > cantidad_max` con `400 cantidad_excede_max` (boundary inclusivo); el front marca la celda y bloquea Guardar. Para cambiar un tope: editar el `UPDATE` del bloque F28.A1 en `db.js` + redeploy.
+
+**Cross-ref:** ADR [[D-027]], [[D-034]]. Catálogo se siembra en `db.js::initDB()` bloque F26.B1 vía `MERGE` por `UQ(planta_id, codigo)` (idempotente); `cantidad_max` se agrega en F28.A1 (`ALTER` + `UPDATE` por tipo).
 
 ---
 
@@ -424,22 +440,30 @@ El campo `tipo` es el discriminador semántico que usa la vista `v_consumo_perio
 -- cerrada_en (F2): distingue logout explícito (activa=0 + cerrada_en=NULL legacy o
 --                  cerrada_en=ts cuando el frontend manda LOGOUT) del cierre por
 --                  sweeper de turno (activa=0 + cerrada_en=ts SYSUTCDATETIME()).
+-- turno_finalizado_en (D-040): FUENTE ÚNICA de la finalización de turno REVERTIBLE. NULL =
+--                  turno vivo; no-NULL = el ingeniero declaró "terminé mi turno". Distinta de
+--                  sesion_bitacora.finalizada_en (§4.6), que es SOLO presencia por-bitácora —
+--                  nunca reusar uno por el otro. La setea POST /api/bitacora/finalizar y
+--                  finalizar-forzado; POST /api/bitacora/revertir-turno la vuelve a NULL (self-
+--                  service). El sweeper la mata sola (activa=0) y select-context la resetea a
+--                  NULL al reactivar (turno nuevo). Ver D-040 y §7.4.
 -- ultima_actividad: heartbeat de 60s y cada request autenticado lo refresca.
 --                   Sigue actualizándose para inspección operativa, pero post-F9 ya
 --                   NO se rechaza el request por TTL ni se purga la sesión al arranque.
 CREATE TABLE bitacora.sesion_activa (
-    sesion_id         INT           IDENTITY(1,1) PRIMARY KEY,
-    usuario_id        INT           NOT NULL
+    sesion_id            INT           IDENTITY(1,1) PRIMARY KEY,
+    usuario_id           INT           NOT NULL
         REFERENCES lov_bit.usuario(usuario_id),
-    planta_id         VARCHAR(10)   NOT NULL
+    planta_id            VARCHAR(10)   NOT NULL
         REFERENCES lov_bit.planta(planta_id),
-    cargo_id          INT           NOT NULL
+    cargo_id             INT           NOT NULL
         REFERENCES lov_bit.cargo(cargo_id),
-    turno             TINYINT       NOT NULL CHECK (turno IN (1, 2)),
-    inicio_sesion     DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
-    ultima_actividad  DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
-    activa            BIT           NOT NULL DEFAULT 1,
-    cerrada_en        DATETIME2     NULL
+    turno                TINYINT       NOT NULL CHECK (turno IN (1, 2)),
+    inicio_sesion        DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    ultima_actividad     DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    activa               BIT           NOT NULL DEFAULT 1,
+    cerrada_en           DATETIME2     NULL,
+    turno_finalizado_en  DATETIME2     NULL   -- D-040 (fuente única finalización de turno)
 );
 
 CREATE INDEX IX_sesion_lookup
@@ -707,8 +731,12 @@ ALTER TABLE bitacora.disponibilidad_dashboard
       actualizado_en_bogota      AS DATEADD(HOUR, -5, actualizado_en);
 
 ALTER TABLE bitacora.sesion_activa
-  ADD inicio_sesion_bogota    AS DATEADD(HOUR, -5, inicio_sesion),
-      ultima_actividad_bogota AS DATEADD(HOUR, -5, ultima_actividad);
+  ADD inicio_sesion_bogota       AS DATEADD(HOUR, -5, inicio_sesion),
+      ultima_actividad_bogota    AS DATEADD(HOUR, -5, ultima_actividad);
+-- cerrada_en_bogota (F2) y turno_finalizado_en_bogota (D-040) se agregan en batches propios
+-- (IF NOT EXISTS por columna) junto al resto de columnas *_bogota calculadas.
+ALTER TABLE bitacora.sesion_activa
+  ADD turno_finalizado_en_bogota AS DATEADD(HOUR, -5, turno_finalizado_en);
 
 ALTER TABLE bitacora.sesion_bitacora
   ADD abierta_en_bogota    AS DATEADD(HOUR, -5, abierta_en),
@@ -729,7 +757,9 @@ Las columnas calculadas son **virtuales** — no ocupan espacio, se calculan al 
 
 ### 4.6 `sesion_bitacora` — participación por bitácora (F2)
 
-Trackea la **participación de un login en cada bitácora individual**, desacoplado de la sesión global. `abierta_en` se setea al entrar a la vista de la bitácora; `finalizada_en` cuando el usuario clickea "Finalizar turno" en esa bitácora, o cuando el sweeper de turno (F4) lo hace en su nombre al agotarse la ventana del turno.
+Trackea la **participación de un login en cada bitácora individual** (presencia), desacoplado de la sesión global. `abierta_en` se setea al entrar a la vista de la bitácora; `finalizada_en` marca que esa presencia se cerró (el sweeper de turno F4 la puede setear al agotarse la ventana).
+
+> **D-040 — `finalizada_en` es SOLO presencia, NO finalización de turno.** Históricamente esta columna estaba sobrecargada: también representaba "el ingeniero terminó su turno". Como `POST /api/bitacora/abrir` la resetea a `NULL` en cada apertura de bitácora, *ver* una bitácora des-finalizaba el turno. Desde D-040 la **finalización de turno vive en `sesion_activa.turno_finalizado_en`** (§3, fuente única, revertible) y `sesion_bitacora.finalizada_en` queda como presencia por-bitácora. **Nunca reusar uno por el otro.** El criterio "ingeniero no finalizado" (`GET /api/cierre/preview-masivo`) filtra por `sa.turno_finalizado_en IS NULL`; la lista de bitácoras abiertas se conserva vía `OUTER APPLY` a esta tabla. Ver D-040.
 
 ```sql
 -- F2: una fila por (sesion_id, bitacora_id). Reabrir tras finalizar es UPSERT
@@ -991,7 +1021,7 @@ GROUP BY c.planta_id, c.fecha, c.periodo;
 
 1. Validar permiso `puede_crear` en bitácora COMB. 403 si no.
 2. Validar `planta_id ∈ {GEC3, GEC32}`, `fecha` formato `YYYY-MM-DD`, `fecha <= hoyBogota`, `celdas: Array`.
-3. Pre-load del catálogo activo de la planta. Validar cada celda: `periodo ∈ [1,24]`, `combustible_id ∈ catálogo`, `cantidad >= 0` o null/0.
+3. Pre-load del catálogo activo de la planta (incluye `cantidad_max`). Validar cada celda: `periodo ∈ [1,24]` (`periodo_fuera_rango`), `combustible_id ∈ catálogo` (`combustible_no_pertenece_planta`), `cantidad` número finito `>= 0` (`cantidad_invalida`), y `cantidad <= cantidad_max` si el combustible tiene tope (`cantidad_excede_max`, D-034; boundary inclusivo, `NULL`=sin tope).
 4. Si hay errores estructurados → `400 { errores: [{periodo, combustible_id, motivo}] }` sin ejecutar nada.
 5. Transacción única: por celda, lookup por UQ → si `cantidad` vacío y existe ⇒ DELETE (`eliminados++`); si nuevo ⇒ INSERT (`creados++`); si existe y `cantidad` cambió ⇒ UPDATE + setear `modificado_por` (`actualizados++`); si solo cambió `detalle` ⇒ UPDATE detalle sin tocar audit (`actualizados++`); si idéntico ⇒ no-op.
 6. Response `200 { resumen: { creados, actualizados, eliminados } }`.
@@ -1316,6 +1346,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 | 1.6 | 2026-05-19 | Conformación de turno (D-025). **Nueva §4.7** con DDL de `bitacora.conformacion_turno` (PK compuesta, FKs a usuario/planta/cargo, índice de lookup, columnas `*_bogota` calculadas vía F22.D2). Trigger híbrido: `turno-sweeper.js` extendido + catchup en `initDB()` para los últimos 7 días Bogotá. Endpoints `GET /api/conformacion-turno` y `POST /api/conformacion-turno/trigger`. **Fix retro:** `POST /api/auth/logout` ahora pobla `sesion_activa.cerrada_en = SYSUTCDATETIME()` (era deuda F2 nunca cerrada). **Filtro semántico del builder:** una sesión cuenta para el turno X si arrancó dentro de la ventana de X (derivación de D-003). Cobertura backend: 14 tests dirigidos en `conformacion_turno.test.js`. |
 | 1.7 | 2026-05-20 | Migración ER DISP (D-026). **Nueva §4.8** con DDL de `bitacora.disponibilidad_estado` (PK `disponibilidad_id`, columnas tipadas `estado`/`codigo`/`fecha_inicio_estado`/`fecha_fin_estado`, snapshot adicional `gerentes_produccion_snapshot`, filtered unique index `UQ_disp_estado_vigente_por_planta`, columnas Bogotá) + vista `v_disponibilidad_estado` (acumulados via window functions). §5.2 actualizada — `disponibilidad_dashboard` ahora es VIEW del vigente sobre la nueva tabla (preserva shape: `disponibilidad_id → registro_activo_id`, `jefes_planta_snapshot → jefes_snapshot`). §7.8 marcada como histórica. Vista `v_disp_intervalos` dropeada (las métricas suman `DATEDIFF_BIG` directo sobre la nueva tabla). Migración idempotente F26.A1 hace backfill + DELETE de rows DISP en `registro_activo`/`registro_historico`. Contratos HTTP y shape de response preservados (los tests existentes que validan via HTTP siguen verdes). |
 | 1.8 | 2026-05-21 | Consumos de Combustibles (D-027). **Nueva §2.7** `lov_bit.combustible` (catálogo por planta, 18 seeds: 8 GEC3 + 10 GEC32 con tipos `ALIMENTADOR/CALIZA/ACPM`). **Nueva §4.9** `bitacora.consumo_combustible` (long-format transaccional, `cantidad DECIMAL(12,3)`, UQ compuesto, columnas Bogotá) + vista `v_consumo_periodo` (pivot con `total_carbon_ton = SUM(tipo='ALIMENTADOR')`, `caliza_ton`, `acpm_gal`). §2.4 gana fila `COMB` (formulario_especial=1, icono Flame). §2.6 matriz extendida con CASE para COMB. Permisos: `Operador de Planta - Carbón y Caliza` + JdT crean; resto ven. Migración idempotente F26.B1 (ortogonal a F26.A1). Endpoints `GET /api/combustibles/catalogo`, `GET /api/combustibles/consumos`, `POST /api/combustibles/consumos` (batch atómico, regla D-019 paridad `modificado_por` solo si cantidad cambió). Frontend bajo `src/components/Combustibles/` integrado a categoría jerárquica nueva "Combustibles". 12 tests en `consumos_combustible.test.js`. |
+| 1.9 | 2026-07-03 | Rol ADMIN (D-039). Cargo 13 `Administrador y Debugging` (App Role `ADMINISTRADOR_DEBUGGING`), `solo_lectura=0`, `puede_cerrar_turno=1`. §2.6 matriz extendida: cláusula `WHEN c.nombre='Administrador y Debugging' THEN 1` como primer WHEN de `puede_ver` y `puede_crear` → acceso total data-driven (ve+crea en toda bitácora activa), sin superusuario por código. Override defensivo DISP (F12.A6) incluye al admin en su `CASE ... IN (...)`. Sin hard-delete de históricos (append-only intacto). `entra-roles.js` mapea el App Role→cargo (1:1, 13 roles) y lo pone primero en `PRECEDENCE`. Tests: `entra_roles.test.js` (13 roles + precedencia) y `rol_admin_debugging.test.js` (matriz completa + regresión override DISP + idempotencia). |
 
 ---
 

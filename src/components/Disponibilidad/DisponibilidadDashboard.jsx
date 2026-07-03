@@ -1,61 +1,95 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Inbox, Plus, Undo2 } from 'lucide-react';
+import '@fontsource/public-sans/400.css';
+import '@fontsource/public-sans/500.css';
+import '@fontsource/public-sans/600.css';
+import '@fontsource/public-sans/700.css';
+import '@fontsource/public-sans/800.css';
+import './disponibilidad.css';
+import EstadoTopbar from './EstadoTopbar';
 import EstadoActualCard from './EstadoActualCard';
 import AcumuladosPorEstado from './AcumuladosPorEstado';
+import TiempoEnEstadosDonut from './TiempoEnEstadosDonut';
 import HistorialList from './HistorialList';
 import CambiarEstadoModal from './CambiarEstadoModal';
 import DashboardSkeleton from './Skeleton';
-import PlantaToggle from './PlantaToggle';
 import { useDisponibilidad } from '../../hooks/useDisponibilidad';
-import { BRAND, NEUTRAL, PLANTAS } from './colores';
+import { PLANTAS } from './colores';
 
-const STORAGE_KEY = 'disponibilidad.plantaSeleccionada';
 const POLL_MS = 30_000;
 const HIST_PAGE = 20;
 
-function loadStoredPlanta(fallback) {
-  try {
-    const v = sessionStorage.getItem(STORAGE_KEY);
-    if (v && PLANTAS.includes(v)) return v;
-  } catch {}
-  if (PLANTAS.includes(fallback)) return fallback;
-  return PLANTAS[0];
-}
-
 const EMPTY_BY_PLANTA = PLANTAS.reduce((acc, p) => ({ ...acc, [p]: null }), {});
 
+// Filtro de AÑO (D-035 vive en la URL; el año es estado local del dashboard). `ANIO_TODOS` = sin
+// filtro (comportamiento histórico all-time). El año actual se calcula en Bogotá (UTC-5, sin DST).
+const ANIO_TODOS = 'todos';
+const ANIO_ACTUAL = Number(
+  new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric' }).format(new Date())
+);
+// Construye las opciones del selector: "Todos los años" (all-time) primero y fijo arriba —
+// con `sep` para dibujar un divisor debajo — seguido de la lista de años (desc). Va primero para
+// que sea visible sin scrollear la lista larga de años.
+function buildAniosOpts(anios) {
+  const lista = Array.isArray(anios) && anios.length ? anios : [ANIO_ACTUAL];
+  return [
+    { value: ANIO_TODOS, label: 'Todos los años', sep: true },
+    ...lista.map((y) => ({ value: String(y), label: String(y) })),
+  ];
+}
+
+// Ventana [desde, hasta) en UTC ISO correspondiente al año Bogotá seleccionado. `ANIO_TODOS`
+// → sin ventana (undefined) para que el backend use su default all-time.
+function ventanaAnio(anio) {
+  if (anio === ANIO_TODOS) return { desde: undefined, hasta: undefined };
+  const y = Number(anio);
+  return {
+    desde: new Date(Date.UTC(y, 0, 1, 5, 0, 0)).toISOString(),      // 1-ene 00:00 Bogotá
+    hasta: new Date(Date.UTC(y + 1, 0, 1, 5, 0, 0)).toISOString(),  // 1-ene (y+1) 00:00 Bogotá
+  };
+}
+
+// D-035: `planta`/`onPlantaChange` son controlados por el dashboard (la URL es la fuente única
+// de verdad — se retiró el sessionStorage `disponibilidad.plantaSeleccionada` para evitar doble
+// fuente). El padre garantiza una planta válida; el resto de la lógica (SWR por planta, polling,
+// cierre cronológico) queda intacta.
 export default function DisponibilidadDashboard({
   bitacoraId,
-  plantaInicial,
+  planta,
+  onPlantaChange,
   puedeEditar,
   showToast,
 }) {
-  const { getEstado, getMetricas, crear, editar, deshacer } = useDisponibilidad(bitacoraId);
+  const { getEstado, getMetricas, getAnios, crear, editar, deshacer } = useDisponibilidad(bitacoraId);
 
-  const [plantaSeleccionada, setPlantaSeleccionada] = useState(() => loadStoredPlanta(plantaInicial));
+  const plantaSeleccionada = planta;
+  const setPlantaSeleccionada = onPlantaChange;
 
   // F13.1 SWR cache: cada planta mantiene su data {vigente,historial,historial_total} y un
   // flag `loaded` (false hasta el primer fetch). Skeleton se muestra solo cuando
   // !dataByPlanta[planta].loaded — re-visitas son instantáneas + refresh silencioso.
   const [dataByPlanta, setDataByPlanta] = useState(EMPTY_BY_PLANTA);
+  // Filtro de AÑO: acota historial + acumulados. Default = año actual (Bogotá).
+  const [anio, setAnio] = useState(String(ANIO_ACTUAL));
+  // Opciones del selector, data-driven: rango real desde el primer registro DISP. Fallback = año
+  // actual hasta que llega la respuesta de /anios.
+  const [aniosOpts, setAniosOpts] = useState(() => buildAniosOpts([ANIO_ACTUAL]));
   const [error, setError] = useState(null);
   const [modal, setModal] = useState(null); // { mode: 'crear' | 'editar' }
   const [confirmDeshacer, setConfirmDeshacer] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const fadeKey = useRef(0);
 
-  useEffect(() => {
-    try { sessionStorage.setItem(STORAGE_KEY, plantaSeleccionada); } catch {}
-  }, [plantaSeleccionada]);
-
   const fetchEstado = useCallback(
     async (planta, { silent = false } = {}) => {
       try {
+        // Ventana del año seleccionado — acota historial (getEstado) y acumulados (getMetricas).
+        const { desde, hasta } = ventanaAnio(anio);
         // Estado vigente + acumulados en paralelo. metricas se degrada a null si falla (el
         // panel de acumulados simplemente no se muestra) — no debe tumbar la carga del estado.
         const [res, met] = await Promise.all([
-          getEstado(planta, { historial_limit: HIST_PAGE, historial_offset: 0 }),
-          getMetricas(planta).catch(() => null),
+          getEstado(planta, { historial_limit: HIST_PAGE, historial_offset: 0, desde, hasta }),
+          getMetricas(planta, { desde, hasta }).catch(() => null),
         ]);
         setDataByPlanta((prev) => ({
           ...prev,
@@ -72,8 +106,17 @@ export default function DisponibilidadDashboard({
         if (!silent) setError(e.message || 'Error al cargar disponibilidad');
       }
     },
-    [getEstado, getMetricas]
+    [getEstado, getMetricas, anio]
   );
+
+  // Años disponibles para el selector (una sola vez al montar). Falla en silencio → fallback.
+  useEffect(() => {
+    let cancelado = false;
+    getAnios()
+      .then((r) => { if (!cancelado) setAniosOpts(buildAniosOpts(r?.anios)); })
+      .catch(() => {});
+    return () => { cancelado = true; };
+  }, [getAnios]);
 
   // Fetch al cambiar de planta. SWR: si ya hay cache, refrescamos en silencio.
   useEffect(() => {
@@ -97,9 +140,12 @@ export default function DisponibilidadDashboard({
     if (!cur) return;
     setLoadingMore(true);
     try {
+      const { desde, hasta } = ventanaAnio(anio);
       const res = await getEstado(plantaSeleccionada, {
         historial_limit: HIST_PAGE,
         historial_offset: cur.historial.length,
+        desde,
+        hasta,
       });
       setDataByPlanta((prev) => {
         const prevCur = prev[plantaSeleccionada];
@@ -118,10 +164,12 @@ export default function DisponibilidadDashboard({
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, dataByPlanta, plantaSeleccionada, getEstado, showToast]);
+  }, [loadingMore, dataByPlanta, plantaSeleccionada, getEstado, showToast, anio]);
 
   const data = dataByPlanta[plantaSeleccionada];
   const isFirstLoad = !data?.loaded;
+  // Solo el año en curso (o "Todos") crece en vivo; un año pasado muestra acumulados congelados.
+  const enVivo = anio === ANIO_TODOS || anio === String(ANIO_ACTUAL);
 
   const handleSubmitModal = useCallback(
     async (form) => {
@@ -166,71 +214,80 @@ export default function DisponibilidadDashboard({
   const tienePuedeMas = data ? data.historial.length < (data.historial_total || 0) : false;
 
   return (
-    <div
-      className="flex-1 flex flex-col overflow-hidden"
-      style={{ backgroundColor: NEUTRAL.canvas }}
-    >
-      <div className="max-w-7xl mx-auto w-full px-8 pt-3 pb-4 flex flex-col flex-1 min-h-0 gap-3">
+    <div className="disp-root" style={{ flex: 1, minHeight: 0 }}>
+      <div className="wrap">
         {error && (
           <div
-            className="rounded-lg p-3 flex items-start gap-3 border"
-            style={{ borderColor: '#FCA5A5', backgroundColor: '#FEF2F2', color: '#7F1D1D' }}
+            className="card disp-fade"
+            style={{
+              padding: 12, marginBottom: 18, display: 'flex', gap: 12, alignItems: 'flex-start',
+              border: '1px solid #FCA5A5', background: '#FEF2F2', color: '#7F1D1D', boxShadow: 'none',
+            }}
           >
-            <AlertTriangle size={18} className="flex-shrink-0 mt-0.5" />
-            <div className="text-sm">
-              <div className="font-semibold">No se pudo cargar la disponibilidad</div>
-              <div className="opacity-90">{error}</div>
+            <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: 2 }} />
+            <div style={{ fontSize: 13 }}>
+              <div style={{ fontWeight: 700 }}>No se pudo cargar la disponibilidad</div>
+              <div style={{ opacity: 0.9 }}>{error}</div>
             </div>
           </div>
         )}
 
         <div
           key={fadeKey.current}
-          className="flex flex-col flex-1 min-h-0 gap-3 disp-fade"
+          className="disp-fade"
+          style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}
         >
+          <EstadoTopbar
+            plantaSeleccionada={plantaSeleccionada}
+            codigo={data?.vigente?.codigo}
+            puedeEditar={puedeEditar}
+            tieneVigente={!!data?.vigente}
+            anio={anio}
+            anios={aniosOpts}
+            onChangeAnio={setAnio}
+            onChangePlanta={setPlantaSeleccionada}
+            onCambiar={() => setModal({ mode: 'crear' })}
+            onEditar={() => setModal({ mode: 'editar' })}
+            onDeshacer={() => setConfirmDeshacer(true)}
+          />
+
           {isFirstLoad ? (
             <DashboardSkeleton />
           ) : data?.vigente ? (
             <>
-              <EstadoActualCard
-                vigente={data.vigente}
-                puedeEditar={puedeEditar}
-                plantaSeleccionada={plantaSeleccionada}
-                onChangePlanta={setPlantaSeleccionada}
-                onCambiar={() => setModal({ mode: 'crear' })}
-                onEditar={() => setModal({ mode: 'editar' })}
-                onDeshacer={() => setConfirmDeshacer(true)}
-              />
-              <AcumuladosPorEstado metricas={data.metricas} vigente={data.vigente} />
-              <div className="flex-1 min-h-0 flex flex-col">
-                <HistorialList
-                  planta={plantaSeleccionada}
-                  historial={data.historial}
-                  total={data.historial_total}
-                  loading={loadingMore}
-                  hasMore={tienePuedeMas}
-                  onLoadMore={cargarMasHistorial}
+              <AcumuladosPorEstado metricas={data.metricas} vigente={data.vigente} enVivo={enVivo} />
+              <div className="state-grid">
+                <TiempoEnEstadosDonut metricas={data.metricas} vigente={data.vigente} />
+                <EstadoActualCard
+                  vigente={data.vigente}
+                  plantaSeleccionada={plantaSeleccionada}
+                  metricas={data.metricas}
                 />
               </div>
+              <HistorialList
+                planta={plantaSeleccionada}
+                historial={data.historial}
+                total={data.historial_total}
+                loading={loadingMore}
+                hasMore={tienePuedeMas}
+                onLoadMore={cargarMasHistorial}
+              />
             </>
           ) : (
             <>
               <EmptyState
                 planta={plantaSeleccionada}
                 puedeEditar={puedeEditar}
-                onChangePlanta={setPlantaSeleccionada}
                 onRegistrar={() => setModal({ mode: 'crear' })}
               />
-              <div className="flex-1 min-h-0 flex flex-col">
-                <HistorialList
-                  planta={plantaSeleccionada}
-                  historial={data?.historial || []}
-                  total={data?.historial_total || 0}
-                  loading={loadingMore}
-                  hasMore={tienePuedeMas}
-                  onLoadMore={cargarMasHistorial}
-                />
-              </div>
+              <HistorialList
+                planta={plantaSeleccionada}
+                historial={data?.historial || []}
+                total={data?.historial_total || 0}
+                loading={loadingMore}
+                hasMore={tienePuedeMas}
+                onLoadMore={cargarMasHistorial}
+              />
             </>
           )}
         </div>
@@ -257,46 +314,33 @@ export default function DisponibilidadDashboard({
           onConfirm={handleDeshacerConfirm}
         />
       )}
-
-      <style>{`
-        .disp-fade { animation: dispFadeIn 150ms ease-out; }
-        @keyframes dispFadeIn { from { opacity: 0; } to { opacity: 1; } }
-      `}</style>
     </div>
   );
 }
 
-function EmptyState({ planta, puedeEditar, plantaSeleccionada, onChangePlanta, onRegistrar }) {
+function EmptyState({ planta, puedeEditar, onRegistrar }) {
   return (
     <div
-      className="rounded-xl border border-dashed p-8 flex flex-col items-center text-center gap-3 relative"
-      style={{ borderColor: NEUTRAL.hairline, backgroundColor: NEUTRAL.surface }}
+      className="card"
+      style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center',
+        gap: 12, padding: 32, marginBottom: 18,
+      }}
     >
-      <div className="absolute top-3 right-3">
-        <PlantaToggle
-          plantaSeleccionada={plantaSeleccionada}
-          onChangePlanta={onChangePlanta}
-          variant="light"
-        />
-      </div>
-      <Inbox size={36} style={{ color: NEUTRAL.fgTer }} />
+      <Inbox size={36} style={{ color: 'var(--muted)' }} />
       <div>
-        <div className="text-base font-semibold" style={{ color: NEUTRAL.fgInk }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink-dark)' }}>
           Sin estado registrado para {planta}
         </div>
         {!puedeEditar && (
-          <p className="text-sm mt-1" style={{ color: NEUTRAL.fgTer }}>
+          <p style={{ fontSize: 13, marginTop: 4, color: 'var(--muted)' }}>
             Sin permisos de escritura.
           </p>
         )}
       </div>
       {puedeEditar && (
-        <button
-          onClick={onRegistrar}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white shadow-sm hover:shadow transition-all"
-          style={{ backgroundColor: BRAND.green }}
-        >
-          <Plus size={16} /> Registrar primer estado
+        <button type="button" className="btn btn-green" onClick={onRegistrar}>
+          <Plus /> Registrar primer estado
         </button>
       )}
     </div>

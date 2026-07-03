@@ -8,9 +8,11 @@ const INTERVAL_MS = 60_000;
 let timer = null;
 
 // F4: finaliza automáticamente las sesion_bitacora cuya ventana de turno ya terminó.
-// NO modifica sesion_activa.activa — el usuario sigue logueado y puede reabrir bitácoras
-// del turno nuevo sin re-login (preguntas3.md punto H: el sweeper finaliza turnos pero
-// el cierre del JdT/IngOp queda pendiente para que el JdT lo haga).
+// Login Entra (cambio de conducta vs. F2): además EXPULSA la sesión de app (sesion_activa.activa=0)
+// a fin de turno. La cookie de login Entra NO se toca — el usuario sigue autenticado; al volver en
+// el turno siguiente, abrir la página reactiva sesion_activa vía select-context. Son dos sesiones
+// separadas (cookie Entra = identidad; sesion_activa = participación en el turno). Ver ADR e
+// invariante en CLAUDE.md (la convención "TTL ninguno / activa=1 hasta logout" quedó superada).
 // Hace la finalización y la emisión de CIET en una transacción por sesion_bitacora — si
 // algo falla en una, las demás siguen procesándose en su propia transacción.
 export async function sweepTurnosVencidos(pool) {
@@ -45,11 +47,18 @@ export async function sweepTurnosVencidos(pool) {
     await transaction.begin();
     try {
       // UPDATE solo las que siguen NULL (idempotente entre runs concurrentes).
-      const idsCsv = ids.join(',');
-      const upd = await new sql.Request(transaction).query(`
+      // AUD-41 (BIT-AUDSEG-2026-001): lista parametrizada (@id0,@id1,...) en vez de CSV concatenado.
+      // `ids` siempre trae >=1 (se pobló al agrupar por sesión), pero guardamos el caso vacío igual.
+      const reqUpd = new sql.Request(transaction);
+      const placeholdersUpd = ids.map((id, i) => {
+        reqUpd.input('id' + i, sql.Int, id);
+        return '@id' + i;
+      }).join(',');
+      if (placeholdersUpd.length === 0) { await transaction.commit(); continue; }
+      const upd = await reqUpd.query(`
         UPDATE bitacora.sesion_bitacora
         SET finalizada_en = SYSUTCDATETIME()
-        WHERE sesion_bitacora_id IN (${idsCsv}) AND finalizada_en IS NULL
+        WHERE sesion_bitacora_id IN (${placeholdersUpd}) AND finalizada_en IS NULL
       `);
       const n = upd.rowsAffected[0] || 0;
       if (n > 0) {
@@ -102,6 +111,38 @@ export async function sweepTurnosVencidos(pool) {
     } catch (err) {
       console.error(`[turno-sweeper] error conformacion ${args.planta_id} T${args.turno} ${args.fecha_operativa}:`, err.message);
     }
+  }
+
+  // Expulsión de sesión de app a fin de turno (login Entra). Se hace DESPUÉS de la conformación
+  // (que filtra por la ventana de inicio_sesion y usa cerrada_en, no por activa). Recorre TODAS
+  // las sesiones activas — no solo las que tenían sesion_bitacora abierta — y cierra aquellas
+  // cuya ventana de turno (según su inicio_sesion) ya terminó. Las reactivadas en el turno
+  // vigente tienen inicio_sesion fresco → su ventana no venció → no se expulsan.
+  try {
+    const activas = await pool.request().query(
+      `SELECT sesion_id, turno, inicio_sesion FROM bitacora.sesion_activa WHERE activa = 1`
+    );
+    const expirados = [];
+    for (const s of activas.recordset) {
+      const { fin } = ventanaTurno(s.turno, s.inicio_sesion);
+      if (ahora >= fin) expirados.push(s.sesion_id);
+    }
+    if (expirados.length > 0) {
+      // AUD-41: lista parametrizada (@id0,@id1,...) en vez de CSV concatenado.
+      const reqExp = pool.request();
+      const placeholdersExp = expirados.map((id, i) => {
+        reqExp.input('id' + i, sql.Int, id);
+        return '@id' + i;
+      }).join(',');
+      await reqExp.query(`
+        UPDATE bitacora.sesion_activa
+           SET activa = 0, cerrada_en = SYSUTCDATETIME()
+         WHERE activa = 1 AND sesion_id IN (${placeholdersExp})
+      `);
+      console.log(`[turno-sweeper] ${expirados.length} sesion_activa expulsadas a fin de turno`);
+    }
+  } catch (err) {
+    console.error('[turno-sweeper] error expulsando sesiones a fin de turno:', err.message);
   }
 
   return finalizadas;

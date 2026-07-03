@@ -1,16 +1,7 @@
 import sql from 'mssql';
-import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import { hashPassword, HASH_PREFIX } from './utils/password.js';
 import { ventanaTurno } from './utils/turno.js';
 import { buildConformacionSnapshot, persistConformacionSnapshot } from './utils/conformacion-snapshot.js';
-
-const PERSONAL_JSON_PATH = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  'data',
-  'personal-2026.json'
-);
+import { JEFE_PLANTA_UPNS, JDT_DEFAULT_UPNS } from './auth/entra-config.js';
 
 const rawHost = process.env.DB_HOST || '';
 let server = rawHost;
@@ -22,6 +13,19 @@ if (rawHost.includes('\\')) {
   instanceName = instance;
 }
 
+// AUD-07: cifrado del canal a SQL Server, env-driven con default NO-rompedor (el server prod
+// corre hoy contra una BD por IP interna sin certificado TLS). Default: encrypt=false +
+// trustServerCertificate=true = comportamiento actual. Para endurecer en prod: instalar un
+// certificado válido en SQL Server y arrancar con DB_ENCRYPT=true DB_TRUST_SERVER_CERT=false.
+const DB_ENCRYPT = process.env.DB_ENCRYPT === 'true';
+const DB_TRUST_SERVER_CERT = process.env.DB_TRUST_SERVER_CERT !== 'false';
+if (process.env.NODE_ENV === 'production' && !DB_ENCRYPT) {
+  console.warn(
+    '  ⚠  PRODUCCIÓN con tráfico SQL en CLARO (DB_ENCRYPT≠true): credenciales y datos viajan sin cifrar. ' +
+    'Instala un certificado en SQL Server y configura DB_ENCRYPT=true DB_TRUST_SERVER_CERT=false.'
+  );
+}
+
 const poolConfig = {
   server,
   database: process.env.DB_NAME,
@@ -29,8 +33,8 @@ const poolConfig = {
   password: process.env.DB_PASSWORD,
   port: instanceName ? undefined : parseInt(process.env.DB_PORT || '1433', 10),
   options: {
-    encrypt: false,
-    trustServerCertificate: true,
+    encrypt: DB_ENCRYPT,
+    trustServerCertificate: DB_TRUST_SERVER_CERT,
     ...(instanceName ? { instanceName } : {}),
   },
   pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
@@ -38,11 +42,92 @@ const poolConfig = {
 
 const pool = new sql.ConnectionPool(poolConfig);
 const poolConnect = pool.connect();
+// El consumidor real es getDB() (await poolConnect, que sí propaga el error). Este .catch no-op
+// solo evita que un fallo de conexión en la carga del módulo se vuelva un unhandledRejection
+// global (p.ej. al importar este módulo en un test puro sin BD). No altera el comportamiento:
+// getDB() sigue lanzando ante un fallo real de conexión.
+poolConnect.catch(() => {});
 
 export async function getDB() {
   await poolConnect;
   return pool;
 }
+
+// D-030: planta sintética reservada para los tests. NUNCA contiene datos reales. Los tests de
+// DISP la siembran (ver server/tests/helpers.js) y operan sobre ella en vez de GEC3/GEC32, de
+// modo que ninguna corrida de la suite pueda tocar disponibilidad productiva. El endpoint
+// cross-repo GET /api/eventos-dashboard la trata como inexistente (devuelve vacío) para que datos
+// de test nunca lleguen al dashboard productivo (las vistas DISP NO la filtran — ver nota abajo).
+export const TEST_PLANTA_ID = 'TST';
+
+// D-030: definiciones canónicas (única fuente de verdad) de las dos vistas DISP. Se usan tanto
+// en la migración F26.A1 (creación inicial en BD fresca) como en el self-heal de cada arranque
+// (para que una BD YA migrada adopte cambios de definición con solo redeploy, sin tocar
+// migracion_aplicada — antes vivían solo en el bloque one-shot y no se re-aplicaban). No duplicar
+// el SQL en otro lado — es el gotcha de migraciones idempotentes que advierte CLAUDE.md (evitar
+// drift entre la copia de migración y la de runtime).
+//
+// NOTA D-030: las vistas NO excluyen TEST_PLANTA_ID. Los tests de DISP dependen de que
+// v_disponibilidad_estado COMPUTE acumulados para la planta de prueba (la vista es lo que se
+// prueba), así que filtrarla las rompería. El leak cross-repo se corta en el borde real del
+// contrato — el endpoint GET /api/eventos-dashboard (server.js), por donde y por lo único por
+// donde el dashboard productivo consume DISP. El dashboard no toca esta BD directamente.
+const SQL_VIEW_V_DISPONIBILIDAD_ESTADO = `
+  CREATE OR ALTER VIEW bitacora.v_disponibilidad_estado AS
+  WITH base AS (
+    SELECT *,
+      CAST(DATEDIFF_BIG(MILLISECOND, fecha_inicio_estado,
+                        COALESCE(fecha_fin_estado, SYSUTCDATETIME())) AS BIGINT) / 3600000.0
+        AS horas_intervalo
+    FROM bitacora.disponibilidad_estado
+  )
+  SELECT
+    disponibilidad_id,
+    planta_id                                                                AS planta,
+    codigo                                                                   AS codigo_estado,
+    estado,
+    detalle,
+    fecha_inicio_estado                                                      AS fecha,
+    fecha_fin_estado,
+    creado_en                                                                AS fecha_creacion,
+    SUM(CASE WHEN estado='En Servicio'   THEN horas_intervalo ELSE 0 END)
+      OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_servicio,
+    SUM(CASE WHEN estado='Indisponible'  THEN horas_intervalo ELSE 0 END)
+      OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_indisponible,
+    SUM(CASE WHEN estado='Mantenimiento' THEN horas_intervalo ELSE 0 END)
+      OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_mantenimiento,
+    SUM(CASE WHEN estado='En Reserva'    THEN horas_intervalo ELSE 0 END)
+      OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_reserva,
+    jefes_planta_snapshot,
+    gerentes_produccion_snapshot,
+    jdts_snapshot,
+    ingenieros_snapshot,
+    creado_por,
+    modificado_por,
+    modificado_en
+  FROM base;
+`;
+
+const SQL_VIEW_DISPONIBILIDAD_DASHBOARD = `
+  CREATE OR ALTER VIEW bitacora.disponibilidad_dashboard AS
+  SELECT
+    planta_id,
+    estado                                AS evento,
+    codigo,
+    fecha_inicio_estado,
+    disponibilidad_id                     AS registro_activo_id,
+    jdts_snapshot,
+    jefes_planta_snapshot                 AS jefes_snapshot,
+    modificado_por,
+    modificado_en,
+    COALESCE(modificado_en, creado_en)    AS actualizado_en
+  FROM bitacora.disponibilidad_estado
+  WHERE fecha_fin_estado IS NULL;
+`;
 
 // F16.A3: id del usuario sistema dedicado a CIETs automáticos (cierre diario MAND).
 // Se cachea al final de initDB() y lo consume mand-sweeper.js + el endpoint de cierre manual.
@@ -209,7 +294,10 @@ async function migrateSchemaV2(db) {
       EXEC('ALTER TABLE lov_bit.usuario DROP CONSTRAINT [' + @uq + ']');
   `);
 
-  // usuario.password_hash: eliminar DEFAULT '1234' si existe, rehashear texto plano a bcrypt.
+  // Login Entra ID: el password local se elimina. password_hash deja de ser obligatorio
+  // (los usuarios auto-aprovisionados desde Entra se insertan con password_hash=NULL); el
+  // único row que conserva un centinela es SISTEMA ('!disabled!', activo=0). Eliminamos el
+  // DEFAULT '1234' si quedó de la versión vieja y volvemos la columna nullable.
   await db.request().batch(`
     DECLARE @df SYSNAME = (
       SELECT dc.name FROM sys.default_constraints dc
@@ -219,18 +307,35 @@ async function migrateSchemaV2(db) {
     IF @df IS NOT NULL
       EXEC('ALTER TABLE lov_bit.usuario DROP CONSTRAINT ' + @df);
   `);
-  // Rehash de contraseñas en texto plano a scrypt. Detecta "ya hasheadas" por el prefijo `scrypt$`.
-  const { recordset: needsRehash } = await db.request().query(`
-    SELECT usuario_id FROM lov_bit.usuario
-    WHERE password_hash NOT LIKE '${HASH_PREFIX}%'
+  await db.request().batch(`
+    IF EXISTS (
+      SELECT 1 FROM sys.columns
+      WHERE object_id=OBJECT_ID('lov_bit.usuario') AND name='password_hash' AND is_nullable=0
+    )
+      ALTER TABLE lov_bit.usuario ALTER COLUMN password_hash VARCHAR(200) NULL;
   `);
-  for (const { usuario_id } of needsRehash) {
-    const h = await hashPassword('1234');
-    await db.request()
-      .input('uid',   sql.Int,         usuario_id)
-      .input('shash', sql.VarChar(200), h)
-      .query(`UPDATE lov_bit.usuario SET password_hash = @shash WHERE usuario_id = @uid`);
-  }
+
+  // Identidad Entra ID: claves de Azure AD para el auto-aprovisionamiento por OID en
+  // /auth/redirect. azure_oid es la clave estable (UNIQUE filtrado); azure_upn/azure_tid son
+  // informativos/diagnóstico y para mapear singletons (es_jefe_planta/es_jdt_default) por UPN.
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.usuario','azure_oid') IS NULL
+      ALTER TABLE lov_bit.usuario ADD azure_oid VARCHAR(64) NULL;
+  `);
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.usuario','azure_upn') IS NULL
+      ALTER TABLE lov_bit.usuario ADD azure_upn VARCHAR(200) NULL;
+  `);
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.usuario','azure_tid') IS NULL
+      ALTER TABLE lov_bit.usuario ADD azure_tid VARCHAR(64) NULL;
+  `);
+  await db.request().batch(`
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes WHERE name='UQ_usuario_oid' AND object_id=OBJECT_ID('lov_bit.usuario')
+    )
+      CREATE UNIQUE INDEX UQ_usuario_oid ON lov_bit.usuario(azure_oid) WHERE azure_oid IS NOT NULL;
+  `);
 
   // cargo: rename 'Jefe de Turno' -> 'Ingeniero Jefe de Turno' (preserva cargo_id).
   await db.request().batch(`
@@ -380,6 +485,16 @@ export async function initDB() {
   await db.request().batch(`
     IF COL_LENGTH('bitacora.sesion_activa', 'cerrada_en') IS NULL
       ALTER TABLE bitacora.sesion_activa ADD cerrada_en DATETIME2 NULL;
+  `);
+
+  // D-040: turno_finalizado_en es la fuente ÚNICA de la finalización de turno revertible.
+  // Vive en la sesión de app (por-usuario-por-turno), NO en sesion_bitacora.finalizada_en
+  // (que queda como SOLO presencia por-bitácora). NULL = turno vivo; no-NULL = finalizado.
+  // Muere sola: el sweeper expulsa activa=0 a fin de turno y select-context reactiva/crea
+  // sesión fresca con la columna en NULL. La lógica de negocio llega en E2.
+  await db.request().batch(`
+    IF COL_LENGTH('bitacora.sesion_activa', 'turno_finalizado_en') IS NULL
+      ALTER TABLE bitacora.sesion_activa ADD turno_finalizado_en DATETIME2 NULL;
   `);
 
   // F3: detalle pasa a nullable en ambas tablas. CIET no usa detalle, MAND (F6) tampoco lo
@@ -590,9 +705,13 @@ export async function initDB() {
   // Cargos definitivos según LISTADO DE PERSONAL 2026.xlsx.
   // puede_cerrar_turno=1 para Ingeniero Jefe de Turno e Ingeniero de Operación (mismo poder operativo,
   // roles distintos en UI y snapshots).
+  // D-039: 'Administrador y Debugging' (rol ADMIN, App Role ADMINISTRADOR_DEBUGGING) con
+  // puede_cerrar_turno=1 y solo_lectura=0; sus permisos de bitácora los da la matriz de abajo
+  // (puede_ver=1 y puede_crear=1 en todas). No es un superusuario por código.
   await db.request().batch(`
     MERGE lov_bit.cargo AS t
     USING (VALUES
+      ('Administrador y Debugging',            0, 1),
       ('Gerente de Producción',                1, 0),
       ('Ingeniero Jefe de Turno',              0, 1),
       ('Ingeniero de Operación',               0, 1),
@@ -603,7 +722,8 @@ export async function initDB() {
       ('Operador de Planta - Planta de Agua',  0, 0),
       ('Operador de Planta - Turbogrupo',      0, 0),
       ('Operador Maquinaria Pesada',           0, 0),
-      ('Operador de Planta - Carbón y Caliza', 0, 0)
+      ('Operador de Planta - Carbón y Caliza', 0, 0),
+      ('Coordinador de carbón y maquinaria',   0, 0)
     ) AS s(nombre, solo_lectura, puede_cerrar_turno)
       ON t.nombre = s.nombre
     WHEN MATCHED THEN UPDATE SET
@@ -790,6 +910,8 @@ export async function initDB() {
     ;WITH matriz AS (
       SELECT c.cargo_id, b.bitacora_id,
         CASE
+          -- D-039: Administrador y Debugging ve TODO (va primero para ganar sobre cualquier cláusula).
+          WHEN c.nombre = 'Administrador y Debugging' THEN 1
           -- F3: CIET es read-only para TODOS los cargos (los registros se generan automáticamente).
           WHEN b.codigo = 'CIET' THEN 1
           -- F6: MAND la ve TODO el mundo (la fila operativa la usan JdT/IngOp pero el resto
@@ -812,21 +934,27 @@ export async function initDB() {
           WHEN c.nombre = 'Operador de Planta - Turbogrupo'      THEN CASE WHEN b.codigo='TURBO'   THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador Maquinaria Pesada'           THEN CASE WHEN b.codigo='MAQU'    THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador de Planta - Carbón y Caliza' THEN CASE WHEN b.codigo='CYC'     THEN 1 ELSE 0 END
+          -- Coordinador de carbón y maquinaria: ve Carbón y Caliza (CYC) y Maquinaria (MAQU);
+          -- COMB (Consumos) ya es visible para todos por la CASE clause global de arriba.
+          WHEN c.nombre = 'Coordinador de carbón y maquinaria'   THEN CASE WHEN b.codigo IN ('CYC','MAQU') THEN 1 ELSE 0 END
           ELSE 0
         END AS puede_ver,
         CASE
+          -- D-039: Administrador y Debugging crea en TODO (va primero para ganar sobre cualquier cláusula).
+          WHEN c.nombre = 'Administrador y Debugging' THEN 1
           -- F3: nadie crea en CIET (registros automáticos).
           WHEN b.codigo = 'CIET' THEN 0
           -- F6: en MAND solo crean JdT e IngOp (preguntas.md punto 1).
           WHEN b.codigo = 'MAND' THEN
             CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN 1 ELSE 0 END
           -- D-027 (F26.B1): COMB la crean Operador de Planta - Carbón y Caliza + JdT.
+          -- D-029: + Coordinador de carbón y maquinaria (llenado de Consumos de Combustible).
           WHEN b.codigo = 'COMB' THEN
-            CASE WHEN c.nombre IN ('Operador de Planta - Carbón y Caliza','Ingeniero Jefe de Turno') THEN 1 ELSE 0 END
+            CASE WHEN c.nombre IN ('Operador de Planta - Carbón y Caliza','Ingeniero Jefe de Turno','Coordinador de carbón y maquinaria') THEN 1 ELSE 0 END
           -- Gerente no crea en nada
           WHEN c.nombre = 'Gerente de Producción'                THEN 0
-          -- JdT e IngOp sólo crean en DISP y AUTH
-          WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN CASE WHEN b.codigo IN ('DISP','AUTH') THEN 1 ELSE 0 END
+          -- JdT e IngOp crean en DISP, AUTH y SALA (Sala de Mando Operativa).
+          WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN CASE WHEN b.codigo IN ('DISP','AUTH','SALA') THEN 1 ELSE 0 END
           -- IngQuímico sólo crea en QUIM
           WHEN c.nombre = 'Ingeniero Químico'                    THEN CASE WHEN b.codigo='QUIM'    THEN 1 ELSE 0 END
           -- Operadores crean sólo en su propia bitácora (igual que puede_ver)
@@ -837,6 +965,9 @@ export async function initDB() {
           WHEN c.nombre = 'Operador de Planta - Turbogrupo'      THEN CASE WHEN b.codigo='TURBO'   THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador Maquinaria Pesada'           THEN CASE WHEN b.codigo='MAQU'    THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador de Planta - Carbón y Caliza' THEN CASE WHEN b.codigo='CYC'     THEN 1 ELSE 0 END
+          -- Coordinador de carbón y maquinaria: crea en Carbón y Caliza (CYC) y Maquinaria (MAQU);
+          -- la creación en COMB (Consumos) la cubre la CASE clause de COMB de arriba.
+          WHEN c.nombre = 'Coordinador de carbón y maquinaria'   THEN CASE WHEN b.codigo IN ('CYC','MAQU') THEN 1 ELSE 0 END
           ELSE 0
         END AS puede_crear
       FROM lov_bit.cargo c CROSS JOIN lov_bit.bitacora b
@@ -904,12 +1035,36 @@ export async function initDB() {
   `);
   const dispPristine = tablaCreadaCheck.recordset[0].pristine === 1;
   if (dispPristine) {
-    await db.request()
+    // AUD-29: segunda barrera por presencia de datos productivos reales. El gate primario
+    // (ausencia de bitacora.disponibilidad_dashboard) asume "primer arranque post-F12 = solo
+    // datos de prueba". Pero si alguien dropea esa tabla más tarde, el gate se re-arma y este
+    // bloque borraría DISP productivo en silencio. Si hay rows DISP de plantas reales
+    // (GEC3/GEC32) en registro_activo/historico, abortamos el wipe y avisamos en vez de borrar.
+    const dispRealCheck = await db.request()
       .input('bitacora_id', sql.Int, DISP_BITACORA_ID)
       .query(`
-        DELETE FROM bitacora.registro_historico WHERE bitacora_id = @bitacora_id;
-        DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @bitacora_id;
+        SELECT CASE WHEN EXISTS (
+          SELECT 1 FROM bitacora.registro_activo
+           WHERE bitacora_id = @bitacora_id AND planta_id IN ('GEC3','GEC32')
+          UNION ALL
+          SELECT 1 FROM bitacora.registro_historico
+           WHERE bitacora_id = @bitacora_id AND planta_id IN ('GEC3','GEC32')
+        ) THEN 1 ELSE 0 END AS tiene_datos_reales
       `);
+    if (dispRealCheck.recordset[0].tiene_datos_reales === 1) {
+      console.warn(
+        '[initDB][AUD-29] Wipe DISP one-shot (F12.A1) OMITIDO: hay registros DISP de plantas ' +
+        'reales (GEC3/GEC32) en registro_activo/historico. El gate primario ' +
+        '(falta bitacora.disponibilidad_dashboard) se re-armó pero NO se borran datos productivos.'
+      );
+    } else {
+      await db.request()
+        .input('bitacora_id', sql.Int, DISP_BITACORA_ID)
+        .query(`
+          DELETE FROM bitacora.registro_historico WHERE bitacora_id = @bitacora_id;
+          DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @bitacora_id;
+        `);
+    }
   }
 
   // F12.A4: reemplaza los 3 tipos de evento viejos (Cambio de Estado / Redespacho /
@@ -944,9 +1099,25 @@ export async function initDB() {
       SELECT bitacora_id, 'Deshacer disponibilidad', 3 FROM lov_bit.bitacora WHERE codigo='CIET';
   `);
 
-  // F12.A6: DISP visible para TODOS los cargos; creación solo para JdT/IngOp. La matriz
-  // INSERT de arriba ya cubre los cargos sembrados, pero forzamos defensivamente para
-  // sobrevivir cargos nuevos o renumeraciones — el match es por nombre, no por id.
+  // D-040: tipo CIET 'Reapertura de turno' (orden 4, después de deshacer disponibilidad).
+  // POST /api/bitacora/revertir-turno lo emite cuando un ingeniero revierte su finalización
+  // (registrarEventoCierre con tipo:'reapertura'). El wiring del emisor llega en E2.
+  await db.request().batch(`
+    IF EXISTS (SELECT 1 FROM lov_bit.bitacora WHERE codigo='CIET')
+      AND NOT EXISTS (
+        SELECT 1 FROM lov_bit.tipo_evento te
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+        WHERE b.codigo='CIET' AND te.nombre = 'Reapertura de turno'
+      )
+      INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden)
+      SELECT bitacora_id, 'Reapertura de turno', 4 FROM lov_bit.bitacora WHERE codigo='CIET';
+  `);
+
+  // F12.A6: DISP visible para TODOS los cargos; creación solo para JdT/IngOp (+ Administrador y
+  // Debugging, D-039). La matriz INSERT de arriba ya cubre los cargos sembrados, pero forzamos
+  // defensivamente para sobrevivir cargos nuevos o renumeraciones — el match es por nombre, no por id.
+  // OJO: este UPDATE re-computa puede_crear de TODA fila DISP, así que cualquier cargo que deba
+  // crear en DISP debe estar en el IN de abajo, no solo en la matriz.
   await db.request()
     .input('bitacora_id', sql.Int, DISP_BITACORA_ID)
     .query(`
@@ -960,7 +1131,7 @@ export async function initDB() {
 
       UPDATE p
       SET puede_ver   = 1,
-          puede_crear = CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación')
+          puede_crear = CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación','Administrador y Debugging')
                              THEN 1 ELSE 0 END
       FROM lov_bit.cargo_bitacora_permiso p
       INNER JOIN lov_bit.cargo c ON c.cargo_id = p.cargo_id
@@ -1076,8 +1247,10 @@ export async function initDB() {
     `);
   }
 
-  // Semilla de personal (83 usuarios del Excel 2026)
-  await seedPersonal(db);
+  // Login Entra ID: el personal YA NO se siembra desde personal-2026.json. Cada usuario se
+  // auto-aprovisiona en lov_bit.usuario en su primer login (provisionEntraUser, ver
+  // auth/provision.js), keyed por azure_oid. Los rows legacy sembrados por la versión vieja
+  // permanecen (los referencian registros históricos vía creado_por); quedan inactivables.
 
   // ---------- 7. Vistas ----------
   await db.request().batch(`
@@ -1209,20 +1382,45 @@ export async function initDB() {
   // de evento_dashboard por registro_origen_id antes de borrar registro_activo + histórico.
   // Una sola vez: el flag F16.A1 protege contra re-ejecución en restart.
   if (MAND_BITACORA_ID) {
-    await db.request()
+    // AUD-29: segunda barrera por presencia de datos productivos reales. El gate primario es la
+    // ausencia del flag 'F16.A1' en migracion_aplicada. Si un operador borra esa fila de flag,
+    // el gate se re-arma y este bloque re-ejecutaría el TRUNCATE de MAND productivo en silencio.
+    // En un arranque limpio (registro_activo vacío — initDB siembra catálogos, no datos
+    // transaccionales) no hay rows GEC3/GEC32 → procede. Si hay MAND real de plantas reales,
+    // abortamos y avisamos en vez de borrar.
+    const mandRealCheck = await db.request()
       .input('mand', sql.Int, MAND_BITACORA_ID)
-      .batch(`
-        IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F16.A1')
-        BEGIN
-          UPDATE bitacora.evento_dashboard SET activa = 0
-            WHERE registro_origen_id IN (
-              SELECT registro_id FROM bitacora.registro_activo WHERE bitacora_id = @mand
-            );
-          DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @mand;
-          DELETE FROM bitacora.registro_historico WHERE bitacora_id = @mand;
-          INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F16.A1');
-        END
+      .query(`
+        SELECT CASE WHEN EXISTS (
+          SELECT 1 FROM bitacora.registro_activo
+           WHERE bitacora_id = @mand AND planta_id IN ('GEC3','GEC32')
+          UNION ALL
+          SELECT 1 FROM bitacora.registro_historico
+           WHERE bitacora_id = @mand AND planta_id IN ('GEC3','GEC32')
+        ) THEN 1 ELSE 0 END AS tiene_datos_reales
       `);
+    if (mandRealCheck.recordset[0].tiene_datos_reales === 1) {
+      console.warn(
+        '[initDB][AUD-29] TRUNCATE MAND one-shot (F16.A1) OMITIDO: hay registros MAND de plantas ' +
+        'reales (GEC3/GEC32) en registro_activo/historico. El gate primario (flag F16.A1 ausente) ' +
+        'se re-armó pero NO se borran datos productivos. El flag NO se marca como aplicado.'
+      );
+    } else {
+      await db.request()
+        .input('mand', sql.Int, MAND_BITACORA_ID)
+        .batch(`
+          IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F16.A1')
+          BEGIN
+            UPDATE bitacora.evento_dashboard SET activa = 0
+              WHERE registro_origen_id IN (
+                SELECT registro_id FROM bitacora.registro_activo WHERE bitacora_id = @mand
+              );
+            DELETE FROM bitacora.registro_activo    WHERE bitacora_id = @mand;
+            DELETE FROM bitacora.registro_historico WHERE bitacora_id = @mand;
+            INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F16.A1');
+          END
+        `);
+    }
   }
 
   // F16.A2: limpia funcionariocnd remanente en PRUEBA/REDESP en histórico (los activos
@@ -1366,6 +1564,8 @@ export async function initDB() {
       ALTER TABLE bitacora.sesion_activa ADD ultima_actividad_bogota AS DATEADD(HOUR, -5, ultima_actividad);
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_activa') AND name='cerrada_en_bogota')
       ALTER TABLE bitacora.sesion_activa ADD cerrada_en_bogota AS DATEADD(HOUR, -5, cerrada_en);
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_activa') AND name='turno_finalizado_en_bogota')
+      ALTER TABLE bitacora.sesion_activa ADD turno_finalizado_en_bogota AS DATEADD(HOUR, -5, turno_finalizado_en);
 
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('bitacora.sesion_bitacora') AND name='abierta_en_bogota')
       ALTER TABLE bitacora.sesion_bitacora ADD abierta_en_bogota AS DATEADD(HOUR, -5, abierta_en);
@@ -1477,46 +1677,10 @@ export async function initDB() {
       `);
 
       // 2. Vista derivada de acumulados (CREATE OR ALTER VIEW debe ser el primer statement
-      //    del batch — por eso va en su propia llamada).
-      await new sql.Request(tx).batch(`
-        CREATE OR ALTER VIEW bitacora.v_disponibilidad_estado AS
-        WITH base AS (
-          SELECT *,
-            CAST(DATEDIFF_BIG(MILLISECOND, fecha_inicio_estado,
-                              COALESCE(fecha_fin_estado, SYSUTCDATETIME())) AS BIGINT) / 3600000.0
-              AS horas_intervalo
-          FROM bitacora.disponibilidad_estado
-        )
-        SELECT
-          disponibilidad_id,
-          planta_id                                                                AS planta,
-          codigo                                                                   AS codigo_estado,
-          estado,
-          detalle,
-          fecha_inicio_estado                                                      AS fecha,
-          fecha_fin_estado,
-          creado_en                                                                AS fecha_creacion,
-          SUM(CASE WHEN estado='En Servicio'   THEN horas_intervalo ELSE 0 END)
-            OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
-                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_servicio,
-          SUM(CASE WHEN estado='Indisponible'  THEN horas_intervalo ELSE 0 END)
-            OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
-                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_indisponible,
-          SUM(CASE WHEN estado='Mantenimiento' THEN horas_intervalo ELSE 0 END)
-            OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
-                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_mantenimiento,
-          SUM(CASE WHEN estado='En Reserva'    THEN horas_intervalo ELSE 0 END)
-            OVER (PARTITION BY planta_id ORDER BY fecha_inicio_estado
-                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)                AS horas_en_reserva,
-          jefes_planta_snapshot,
-          gerentes_produccion_snapshot,
-          jdts_snapshot,
-          ingenieros_snapshot,
-          creado_por,
-          modificado_por,
-          modificado_en
-        FROM base;
-      `);
+      //    del batch — por eso va en su propia llamada). Definición canónica en
+      //    SQL_VIEW_V_DISPONIBILIDAD_ESTADO (módulo top-level) — también la re-aplica el
+      //    self-heal de cada arranque (D-030).
+      await new sql.Request(tx).batch(SQL_VIEW_V_DISPONIBILIDAD_ESTADO);
 
       // 3-7. Backfill + validación + DELETE en origen + DROP de index/view/tabla viejos.
       await new sql.Request(tx).batch(`
@@ -1583,23 +1747,10 @@ export async function initDB() {
       `);
 
       // 7. Vista compat para cross-repo — preserva el shape de disponibilidad_dashboard.
-      //    CREATE OR ALTER VIEW debe ser el primer statement del batch.
-      await new sql.Request(tx).batch(`
-        CREATE OR ALTER VIEW bitacora.disponibilidad_dashboard AS
-        SELECT
-          planta_id,
-          estado                                AS evento,
-          codigo,
-          fecha_inicio_estado,
-          disponibilidad_id                     AS registro_activo_id,
-          jdts_snapshot,
-          jefes_planta_snapshot                 AS jefes_snapshot,
-          modificado_por,
-          modificado_en,
-          COALESCE(modificado_en, creado_en)    AS actualizado_en
-        FROM bitacora.disponibilidad_estado
-        WHERE fecha_fin_estado IS NULL;
-      `);
+      //    CREATE OR ALTER VIEW debe ser el primer statement del batch. Definición canónica en
+      //    SQL_VIEW_DISPONIBILIDAD_DASHBOARD (módulo top-level) — también la re-aplica el
+      //    self-heal de cada arranque (D-030).
+      await new sql.Request(tx).batch(SQL_VIEW_DISPONIBILIDAD_DASHBOARD);
 
       // 8. Flag de migración aplicada (último statement antes del COMMIT — si algo falla
       //    antes, el ROLLBACK borra el INSERT y el siguiente arranque reintenta).
@@ -1613,6 +1764,21 @@ export async function initDB() {
       try { await tx.rollback(); } catch {}
       throw err;
     }
+  }
+
+  // ---------- D-030 — self-heal de vistas DISP (excluir planta de test) ----------
+  // Las dos vistas DISP se definían SOLO dentro del bloque de migración F26.A1 (one-shot,
+  // gateado por flag). Una BD ya migrada no las re-creaba en cada arranque, así que un cambio
+  // de definición (ej. el filtro de TEST_PLANTA_ID) no se aplicaba sin re-migrar. Este bloque
+  // corre en CADA arranque, gateado solo por existencia de la tabla, y re-aplica las
+  // definiciones canónicas (CREATE OR ALTER, idempotente). Cada CREATE OR ALTER VIEW debe ser
+  // el primer statement de su batch — por eso van en llamadas separadas.
+  const dispEstadoExiste = (await db.request().query(
+    `SELECT 1 AS x WHERE OBJECT_ID('bitacora.disponibilidad_estado','U') IS NOT NULL`
+  )).recordset[0];
+  if (dispEstadoExiste) {
+    await db.request().batch(SQL_VIEW_V_DISPONIBILIDAD_ESTADO);
+    await db.request().batch(SQL_VIEW_DISPONIBILIDAD_DASHBOARD);
   }
 
   // ---------- F26.B1 — D-027: Combustibles → Consumos ----------
@@ -1812,15 +1978,122 @@ export async function initDB() {
     throw new Error("[initDB] bitácora 'COMB' no fue sembrada (F26.B1)");
   }
 
+  // F27.A1 (D-029): schema de soporte para el valor SIS sombra (consumo de carbón GEC32
+  // scrapeado del SIS interno) + observabilidad/resumabilidad del scraper. Solo schema;
+  // el scraper/endpoints/UI llegan en etapas posteriores. Patrón idempotente F26.B1.
+  //   1. consumo_combustible += valor_sis (lectura cruda validada del SIS) + sis_actualizado_en.
+  //   2. bitacora.sis_scrape_log: una fila por (planta, fecha) con el resultado del scrape
+  //      (cuántos periodos ok/error, último periodo, si quedó completo). UNIQUE(planta,fecha)
+  //      la hace resumible (el backfill salta días con completo=1).
+  // Documentado en docs/decisions.md D-029 y BIT-MODBD-2026-001.md.
+  const f27A1Aplicada = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F27.A1'`
+  );
+  if (!f27A1Aplicada.recordset[0]) {
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    try {
+      // 1. Columnas valor_sis + sis_actualizado_en (idempotentes).
+      await new sql.Request(tx).batch(`
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+          WHERE object_id=OBJECT_ID('bitacora.consumo_combustible') AND name='valor_sis')
+          ALTER TABLE bitacora.consumo_combustible ADD valor_sis DECIMAL(12,3) NULL;
+      `);
+      await new sql.Request(tx).batch(`
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+          WHERE object_id=OBJECT_ID('bitacora.consumo_combustible') AND name='sis_actualizado_en')
+          ALTER TABLE bitacora.consumo_combustible ADD sis_actualizado_en DATETIME2 NULL;
+      `);
+
+      // 2. Tabla bitacora.sis_scrape_log.
+      await new sql.Request(tx).batch(`
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='sis_scrape_log' AND schema_id=SCHEMA_ID('bitacora'))
+        CREATE TABLE bitacora.sis_scrape_log (
+          scrape_log_id  INT IDENTITY(1,1) PRIMARY KEY,
+          planta_id      VARCHAR(10) NOT NULL REFERENCES lov_bit.planta(planta_id),
+          fecha          DATE        NOT NULL,
+          scrape_tipo    VARCHAR(20) NOT NULL
+            CONSTRAINT CK_sis_scrape_tipo CHECK (scrape_tipo IN ('horario','backfill','manual')),
+          periodos_ok    TINYINT     NOT NULL CONSTRAINT DF_sis_scrape_ok DEFAULT 0,
+          periodos_error TINYINT     NOT NULL CONSTRAINT DF_sis_scrape_error DEFAULT 0,
+          ultimo_periodo TINYINT     NULL,
+          completo       BIT         NOT NULL CONSTRAINT DF_sis_scrape_completo DEFAULT 0,
+          scraped_en     DATETIME2   NOT NULL CONSTRAINT DF_sis_scrape_en DEFAULT SYSUTCDATETIME(),
+          CONSTRAINT UQ_sis_scrape_planta_fecha UNIQUE (planta_id, fecha)
+        );
+      `);
+
+      // 3. Flag de migración aplicada (último statement antes del COMMIT). Mismo shape que
+      //    F26.B1: la tabla migracion_aplicada solo recibe (codigo).
+      await new sql.Request(tx).batch(`
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F27.A1');
+      `);
+
+      await tx.commit();
+      console.log('[F27.A1] valor_sis + sis_actualizado_en + sis_scrape_log creados');
+    } catch (err) {
+      try { await tx.rollback(); } catch {}
+      throw err;
+    }
+  }
+
+  // F28.A1 (D-034): límite físico por combustible. Columna lov_bit.combustible.cantidad_max
+  // (data-driven, fuente única) usada por el front (input max + marcar/bloquear) y el back
+  // (validación cantidad_excede_max en POST /api/combustibles/consumos). Topes por tipo:
+  // ALIMENTADOR=25 Ton, CALIZA=40 Ton, ACPM=25000 Gal. cantidad_max NULL = "sin tope"
+  // (el server omite el chequeo) para no romper combustibles futuros que no lo seteen.
+  // Patrón idempotente F26.B1/F27.A1. Documentado en docs/decisions.md D-034 y BIT-MODBD §4.9.
+  const f28A1Aplicada = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F28.A1'`
+  );
+  if (!f28A1Aplicada.recordset[0]) {
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    try {
+      // 1. Columna cantidad_max (idempotente).
+      await new sql.Request(tx).batch(`
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+          WHERE object_id=OBJECT_ID('lov_bit.combustible') AND name='cantidad_max')
+          ALTER TABLE lov_bit.combustible ADD cantidad_max DECIMAL(12,3) NULL;
+      `);
+
+      // 2. Sembrar topes por tipo en las filas existentes (solo donde aún es NULL, para no
+      //    pisar ajustes manuales futuros si alguien quita el flag y reaplica).
+      await new sql.Request(tx).batch(`
+        UPDATE lov_bit.combustible
+        SET cantidad_max = CASE tipo
+              WHEN 'ALIMENTADOR' THEN 25
+              WHEN 'CALIZA'      THEN 40
+              WHEN 'ACPM'        THEN 25000
+            END
+        WHERE cantidad_max IS NULL;
+      `);
+
+      // 3. Flag de migración aplicada (último statement antes del COMMIT). Mismo shape que
+      //    F26.B1/F27.A1: la tabla migracion_aplicada solo recibe (codigo).
+      await new sql.Request(tx).batch(`
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F28.A1');
+      `);
+
+      await tx.commit();
+      console.log('[F28.A1] cantidad_max sembrado en lov_bit.combustible (25/40/25000 por tipo)');
+    } catch (err) {
+      try { await tx.rollback(); } catch {}
+      throw err;
+    }
+  }
+
   // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de
   // auditoría interna (CIET).
   await db.request().batch(`
     CREATE OR ALTER VIEW bitacora.v_historico_busqueda AS
     SELECT h.registro_id, h.fecha_evento, h.turno, h.detalle,
            h.campos_extra, h.fecha_cierre_operativo,
+           h.bitacora_id,
            b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo,
            b.oculta AS bitacora_oculta,
            p.nombre AS planta_nombre, h.planta_id,
+           h.tipo_evento_id,
            te.nombre AS tipo_evento,
            h.ingenieros_snapshot, h.jdts_snapshot, h.jefes_snapshot,
            autor.nombre_completo AS creado_por_nombre,
@@ -1833,24 +2106,16 @@ export async function initDB() {
     LEFT JOIN lov_bit.usuario autor ON autor.usuario_id = h.creado_por;
   `);
 
-  // Invariante singleton de flags de usuario (BIT-RF-2026-001.md §3 + §6.5):
-  //   * Sólo username='emunoz' (Ernesto Muñoz) tiene es_jefe_planta=1.
-  //   * Sólo username='ofedullo' (Omar Fedullo) tiene es_jdt_default=1.
-  // Defensa en profundidad: aunque seedPersonal() ya re-aplica los flags del JSON,
-  // este bloque corrige divergencias en filas FUERA del JSON (cuentas test, manuales)
-  // y blinda contra ediciones por SSMS. La limpieza one-off vive en
-  // sql/snippets/limpiar_test_user_flags.sql. Cross-ref D-023 en docs/decisions.md.
-  await db.request().batch(`
-    BEGIN TRAN;
-      UPDATE lov_bit.usuario
-         SET es_jefe_planta = 0
-       WHERE es_jefe_planta = 1 AND username <> 'emunoz';
-
-      UPDATE lov_bit.usuario
-         SET es_jdt_default = 0
-       WHERE es_jdt_default = 1 AND username <> 'ofedullo';
-    COMMIT;
-  `);
+  // Invariante singleton de flags de usuario (BIT-RF-2026-001.md §3 + §6.5; D-023):
+  //   * es_jefe_planta=1: el Jefe de Planta titular (Ernesto Muñoz).
+  //   * es_jdt_default=1: el JdT por defecto para el fallback de snapshotJDTs (Omar Fedullo).
+  // Estos son singletons de IDENTIDAD, NO App Roles, así que con login Entra se configuran por
+  // UPN (M365_JEFE_PLANTA_UPNS / M365_JDT_DEFAULT_UPNS contra usuario.azure_upn). Si la lista
+  // está vacía (dev sin Entra) se conserva el comportamiento legacy por username. Cuando hay
+  // lista configurada, los rows legacy (azure_upn NULL) que tuvieran el flag se limpian, así el
+  // titular vigente es el row Entra del UPN configurado.
+  await enforceSingletonFlag(db, 'es_jefe_planta', JEFE_PLANTA_UPNS, 'emunoz');
+  await enforceSingletonFlag(db, 'es_jdt_default', JDT_DEFAULT_UPNS, 'ofedullo');
 
   // Q3=d conformacion-turno-2026-05: catchup al arranque. Detecta (planta, turno, fecha_operativa)
   // de los últimos 7 días Bogotá que NO tengan snapshot en conformacion_turno, y para cada uno
@@ -1906,51 +2171,38 @@ export async function initDB() {
   console.log('[DB] Conexión OK');
 }
 
-// Carga server/data/personal-2026.json y hace UPSERT contra lov_bit.usuario por username.
-// Todos los usuarios usan scrypt('1234') como password inicial. Las filas ya existentes conservan
-// su password_hash actual (no se resetean si alguien ya cambió su clave).
-async function seedPersonal(db) {
-  const raw = await readFile(PERSONAL_JSON_PATH, 'utf8');
-  const personal = JSON.parse(raw);
-  if (!Array.isArray(personal) || personal.length === 0) {
-    throw new Error(`[seedPersonal] ${PERSONAL_JSON_PATH} vacío o no es un array`);
-  }
-  // Un hash distinto por usuario (cada uno con salt aleatorio). Para 83 filas cuesta ~10s total;
-  // sólo ocurre en el primer arranque (WHEN NOT MATCHED no se dispara en arranques siguientes).
-
-  // Validar que cada cargo referenciado existe en lov_bit.cargo
-  const cargoSet = new Set(personal.map(p => p.cargo));
-  const cargoRows = await db.request().query('SELECT cargo_id, nombre FROM lov_bit.cargo');
-  const cargoByName = new Map(cargoRows.recordset.map(c => [c.nombre, c.cargo_id]));
-  for (const name of cargoSet) {
-    if (!cargoByName.has(name)) {
-      throw new Error(`[seedPersonal] Cargo '${name}' referenciado en personal-2026.json no existe en lov_bit.cargo`);
-    }
-  }
-
-  // UPSERT por username (fila a fila: volumen bajo, 83 registros).
-  for (const p of personal) {
-    const hashed = await hashPassword('1234');
+// Enforce del invariante singleton de un flag de identidad (es_jefe_planta / es_jdt_default).
+// Con login Entra el titular se identifica por su UPN (usuario.azure_upn ∈ `upns`). Si `upns`
+// está vacío (dev sin Entra), cae al comportamiento legacy: el único titular es el username
+// `legacyUsername`. Idempotente — corre en cada arranque (D-023, defensa en profundidad).
+async function enforceSingletonFlag(db, columna, upns, legacyUsername) {
+  if (upns.length === 0) {
     await db.request()
-      .input('nombre_completo', sql.VarChar(200), p.nombre_completo)
-      .input('username',        sql.VarChar(50),  p.username)
-      .input('password_hash',   sql.VarChar(200), hashed)
-      .input('es_jefe_planta',  sql.Bit,          !!p.es_jefe_planta)
-      .input('es_jdt_default',  sql.Bit,          !!p.es_jdt_default)
-      .query(`
-        MERGE lov_bit.usuario AS t
-        USING (VALUES (@nombre_completo, @username, @password_hash, @es_jefe_planta, @es_jdt_default))
-            AS s (nombre_completo, username, password_hash, es_jefe_planta, es_jdt_default)
-          ON t.username = s.username
-        WHEN MATCHED THEN UPDATE SET
-          nombre_completo = s.nombre_completo,
-          es_jefe_planta  = s.es_jefe_planta,
-          es_jdt_default  = s.es_jdt_default,
-          activo          = 1
-        WHEN NOT MATCHED THEN INSERT (nombre_completo, username, email, password_hash, es_jefe_planta, es_jdt_default, activo)
-          VALUES (s.nombre_completo, s.username, NULL, s.password_hash, s.es_jefe_planta, s.es_jdt_default, 1);
-      `);
+      .input('u', sql.VarChar(50), legacyUsername)
+      .query(`UPDATE lov_bit.usuario SET ${columna} = 0 WHERE ${columna} = 1 AND username <> @u;`);
+    return;
   }
-
-  console.log(`[DB] seedPersonal: ${personal.length} usuarios procesados`);
+  // AUD-31: los dos UPDATE corren atómicos dentro de una sql.Transaction con rollback en
+  // catch (mismo patrón que matrizTx / F26-F28). Antes era un batch `BEGIN TRAN; …; COMMIT;`
+  // sin XACT_ABORT ni manejo de error: si el 2º UPDATE fallaba, la transacción quedaba abierta
+  // sobre la conexión del pool (locks colgados, conexión envenenada). El driver mssql hace
+  // rollback explícito y devuelve la conexión limpia.
+  const tx = new sql.Transaction(db);
+  await tx.begin();
+  try {
+    const req = new sql.Request(tx);
+    const placeholders = upns.map((u, i) => { req.input('u' + i, sql.VarChar(200), u); return '@u' + i; }).join(',');
+    // SET=1 para los UPN configurados; SET=0 para cualquier otro row con el flag (incluye rows
+    // legacy con azure_upn NULL), garantizando un único titular vigente: el row Entra del UPN.
+    await req.query(`
+      UPDATE lov_bit.usuario SET ${columna} = 1
+       WHERE LOWER(azure_upn) IN (${placeholders}) AND ${columna} = 0;
+      UPDATE lov_bit.usuario SET ${columna} = 0
+       WHERE ${columna} = 1 AND (azure_upn IS NULL OR LOWER(azure_upn) NOT IN (${placeholders}));
+    `);
+    await tx.commit();
+  } catch (err) {
+    try { await tx.rollback(); } catch {}
+    throw err;
+  }
 }

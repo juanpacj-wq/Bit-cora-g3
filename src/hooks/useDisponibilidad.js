@@ -1,36 +1,42 @@
 import { useCallback, useMemo } from 'react';
 import { api } from './useApi';
-
-const STORAGE_KEY = 'bitacoras_auth';
-
-function getSesionId() {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const { sesion } = JSON.parse(raw);
-    return sesion?.sesion_id ?? null;
-  } catch {
-    return null;
-  }
-}
+import { withBase } from '../config/paths';
 
 // useApi.api hace `throw new Error(data.error)` y descarta el body — para los 409
 // del flujo DISP necesitamos el `vigente` (mismo_estado / fecha_anterior_a_vigente)
 // y el `n_menos_1` (mismo_estado_que_anterior). Wrapper local que adjunta el body
-// al Error para que el modal pueda construir popups específicos.
+// al Error para que el modal pueda construir popups específicos. Autenticación por cookie
+// Entra (credentials:'include'), igual que useApi.
+// Etiqueta amigable cuando el backend está caído / la red no tiene ruta (fetch rechaza con un
+// TypeError crudo). `.body.mensaje` es lo que lee CambiarEstadoModal.buildPopup en su rama default.
+const MSG_SIN_CONEXION_DISP = 'No se pudo contactar al servidor. Verifica tu conexión a la red corporativa e intenta de nuevo.';
+
 async function requestWithBody(url, { method = 'POST', body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
-  const sid = getSesionId();
-  if (sid != null) headers['X-Sesion-Id'] = String(sid);
-  const res = await fetch(url, {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    // Mismo prefijo de sub-path que useApi (este wrapper existe solo para conservar el body de
+    // los 409 de DISP, no para saltarse el ruteo).
+    res = await fetch(withBase(url), {
+      method,
+      headers,
+      credentials: 'include',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    const err = new Error(MSG_SIN_CONEXION_DISP);
+    err.status = 0;
+    err.codigo = 'sin_conexion';
+    err.body = { error: MSG_SIN_CONEXION_DISP, codigo: 'sin_conexion', mensaje: MSG_SIN_CONEXION_DISP };
+    throw err;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.error || data.mensaje || `HTTP ${res.status}`);
+    // `data.error`/`data.mensaje` ya vienen saneados por el backend para los 5xx; los 409 de DISP
+    // traen además `codigo`/`vigente`/`n_menos_1` que buildPopup usa para popups específicos.
+    const err = new Error(data.error || data.mensaje || `Error ${res.status}`);
     err.status = res.status;
+    err.codigo = data.codigo;
     err.body = data;
     throw err;
   }
@@ -39,12 +45,15 @@ async function requestWithBody(url, { method = 'POST', body } = {}) {
 
 export function useDisponibilidad(dispBitacoraId) {
   const getEstado = useCallback(
-    (planta_id, { historial_limit = 20, historial_offset = 0 } = {}) => {
+    (planta_id, { historial_limit = 20, historial_offset = 0, desde, hasta } = {}) => {
       const qs = new URLSearchParams({
         planta_id,
         historial_limit: String(historial_limit),
         historial_offset: String(historial_offset),
       });
+      // Filtro de AÑO: ventana [desde, hasta) que acota el historial (el vigente no se filtra).
+      if (desde) qs.set('desde', desde);
+      if (hasta) qs.set('hasta', hasta);
       return api.get(`/api/disponibilidad?${qs.toString()}`);
     },
     []
@@ -54,10 +63,18 @@ export function useDisponibilidad(dispBitacoraId) {
   // Sin desde/hasta → ventana = toda la historia de la planta. Alimenta el panel de
   // acumulados; el estado vigente crece en vivo client-side reusando el tick de TiempoEnEstado.
   const getMetricas = useCallback(
-    (planta_id) =>
-      api.get(`/api/disponibilidad/metricas?planta_id=${encodeURIComponent(planta_id)}`),
+    (planta_id, { desde, hasta } = {}) => {
+      const qs = new URLSearchParams({ planta_id });
+      // Filtro de AÑO: acota los acumulados/donut/factor a la ventana [desde, hasta).
+      if (desde) qs.set('desde', desde);
+      if (hasta) qs.set('hasta', hasta);
+      return api.get(`/api/disponibilidad/metricas?${qs.toString()}`);
+    },
     []
   );
+
+  // Años disponibles para el filtro de AÑO (rango contiguo desde el primer registro DISP).
+  const getAnios = useCallback(() => api.get('/api/disponibilidad/anios'), []);
 
   const crear = useCallback(
     ({ planta_id, evento, codigo, fecha_inicio_estado, detalle }) => {
@@ -100,7 +117,7 @@ export function useDisponibilidad(dispBitacoraId) {
   );
 
   return useMemo(
-    () => ({ getEstado, getMetricas, crear, editar, deshacer }),
-    [getEstado, getMetricas, crear, editar, deshacer]
+    () => ({ getEstado, getMetricas, getAnios, crear, editar, deshacer }),
+    [getEstado, getMetricas, getAnios, crear, editar, deshacer]
   );
 }

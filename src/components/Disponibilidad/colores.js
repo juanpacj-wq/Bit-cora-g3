@@ -1,20 +1,24 @@
-// F13: paleta corporativa (Paleta_De_colores.png + NeutralesPaleta_De_colores.png).
-// Referenciada también por COLORS de BitacorasGecelca3.jsx — los hex coinciden.
+// Rediseño visual DISP (look dashboard.html): paleta teal/celeste del mockup.
+// Estos tokens SOLO se usan dentro de components/Disponibilidad/ (verificado), por lo que
+// el cambio de paleta no afecta otras bitácoras. Los mismos hex viven como variables CSS en
+// disponibilidad.css (scopeadas a .disp-root); acá se exponen para los estilos dinámicos
+// por estado (style={{...}}).
 export const BRAND = {
-  green: '#31a354',
-  greenDeep: '#006f36',
-  navy: '#003566',
-  navyDeep: '#001d3d',
-  ink: '#011027',
+  green: '#16b486',
+  greenDeep: '#0f9e74',
+  navy: '#244651',
+  navyDeep: '#0f3d4a',
+  ink: '#244651',
 };
 
 export const NEUTRAL = {
   surface: '#FFFFFF',
-  canvas: '#F5F7FA',
-  subtle: '#EBEFF4',
-  hairline: '#D6DDE6',
-  fgTer: '#5C6877',
-  fgInk: '#011027',
+  canvas: '#eef4f5',
+  subtle: '#e6eef0',
+  hairline: '#e6eef0',
+  fgTer: '#9bb3ba',   // muted
+  fgInk: '#244651',   // ink-dark
+  fgBody: '#4a6670',  // ink (texto de cuerpo)
 };
 
 // Mapa estado → tokens. `icon` es el nombre del componente lucide-react que el
@@ -28,10 +32,10 @@ export const NEUTRAL = {
 // Indisponible y Mantenimiento comparten codigo=-1; el discriminador visual y semántico
 // es el string `evento`.
 export const ESTADO_COLORS = {
-  'En Servicio':  { bg: BRAND.green, text: NEUTRAL.surface, badge: BRAND.greenDeep, icon: 'CheckCircle2' },
-  'En Reserva':   { bg: '#1e40af',   text: NEUTRAL.surface, badge: '#1e3a8a',       icon: 'Clock' },
-  Indisponible:   { bg: '#DC3545',   text: NEUTRAL.surface, badge: '#A41E2A',       icon: 'XCircle' },
-  Mantenimiento:  { bg: '#FFC107',   text: NEUTRAL.fgInk,   badge: '#A37500',       icon: 'Wrench' },
+  'En Servicio':  { bg: BRAND.green,   text: NEUTRAL.surface, badge: BRAND.greenDeep, icon: 'CheckCircle2', cls: 'serv' },
+  'En Reserva':   { bg: '#2f9fe0',     text: NEUTRAL.surface, badge: '#1f7fb8',       icon: 'Clock',        cls: 'res'  },
+  Indisponible:   { bg: '#d9627a',     text: NEUTRAL.surface, badge: '#c44862',       icon: 'XCircle',      cls: 'ind'  },
+  Mantenimiento:  { bg: '#e0a83c',     text: NEUTRAL.surface, badge: '#bd8a26',       icon: 'Wrench',       cls: 'mant' },
 };
 
 export const ESTADOS = ['En Servicio', 'En Reserva', 'Indisponible', 'Mantenimiento'];

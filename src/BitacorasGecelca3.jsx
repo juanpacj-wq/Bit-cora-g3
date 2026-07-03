@@ -6,15 +6,16 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import {
-  LogIn, LogOut, Clock, Plus, Save, Trash2, Lock, CheckCircle2,
+  LogIn, LogOut, Clock, Plus, Save, Trash2, Lock, CheckCircle2, RotateCcw,
   AlertTriangle, X, ChevronDown, ChevronLeft, ChevronRight, Calendar,
   Search, Filter, FileText,
   Activity, Flame, Droplets, Zap, Gauge, Cpu, FlaskConical, Leaf,
   Settings, FileCheck, Edit3, Eye, XCircle, Check, Users, History,
-  User, LayoutDashboard, MonitorCog,
+  LayoutDashboard, MonitorCog, Menu, ArrowLeftRight,
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 import CierrePendientesModal from "./components/CierrePendientesModal";
+import LogoutModal from "./components/LogoutModal";
 import SalaDeMandoGrid from "./components/SalaDeMando/SalaDeMandoGrid";
 import DisponibilidadDashboard from "./components/Disponibilidad/DisponibilidadDashboard";
 import ConsumosGrid from "./components/Combustibles/ConsumosGrid";
@@ -25,16 +26,41 @@ import { useCierre } from "./hooks/useCierre";
 import { useUsuariosActivos } from "./hooks/useUsuariosActivos";
 import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
 import { useFlipReorder } from "./hooks/useFlipReorder";
-import { useBitacoraSesion, useFinalizarTurno } from "./hooks/useBitacoraSesion";
+import { useBitacoraSesion, useFinalizarTurno, useRevertirTurno } from "./hooks/useBitacoraSesion";
+import { useAppRoute } from "./hooks/useAppRoute";
+import { buildHash } from "./routing/appRoute";
 import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
+import { asset } from "./config/paths";
 
 const COLORS = {
-  greenPrimary: "#31a354", greenDark: "#006f36",
+  greenPrimary: "#31a354", greenDark: "#006f36", greenDeepest: "#011a0e",
   blueDark: "#003566", blueDeep: "#001d3d", blueDeepest: "#011027",
   red: "#DC3545", yellow: "#FFC107",
   grayLight: "#f8f9fa", grayMid: "#e9ecef", grayBorder: "#dee2e6",
   grayText: "#6c757d", white: "#ffffff",
 };
+
+// Tema visual del header por unidad: azul = GEC3, verde = GEC32, para que sea obvio en qué
+// unidad se hizo login. En tema verde los acentos (badge de turno, avatar) se invierten a
+// azul — sobre el gradiente verde los acentos verdes se camuflan. Clases Tailwind como
+// literales completos (requisito del JIT). Fallback azul para plantas desconocidas (TST).
+const TEMA_UNIDAD = {
+  GEC3: {
+    gradiente: `linear-gradient(90deg, ${COLORS.blueDeepest} 0%, ${COLORS.blueDark} 100%)`,
+    textoSuave: "text-blue-300",
+    textoReloj: "text-blue-200",
+    badgeBg: COLORS.greenPrimary,
+    avatarBg: COLORS.greenDark,
+  },
+  GEC32: {
+    gradiente: `linear-gradient(90deg, ${COLORS.greenDeepest} 0%, ${COLORS.greenDark} 100%)`,
+    textoSuave: "text-emerald-300",
+    textoReloj: "text-emerald-200",
+    badgeBg: COLORS.blueDark,
+    avatarBg: COLORS.blueDeep,
+  },
+};
+const temaUnidad = (plantaId) => TEMA_UNIDAD[plantaId] || TEMA_UNIDAD.GEC3;
 
 const ICON_MAP = {
   Activity, Settings, Flame, Droplets, Gauge, Zap, Cpu,
@@ -228,28 +254,40 @@ function EstadoBadge({ estado }) {
 // Login (email/password → planta → cargo)
 // ============================================================
 
-function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
-  const [paso, setPaso] = useState("credenciales"); // 'credenciales' | 'planta' | 'cargo'
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [plantaSel, setPlantaSel] = useState(null);
+// URL del dashboard hermano (dashboard-gen-gec3). En el despliegue unificado vive en /dashboard
+// del MISMO dominio; en dev corre en su propio server (localhost:5173, mientras bitácora está en
+// 5174). Default inteligente por entorno; se puede forzar con VITE_DASHBOARD_URL en el .env.
+const DASHBOARD_URL = import.meta.env.VITE_DASHBOARD_URL
+  || (import.meta.env.DEV ? 'http://localhost:5173/' : '/dashboard/');
 
-  const handleLogin = async (e) => {
-    e.preventDefault();
-    try {
-      await auth.login(username, password);
-      setPaso("planta");
-    } catch (err) {
-      showToast(err.message || "Error al iniciar sesión", "error");
+function LoginScreen({ auth, plantas, onReady, showToast }) {
+  // Login Entra ID: dos pasos. 'microsoft' (sin sesión Entra) → 'planta' (autenticado, elige
+  // planta). El cargo lo asigna Entra automáticamente desde los App Roles; ya NO hay paso de
+  // selección de cargo ni de credenciales.
+  const paso = auth.user ? "planta" : "microsoft";
+
+  // Surfacing de resultados del callback OIDC (/?auth=...): error → toast, y limpiamos la URL
+  // para no repetir el toast al recargar.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const a = params.get("auth");
+    if (!a) return;
+    if (a === "no_acceso") {
+      showToast("Tu cuenta no tiene acceso a Bitácoras en Microsoft Entra.", "error");
+    } else if (a === "error" || a === "state_invalido") {
+      showToast("No se pudo completar el inicio de sesión. Intenta de nuevo.", "error");
     }
-  };
+    params.delete("auth");
+    const qs = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (qs ? "?" + qs : ""));
+  }, [showToast]);
 
-  const handleSelectCargo = async (cargo) => {
+  const handleSelectPlanta = async (planta_id) => {
     try {
-      await auth.selectContext(plantaSel, cargo.cargo_id);
+      await auth.selectContext(planta_id);
       onReady();
     } catch (err) {
-      showToast(err.message || "Error al seleccionar contexto", "error");
+      showToast(err.message || "Error al seleccionar planta", "error");
     }
   };
 
@@ -271,9 +309,9 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
         {/* PANEL IZQUIERDO — Form */}
         <div className="flex-1 flex flex-col justify-center px-8 py-7 lg:px-12 lg:py-9">
           <div className="text-center mb-5">
-            <img src="/gecelca3-logo.png" alt="Gecelca3" className="h-11 mx-auto mb-3"
+            <img src={asset("/gecelca3-logo.png")} alt="Gecelca3" className="h-11 mx-auto mb-3"
               onError={(e) => { e.target.style.display = "none"; }} />
-            {paso === "credenciales" ? (
+            {paso === "microsoft" ? (
               <>
                 <h1 className="text-3xl font-bold tracking-tight" style={{ color: COLORS.blueDark }}>INICIAR SESION</h1>
                 <p className="text-sm mt-1.5" style={{ color: COLORS.grayText }}>
@@ -284,73 +322,35 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
               <>
                 <h1 className="text-2xl font-bold" style={{ color: COLORS.blueDeep }}>Bitácoras de Planta</h1>
                 <p className="text-sm mt-1" style={{ color: COLORS.grayText }}>
-                  {paso === "planta" ? "Selecciona tu planta de operación" : "Selecciona tu cargo"}
+                  Selecciona tu planta de operación
                 </p>
               </>
             )}
           </div>
 
-          {paso === "credenciales" && (
-            <form onSubmit={handleLogin} className="space-y-4 max-w-sm mx-auto w-full">
-              <div className="relative">
-                <User size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
-                  style={{ color: COLORS.grayText }} />
-                <input
-                  type="text" required placeholder="Usuario"
-                  autoComplete="username" autoCapitalize="off" autoCorrect="off" spellCheck="false"
-                  value={username} onChange={(e) => setUsername(e.target.value.trim().toLowerCase())}
-                  className="w-full pl-10 pr-4 py-3 rounded-xl border focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none text-sm transition-all"
-                  style={{ backgroundColor: COLORS.grayLight, borderColor: COLORS.grayBorder }}
-                />
-              </div>
-              <div className="relative">
-                <Lock size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
-                  style={{ color: COLORS.grayText }} />
-                <input
-                  type="password" required placeholder="Contraseña"
-                  value={password} onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 rounded-xl border focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none text-sm transition-all"
-                  style={{ backgroundColor: COLORS.grayLight, borderColor: COLORS.grayBorder }}
-                />
-              </div>
-
-              <div className="pt-2 flex justify-center">
-                <button
-                  type="submit" disabled={auth.loading}
-                  className="px-10 py-3 rounded-xl text-white font-semibold shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all disabled:opacity-60 disabled:hover:translate-y-0"
-                  style={{ background: `linear-gradient(135deg, ${COLORS.greenPrimary} 0%, ${COLORS.greenDark} 100%)` }}
-                >
-                  {auth.loading ? "Validando..." : "Iniciar sesión"}
-                </button>
-              </div>
-
-              <div className="flex items-center gap-3 pt-3">
-                <span className="flex-1 h-px" style={{ backgroundColor: COLORS.grayBorder }} />
-                <span className="text-xs font-semibold" style={{ color: COLORS.grayText }}>
-                  <strong style={{ color: COLORS.blueDeep }}>O continúa</strong> con
+          {paso === "microsoft" && (
+            <div className="space-y-5 max-w-sm mx-auto w-full">
+              <p className="text-center text-sm" style={{ color: COLORS.grayText }}>
+                Accede con tu cuenta corporativa de Microsoft. Tu rol se asigna automáticamente.
+              </p>
+              <button
+                type="button"
+                onClick={() => auth.loginWithMicrosoft()}
+                className="w-full flex items-center justify-center gap-3 py-3 rounded-xl border bg-white shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all"
+                style={{ borderColor: COLORS.grayBorder }}
+                aria-label="Iniciar sesión con Microsoft"
+              >
+                <svg width="18" height="18" viewBox="0 0 23 23" aria-hidden="true">
+                  <rect x="1" y="1" width="10" height="10" fill="#F25022" />
+                  <rect x="12" y="1" width="10" height="10" fill="#7FBA00" />
+                  <rect x="1" y="12" width="10" height="10" fill="#00A4EF" />
+                  <rect x="12" y="12" width="10" height="10" fill="#FFB900" />
+                </svg>
+                <span className="text-sm" style={{ color: COLORS.blueDeep }}>
+                  Iniciar sesión con <strong>Microsoft</strong>
                 </span>
-                <span className="flex-1 h-px" style={{ backgroundColor: COLORS.grayBorder }} />
-              </div>
-
-              <span title="Próximamente — usar credenciales por ahora" className="inline-block w-full">
-                <button
-                  type="button" disabled
-                  className="w-full flex items-center justify-center gap-3 py-3 rounded-xl border bg-white opacity-50 cursor-not-allowed"
-                  style={{ borderColor: COLORS.grayBorder }}
-                  aria-label="Iniciar sesión con Microsoft (próximamente)"
-                >
-                  <svg width="18" height="18" viewBox="0 0 23 23" aria-hidden="true">
-                    <rect x="1" y="1" width="10" height="10" fill="#F25022" />
-                    <rect x="12" y="1" width="10" height="10" fill="#7FBA00" />
-                    <rect x="1" y="12" width="10" height="10" fill="#00A4EF" />
-                    <rect x="12" y="12" width="10" height="10" fill="#FFB900" />
-                  </svg>
-                  <span className="text-sm" style={{ color: COLORS.blueDeep }}>
-                    Iniciar sesión con <strong>Microsoft</strong>
-                  </span>
-                </button>
-              </span>
-            </form>
+              </button>
+            </div>
           )}
 
           {paso === "planta" && (
@@ -365,8 +365,9 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
                 {plantas.map((p) => (
                   <button
                     key={p.planta_id}
-                    onClick={() => { setPlantaSel(p.planta_id); setPaso("cargo"); }}
-                    className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left bg-white"
+                    onClick={() => handleSelectPlanta(p.planta_id)}
+                    disabled={auth.loading}
+                    className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left bg-white disabled:opacity-60"
                   >
                     <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-sm flex-shrink-0"
                       style={{ backgroundColor: COLORS.greenDark }}>
@@ -383,45 +384,6 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
             </div>
           )}
 
-          {paso === "cargo" && (
-            <div className="max-w-sm mx-auto w-full">
-              <div className="flex items-center gap-2 mb-3 flex-wrap">
-                <button onClick={() => setPaso("planta")} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 transition-colors">
-                  ← Cambiar planta
-                </button>
-                <span className="text-xs font-semibold px-2 py-0.5 rounded-md text-white" style={{ backgroundColor: COLORS.greenDark }}>
-                  {plantas.find((p) => p.planta_id === plantaSel)?.nombre}
-                </span>
-              </div>
-              <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-gray-400">
-                {cargos.map((c) => (
-                  <button
-                    key={c.cargo_id}
-                    onClick={() => handleSelectCargo(c)}
-                    className="w-full flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-emerald-400 hover:shadow-lg transition-all group text-left bg-white"
-                  >
-                    <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0"
-                      style={{ backgroundColor: c.puede_cerrar_turno ? COLORS.greenDark : COLORS.blueDark }}>
-                      {iniciales(c.nombre)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="font-semibold text-gray-900 group-hover:text-emerald-700 transition-colors">{c.nombre}</div>
-                      <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-medium"
-                          style={{
-                            backgroundColor: c.puede_cerrar_turno ? "#e6f4ea" : "#e8f0fe",
-                            color: c.puede_cerrar_turno ? COLORS.greenDark : COLORS.blueDark,
-                          }}>
-                          {c.solo_lectura ? "Solo lectura" : "Operativo"}
-                        </span>
-                      </div>
-                    </div>
-                    <LogIn size={20} className="text-gray-300 group-hover:text-emerald-500 transition-colors flex-shrink-0" />
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
 
         {/* PANEL DERECHO — Hero (oculto en móvil) */}
@@ -438,7 +400,7 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
           {/* Foto de la planta enmarcada */}
           <div className="relative w-full max-w-sm">
             <div className="relative rounded-3xl overflow-hidden shadow-2xl ring-1 ring-white/20">
-              <img src="/planta-gecelca3.jpg" alt="Planta Gecelca3"
+              <img src={asset("/planta-gecelca3.jpg")} alt="Planta Gecelca3"
                 className="w-full h-[460px] object-cover"
                 onError={(e) => { e.target.style.display = "none"; }} />
               <div className="absolute inset-0 pointer-events-none"
@@ -462,13 +424,17 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
         </div>
       </div>
 
-      {/* Pill decorativa "dashboard" */}
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 inline-flex items-center gap-2 px-5 py-2 rounded-full text-white shadow-xl select-none"
+      {/* Acceso al dashboard de generación (app hermana). Pestaña NUEVA (el navegador la
+          enfoca): la bitácora queda abierta en la pestaña original. noopener corta la
+          referencia window.opener hacia esta app. */}
+      <a href={DASHBOARD_URL} target="_blank" rel="noopener noreferrer"
+        className="absolute bottom-6 left-1/2 -translate-x-1/2 inline-flex items-center gap-2 px-5 py-2 rounded-full text-white shadow-xl select-none no-underline cursor-pointer hover:-translate-y-0.5 hover:shadow-2xl transition-all"
         style={{ backgroundColor: COLORS.blueDeepest, border: `1px solid ${COLORS.blueDark}` }}
-        aria-hidden="true">
+        aria-label="Abrir el dashboard de generación en una pestaña nueva"
+        title="Abrir el dashboard de generación en una pestaña nueva">
         <LayoutDashboard size={15} style={{ color: COLORS.greenPrimary }} />
         <span className="text-sm font-semibold">dashboard</span>
-      </div>
+      </a>
     </div>
   );
 }
@@ -477,7 +443,106 @@ function LoginScreen({ auth, plantas, cargos, onReady, showToast }) {
 // Header
 // ============================================================
 
-function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista }) {
+// Menú de navegación (hamburguesa) del header. Portal a document.body — mismo patrón que el
+// popup de usuarios conectados y los flyout de categorías — para no quedar clipeado por el
+// overflow del header. Agrupa las acciones globales antes dispersas: Dashboard (app hermana,
+// pestaña nueva), toggle Históricos/Bitácoras (antes botón suelto del nav), "Cambiar de unidad"
+// (antes enlace inline del LogoutModal) y "Cerrar sesión" (abre el LogoutModal).
+function HeaderMenu({ vista, onDashboard, onToggleVista, onCambiarUnidad, onLogout }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, right: 0 });
+  const buttonRef = useRef(null);
+
+  useEffect(() => {
+    if (!open || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 8, right: window.innerWidth - rect.right });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const onClickOutside = (e) => {
+      const btn = buttonRef.current;
+      const menu = document.getElementById('header-nav-menu');
+      if (btn?.contains(e.target)) return;
+      if (menu?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onScrollOrResize = () => setOpen(false);
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onClickOutside);
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onClickOutside);
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
+  }, [open]);
+
+  const run = (fn) => { setOpen(false); fn(); };
+  const enHistoricos = vista === 'historicos';
+
+  const items = [
+    { icon: LayoutDashboard, label: 'Dashboard', onClick: () => run(onDashboard) },
+    {
+      icon: enHistoricos ? FileText : History,
+      label: enHistoricos ? 'Ver bitácoras' : 'Ver históricos',
+      onClick: () => run(onToggleVista),
+    },
+    { icon: ArrowLeftRight, label: 'Cambiar de unidad', onClick: () => run(onCambiarUnidad) },
+    { divider: true },
+    { icon: LogOut, label: 'Cerrar sesión', onClick: () => run(onLogout), danger: true },
+  ];
+
+  return (
+    <div className="relative">
+      <button
+        ref={buttonRef}
+        onClick={() => setOpen((o) => !o)}
+        className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+        title="Menú"
+        aria-label="Abrir menú de navegación"
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        {open ? <X size={18} /> : <Menu size={18} />}
+      </button>
+      {open && createPortal(
+        <div
+          id="header-nav-menu"
+          role="menu"
+          className="bg-white text-gray-800 rounded-xl shadow-xl border border-gray-200 py-1.5 overflow-hidden"
+          style={{ position: 'fixed', top: pos.top, right: pos.right, width: '15rem', zIndex: 50 }}
+        >
+          {items.map((it, i) => {
+            if (it.divider) return <div key={`div-${i}`} className="my-1 border-t border-gray-100" />;
+            const Icon = it.icon;
+            return (
+              <button
+                key={it.label}
+                role="menuitem"
+                onClick={it.onClick}
+                className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm font-medium transition-colors ${
+                  it.danger ? 'text-red-600 hover:bg-red-50' : 'text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                <Icon size={17} className={it.danger ? 'text-red-500' : 'text-gray-400'} />
+                <span className="flex-1 text-left">{it.label}</span>
+              </button>
+            );
+          })}
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista, onDashboard, onCambiarUnidad }) {
+  const tema = temaUnidad(sesion?.planta_id);
   const [reloj, setReloj] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
@@ -544,40 +609,27 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
 
   return (
     <header className="text-white px-6 py-3 flex items-center justify-between shadow-lg relative z-10"
-      style={{ background: `linear-gradient(90deg, ${COLORS.blueDeepest} 0%, ${COLORS.blueDark} 100%)` }}>
+      style={{ background: tema.gradiente }}>
       <div className="flex items-center gap-4">
-        <img src="/G3 blanco.png" alt="Gecelca3" className="h-10" onError={(e) => { e.target.style.display = "none"; }} />
+        <img src={asset("/G3 blanco.png")} alt="Gecelca3" className="h-10" onError={(e) => { e.target.style.display = "none"; }} />
         <div>
           <h1 className="text-lg font-bold tracking-tight">Bitácoras de Planta</h1>
-          <p className="text-xs text-blue-300 opacity-80">Sistema de Registro Operativo</p>
+          <p className={`text-xs ${tema.textoSuave} opacity-80`}>Sistema de Registro Operativo</p>
         </div>
       </div>
 
       <div className="hidden md:flex items-center gap-6 text-sm">
-        <div className="flex items-center gap-2 text-blue-200">
+        <div className={`flex items-center gap-2 ${tema.textoReloj}`}>
           <Clock size={16} />
           <span className="capitalize">{fechaStr}</span>
           <span className="font-mono font-bold text-white">{horaStr}</span>
         </div>
-        <span className="px-3 py-1 rounded-lg text-xs font-bold" style={{ backgroundColor: COLORS.greenPrimary }}>
+        <span className="px-3 py-1 rounded-lg text-xs font-bold" style={{ backgroundColor: tema.badgeBg }}>
           {getTurnoLabel(sesion?.turno)}
         </span>
       </div>
 
       <div className="flex items-center gap-3">
-        {onToggleVista && (
-          <button
-            onClick={onToggleVista}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-sm font-semibold"
-            title={vista === 'historicos' ? 'Volver a bitácoras' : 'Ver históricos'}
-            aria-pressed={vista === 'historicos'}
-          >
-            {vista === 'historicos' ? <FileText size={18} /> : <History size={18} />}
-            <span className="hidden md:inline">
-              {vista === 'historicos' ? 'Bitácoras' : 'Históricos'}
-            </span>
-          </button>
-        )}
         <div className="relative">
           <button
             ref={buttonRef}
@@ -642,8 +694,11 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
                             <span className="ml-2 text-xs font-medium text-emerald-600">(tú)</span>
                           )}
                         </div>
-                        <div className="text-xs text-gray-500 truncate">
-                          {u.cargo_nombre} — {u.planta_nombre}
+                        {/* Cargo y planta en líneas separadas: un cargo largo (ej. "Coordinador de
+                            carbón y maquinaria") ya no trunca ni oculta la planta. */}
+                        <div className="text-xs text-gray-500">
+                          <div className="truncate">{u.cargo_nombre}</div>
+                          <div className="truncate">{u.planta_nombre}</div>
                         </div>
                       </div>
                       <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 whitespace-nowrap">
@@ -660,15 +715,19 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
 
         <div className="text-right hidden sm:block">
           <div className="text-sm font-semibold">{user.nombre_completo}</div>
-          <div className="text-xs text-blue-300">{cargoNombre} — {plantaNombre}</div>
+          <div className={`text-xs ${tema.textoSuave}`}>{cargoNombre} — {plantaNombre}</div>
         </div>
         <div className="w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold"
-          style={{ backgroundColor: COLORS.greenDark }}>
+          style={{ backgroundColor: tema.avatarBg }}>
           {iniciales(user.nombre_completo)}
         </div>
-        <button onClick={onLogout} className="p-2 rounded-lg hover:bg-white/10 transition-colors" title="Cerrar sesión">
-          <LogOut size={18} />
-        </button>
+        <HeaderMenu
+          vista={vista}
+          onDashboard={onDashboard}
+          onToggleVista={onToggleVista}
+          onCambiarUnidad={onCambiarUnidad}
+          onLogout={onLogout}
+        />
       </div>
     </header>
   );
@@ -958,13 +1017,30 @@ function CategoriaTab({ categoria, activeId, onSelect, registrosPorBitacora }) {
 
 function BarraEstado({
   bitacora, registros, estadoBitacora, puedeCrear, esJefeTurno,
-  onCerrarTurno, onCerrarMasivo, onFinalizarTurno, finalizandoTurno,
+  onCerrarTurno, onCerrarMasivo, onFinalizarTurno, finalizandoTurno, turnoFinalizado,
+  onRevertirTurno, revirtiendoTurno,
   filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
-  filtroFecha, setFiltroFecha, filtroTurno, setFiltroTurno,
+  filtroFecha, setFiltroFecha, onCommitFecha, filtroTurno, setFiltroTurno,
   tiposEvento, onAddRegistro,
   mandDirty, mandGuardando, onGuardarMand,
 }) {
   const isMand = bitacora?.codigo === 'MAND';
+  // R1/R3: el selector de día usa un valor "pendiente" que solo se aplica al pulsar "Guardar"
+  // (o Enter, o las flechas/"Hoy" que son clics explícitos). `onCommitFecha` centraliza el commit
+  // (puede abrir el popup de borrador). El futuro queda bloqueado con max=hoy Bogotá.
+  const hoyBogota = getTodayBogota();
+  // `pendingFecha` = valor tecleado en el input, aún sin commitear (solo aplica al pulsar
+  // Guardar/Enter). Se resincroniza con `filtroFecha` DURANTE el render (patrón oficial de
+  // React "adjusting state when a prop changes"), NO en un useEffect post-paint: al navegar con
+  // las flechas/"Hoy" `onCommitFecha` cambia `filtroFecha` de inmediato, y un efecto tardío dejaba
+  // un frame con `pendingFecha` viejo ≠ `filtroFecha` nuevo → el botón "Guardar" parpadeaba. Ajustar
+  // en render corta ese frame antes de pintar.
+  const [pendingFecha, setPendingFecha] = useState(filtroFecha);
+  const [prevFiltroFecha, setPrevFiltroFecha] = useState(filtroFecha);
+  if (filtroFecha !== prevFiltroFecha) {
+    setPrevFiltroFecha(filtroFecha);
+    setPendingFecha(filtroFecha);
+  }
   const borradores = registros.filter((r) => r.estado === "borrador").length;
   const cerrados = registros.filter((r) => r.estado === "cerrado").length;
 
@@ -993,7 +1069,7 @@ function BarraEstado({
         <div className="flex items-center gap-2 flex-wrap">
           <Calendar size={16} className="text-gray-400" />
           <button
-            onClick={() => setFiltroFecha(shiftDate(filtroFecha || getTodayBogota(), -1))}
+            onClick={() => onCommitFecha(shiftDate(filtroFecha || hoyBogota, -1))}
             title="Día anterior"
             className="p-1.5 rounded border border-gray-200 hover:bg-gray-50"
           >
@@ -1001,19 +1077,41 @@ function BarraEstado({
           </button>
           <input
             type="date"
-            value={filtroFecha}
-            onChange={(e) => setFiltroFecha(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+            value={pendingFecha}
+            max={hoyBogota}
+            onChange={(e) => setPendingFecha(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && pendingFecha && pendingFecha <= hoyBogota && pendingFecha !== filtroFecha) {
+                onCommitFecha(pendingFecha);
+              }
+            }}
+            title={filtroFecha ? `Día de trabajo: ${filtroFecha}` : "Sin filtro de día: se muestran todos los registros"}
+            className={`px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${
+              filtroFecha ? "border-emerald-400 bg-emerald-50 font-medium" : "border-gray-300"
+            }`}
           />
+          {pendingFecha && pendingFecha !== filtroFecha && (
+            <button
+              onClick={() => onCommitFecha(pendingFecha)}
+              disabled={pendingFecha > hoyBogota}
+              title="Aplicar el día seleccionado"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ backgroundColor: COLORS.greenPrimary }}
+            >
+              <Save size={14} />
+              Guardar
+            </button>
+          )}
           <button
-            onClick={() => setFiltroFecha(shiftDate(filtroFecha || getTodayBogota(), 1))}
+            onClick={() => onCommitFecha(shiftDate(filtroFecha || hoyBogota, 1))}
+            disabled={(filtroFecha || hoyBogota) >= hoyBogota}
             title="Día siguiente"
-            className="p-1.5 rounded border border-gray-200 hover:bg-gray-50"
+            className="p-1.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ChevronRight size={16} />
           </button>
           <button
-            onClick={() => setFiltroFecha(getTodayBogota())}
+            onClick={() => onCommitFecha(hoyBogota)}
             title="Saltar a hoy"
             className="px-3 py-2 rounded-xl border border-gray-300 text-sm font-medium hover:bg-gray-50"
           >
@@ -1022,19 +1120,22 @@ function BarraEstado({
           <select
             value={filtroTurno}
             onChange={(e) => setFiltroTurno(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-gray-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400"
+            className={`px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${
+              filtroTurno ? "border-emerald-400 bg-emerald-50 font-medium" : "border-gray-300 bg-white"
+            }`}
           >
             <option value="">Todos los turnos</option>
             <option value="1">Turno 1 (Diurno)</option>
             <option value="2">Turno 2 (Nocturno)</option>
           </select>
-          {(filtroFecha || filtroTurno) && (
+          {(filtroFecha || filtroTurno || filtroTexto || filtroTipo) && (
             <button
-              onClick={() => { setFiltroFecha(''); setFiltroTurno(''); }}
-              title="Limpiar filtros de fecha y turno"
-              className="text-xs text-gray-500 hover:text-gray-700 underline"
+              onClick={() => { setFiltroFecha(''); setFiltroTurno(''); setFiltroTexto(''); setFiltroTipo(''); }}
+              title="Quitar todos los filtros y mostrar todos los registros"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-sm font-medium hover:bg-amber-100"
             >
-              Limpiar
+              <X size={14} />
+              Borrar filtros
             </button>
           )}
         </div>
@@ -1083,7 +1184,10 @@ function BarraEstado({
           </button>
         )
       ) : (
-        puedeCrear && (
+        // D-040: gate de UI acotado a genéricas. Este botón vive en la rama !isMand de una
+        // BarraEstado que solo se monta para no-DISP/COMB → es exclusivo de bitácoras genéricas.
+        // Restamos turnoFinalizado SOLO acá (MAND "Guardar" arriba y DISP/COMB quedan crudos).
+        puedeCrear && !turnoFinalizado && (
           <button onClick={onAddRegistro}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all"
             style={{ backgroundColor: COLORS.greenPrimary }}>
@@ -1093,16 +1197,25 @@ function BarraEstado({
         )
       )}
 
-      {/* F4: "Finalizar turno" para todo ingeniero logueado (preguntas3.md punto E). Finaliza
-          globalmente todas sus sesion_bitacora y emite CIET. Convive con el popup de logout.
-          F17: oculto en MAND (cierre del día es automático vía sweeper). */}
+      {/* F4/D-040: "Finalizar turno" para todo ingeniero logueado. Ahora es REVERTIBLE: cuando el
+          turno está finalizado el botón togglea a "Revertir finalización" (self-service, sin permiso
+          especial). F17: oculto en MAND (cierre del día es automático vía sweeper). */}
       {!isMand && onFinalizarTurno && (
-        <button onClick={onFinalizarTurno} disabled={finalizandoTurno}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
-          style={{ backgroundColor: COLORS.greenDark }}>
-          <CheckCircle2 size={16} />
-          {finalizandoTurno ? 'Finalizando…' : 'Finalizar Turno'}
-        </button>
+        turnoFinalizado ? (
+          <button onClick={onRevertirTurno} disabled={revirtiendoTurno}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
+            style={{ backgroundColor: COLORS.blueDark }}>
+            <RotateCcw size={16} />
+            {revirtiendoTurno ? 'Revirtiendo…' : 'Revertir finalización'}
+          </button>
+        ) : (
+          <button onClick={onFinalizarTurno} disabled={finalizandoTurno}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
+            style={{ backgroundColor: COLORS.greenDark }}>
+            <CheckCircle2 size={16} />
+            {finalizandoTurno ? 'Finalizando…' : 'Finalizar Turno'}
+          </button>
+        )
       )}
 
       {/* "Cerrar Turno" individual: oculto en MAND. El cierre del día MAND es automático
@@ -1139,7 +1252,7 @@ function BarraEstado({
 function GrillaRegistros({
   registros, bitacora, tiposEvento, jefeNombre, jdtNombre,
   puedeCrear, onUpdateLocal, onSaveRegistro, onDeleteRegistro,
-  filtroTexto, filtroTipo, filtroFecha, filtroTurno,
+  filtroTexto, filtroTipo, filtroFecha, filtroTurno, onLimpiarFiltros,
 }) {
   const [editingId, setEditingId] = useState(null);
 
@@ -1172,22 +1285,58 @@ function GrillaRegistros({
 
   const hayFiltrosActivos = !!(filtroTexto || filtroTipo || filtroFecha || filtroTurno);
 
+  const ocultos = registros.length - regs.length;
+
+  // UX: al crear un registro nuevo ("+ Nuevo Registro") el borrador se agrega al final de la lista
+  // (ordenada por fecha asc, y el borrador nace a la hora actual → último). Si el scroll estaba
+  // arriba, el nuevo registro quedaba fuera de vista. Bajamos al fondo SOLO cuando aparece un
+  // borrador nuevo (por su `_localId`), no en cada edición/guardado.
+  const scrollRef = useRef(null);
+  const draftId = regs.find((r) => !r.registro_id)?._localId || null;
+  const prevDraftId = useRef(null);
+  useEffect(() => {
+    if (draftId && draftId !== prevDraftId.current) {
+      const el = scrollRef.current;
+      if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    }
+    prevDraftId.current = draftId;
+  }, [draftId]);
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="flex-1 overflow-auto px-6 py-4">
+      <div ref={scrollRef} className="flex-1 overflow-auto px-6 py-4">
+        {hayFiltrosActivos && ocultos > 0 && regs.length > 0 && (
+          <div className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg border border-amber-200 bg-amber-50 text-xs text-amber-700">
+            <AlertTriangle size={14} className="shrink-0" />
+            <span>{ocultos} registro{ocultos === 1 ? "" : "s"} oculto{ocultos === 1 ? "" : "s"} por los filtros aplicados.</span>
+            <button onClick={onLimpiarFiltros} className="font-semibold underline hover:text-amber-900">
+              Mostrar todos
+            </button>
+          </div>
+        )}
         {regs.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-gray-400">
             <FileText size={48} className="mb-4 opacity-50" />
             {hayFiltrosActivos ? (
               <>
                 <p className="text-lg font-medium">No hay registros para los filtros aplicados</p>
-                <p className="text-sm mt-1">Prueba limpiar fecha, turno, tipo o texto.</p>
+                <p className="text-sm mt-1">
+                  {registros.length > 0
+                    ? `Hay ${registros.length} registro${registros.length === 1 ? "" : "s"} en otras fechas o turnos.`
+                    : "Esta bitácora no tiene registros activos."}
+                </p>
+                <button
+                  onClick={onLimpiarFiltros}
+                  className="mt-3 px-4 py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 text-sm font-medium hover:bg-amber-100"
+                >
+                  Borrar filtros y mostrar todos
+                </button>
               </>
             ) : (
               <>
                 <p className="text-lg font-medium">No hay registros aún</p>
                 <p className="text-sm mt-1">
-                  {puedeCrear ? "Haz clic en \"Nuevo Registro\" para comenzar" : "Esta bitácora no tiene registros del día"}
+                  {puedeCrear ? "Haz clic en \"Nuevo Registro\" para comenzar" : "Esta bitácora no tiene registros activos"}
                 </p>
               </>
             )}
@@ -1233,6 +1382,27 @@ function GrillaRegistros({
   );
 }
 
+// Textarea que crece con su contenido (sin scroll interno ni alto fijo).
+function AutoGrowTextarea({ value, className, ...props }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      rows={1}
+      className={className}
+      style={{ overflow: "hidden" }}
+      {...props}
+    />
+  );
+}
+
 function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre, camposExtraDef = [], isEditing, onStartEdit, onCancelEdit, onUpdate, onSave, onDelete, puedeEditar }) {
   const tipoNombre = reg.tipo_evento_nombre
     || tiposEvento.find((t) => t.tipo_evento_id === reg.tipo_evento_id)?.nombre
@@ -1245,6 +1415,16 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
   };
   const borderColor = tipoBorderColor[tipoNombre] || COLORS.grayBorder;
   const estadoDisplay = reg.estado === "borrador" ? "Borrador" : reg.estado === "cerrado" ? "Cerrado" : "Borrador";
+  // Aviso suave contra typos de digitación en el datetime-local (ej. escribir 01/07 en un
+  // navegador con locale MM/DD produce enero 7): fecha a más de 7 días de hoy se resalta
+  // en ámbar con un hint, sin bloquear el guardado.
+  const fechaEventoDia = toBogotaDate(reg.fecha_evento);
+  const fechaSospechosa = !!fechaEventoDia
+    && Math.abs(new Date(fechaEventoDia) - new Date(getTodayBogota())) > 7 * 86_400_000;
+  // El turno se auto-sincroniza con la hora al editar el datetime, pero el select permite
+  // sobrescribirlo. Si quedó incoherente con la hora, lo marcamos (y el guardado lo bloquea).
+  const turnoNoCoincide = reg.turno != null
+    && Number(reg.turno) !== turnoFromFechaLocal(toBogotaLocal(reg.fecha_evento));
   const hasExtras = camposExtraDef.length > 0;
   const camposExtraValores = parseCamposExtra(reg.campos_extra);
   const updateCampoExtra = (campo, valorRaw, tipo) => {
@@ -1280,21 +1460,40 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
               <input
                 type="datetime-local"
                 value={toBogotaLocal(reg.fecha_evento)}
+                max={nowBogotaLocal()}
                 onChange={(e) => {
                   const v = e.target.value;
                   onUpdate("fecha_evento", v);
                   onUpdate("turno", turnoFromFechaLocal(v));
                 }}
-                className="w-full px-3 py-1.5 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                className={`w-full px-3 py-1.5 rounded-lg border text-sm focus:outline-none focus:ring-2 ${
+                  fechaSospechosa
+                    ? "border-amber-400 bg-amber-50 focus:ring-amber-400"
+                    : "border-gray-300 focus:ring-emerald-400"
+                }`}
               />
+              {fechaSospechosa && (
+                <p className="text-[11px] text-amber-600 leading-tight">
+                  Fecha a más de 7 días de hoy — verifica día y mes.
+                </p>
+              )}
               <select
                 value={reg.turno || 1}
                 onChange={(e) => onUpdate("turno", parseInt(e.target.value, 10))}
-                className="w-full px-3 py-1.5 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-white"
+                className={`w-full px-3 py-1.5 rounded-lg border text-sm focus:outline-none focus:ring-2 bg-white ${
+                  turnoNoCoincide
+                    ? "border-red-400 bg-red-50 focus:ring-red-400"
+                    : "border-gray-300 focus:ring-emerald-400"
+                }`}
               >
                 <option value={1}>Turno 1</option>
                 <option value={2}>Turno 2</option>
               </select>
+              {turnoNoCoincide && (
+                <p className="text-[11px] text-red-600 leading-tight">
+                  La hora no coincide con el turno.
+                </p>
+              )}
             </div>
           ) : (
             <div>
@@ -1328,12 +1527,11 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
         <div className={hasExtras ? "lg:col-span-3" : "lg:col-span-5"}>
           <label className="text-xs text-gray-400 lg:hidden">Descripción</label>
           {isEditing ? (
-            <textarea
+            <AutoGrowTextarea
               value={reg.detalle || ""}
               onChange={(e) => onUpdate("detalle", e.target.value)}
-              rows={3}
               placeholder="Describe el evento operativo..."
-              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none"
+              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none min-h-[4.5rem]"
             />
           ) : (
             <p className="text-sm text-gray-700 leading-relaxed line-clamp-2">
@@ -1391,7 +1589,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
               <button onClick={onSave} className="p-2 rounded-lg text-white transition-colors" style={{ backgroundColor: COLORS.greenPrimary }} title="Guardar">
                 <Save size={16} />
               </button>
-              <button onClick={onCancelEdit} className="p-2 rounded-lg text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors" title="Cancelar">
+              <button onClick={reg.registro_id ? onCancelEdit : onDelete} className="p-2 rounded-lg text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors" title={reg.registro_id ? "Cancelar" : "Eliminar"}>
                 <X size={16} />
               </button>
             </>
@@ -1461,27 +1659,37 @@ export default function App() {
   const [tiposEvento, setTiposEvento] = useState([]);
   const [filtroTexto, setFiltroTexto] = useState("");
   const [filtroTipo, setFiltroTipo] = useState("");
-  // F11: filtros fecha+turno para bitácoras no-MAND. Persisten en sessionStorage para
-  // sobrevivir al cambio de tab y al refresh, no entre sesiones del navegador.
-  const [filtroFecha, setFiltroFecha] = useState(
-    () => sessionStorage.getItem('bitacoras.filtroFecha') || ''
-  );
-  const [filtroTurno, setFiltroTurno] = useState(
-    () => sessionStorage.getItem('bitacoras.filtroTurno') || ''
-  );
-  useEffect(() => { sessionStorage.setItem('bitacoras.filtroFecha', filtroFecha); }, [filtroFecha]);
-  useEffect(() => { sessionStorage.setItem('bitacoras.filtroTurno', filtroTurno); }, [filtroTurno]);
+  // F11/R2/R3: "día de trabajo" (antes solo filtro) para bitácoras no-MAND. Default = HOY (Bogotá):
+  // filtra la lista a ese día Y determina el día en que "Nuevo Registro" crea el borrador. Sin
+  // persistencia (se retiró el sessionStorage). "Borrar filtros" lo vacía a '' = todos los días
+  // (escape hatch de visualización). Nunca acepta días futuros.
+  const [filtroFecha, setFiltroFecha] = useState(() => getTodayBogota());
+  const [filtroTurno, setFiltroTurno] = useState('');
+  const limpiarFiltros = useCallback(() => {
+    setFiltroTexto(''); setFiltroTipo(''); setFiltroFecha(''); setFiltroTurno('');
+  }, []);
   const [toast, setToast] = useState(null);
   const [modal, setModal] = useState(null);
+  const [logoutOpen, setLogoutOpen] = useState(false);
   const [draftLocal, setDraftLocal] = useState(null);
   const [vista, setVista] = useState('bitacoras');
+
+  // D-035: subestado de las secciones con UI propia, lifted al dashboard para que la URL pueda
+  // deep-linkearlo (DISP=planta, COMB=fecha). La URL es la fuente única de verdad; estos states
+  // son su espejo en React. COMB arranca en hoy (Bogotá); DISP se siembra al entrar (ver derive).
+  const [dispPlanta, setDispPlanta] = useState(null);
+  const [combFecha, setCombFecha] = useState(() => getTodayBogota());
+
+  // D-035: routing por hash. `route` (parseado) es la lectura; `navigate` empuja estado→URL.
+  const { route, navigate } = useAppRoute();
 
   // F2: marca participación cuando el usuario abre una bitácora. Idempotente — reabrir tras
   // finalizar el turno crea una nueva ventana de participación sin requerir re-login.
   useBitacoraSesion(auth.sesion?.sesion_id ? activeBitacora : null);
 
-  // F4: hook para botón "Finalizar Turno" del header.
+  // F4/D-040: hooks para "Finalizar Turno" / "Revertir finalización" del header.
   const { finalizar: finalizarTurno, loading: finalizandoTurno } = useFinalizarTurno();
+  const { revertir: revertirTurno, loading: revirtiendoTurno } = useRevertirTurno();
   const [pendientesModal, setPendientesModal] = useState(null);
   // F17: estado lifted desde SalaDeMandoGrid para que el botón "Guardar" del header sepa
   // si hay diff pendiente y dispare la batch via ref. mandSaveRef.current es la fn que
@@ -1503,6 +1711,12 @@ export default function App() {
 
   const sesion = auth.sesion;
   const user = auth.user;
+
+  // D-040: la finalización de turno es estado del BACKEND (sesion_activa.turno_finalizado_en),
+  // fuente única y revertible. Se deriva de la sesión de app (sobrevive F5 vía /api/me) — ya no
+  // vive en localStorage (divergía del backend y el reset de /abrir lo dejaba inconsistente). El
+  // turno-sweeper la muere sola a fin de turno; select-context la limpia al reactivar (turno nuevo).
+  const turnoFinalizado = sesion?.turno_finalizado_en != null;
 
   // Las bitácoras visibles se separan en (a) categorías agrupadas en un solo botón fijo
   // a la izquierda y (b) bitácoras "sueltas" que siguen siendo tabs reordenables por count.
@@ -1548,12 +1762,71 @@ export default function App() {
   const permisoActivo = catalogos.permisos.find((p) => p.bitacora_id === activeBitacora);
   const puedeCrear = !!permisoActivo?.puede_crear;
 
-  // Selecciona primera bitácora permitida al iniciar
+  // D-035: sincronización ruta ↔ estado. El dashboard es dueño del estado; los dos efectos de
+  // abajo lo mantienen en espejo con la URL (fuente única de verdad, permission-gated). Refs para
+  // leer el estado actual dentro del "derive" SIN meterlo en deps: así un cambio de estado (ej.
+  // clic en un tab) no dispara una re-derivación desde la ruta vieja que lo revierta.
+  const activeBitacoraRef = useRef(activeBitacora);
+  const dispPlantaRef = useRef(dispPlanta);
+  const combFechaRef = useRef(combFecha);
+  activeBitacoraRef.current = activeBitacora;
+  dispPlantaRef.current = dispPlanta;
+  combFechaRef.current = combFecha;
+
+  const codigoActivo = useMemo(
+    () => bitacorasPermitidas.find((b) => b.bitacora_id === activeBitacora)?.codigo || null,
+    [bitacorasPermitidas, activeBitacora]
+  );
+
+  // (a) Derivar estado DESDE la ruta: corre en el primer load (deep-link), al volver de "Cambiar
+  // unidad" (cambia `sesion`) y ante navegación externa (back/forward, edición manual del hash).
+  // Reemplaza el viejo init "primera permitida": el fallback de ruta vacía/desconocida/no-permitida
+  // hace exactamente eso. Cuando la ruta cambió porque la escribimos nosotros (efecto b), aplicar
+  // es no-op por los guards de igualdad → sin loop.
   useEffect(() => {
-    if (!activeBitacora && bitacorasPermitidas.length > 0) {
-      setActiveBitacora(bitacorasPermitidas[0].bitacora_id);
+    if (!sesion || bitacorasPermitidas.length === 0) return;
+    if (route.vista === 'historicos') {
+      setVista('historicos');
+      if (activeBitacoraRef.current == null) setActiveBitacora(bitacorasPermitidas[0].bitacora_id);
+      return;
     }
-  }, [bitacorasPermitidas, activeBitacora]);
+    setVista('bitacoras');
+    let target = route.codigo
+      ? bitacorasPermitidas.find((b) => b.codigo === route.codigo)
+      : null;
+    if (!target) target = bitacorasPermitidas[0]; // fallback: codigo nulo o no permitido
+    if (target.bitacora_id !== activeBitacoraRef.current) {
+      setActiveBitacora(target.bitacora_id);
+      setFiltroTexto(''); setFiltroTipo(''); setFiltroFecha(getTodayBogota()); setFiltroTurno(''); setDraftLocal(null);
+    }
+    if (target.codigo === 'DISP') {
+      // Sembrar planta: param de la ruta → planta ya elegida → unidad del login (default).
+      const next = route.params.planta || dispPlantaRef.current || sesion.planta_id;
+      if (next && next !== dispPlantaRef.current) setDispPlanta(next);
+    }
+    if (target.codigo === 'COMB' && route.params.fecha && route.params.fecha !== combFechaRef.current) {
+      setCombFecha(route.params.fecha);
+    }
+  }, [route, sesion, bitacorasPermitidas]);
+
+  // (b) Escribir estado HACIA la ruta. Subestado (planta/fecha) y el primer write canónico usan
+  // replaceState (no inundan el historial); el cambio de sección/vista usa pushState (back/forward
+  // navega). Sin sesión (LoginScreen) NO escribe: el routing solo vive en el dashboard.
+  const prevSectionKey = useRef(null);
+  useEffect(() => {
+    if (!sesion || bitacorasPermitidas.length === 0) return;
+    let desired = null;
+    if (vista === 'historicos') desired = { vista: 'historicos', codigo: null, params: {} };
+    else if (codigoActivo === 'DISP') desired = { vista: 'bitacoras', codigo: 'DISP', params: { planta: dispPlanta } };
+    else if (codigoActivo === 'COMB') desired = { vista: 'bitacoras', codigo: 'COMB', params: { fecha: combFecha } };
+    else if (codigoActivo) desired = { vista: 'bitacoras', codigo: codigoActivo, params: {} };
+    if (!desired) return;
+    const sectionKey = `${desired.vista}:${desired.codigo}`;
+    const replace = prevSectionKey.current === null || prevSectionKey.current === sectionKey;
+    prevSectionKey.current = sectionKey;
+    if (buildHash(desired) === window.location.hash) return;
+    navigate(desired, { replace });
+  }, [sesion, bitacorasPermitidas, vista, codigoActivo, dispPlanta, combFecha, navigate]);
 
   // Carga tipos evento cuando cambia la bitácora
   useEffect(() => {
@@ -1596,13 +1869,16 @@ export default function App() {
   const handleAddRegistro = useCallback(() => {
     if (draftLocal) { showToast("Termina de guardar el registro en edición", "info"); return; }
     const defTipo = tiposEvento.find((t) => t.es_default) || tiposEvento[0];
+    // R2: el borrador nace en el día de trabajo seleccionado (hora actual Bogotá); si no hay día
+    // seleccionado ("todos los días"), cae en hoy. El futuro ya está bloqueado en el selector.
+    const fechaEventoNuevo = filtroFecha ? `${filtroFecha}T${nowBogotaLocal().slice(11)}` : nowBogotaLocal();
     setDraftLocal({
       _localId: `draft_${Date.now()}`,
       _dirty: true,
       bitacora_id: activeBitacora,
       planta_id: sesion.planta_id,
-      fecha_evento: nowBogotaLocal(),
-      turno: getTurnoActualNum(),
+      fecha_evento: fechaEventoNuevo,
+      turno: turnoFromFechaLocal(fechaEventoNuevo),
       detalle: "",
       tipo_evento_id: defTipo?.tipo_evento_id || null,
       tipo_evento_nombre: defTipo?.nombre,
@@ -1611,7 +1887,7 @@ export default function App() {
       creado_por_nombre: user.nombre_completo,
       bitacora_nombre: bitacorasPermitidas.find((b) => b.bitacora_id === activeBitacora)?.nombre,
     });
-  }, [draftLocal, tiposEvento, activeBitacora, sesion, user, bitacorasPermitidas, showToast]);
+  }, [draftLocal, tiposEvento, activeBitacora, sesion, user, bitacorasPermitidas, showToast, filtroFecha]);
 
   const handleUpdateLocal = useCallback((id, campo, valor) => {
     if (draftLocal && draftLocal._localId === id) {
@@ -1627,6 +1903,12 @@ export default function App() {
   const handleSaveRegistro = useCallback(async (reg) => {
     if (!reg.tipo_evento_id) { showToast("Selecciona un tipo de evento", "error"); return false; }
     if (!reg.detalle || !reg.detalle.trim()) { showToast("Escribe una descripción", "error"); return false; }
+    // El turno debe corresponder a la hora del evento (T1 [06,17], T2 [18,05]). El select permite
+    // sobrescribir el turno manualmente; acá bloqueamos guardar si quedó incoherente con la hora.
+    if (Number(reg.turno) !== turnoFromFechaLocal(toBogotaLocal(reg.fecha_evento))) {
+      showToast("La hora no coincide con el turno", "error");
+      return false;
+    }
 
     try {
       const fechaEventoIso = bogotaLocalToIso(reg.fecha_evento);
@@ -1662,6 +1944,27 @@ export default function App() {
       return false;
     }
   }, [registrosHook, user, sesion, activeBitacora, showToast]);
+
+  // R4: cambiar el día de trabajo con un borrador sin guardar abre un popup (Guardar borrador /
+  // Descartar / Cancelar) para que el borrador no bloquee navegar a otro día y crear registros allí.
+  // Sin borrador dirty, aplica el nuevo día directo.
+  const intentarCambiarDia = useCallback((nuevoDia) => {
+    if (draftLocal?._dirty && nuevoDia !== filtroFecha) {
+      setModal({
+        title: "Registro borrador sin guardar",
+        message: `Tienes un registro en borrador sin guardar${filtroFecha ? ` en el día ${filtroFecha}` : ""}. ¿Qué deseas hacer antes de cambiar de día?`,
+        confirmLabel: "Guardar borrador", confirmColor: "green", icon: Save,
+        onConfirm: async () => {
+          const ok = await handleSaveRegistro(draftLocal);
+          if (ok) { setModal(null); setFiltroFecha(nuevoDia); }
+        },
+        secondaryLabel: "Descartar",
+        onSecondary: () => { setDraftLocal(null); setModal(null); setFiltroFecha(nuevoDia); },
+      });
+      return;
+    }
+    setFiltroFecha(nuevoDia);
+  }, [draftLocal, filtroFecha, handleSaveRegistro]);
 
   const handleDeleteRegistro = useCallback((reg) => {
     if (!reg.registro_id) {
@@ -1742,52 +2045,77 @@ export default function App() {
     }
   }, [pendientesModal, cierre, sesion, activeBitacora, registrosHook, showToast]);
 
-  // F4: botón "Finalizar Turno" — finaliza globalmente todas las sesion_bitacora del usuario
-  // actual y emite UN CIET. No cierra registros (eso es del JdT/IngOp).
+  // F4/D-040: "Finalizar Turno" — marca sesion_activa.turno_finalizado_en (fuente única) y emite
+  // un CIET. No cierra registros (eso es del JdT/IngOp). El estado se refleja en cliente con
+  // patchSesion (sin refetch); F5 rehidrata vía /api/me. Revertible con handleRevertirTurno.
   const handleFinalizarTurno = useCallback(async () => {
     setModal({
       title: 'Finalizar turno',
-      message: 'Esto registra que terminaste tu turno. Tu actividad se marcará como finalizada en todas las bitácoras donde participas. ¿Continuar?',
+      message: 'Esto registra que terminaste tu turno y bloquea el registro en las bitácoras generales hasta que lo reviertas. ¿Continuar?',
       confirmLabel: 'Finalizar', confirmColor: 'green', icon: CheckCircle2,
       onConfirm: async () => {
         try {
           const r = await finalizarTurno();
+          auth.patchSesion({ turno_finalizado_en: r?.turno_finalizado_en ?? new Date().toISOString() });
           setModal(null);
-          showToast(`Turno finalizado en ${r.finalizadas?.length || 0} bitácora(s)`);
+          showToast('Finalizaste tu turno. El registro en bitácoras generales quedó bloqueado.');
         } catch (e) {
           showToast(e.message, 'error');
         }
       },
     });
-  }, [finalizarTurno, showToast]);
+  }, [finalizarTurno, showToast, auth]);
 
-  // F4: popup defensivo en logout — pregunta si quiere finalizar antes de salir.
-  // 3 opciones: Sí, finalizar y salir / No, salir directo / Cancelar.
-  // "Salir sin finalizar" hace solo cleanup local (D-003): sesion_activa.activa=1 queda
-  // como antes (equivalente a cerrar pestaña). "Sí, finalizar y salir" finaliza turno
-  // y dispara logout backend (activa=0).
-  const handleLogout = useCallback(() => {
+  // D-040: "Revertir finalización" — self-service. Limpia turno_finalizado_en (+ CIET 'reapertura')
+  // y desbloquea el registro en bitácoras generales.
+  const handleRevertirTurno = useCallback(async () => {
     setModal({
-      title: 'Cerrar sesión',
-      message: '¿Finalizas tu turno antes de salir? Si lo haces, se registra en histórico que terminaste tu participación.',
-      confirmLabel: 'Sí, finalizar y salir',
-      confirmColor: 'green',
-      icon: LogOut,
-      secondaryLabel: 'No, salir sin finalizar',
-      onSecondary: () => {
-        auth.logoutLocal();
-        setModal(null);
-        setActiveBitacora(null);
-        setDraftLocal(null);
-      },
+      title: 'Revertir finalización',
+      message: 'Vas a reabrir tu turno para volver a registrar en las bitácoras generales. ¿Continuar?',
+      confirmLabel: 'Revertir', confirmColor: 'green', icon: RotateCcw,
       onConfirm: async () => {
-        try { await finalizarTurno(); } catch {}
-        await auth.logout();
-        setModal(null);
-        setActiveBitacora(null);
-        setDraftLocal(null);
+        try {
+          await revertirTurno();
+          auth.patchSesion({ turno_finalizado_en: null });
+          setModal(null);
+          showToast('Reabriste tu turno. Ya puedes registrar de nuevo.');
+        } catch (e) {
+          showToast(e.message, 'error');
+        }
       },
     });
+  }, [revertirTurno, showToast, auth]);
+
+  // F4 + D-035: popup defensivo en logout. "Operar otra unidad" reemplaza al viejo "salir sin
+  // finalizar": conserva el login Entra pero **mata la sesión de app** (`clearSesion` → POST
+  // /api/auth/cerrar-app, activa=0) para que una persona no quede iniciada en 2 unidades; el
+  // render cae en LoginScreen paso "planta" para elegir GEC3/GEC32 y select-context crea una
+  // sesión limpia. "Sí, finalizar y salir" finaliza turno + logout backend (cookie incluida).
+  // Igual que la navegación SPA de hoy, descarta los buffers no guardados del cliente sin aviso
+  // cross-componente (beforeunload no aplica sin reload).
+  const handleCambiarUnidad = useCallback(() => {
+    setLogoutOpen(false);
+    setActiveBitacora(null);
+    setDraftLocal(null);
+    auth.clearSesion();
+  }, [auth]);
+
+  // Abre el modal rediseñado (LogoutModal): ilustración hero + 2 acciones (Cancelar | Sí,
+  // finalizar y salir). "Cambiar de unidad" ya no vive acá — se movió al HeaderMenu.
+  const handleLogout = useCallback(() => setLogoutOpen(true), []);
+
+  // Dashboard de generación (app hermana): pestaña nueva, igual que el enlace del LoginScreen.
+  // noopener corta la referencia window.opener hacia esta app.
+  const handleDashboard = useCallback(() => {
+    window.open(DASHBOARD_URL, '_blank', 'noopener,noreferrer');
+  }, []);
+
+  const handleLogoutConfirm = useCallback(async () => {
+    try { await finalizarTurno(); } catch {}
+    await auth.logout(); // navega fuera (window.location); el desmontaje limpia el resto
+    setLogoutOpen(false);
+    setActiveBitacora(null);
+    setDraftLocal(null);
   }, [auth, finalizarTurno]);
 
   // ==================== RENDER ====================
@@ -1804,7 +2132,6 @@ export default function App() {
         <LoginScreen
           auth={auth}
           plantas={catalogos.plantas}
-          cargos={catalogos.cargos}
           onReady={() => {}}
           showToast={showToast}
         />
@@ -1829,6 +2156,8 @@ export default function App() {
         onLogout={handleLogout}
         vista={vista}
         onToggleVista={() => setVista((v) => (v === 'historicos' ? 'bitacoras' : 'historicos'))}
+        onDashboard={handleDashboard}
+        onCambiarUnidad={handleCambiarUnidad}
       />
 
       {vista === 'historicos' ? (
@@ -1854,9 +2183,12 @@ export default function App() {
               onCerrarMasivo={handleCerrarMasivo}
               onFinalizarTurno={handleFinalizarTurno}
               finalizandoTurno={finalizandoTurno}
+              turnoFinalizado={turnoFinalizado}
+              onRevertirTurno={handleRevertirTurno}
+              revirtiendoTurno={revirtiendoTurno}
               filtroTexto={filtroTexto} setFiltroTexto={setFiltroTexto}
               filtroTipo={filtroTipo} setFiltroTipo={setFiltroTipo}
-              filtroFecha={filtroFecha} setFiltroFecha={setFiltroFecha}
+              filtroFecha={filtroFecha} setFiltroFecha={setFiltroFecha} onCommitFecha={intentarCambiarDia}
               filtroTurno={filtroTurno} setFiltroTurno={setFiltroTurno}
               tiposEvento={tiposEvento}
               onAddRegistro={handleAddRegistro}
@@ -1864,6 +2196,17 @@ export default function App() {
               mandGuardando={mandGuardando}
               onGuardarMand={() => mandSaveRef.current?.()}
             />
+          )}
+
+          {/* D-040: aviso de turno finalizado. Solo en bitácoras GENÉRICAS (donde el registro
+              queda bloqueado). MAND/DISP/COMB siguen operables → no muestran el banner. */}
+          {bitacoraActiva && !['DISP', 'COMB', 'MAND'].includes(bitacoraActiva.codigo) && turnoFinalizado && (
+            <div role="status"
+              className="flex items-center gap-2 mt-3 rounded-xl border px-4 py-3 text-sm font-medium"
+              style={{ backgroundColor: '#FEF3C7', borderColor: '#FDE68A', color: '#92400E' }}>
+              <AlertTriangle size={16} className="shrink-0" />
+              <span>Finalizaste tu turno; el registro en bitácoras está bloqueado. Revierte para volver a registrar.</span>
+            </div>
           )}
 
           {bitacoraActiva?.codigo === 'MAND' ? (
@@ -1880,7 +2223,8 @@ export default function App() {
           ) : bitacoraActiva?.codigo === 'DISP' ? (
             <DisponibilidadDashboard
               bitacoraId={bitacoraActiva.bitacora_id}
-              plantaInicial={sesion?.planta_id}
+              planta={dispPlanta || sesion?.planta_id}
+              onPlantaChange={setDispPlanta}
               puedeEditar={puedeCrear}
               showToast={showToast}
             />
@@ -1888,17 +2232,21 @@ export default function App() {
             <ConsumosGrid
               bitacora={bitacoraActiva}
               plantaId={sesion?.planta_id}
+              fecha={combFecha}
+              onFechaChange={setCombFecha}
               puedeCrear={puedeCrear}
               showToast={showToast}
             />
           ) : (
+            /* D-040: la grilla genérica se bloquea cuando el turno está finalizado (paridad con el
+               write-gate del backend). MAND/DISP/COMB reciben el puedeCrear crudo. */
             <GrillaRegistros
               registros={registrosDeBitacora}
               bitacora={bitacoraActiva}
               tiposEvento={tiposEvento}
               jefeNombre={catalogos.jefe?.nombre_completo}
               jdtNombre={null}
-              puedeCrear={puedeCrear}
+              puedeCrear={puedeCrear && !turnoFinalizado}
               onUpdateLocal={handleUpdateLocal}
               onSaveRegistro={handleSaveRegistro}
               onDeleteRegistro={handleDeleteRegistro}
@@ -1906,6 +2254,7 @@ export default function App() {
               filtroTipo={filtroTipo}
               filtroFecha={filtroFecha}
               filtroTurno={filtroTurno}
+              onLimpiarFiltros={limpiarFiltros}
             />
           )}
         </>
@@ -1924,6 +2273,13 @@ export default function App() {
           onCancel={() => setModal(null)}
         />
       )}
+
+      <LogoutModal
+        open={logoutOpen}
+        userName={user?.nombre_completo}
+        onCancel={() => setLogoutOpen(false)}
+        onConfirm={handleLogoutConfirm}
+      />
 
       {pendientesModal && (
         <CierrePendientesModal

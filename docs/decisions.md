@@ -350,6 +350,186 @@ Razón de la vista en vez de query inline: encapsula la unión `activo + histór
 
 ---
 
+## D-029 — Rol "Coordinador de carbón y maquinaria"
+
+**Fecha:** 2026-06-20
+
+**Contexto:** la operación necesita un cargo que coordine carbón y maquinaria con permiso de lectura y llenado de las bitácoras `Carbón y Caliza` (CYC) y `Maquinaria` (MAQU), y además pueda registrar en el módulo de Consumos de Combustible (COMB). Hasta ahora COMB solo lo llenaban `Operador de Planta - Carbón y Caliza` + `Ingeniero Jefe de Turno` ([[D-027]]), y CYC/MAQU eran exclusivas de sus operadores. El nuevo rol no cierra turno ni es solo-lectura.
+
+**Decisión:** agregar el cargo `Coordinador de carbón y maquinaria` (`solo_lectura=0`, `puede_cerrar_turno=0`) al `MERGE` idempotente de `lov_bit.cargo` en `db.js`, y extender la matriz canónica de permisos (`cargo_bitacora_permiso`, reconstruida desde cero en cada arranque dentro de la transacción `matrizTx`) con CASE clauses que le dan `puede_ver=puede_crear=1` en `CYC` y `MAQU`, y lo suman a la lista de creadores de `COMB`. No se tocó el bloque one-shot F26.B1 de [[D-027]]: su MERGE de cargos no privilegiados solo hace `INSERT WHEN NOT MATCHED`, así que no resetea la fila que la matriz ya insertó con `puede_crear=1` para COMB. Sin cambios de frontend: el sidebar/permisos son data-driven (`/api/catalogos/permisos/:cargo_id`) y el flag `puede_cerrar_turno` se lee de `lov_bit.cargo`, desacoplado del nombre del cargo.
+
+**Consecuencias:** (a) el rol aparece automáticamente en el selector de contexto post-login (endpoint `/api/catalogos/cargos`) sin código nuevo. (b) En cada restart la matriz se reconstruye y preserva estos permisos (no depende de seeds one-shot). (c) Sin usuarios seedeados con este cargo todavía — se asignan vía `select-context` o agregándolos a `personal-2026.json`. (d) Nuevo test de integración `server/tests/rol_coordinador_carbon_maquinaria.test.js` (matriz CYC/MAQU/COMB + negativos QUIM/MAND + POST COMB 200 + idempotencia re-initDB), registrado en `npm test`. Cross-ref: [[D-027]] (módulo COMB y matriz extendida), §2.6 BIT-MODBD (matriz canónica reconstruida por arranque).
+
+---
+
+## D-030 — Planta de test reservada `'TST'` para aislar los tests de DISP
+
+**Fecha:** 2026-06-26
+
+**Contexto:** la suite de tests apunta a la **misma BD que producción** (no hay BD de test separada). El helper `cleanDisp()` de `server/tests/disponibilidad.test.js` ejecutaba `DELETE FROM bitacora.disponibilidad_estado WHERE planta_id='GEC3'` (sin filtro de tag) en `before()`, `after()` y entre casi todos los casos — así que **cada corrida borraba la disponibilidad real de GEC3**. Etiquetar las filas de test no alcanza para DISP: el handler de producción del POST (`server.js`) hace `findVigente(planta_id)` → `cerrarVigente(...)` sobre **el vigente real de la planta** antes de insertar, y el índice único `UQ_disp_estado_vigente_por_planta` impide dos vigentes; con tests y datos reales en la misma planta, el handler corrompe el vigente real. El borrado masivo era *load-bearing* solo porque limpiaba ese vigente real de antemano.
+
+**Decisión:** introducir una **planta sintética reservada `'TST'`** (constante `TEST_PLANTA_ID` exportada desde `db.js`) que nunca contiene datos reales. `setupSessions({ planta })` (en `tests/helpers.js`) la siembra idempotentemente en `lov_bit.planta` (`activa=1`, obligatorio porque el POST DISP y `/metricas` validan `planta_id=@p AND activa=1`) y crea las sesiones de test sobre ella; `disponibilidad.test.js` opera 100% sobre `'TST'`. Así el handler de producción y `cleanDisp` solo tocan la planta sintética — GEC3/GEC32 quedan intactas pase lo que pase. El leak cross-repo (que `'TST'` se filtre al dashboard productivo) se corta en el **único borde del contrato**: el endpoint `GET /api/eventos-dashboard` devuelve `{eventos:[]}` para `planta_id===TEST_PLANTA_ID`. **Las vistas `v_disponibilidad_estado` y `disponibilidad_dashboard` NO filtran `'TST'`** a propósito: los tests 20-23 dependen de que `v_disponibilidad_estado` compute acumulados *para la planta de prueba* (la vista es lo que se prueba); filtrarla los rompería. El dashboard no consulta esta BD directo, solo el endpoint, así que filtrar ahí es suficiente y correcto.
+
+**Consecuencias:** (a) ninguna corrida de la suite puede destruir ni corromper disponibilidad productiva. (b) Las definiciones de las dos vistas DISP se hoistearon a consts canónicas (`SQL_VIEW_*`) usadas tanto por la migración one-shot F26.A1 como por un nuevo bloque self-heal que las re-aplica (`CREATE OR ALTER`) en cada arranque gateado por existencia de la tabla — de paso corrige un bug latente: antes un cambio de definición de vista no llegaba a una BD ya migrada sin re-migrar. (c) La fila `'TST'` queda residente en `lov_bit.planta` como fixture (análoga al usuario SISTEMA de [[D-015]]); es inofensiva porque el endpoint cross-repo la ignora y ningún consumidor la consulta. (d) COMB sigue con whitelist hardcodeada `['GEC3','GEC32']`, así que esta planta no sirve para tests de combustibles. (e) **Riesgo residual conocido (fuera de alcance):** los tests de MAND/AUTH (`sala_de_mando_batch`, `auth_middleware`, `cierre_y_fechas`, `fechas_bogota`) borran por `planta_id='GEC3'` en `registro_activo`/`registro_historico` — mismo patrón destructivo en otras bitácoras, no corregido acá. Cross-ref: [[D-026]] (DISP en tabla dedicada), [[D-015]] (usuario SISTEMA como fixture residente).
+
+---
+
+## D-031 — Login con Microsoft Entra ID; rol automático; dos sesiones separadas
+
+**Fecha:** 2026-06-26
+
+**Contexto:** el login local (usuario/contraseña scrypt, 2 pasos con selección manual de planta **y cargo**, identidad transportada en el header `X-Sesion-Id` —entero IDENTITY secuencial, exfiltrable por XSS, sin firma—) era el punto más débil del sistema (ver `docs/auditoria-auth-usuarios-roles-2026-06.md`): login y creación de sesión desacoplados, `select-context` sin verificar entitlement de cargo, password universal `'1234'`. La organización creó en Entra ID los 12 App Roles que calzan 1:1 con los 12 `lov_bit.cargo.nombre`. Se exige reemplazar el login por Entra ID, asignar el cargo automáticamente desde el claim `roles`, eliminar la pantalla de selección de cargo y blindar el modelo frente a auditoría, sin tocar el diseño del front.
+
+**Decisión:** OIDC server-side con cliente confidencial (`@azure/msal-node`, Authorization Code + PKCE + state + nonce), montado como **wrapper Express delgado** (`server/auth/app.js`) que corre `express-session` (cookie httpOnly, store MSSQL `[auth].[AppSessions]`) y las rutas `/auth/login`, `/auth/redirect`, `/api/me`, `/api/logout`, y delega TODO lo demás al if-chain nativo (`legacyHandler`) —que sigue siendo http nativo; el "sin Express" del CLAUDE.md se revierte SOLO para el surface de auth—. `express.json()` se monta acotado a `/auth` para no romper `parseBody()`. **Identidad:** auto-aprovisionamiento por `azure_oid` (nuevas columnas `azure_oid/upn/tid` en `lov_bit.usuario`, índice único filtrado; `password_hash` nullable; `personal-2026.json`/`seedPersonal` retirados); los singletons `es_jefe_planta`/`es_jdt_default` (que NO derivan de App Roles) se fijan por UPN (`M365_JEFE_PLANTA_UPNS`/`M365_JDT_DEFAULT_UPNS`). **Rol automático:** `server/utils/entra-roles.js` mapea value→cargo y resuelve por **precedencia** cuando hay multi-rol (JdT > IngOp > IngQuímico > Coordinador > operadores > Gerente); sin rol conocido → 403. `select-context` ya no recibe `usuario_id`/`cargo_id`: deriva el usuario del oid de la cookie y el cargo del token. `loadSession` resuelve la sesión por `oid` (mismo shape de salida → permissions.js y endpoints intactos). **Dos sesiones separadas:** la cookie Entra (larga) es la identidad; `sesion_activa` es la participación en el turno y el `turno-sweeper` ahora la **expulsa** (`activa=0`) a fin de turno —la cookie sobrevive; reentrar reactiva `sesion_activa` (refrescando `inicio_sesion`+`turno`)—. Revalidación silenciosa (`revalidate.js`) detecta revocación en Entra y mata la sesión.
+
+**Consecuencias:** (a) **Invierte la convención #1 de CLAUDE.md** ("TTL ninguno / `activa=1` hasta logout"): ahora el sweeper baja `activa=0` a fin de turno. (b) El cargo deja de elegirse en el front (pantalla eliminada) y deja de ser arbitrario: lo gobierna Entra. (c) Sin token en `sessionStorage` (XSS-resistente); PKCE/state/nonce/regeneración de sesión/cookie httpOnly+SameSite+Secure(prod). (d) Login local 100% eliminado; SISTEMA queda solo para procesos internos. (e) Rows de usuario legacy (sembrados por la versión vieja) quedan inactivables y solo los referencian registros históricos vía `creado_por`. (f) Tests: nuevo `entra_roles.test.js` (precedencia + 403); `loadSession` expone un backdoor SOLO de test (`AUTH_TEST_BYPASS=1`, resuelve por `X-Sesion-Id`) para que el harness HTTP funcione sin cookie real —jamás activo en prod—. Cross-ref: `docs/auditoria-auth-usuarios-roles-2026-06.md`, §2.3/§3 BIT-MODBD (columnas Entra + ciclo de sesión), [[D-003]] (sesión persistente, superada parcialmente), [[D-025]] (conformación de turno, intacta).
+
+---
+
+## D-032 — Saneamiento central de errores hacia el cliente
+
+**Fecha:** 2026-06-26
+
+**Contexto:** intentar un registro DISP desde una red sin ruta a la BD mostraba en el modal `Failed to connect to REDACTED in 15000ms`. El if-chain devolvía `err.message` crudo en todas las respuestas 5xx (top-level catch de `legacyHandler` + cuatro endpoints: cierre-diario, cierre masivo, conformación-trigger, y `/auth/login`). Era a la vez (a) **brecha de seguridad** —filtraba host/instancia/puerto/credenciales-shape de la BD y del flujo OIDC— y (b) **incomprensible** para un operador. Variantes del mismo patrón: respuestas que usaban el `error` como *slug* (`'sin_cargo_asignado'`) o que filtraban nombres de tabla (`'...no existe en lov_bit.cargo'`, `'Mapeo de tipos MAND incompleto en lov_bit.tipo_evento'`), y el frontend que mostraba el `TypeError: Failed to fetch` crudo cuando el backend está caído.
+
+**Decisión:** módulo `server/utils/errores.js` con `clasificarError(err) → {status, codigo}` y `responderError(res, err, ctx)`: clasifica el error técnico (conexión BD caída → 503 `db_no_disponible`; timeout de request → 503 `db_timeout`; SQL/constraint → 500 `db_error`; body no-JSON → 400 `cuerpo_invalido`; desconocido → 500 `error_interno`), **loguea el detalle crudo server-side** y responde `{ error, codigo, mensaje }` donde `error`/`mensaje` son texto amigable en español y `codigo` es un slug estable. El top-level catch y los cuatro endpoints usan `responderError`/`mensajeUsuario`; los slugs/tablas filtrados se reemplazaron por texto amigable + `codigo` (`sin_cargo_asignado`, `config_sistema`, `sin_jefe_planta`). Frontend: `useApi`/`useDisponibilidad` traducen el rechazo de `fetch` (servidor inalcanzable) a un Error con `codigo:'sin_conexion'` + `body.mensaje` amigable, y propagan `codigo`/`body` del backend.
+
+**Consecuencias:** (a) **Shape de error ampliado**: toda respuesta de error puede traer `codigo` (estable, machine-readable) además de `error`/`mensaje` (humano) — el frontend ramifica por `codigo`, nunca parseando texto. (b) Los 409 de DISP (`mismo_estado`/`fecha_anterior_a_vigente`/`mismo_estado_que_anterior`) **no cambian**: siguen exponiendo su `error`-slug + `vigente`/`n_menos_1` porque `CambiarEstadoModal.buildPopup` los usa para popups específicos; el saneamiento solo toca los caminos inesperados/5xx. (c) `'No hay jefe de planta activo'` pasó de 500 a 409 (es una precondición, no un bug del server). (d) Test sin BD `server/tests/errores.test.js` fija que ningún mensaje al usuario filtre host/instancia/constraint. Cross-ref: convención #16 de CLAUDE.md.
+
+---
+
+## D-033 — COMB: rediseño visual "Blueprint Heatmap"
+
+**Fecha:** 2026-06-29
+
+**Contexto:** la grilla de Consumos de Combustibles (COMB, D-027) usaba estilos Tailwind genéricos (`bg-yellow-50`, `bg-emerald-600`). Existía una propuesta de diseño aprobada — "Blueprint Heatmap", plano técnico azul con heatmap por celda en columnas de alimentador — en `ConsumosGridBlueprint.jsx` (raíz del repo), referencia que NO era producción: catálogo mock, `seedBuffer()`, `loading=false` hardcodeado, `hayCambios` simplificado con `Object.keys`, fechas reimplementadas y fuentes por CDN. La meta era adoptar **solo la piel** sobre el componente real, sin tocar lógica (datos, hook, diff, validaciones, TZ, batch save, errores, permisos, estados), igual que el rediseño previo de DISP.
+
+**Decisión:** restilizado solo-frontend de `src/components/Combustibles/`. (1) **Aislamiento como DISP**: CSS scopeado bajo `.comb-root` (`combustibles.css`, variables en `.comb-root` no `:root`, clases prefijadas) → cero fuga a otras bitácoras; el único estilo inline es el `background` dinámico del tinte por celda. (2) **Fuentes locales** vía `@fontsource/archivo` + `@fontsource/inter` + `@fontsource/jetbrains-mono` importadas en el componente raíz — **sin CDN en runtime**. (3) **Escala heatmap FIJA `HEATMAP_MAX_TON=25`** (tope físico de carga de carbón por alimentador/periodo; reemplaza el mágico `42` del mock) → tonos comparables día a día. Heatmap aplicado **solo a columnas `tipo='ALIMENTADOR'`**. (4) **Leyenda ↔ tinte reconciliados**: una sola rampa `HEATMAP_RAMP` (en `colores.js`) alimenta `tint()` y los chips de la leyenda (el blueprint las tenía desincronizadas). Toda la lógica (snapshot/buffer, `hayCambios` por diff real `JSON.stringify`, `calcularDiff`, `onGuardar` con `e.errores[].motivo`, `totalCarbonPeriodo`, `beforeunload`, gateo `puedeCrear`, `SelectorFecha` con bloqueo de futuro) quedó intacta.
+
+**Consecuencias:** (a) cambio **solo-frontend** — BD, endpoint (`/api/combustibles/*`) y hook (`useCombustibles`) sin tocar; los tests `server/tests/consumos_combustible.test.js` no se ven afectados. (b) 3 dependencias nuevas de fuente (`@fontsource/*`); Vite las bundlea como assets locales en `dist/`. (c) `ConsumosGridBlueprint.jsx` borrado tras servir de referencia (regla 13 de CLAUDE.md; recuperable por git). (d) Patrón replicable: futuras bitácoras con grilla pueden reusar el scoping `.comb-root` + `@fontsource` local + rampa única para heatmap.
+
+---
+
+## D-034 — COMB: límites físicos por combustible (data-driven)
+
+**Fecha:** 2026-06-29
+
+**Contexto:** el POST de Consumos (D-027) solo validaba `cantidad ≥ 0` y finita (`cantidad_invalida`); no había tope superior, así que se podían registrar valores físicamente imposibles. Cada combustible tiene un límite real por celda/periodo: ALIMENTADOR (carbón) 0–25 Ton, CALIZA 0–40 Ton, ACPM (FO líquido) 0–25000 Gal.
+
+**Decisión:** límite **data-driven** en BD como fuente única. Migración idempotente `F28.A1` (`server/db.js`, flag en `bitacora.migracion_aplicada`, patrón F26.B1/F27.A1): `ALTER lov_bit.combustible ADD cantidad_max DECIMAL(12,3) NULL` + `UPDATE ... SET cantidad_max = CASE tipo WHEN 'ALIMENTADOR' THEN 25 WHEN 'CALIZA' THEN 40 WHEN 'ACPM' THEN 25000 END WHERE cantidad_max IS NULL`. `cantidad_max NULL = sin tope` (el server omite el chequeo) para no romper combustibles futuros. **Backend:** los GET `/catalogo` y `/consumos` exponen `cantidad_max`; el POST valida por celda `cantidad > cantidad_max` → `400 { errores:[{ periodo, combustible_id, motivo:'cantidad_excede_max' }] }` (boundary inclusivo, `=max` permitido), acumulado en el mismo array de errores existente. **Frontend (`ConsumosGrid.jsx`):** la celda fuera de rango se marca en rojo (`.comb-cell.invalid`), Guardar se deshabilita mientras haya inválidas y se muestra un mensaje (`.comb-alert`); NO se recorta ni borra lo escrito. El heatmap pasa a escalar desde `cantidad_max` del alimentador (`tint(v, maxAlim)`), eliminando el `25` hardcodeado. Diccionario `motivo→texto` es-CO para los toasts.
+
+**Consecuencias:** (a) doble barrera (front bloquea Guardar, back rechaza). (b) Para cambiar un tope o agregar un combustible con límite: editar el `UPDATE`/seed de la migración (o un bloque nuevo) + redeploy — no hay CRUD admin. (c) Tests `13–15` en `consumos_combustible.test.js` (catálogo expone `cantidad_max`; rechazo por tipo; boundary exacto). (d) Cross-ref: convención #17 de CLAUDE.md, BIT-MODBD §4.9.
+
+**Próxima fase (plasmado, NO implementado aún):**
+1. **Tope agregado de Total Carbón por periodo y planta** — columna `carbon_max_periodo_ton` en `lov_bit.planta` (GEC3=150 UG3.0 / GEC32=200 UG3.2), validado en el POST (motivo `total_carbon_excede_max`, error a nivel periodo) y marcado en la columna virtual "Total Carbón" del front. Hoy es redundante con el per-celda (6×25=150, 8×25=200) pero es el límite físico de la **caldera**, atado a la unidad y no al conteo de alimentadores.
+2. **Editabilidad de alimentadores según la unidad del login** — según la unidad (GEC3 = 6 alimentadores de carbón / GEC32 = 8), bloquear en front y back qué alimentadores pueden recibir ingesta/edición (algunos pueden estar fuera de servicio). Bloqueos en ambos lados.
+
+---
+
+## D-035 — Routing por hash (deep-link/F5) + botón "Cambiar unidad"
+
+**Fecha:** 2026-06-29
+
+**Contexto:** la sección activa del dashboard (`activeBitacora`) era estado local de React: un F5 o un deep-link volvían siempre a la primera bitácora permitida, y el subestado de las secciones con UI propia (planta de DISP, fecha de COMB) se perdía. DISP además persistía su planta en `sessionStorage` (`disponibilidad.plantaSeleccionada`), una segunda fuente de verdad. En paralelo, el modal de logout ofrecía "No, salir sin finalizar" (cleanup de cliente que conserva la cookie Entra), pero no había forma de **cambiar de unidad** (GEC3↔GEC32) sin re-loguearse.
+
+**Decisión:** (1) **Capa de rutas por hash, sin dependencia nueva** (NO react-router). Módulo puro `src/routing/appRoute.js` (`parseHash`/`buildHash` + validadores) con forma canónica `#/op24h` (MAND), `#/disp?planta=GEC3|GEC32`, `#/comb?fecha=YYYY-MM-DD`, `#/b/<codigo>` (genéricas), `#/historicos`; vacío/desconocido/no-permitido → fallback a la primera permitida. Hook `src/hooks/useAppRoute.js` (lee el hash, se suscribe a `hashchange`+`popstate`, expone `navigate(next,{replace})` con guarda anti-loop). El hash es la **fuente única de verdad**: el dashboard deriva su estado desde la ruta (permission-gated) y escribe la ruta ante cambios (subestado → `replaceState`, cambio de sección → `pushState`). Validación estricta de params: planta ∈ {GEC3,GEC32}; fecha bien formada y no futura (paridad con el `400 fecha_futura` de COMB) — param inválido se descarta. Se eligió el hash porque: 0 deps, deep-linkable, back/forward del navegador, y **no colisiona con el redirect OIDC** (el `#` no viaja al server ni choca con `?auth=…`; Entra sigue aterrizando en `/`). (2) **DISP y COMB pasan a controlados** por el dashboard (`planta`/`onPlantaChange`, `fecha`/`onFechaChange`); **se retira el `sessionStorage` de planta de DISP** para no tener doble fuente. (3) **"Operar otra unidad"** (originalmente "Cambiar unidad") reemplaza a "salir sin finalizar" en el modal de logout: conserva el login Entra pero **mata la sesión de app** server-side — `auth.clearSesion()` limpia el estado de cliente y dispara `POST /api/auth/cerrar-app` (`activa=0`, sin tocar la cookie Entra), y el render cae en `LoginScreen` paso "planta". Al re-elegir unidad, `select-context` reactiva/crea la sesión de la nueva unidad **y desactiva cualquier otra sesión activa del usuario** (invariante: una persona no puede estar iniciada en 2 unidades a la vez). *(Refinado el 2026-06-30: la versión original era solo-cliente y dejaba la sesión anterior `activa=1`, produciendo 2 sesiones activas por persona; se corrigió añadiendo el endpoint de cierre + el barrido en `select-context`.)*
+
+**Consecuencias:** (a) el routing es **solo-frontend** (sin backend ni contrato cross-repo; tests de combustibles verdes); la corrección de sesión única (2026-06-30) sí toca backend: nuevo `POST /api/auth/cerrar-app` + barrido en `select-context` (ver decisión 3). (b) F5 y deep-link preservan sección + subestado; back/forward navega. (c) Sincronización ruta↔estado con dos efectos guardados por refs de igualdad (el "derive" no depende de `activeBitacora` para no revertir un clic; el "write" no escribe sin sesión → el routing solo vive en el dashboard). (d) "Cambiar unidad" descarta buffers no guardados del cliente sin aviso cross-componente — consistente con la navegación SPA de hoy (no hay reload, `beforeunload` no aplica). (e) Tests `src/routing/appRoute.test.js` (round-trip parse/build, validación de planta/fecha, fallback). (f) Cross-ref: convención de navegación en CLAUDE.md.
+
+**Addendum (2026-06-30) — Rediseño del modal de logout.** El logout dejó de usar el `ConfirmModal` genérico (botones apiñados en multifila) y pasó a un componente dedicado `src/components/LogoutModal.jsx`: más ancho/alto (`max-w-lg`), ilustración hero (`public/logout-ilustracion.png` — mujer abriendo la puerta + gato saliendo + planta) y los **botones en una sola fila** (`Cancelar` | `Sí, finalizar y salir`). "Operar otra unidad" se reubica como **enlace inline** dentro del texto (paridad estructural con el patrón "switch account"), con su acción `auth.clearSesion()` (que ahora además mata la sesión de app, ver decisión 3). El `ConfirmModal` genérico queda intacto para el resto de confirmaciones; el estado de logout vive en `logoutOpen` (separado de `modal`). Copy en es-CO: "Si solo necesitas **operar otra unidad**, puedes cambiarla sin cerrar sesión" (enlace en "operar otra unidad"; *unidad* ≠ *planta* en el dominio).
+
+---
+
+## D-036 — Ronda de remediación de seguridad (auditoría BIT-AUDSEG-2026-001)
+
+**Fecha:** 2026-06-30
+
+**Contexto:** una auditoría estricta de principio a fin (`BIT-AUDSEG-2026-001.md`, 42 hallazgos AUD-01..42 en 7 olas) detectó vulnerabilidades de seguridad y deuda de arquitectura. Se ejecutó un pipeline de remediación en la rama `sec/audseg-remediation`, ítem por ítem con contexto aislado por subagente, verificación con tests y commit por hallazgo.
+
+**Decisión:** resolver por orden de prioridad+dependencias, con tres clases de cierre: ✅ resuelto en código+test; 🟡 parcial (la parte de código hecha + un runbook para la acción de infra/ops o cross-repo que el pipeline no puede/debe hacer solo); ⬜ diferido (refactor arquitectónico grande que no se hace a ciegas sin la suite plena). Cambios clave:
+- **Auth/identidad:** sesión exigida en 8 endpoints que la omitían (AUD-05); backdoor de test fail-closed en prod (AUD-06); cookie `Secure` forzada + `SESSION_SECRET` obligatorio + validación `tid`/`nonce` (AUD-09/22); revalidación de privilegios efectiva que re-deriva el cargo y mata la sesión ante downgrade (AUD-10); scope de planta en DISP (AUD-11).
+- **Transporte/datos:** cifrado SQL env-driven con default no-rompedor (AUD-07, encender = infra/cert); rate-limit + tope de body + CORS allowlist + Origin-check anti-CSRF (AUD-15/16/19/20); `campos_extra` sin mass-assignment (AUD-39).
+- **Scraper SIS/WS:** parser BIFF8 endurecido contra `.xls` maliciosos (ciclos/sectorSize/topes) cortando el DoS del backend (AUD-08); validación de rango de datos SIS (AUD-14); handshake WS con validación de `Origin` anti-CSWSH + snapshot por planta (AUD-21/42); SSRF allowlist + escape XML (AUD-25/26).
+- **Robustez BD:** `HOLDLOCK` en el MERGE de provisión, `XACT_ABORT`/transacción en `enforceSingletonFlag`, guards por datos antes de borrados destructivos (AUD-29/30/31).
+- **Higiene:** secretos/PII/screenshot sacados del árbol + `dist` untrackeado (AUD-01/02/03/04, con runbook de rotación de clave + purga de historial como acción humana); `ws` 8.18→8.21 (CVE) y `engines` (AUD-37); drift de docs (AUD-38).
+
+**Consecuencias:** (a) **24 hallazgos ✅** (código+test verde), **7 🟡** (con runbook: rotación/purga de historial AUD-01, cert TLS AUD-07, cifrado-at-rest de sesión AUD-13, token cross-repo AUD-18, split de logins BD AUD-12, worker/canal del scraper AUD-08, cookie-handshake WS AUD-21), **3 ⬜** diferidos (BD de test dedicada AUD-33 —login sin `dbcreator`—, split de `server.js` AUD-34, unificación de routing AUD-35). (b) **8 suites de tests puros nuevas, 51+ casos verde**, sin tocar la BD productiva; la verificación HTTP plena queda atada a AUD-33 (BD de test dedicada). (c) Se introdujeron varias env de seguridad: `DB_ENCRYPT`/`DB_TRUST_SERVER_CERT`, `CORS_ALLOWED_ORIGINS`, `WS_ALLOWED_ORIGINS`, `DASHBOARD_API_TOKEN`, `TEST_DB_DEDICATED`, `REVALIDATE_MAX_FALLOS` (todas con default no-rompedor). (d) El tablero vivo y el detalle por ítem están en `BIT-AUDSEG-2026-001.md` y `prompts/AUDSEG-PIPELINE/ESTADO.md`. Cross-ref: [[D-031]] (auth Entra), [[D-032]] (saneo de errores), [[D-030]] (planta TST).
+
+## D-037 — Routing unificado en Express + `server.js` modularizado (AUD-34/35)
+
+**Fecha:** 2026-07-01
+
+**Contexto:** cierre de los dos ítems de arquitectura que D-036 dejó ⬜ diferidos. `server/server.js` era un monolito (~2849 líneas): un único if-chain (`legacyHandler`) con ~43 endpoints, cada uno repitiendo a mano `loadSession` + `parseBody` + checks de permiso/planta (AUD-34). Tras D-031 convivían **dos modelos de routing** — el wrapper Express delgado solo para `/auth` y el if-chain nativo para el resto — con dos body parsers (`express.json` acotado vs. `parseBody` crudo) y dos posturas de middleware (AUD-35). El god-file era la **causa estructural** de que la autenticación fuera opt-in y fácil de olvidar (raíz de AUD-05).
+
+**Decisión:** **un solo modelo = Express.** Migración strangler por dominio (E1–E10): cada familia de endpoints se extrajo a `server/routes/<dominio>.js` (catálogos, cierre, históricos, autorizaciones, eventos-dashboard, conformación, combustibles, disponibilidad, MAND, registros —con la rama DISP inline, D-026—, bitácora y contexto de sesión), montada en `auth/app.js` **antes** del catch-all; sus rutas se borraban del if-chain en el mismo commit. Piezas clave:
+- **Auth-por-defecto (fix estructural de AUD-05):** middleware global `requireEntra` (`routes/_middleware.js`) cierra el acceso anónimo salvo una **allowlist pública explícita** (`/health`, catálogos no-PII, `eventos-dashboard`); honra el backdoor de test (`AUTH_TEST_BYPASS` + `X-Sesion-Id`, fail-closed); si no, exige identidad Entra (`req.session.user.oid`) → 401. Un endpoint nuevo nace cerrado.
+- **Pipeline único:** `session → cors → csrf → /health → auth (login/redirect/me/logout) → requireEntra → express.json (global, 1 MB) → routers de dominio → 404 → expressErrorHandler`. CORS/preflight y CSRF de mutadores pasaron de ramas del if-chain a middleware Express global (`corsMiddleware`/`csrfMiddleware`).
+- **Body parsing unificado:** durante la migración `express.json` se montó **por router** (para no consumir el stream de las rutas aún en el if-chain con `parseBody`); en E11 se **hoistó a global** post-auth y se **eliminó `parseBody`** (su tope AUD-15 lo enforcea `express.json({ limit: '1mb' })` → 413 vía `clasificarError` con `type:'entity.too.large'`). `legacyHandler` se borró; `server.js` quedó en **bootstrap** (initDB → buildAuthApp → http.Server para los WS → sweepers → listen), ~73 líneas.
+- **Middleware reutilizable:** `loadAppSession` (setea `req.sesion` o 401) reemplaza el idiom `loadSession` repetido ~34 veces; `asyncH` enruta el throw de un handler async a `expressErrorHandler`.
+
+**Consecuencias:** (a) `server.js` 2849 → ~73 líneas; 13 routers nuevos + `_middleware.js`/`_shared.js`; `routes/.gitkeep` borrado. (b) Autenticación **cerrada por defecto** (no más opt-in). (c) **Verificación "proceder ahora"** (decisión del usuario, sin bloquear en AUD-33): por etapa `node --check` + tests puros (`routes_middleware`, `errores`, `http_hardening`, …) + smoke autenticado en `:3099` contra la planta `'TST'` (D-030) sin tocar `:3002` ni datos reales. **La suite HTTP completa (`server npm test`) sigue diferida a la BD de test dedicada (AUD-33)** — riesgo aceptado y documentado. (d) `parseBody`/`MAX_BODY_BYTES` eliminados de `utils/http.js` (`sendJSON` permanece). Cross-ref: [[D-031]] (wrapper Express /auth de origen), [[D-032]] (saneo de errores/`expressErrorHandler`), [[D-036]] (ronda que difirió AUD-34/35), [[D-026]] (rama DISP migrada dentro de registros).
+
+---
+
+## D-038 — Despliegue bajo sub-path `/bitacora` en el reverse proxy compartido (pgen.gecelca.com.co)
+
+**Fecha:** 2026-07-01
+
+**Contexto:** Bitácora comparte servidor Ubuntu y nginx con `dashboard-gen-gec3` bajo un solo
+dominio (`pgen.gecelca.com.co`), separados por ruta (`/bitacora` con auth, `/dashboard` sin auth) —
+contrato en `../docs/deployment-unificado.md`. El backend compara `req.url` por string exacto y la
+cookie de sesión es `Secure` (OIDC exige HTTPS), así que el prefijo no puede llegar al backend ni
+la app puede asumir la raíz del dominio.
+
+**Decisión:** el sub-path es **configurable por env `APP_BASE_PATH`** (`/bitacora` en prod, vacío
+= `/` en dev) y se aplica en tres capas: (a) **build** — `vite.config.js` lo usa como `base` y
+`src/config/paths.js` centraliza `withBase`/`wsUrl`/`asset` sobre `import.meta.env.BASE_URL`
+(ningún literal `/api`, `/ws`, ni `src="/img"` en el código; `asset()` existe porque Vite NO
+reescribe string literals de JSX con el `base`); (b) **backend** — `entra-config.js` exporta
+`APP_BASE_PATH` para los redirects post-OIDC (`home()`) y el `path` de la cookie
+(`bitacora.sid` acotada a `path=/bitacora`); (c) **nginx** — `deploy/nginx-bitacora.conf` quita el
+prefijo (barra final en `proxy_pass`) y reenvía `Host`/`Origin`/`X-Forwarded-Proto` (CSRF/CSWSH +
+cookie Secure tras proxy; `trust proxy=1`). TLS con **certificado corporativo** (renovación
+manual, runbook `deploy/DEPLOY.md §6`). Fallback SPA con named location (pitfall
+`alias`+`try_files`).
+
+**Consecuencias:** (a) un solo build sirve cualquier base; dev queda intacto (base `/`, proxies
+Vite sin strip). (b) Azure App Registration necesita los Redirect URIs con el sub-path
+(`https://pgen.gecelca.com.co/bitacora/auth/redirect`). (c) El deploy es por runbook
+(`deploy/DEPLOY.md`, systemd `bitacora-api.service`, locations pegadas en el server block del
+dashboard). (d) La cookie no viaja a `/dashboard` (aislamiento entre apps). Cross-ref: [[D-031]]
+(OIDC), [[D-036]]/[[D-037]] (hardening del pipeline que este despliegue expone).
+
+---
+
+## D-039 — Rol ADMIN (`Administrador y Debugging`) con acceso total, data-driven
+
+**Fecha:** 2026-07-03
+
+**Contexto:** se necesitaba un rol de administrador/debugging para pruebas funcionales que pudiera **ver, crear, editar y borrar en todo lo que la app permite**, y quedar **blindado ante auditoría**. En Entra se creó el grupo de seguridad `AMINISTRADOR_DEBUGGING` (`dfc61859-cef1-45f9-8b89-8b4658bbf56f`). El control de acceso de Bitácora es 100% data-driven (App Role → `ROLE_TO_CARGO` → `lov_bit.cargo` → matriz `cargo_bitacora_permiso` + flags `puede_cerrar_turno`/`solo_lectura`), sin superusuarios por código.
+
+**Decisión:** modelar el admin como **un cargo real más** — NO un bypass. Cambios:
+- **Entra:** un App Role con `value = ADMINISTRADOR_DEBUGGING` (el grupo se asigna a ese App Role; "Assignment required = Yes" sigue siendo el gate de acceso). El claim `roles` transporta ese `value`, no el id del grupo.
+- **`entra-roles.js`:** `ROLE_TO_CARGO['ADMINISTRADOR_DEBUGGING'] = 'Administrador y Debugging'` y **primero** en `PRECEDENCE` (gana en multi-rol).
+- **`db.js`:** cargo sembrado con `solo_lectura=0`, `puede_cerrar_turno=1`; en la matriz (`WITH matriz AS`) una cláusula `WHEN c.nombre='Administrador y Debugging' THEN 1` como **primer WHEN** de `puede_ver` y `puede_crear` (gana sobre las de código). **Gotcha:** el override defensivo DISP (F12.A6) recomputa `puede_crear` de toda fila DISP, así que el admin también se agregó a ese `IN (...)` o quedaría en 0 en DISP.
+- **Sin cambios de frontend:** el sidebar filtra por `puede_ver`, los botones por `puede_crear`, y cerrar turno / conformación por `sesion.puede_cerrar_turno` — todo se activa solo con los datos del nuevo cargo.
+
+**Consecuencias:** (a) toda acción del admin pasa por los MISMOS gates (auth/CSRF/rate-limit/permiso) y queda **atribuida** (`creado_por`/`modificado_por`) — auditable, cero código de bypass. (b) El admin obtiene el **máximo borrado que la app ya soporta** (borradores, soft-deletes de eventos, celdas de MAND/COMB, cierre); **NO se añadió hard-delete de registros cerrados/históricos** — la app es append-only por diseño de auditoría y romper eso contradiría el requisito. (c) La bitácora `AUTH` (`activa=0`) queda fuera para todos, incluido admin (esperado). (d) Los singletons `es_jefe_planta`/`es_jdt_default` NO se tocan (son identidad por-UPN para snapshots, no gates; `puede_cerrar_turno` ya cubre lo que habilitan). (e) Tests: `entra_roles.test.js` (13 roles + precedencia admin) y `rol_admin_debugging.test.js` (matriz completa + regresión override DISP + idempotencia). Verificado end-to-end vía backdoor de test: crear (201) y borrar (200) en QUIM, bitácora ajena a operadores. Cross-ref: [[D-031]] (login Entra / rol automático), [[D-029]] (patrón de rol nuevo en matriz), [[D-037]] (auth-por-defecto).
+
+---
+
+## D-040 — Finalizar turno revertible (fuente única `sesion_activa.turno_finalizado_en`) + write-gate genérico
+
+**Fecha:** 2026-07-03
+
+**Contexto:** la finalización de turno estaba **sobrecargada** sobre `sesion_bitacora.finalizada_en`, que mezclaba dos cosas: *presencia por-bitácora* y *decisión de "terminé mi turno"*. Como `POST /api/bitacora/abrir` (disparado por `useBitacoraSesion` en CADA apertura/cambio de bitácora) hacía `MERGE ... UPDATE SET finalizada_en = NULL`, **con solo ver una bitácora el ingeniero se des-finalizaba** y reaparecía como pendiente en el cierre del JdT. Además el estado de finalización del front salía 100% de `localStorage`/`shiftInstanceId` (divergía del backend tras F5 y tras el reset de `/abrir`), no había forma de **revertir**, y finalizar no inhibía registrar.
+
+**Decisión:** la finalización de turno pasa a **`sesion_activa.turno_finalizado_en DATETIME2 NULL`** (fuente única; NULL = turno vivo, no-NULL = finalizado). `sesion_bitacora.finalizada_en` vuelve a ser **SOLO presencia por-bitácora** (nunca reusar uno por el otro). Es **revertible self-service** vía **`POST /api/bitacora/revertir-turno`** (sin permiso especial, CIET `reapertura`). `POST /api/bitacora/finalizar` y `finalizar-forzado` setean la columna (CIET idempotente, solo si cambió). El fix del bug: `ingenieros_no_finalizados` filtra por `sa.turno_finalizado_en IS NULL` (ya no lee `sesion_bitacora`), conservando `bitacoras_abiertas` vía `OUTER APPLY`. **Write-gate 409 `turno_finalizado` solo en la rama GENÉRICA de `registros.js`** (POST/PUT/DELETE); MAND/DISP/COMB quedan operables (endpoints propios). El front deriva `turnoFinalizado` de `sesion.turno_finalizado_en` (se eliminó `localStorage`/`shiftInstanceId`/tick), refleja finalizar/revertir con `useAuth.patchSesion` y rehidrata por `/api/me`; el botón togglea a "Revertir finalización" + banner, y el gate de UI se acota a "Nuevo Registro" + `GrillaRegistros`.
+
+**Consecuencias:** (a) el estado **muere solo**: el turno-sweeper expulsa `activa=0` a fin de turno y `select-context` reactiva/crea sesión fresca con la columna en NULL (reset explícito en la rama de reactivación — sin él, volver por "Operar otra unidad" a la misma planta dejaba el turno "finalizado", bug simétrico). (b) Revertir tras ser **forzado** es posible y NO traba el cierre del JdT (que opera sobre `registro_activo`, no sobre esta columna). (c) MAND/DISP/COMB no se bloquean, alineado front↔back. (d) Idempotencia: doble finalizar / doble revertir no duplican CIET (guardas `IS NULL`/`IS NOT NULL` + CIET solo si hubo fila). (e) Se sembró el tipo CIET `'Reapertura de turno'`. (f) Tests: `finalizar_turno.test.js` (11, incl. la regresión del bug: finalizar → `/abrir` → sigue finalizado y no reaparece en `preview-masivo`); suite canónica **218/217✔/1skip**. Cross-ref: [[D-031]] (sesión de app / sweeper / `select-context`), [[D-035]] (sesión única por persona / "Operar otra unidad"), [[D-032]] (shape `{error,codigo,mensaje}` del 409), [[D-037]] (auth-por-defecto + routers), [[D-030]] (tests planta `TST`).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

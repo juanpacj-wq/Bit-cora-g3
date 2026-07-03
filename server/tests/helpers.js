@@ -1,9 +1,14 @@
 import sql from 'mssql';
-import { initDB, getDB } from '../db.js';
+import { randomBytes } from 'node:crypto';
+import { initDB, getDB, TEST_PLANTA_ID } from '../db.js';
 import { hashPassword } from '../utils/password.js';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3002';
 export const PLANTA_ID = 'GEC3';
+
+// D-030: planta sintética reservada para tests (definida en db.js, excluida de las vistas DISP).
+// Los tests que tocan disponibilidad operan sobre esta planta — nunca sobre GEC3/GEC32 reales.
+export const TEST_PLANTA = TEST_PLANTA_ID;
 
 // D5: sin corchetes [...]. SQL Server interpreta [ y ] como wildcards de conjunto en LIKE,
 // con corchetes el patrón '%[TEST-RUN-N]%' NO matchea el literal '[TEST-RUN-N]' — el
@@ -37,10 +42,27 @@ const USER_CARGO = {
   ingQuim: 'Ingeniero Químico',
 };
 
-export async function setupSessions() {
+export async function setupSessions({ planta = PLANTA_ID } = {}) {
   await initDB();
   const db = await getDB();
-  const password_hash = await hashPassword('1234');
+  // AUD-40 (BIT-AUDSEG-2026-001): password aleatorio fuerte por corrida en vez del literal '1234'.
+  // El login local ya no existe (D-031, Entra-only), así que el hash es INERTE — pero un valor
+  // conocido en usuarios test_* activos sobre la BD productiva es mala higiene. Aleatorizarlo lo
+  // mantiene inerte y deja de ser un valor conocido. NO se toca activo=1 (los tests lo necesitan).
+  const password_hash = await hashPassword(randomBytes(24).toString('hex'));
+
+  // D-030: si las sesiones van a una planta distinta de las productivas (típicamente TEST_PLANTA),
+  // sembrarla idempotentemente. Necesaria por la FK de sesion_activa/disponibilidad_estado y por la
+  // validación `planta_id=@p AND activa=1` del POST DISP y /metricas (activa=1 obligatorio).
+  if (planta !== PLANTA_ID) {
+    await db.request()
+      .input('planta', sql.VarChar(10), planta)
+      .query(`
+        MERGE lov_bit.planta AS t
+        USING (SELECT @planta AS planta_id) AS s ON t.planta_id = s.planta_id
+        WHEN NOT MATCHED THEN INSERT (planta_id, nombre, activa) VALUES (@planta, 'Test Synthetic', 1);
+      `);
+  }
 
   for (const u of TEST_USERS) {
     await db.request()
@@ -77,7 +99,7 @@ export async function setupSessions() {
       .query(`UPDATE bitacora.sesion_activa SET activa = 0 WHERE usuario_id = @usuario_id`);
     const ins = await db.request()
       .input('usuario_id', sql.Int, usuario_id)
-      .input('planta_id', sql.VarChar(10), PLANTA_ID)
+      .input('planta_id', sql.VarChar(10), planta)
       .input('cargo_id', sql.Int, cargo_id)
       .input('turno', sql.TinyInt, 1)
       .query(`
@@ -121,27 +143,31 @@ export async function cleanupTestRegistros() {
       DELETE FROM bitacora.registro_activo WHERE detalle LIKE @tag;
       DELETE FROM bitacora.registro_historico WHERE detalle LIKE @tag;
     `);
-  // F16 + D5: limpia mand_cierre_log para la planta de test. El log no tiene un campo "tag";
-  // borrar por (planta_id, fecha_cerrada >= 2026-05-01) cubre fechas determinísticas usadas
-  // en cierre_y_fechas.test.js (D5) y cualquier futuro día Bogotá donde el sweeper haya
-  // disparado durante el run. El rango guarda contra borrar mand_cierre_log histórico previo
-  // a este branch (no debería existir en GEC3, pero queda como safety net).
-  await db.request()
-    .input('planta', sql.VarChar(10), PLANTA_ID)
-    .query(`
-      DELETE FROM bitacora.mand_cierre_log
-      WHERE planta_id = @planta AND fecha_cerrada >= '2026-05-01';
-    `);
-  // F16: limpia evento_dashboard MAND remanente (los soft-deleted ya quedan así, pero por
-  // si algun test deja filas activas tras un fallo).
-  await db.request()
-    .input('planta', sql.VarChar(10), PLANTA_ID)
-    .query(`
-      DELETE FROM bitacora.evento_dashboard
-      WHERE planta_id = @planta
-        AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_activo)
-        AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_historico);
-    `);
+  // AUD-33 (seguridad): estos dos borrados NO están tagueados y, sobre la BD PRODUCTIVA, destruyen
+  // el cierre MAND real y los eventos-dashboard reales de GEC3 (la suite corre contra prod, D-030).
+  // Sólo deben ejecutarse contra una BD de test DEDICADA. Se gatean tras `TEST_DB_DEDICATED=1`:
+  // sin el flag (default, incl. cualquier corrida accidental contra prod) se OMITEN → cero
+  // destrucción de datos reales. Para la suite plena, crear `PortalG3_test` (runbook AUD-33 en
+  // BIT-AUDSEG) y correr con `TEST_DB_DEDICATED=1`. Ver también AUD-40 (usuarios test).
+  if (process.env.TEST_DB_DEDICATED === '1') {
+    // F16 + D5: limpia mand_cierre_log para la planta de test. El log no tiene "tag"; borrar por
+    // (planta_id, fecha_cerrada >= 2026-05-01) cubre fechas determinísticas de cierre_y_fechas (D5).
+    await db.request()
+      .input('planta', sql.VarChar(10), PLANTA_ID)
+      .query(`
+        DELETE FROM bitacora.mand_cierre_log
+        WHERE planta_id = @planta AND fecha_cerrada >= '2026-05-01';
+      `);
+    // F16: limpia evento_dashboard MAND remanente dejado por un test fallido.
+    await db.request()
+      .input('planta', sql.VarChar(10), PLANTA_ID)
+      .query(`
+        DELETE FROM bitacora.evento_dashboard
+        WHERE planta_id = @planta
+          AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_activo)
+          AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_historico);
+      `);
+  }
   const usernames = TEST_USERS.map((u) => `'${u.username}'`).join(',');
   await db.request().query(`
     UPDATE bitacora.sesion_activa SET activa = 0

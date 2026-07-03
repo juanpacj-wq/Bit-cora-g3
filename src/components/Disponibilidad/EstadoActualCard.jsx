@@ -1,7 +1,7 @@
 import React from 'react';
-import { CheckCircle2, Clock, XCircle, Wrench, Edit3, RefreshCw, Undo2 } from 'lucide-react';
+import { CheckCircle2, Clock, XCircle, Wrench } from 'lucide-react';
 import TiempoEnEstado from './TiempoEnEstado';
-import PlantaToggle from './PlantaToggle';
+import FactorDisponibilidad from './FactorDisponibilidad';
 import { ESTADO_COLORS, NEUTRAL } from './colores';
 
 const ICONS = { CheckCircle2, Clock, XCircle, Wrench };
@@ -20,18 +20,12 @@ function formatFechaCorta(iso) {
   return FECHA_CORTA_FMT.format(d);
 }
 
-export default function EstadoActualCard({
-  vigente,
-  puedeEditar,
-  plantaSeleccionada,
-  onChangePlanta,
-  onCambiar,
-  onEditar,
-  onDeshacer,
-}) {
+// Tarjeta "Estado actual" (look dashboard.html). Las acciones (Cambiar/Editar/Deshacer) y el
+// toggle de planta viven ahora en EstadoTopbar; esta tarjeta es solo presentación del vigente.
+export default function EstadoActualCard({ vigente, plantaSeleccionada, metricas }) {
   const evento = vigente?.evento;
   const tokens = ESTADO_COLORS[evento] || {
-    bg: NEUTRAL.subtle, text: NEUTRAL.fgInk, badge: NEUTRAL.fgTer, icon: 'Clock',
+    bg: NEUTRAL.fgTer, text: NEUTRAL.surface, badge: NEUTRAL.fgTer, icon: 'Clock',
   };
   const Icon = ICONS[tokens.icon] || Clock;
 
@@ -40,108 +34,50 @@ export default function EstadoActualCard({
   const detalle = vigente?.detalle?.trim?.() || '';
 
   return (
-    <div
-      className="rounded-xl shadow-sm overflow-hidden border"
-      style={{ borderColor: NEUTRAL.hairline, backgroundColor: NEUTRAL.surface }}
-    >
-      <div
-        className="px-6 py-4 flex flex-col md:flex-row md:items-center gap-4"
-        style={{ backgroundColor: tokens.bg, color: tokens.text }}
-      >
-        <div className="flex items-center gap-4 flex-1 min-w-0">
-          <div
-            className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"
-            style={{ backgroundColor: tokens.badge, color: '#fff' }}
-          >
-            <Icon size={26} />
-          </div>
-          <div className="min-w-0">
-            <div className="text-xl font-semibold truncate">{evento || 'Sin estado'}</div>
-            <div className="text-xs opacity-90">
-              Código <span className="font-semibold">{vigente?.codigo ?? '—'}</span>
-            </div>
+    <div className="card">
+      <div className="card-head"><h3>Estado actual</h3></div>
+
+      <div className="cur-head">
+        <span className="cur-badge" style={{ background: tokens.bg }}>
+          <Icon /> {evento || 'Sin estado'}
+        </span>
+        <span className="cur-code">
+          Código <b>{vigente?.codigo ?? '—'}</b> · Equipo <b>{plantaSeleccionada}</b>
+        </span>
+      </div>
+
+      <div className="fields">
+        <div className="field">
+          <div className="flbl">Desde</div>
+          <div className="fval mono">{formatFechaCorta(vigente?.fecha_inicio_estado)}</div>
+        </div>
+
+        <div className="field">
+          <div className="flbl">Tiempo en estado</div>
+          <div className="fval mono">
+            <TiempoEnEstado fechaInicio={vigente?.fecha_inicio_estado} />
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 md:justify-end">
-          {onChangePlanta && (
-            <PlantaToggle
-              plantaSeleccionada={plantaSeleccionada}
-              onChangePlanta={onChangePlanta}
-              variant="overlay"
-            />
-          )}
-          {puedeEditar && (
-            <>
-              <button
-                onClick={onCambiar}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white text-gray-900 text-sm font-medium hover:bg-gray-50 transition-colors"
-              >
-                <RefreshCw size={16} /> Cambiar estado
-              </button>
-              <button
-                onClick={onEditar}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/15 hover:bg-white/25 text-white text-sm font-medium border border-white/40 transition-colors"
-              >
-                <Edit3 size={16} /> Editar
-              </button>
-              <button
-                onClick={onDeshacer}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/15 hover:bg-white/25 text-white text-sm font-medium border border-white/40 transition-colors"
-              >
-                <Undo2 size={16} /> Deshacer
-              </button>
-            </>
-          )}
+        <div className="field">
+          <div className="flbl">Registrado por</div>
+          <div className="fval">
+            {autorNombre}
+            {modificador && (
+              <div className="fmeta">
+                · editado por {modificador} el {formatFechaCorta(vigente?.modificado_en)}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="field">
+          <div className="flbl">Detalle</div>
+          <div className={`fval${detalle ? '' : ' empty'}`}>{detalle || '—'}</div>
         </div>
       </div>
 
-      <div className="px-6 py-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
-        <Field label="Desde">
-          <span style={{ color: NEUTRAL.fgInk }} className="font-medium">
-            {formatFechaCorta(vigente?.fecha_inicio_estado)}
-          </span>
-        </Field>
-
-        <Field label="Tiempo en estado">
-          <TiempoEnEstado
-            fechaInicio={vigente?.fecha_inicio_estado}
-            className="font-mono font-semibold tabular-nums"
-            style={{ color: NEUTRAL.fgInk }}
-          />
-        </Field>
-
-        <Field label="Registrado por">
-          <span style={{ color: NEUTRAL.fgInk }}>{autorNombre}</span>
-          {modificador && (
-            <span className="ml-2 text-xs" style={{ color: NEUTRAL.fgTer }}>
-              · editado por {modificador} el {formatFechaCorta(vigente?.modificado_en)}
-            </span>
-          )}
-        </Field>
-
-        <Field label="Detalle">
-          {detalle ? (
-            <span style={{ color: NEUTRAL.fgInk }}>{detalle}</span>
-          ) : (
-            <span style={{ color: NEUTRAL.fgTer }}>—</span>
-          )}
-        </Field>
-      </div>
-    </div>
-  );
-}
-
-function Field({ label, children }) {
-  return (
-    <div>
-      <div
-        className="text-[11px] font-medium mb-1"
-        style={{ color: NEUTRAL.fgTer }}
-      >
-        {label}
-      </div>
-      <div className="text-sm">{children}</div>
+      <FactorDisponibilidad metricas={metricas} />
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from './useApi';
+import { wsUrl } from '../config/paths';
 
 export function useUsuariosActivos(ready, sesionId) {
   const [usuarios, setUsuarios] = useState([]);
@@ -20,8 +21,7 @@ export function useUsuariosActivos(ready, sesionId) {
 
     const connect = () => {
       if (unmountedRef.current) return;
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${window.location.host}/ws/usuarios-activos?sesion_id=${sesionId}`;
+      const url = wsUrl(`/ws/usuarios-activos?sesion_id=${sesionId}`);
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
