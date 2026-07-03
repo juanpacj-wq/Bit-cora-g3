@@ -8,6 +8,7 @@ import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch } from '../middleware/permissions.js';
 import { registrarEventoCierre } from '../utils/ciet.js';
+import { ventanaActual } from '../utils/turno.js';
 import { asyncH, loadAppSession } from './_middleware.js';
 
 const router = express.Router();
@@ -53,16 +54,24 @@ router.post('/abrir', asyncH(async (req, res) => {
 router.post('/finalizar', asyncH(async (req, res) => {
   const sesion = req.sesion;
   const pool = await getDB();
+  // D-040 (persistencia por ventana): la finalización se marca en fresco si NO hay una vigente en la
+  // ventana del turno actual (NULL o de un turno pasado). Si ya hay una vigente → no-op idempotente.
+  const { inicio: ventanaInicio, fin: ventanaFin } = ventanaActual();
   const transaction = new sql.Transaction(pool);
   await transaction.begin();
   try {
     const result = await new sql.Request(transaction)
       .input('usuario_id', sql.Int, sesion.usuario_id)
+      .input('ventana_inicio', sql.DateTime2, ventanaInicio)
+      .input('ventana_fin', sql.DateTime2, ventanaFin)
       .query(`
         UPDATE bitacora.sesion_activa
           SET turno_finalizado_en = SYSUTCDATETIME()
           OUTPUT INSERTED.sesion_id, INSERTED.turno_finalizado_en
-          WHERE usuario_id = @usuario_id AND activa = 1 AND turno_finalizado_en IS NULL;
+          WHERE usuario_id = @usuario_id AND activa = 1
+            AND (turno_finalizado_en IS NULL
+                 OR turno_finalizado_en < @ventana_inicio
+                 OR turno_finalizado_en >= @ventana_fin);
       `);
 
     const cambio = result.recordset.length > 0;
@@ -94,16 +103,23 @@ router.post('/finalizar', asyncH(async (req, res) => {
 router.post('/revertir-turno', asyncH(async (req, res) => {
   const sesion = req.sesion;
   const pool = await getDB();
+  // D-040 (persistencia por ventana): solo se revierte una finalización VIGENTE (dentro de la ventana
+  // del turno actual). Un valor de un turno pasado ya cuenta como "abierto" → no-op (no re-emite CIET).
+  const { inicio: ventanaInicio, fin: ventanaFin } = ventanaActual();
   const transaction = new sql.Transaction(pool);
   await transaction.begin();
   try {
     const result = await new sql.Request(transaction)
       .input('usuario_id', sql.Int, sesion.usuario_id)
+      .input('ventana_inicio', sql.DateTime2, ventanaInicio)
+      .input('ventana_fin', sql.DateTime2, ventanaFin)
       .query(`
         UPDATE bitacora.sesion_activa
           SET turno_finalizado_en = NULL
           OUTPUT DELETED.turno_finalizado_en AS antes
-          WHERE usuario_id = @usuario_id AND activa = 1 AND turno_finalizado_en IS NOT NULL;
+          WHERE usuario_id = @usuario_id AND activa = 1
+            AND turno_finalizado_en >= @ventana_inicio
+            AND turno_finalizado_en < @ventana_fin;
       `);
 
     let evento_ciet = null;
@@ -137,6 +153,8 @@ router.post('/finalizar-forzado', asyncH(async (req, res) => {
   if (ids.length === 0) return sendJSON(res, 400, { error: 'usuarios contiene IDs inválidos' });
 
   const pool = await getDB();
+  // D-040 (persistencia por ventana): mismo criterio que /finalizar para cada objetivo.
+  const { inicio: ventanaInicio, fin: ventanaFin } = ventanaActual();
   const transaction = new sql.Transaction(pool);
   await transaction.begin();
   try {
@@ -160,10 +178,14 @@ router.post('/finalizar-forzado', asyncH(async (req, res) => {
       const upd = await new sql.Request(transaction)
         .input('usuario_id', sql.Int, usuario_id)
         .input('planta_id', sql.VarChar(10), sesion.planta_id)
+        .input('ventana_inicio', sql.DateTime2, ventanaInicio)
+        .input('ventana_fin', sql.DateTime2, ventanaFin)
         .query(`
           UPDATE bitacora.sesion_activa SET turno_finalizado_en = SYSUTCDATETIME()
           WHERE usuario_id = @usuario_id AND planta_id = @planta_id AND activa = 1
-            AND turno_finalizado_en IS NULL;
+            AND (turno_finalizado_en IS NULL
+                 OR turno_finalizado_en < @ventana_inicio
+                 OR turno_finalizado_en >= @ventana_fin);
         `);
 
       if ((upd.rowsAffected[0] || 0) > 0) {

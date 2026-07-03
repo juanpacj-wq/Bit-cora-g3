@@ -1,5 +1,6 @@
 import sql from 'mssql';
 import { getDB } from '../db.js';
+import { finalizacionVigente } from '../utils/turno.js';
 
 // AUD-06: el backdoor de test (resolver identidad por header X-Sesion-Id, entero enumerable) SOLO
 // puede activarse en entornos no-productivos. Función pura y exportada para poder testearla aislada.
@@ -60,6 +61,12 @@ export async function loadSession(req) {
     row = await loadByOid(db, oid);
   }
   if (!row) return null;
+  // D-040 (persistencia por ventana): expone el valor EFECTIVO de la finalización. Una finalización
+  // de un turno pasado (que el sweeper aún no expulsó, o que quedó en una fila reactivada en el borde)
+  // se sirve como null → `/api/me` y el write-gate (req.sesion) ven "turno vivo" sin lógica de TZ en
+  // el front. La fila en BD queda como está: los guards/select-context son window-aware y no la tratan
+  // como vigente.
+  if (!finalizacionVigente(row.turno_finalizado_en)) row.turno_finalizado_en = null;
   db.request()
     .input('sesion_id', sql.Int, row.sesion_id)
     .query(`UPDATE bitacora.sesion_activa SET ultima_actividad = SYSUTCDATETIME() WHERE sesion_id = @sesion_id`)

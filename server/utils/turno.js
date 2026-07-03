@@ -54,6 +54,31 @@ export function ventanaTurno(turno, fechaRef) {
   };
 }
 
+// D-040 (persistencia por ventana de turno): turno (1/2) de la ventana que CONTIENE fechaRef,
+// derivado de la hora Bogotá. Igual criterio que getTurnoColombia() pero para un instante dado.
+function turnoDe(fechaRef) {
+  const { hour } = colombiaParts(fechaRef);
+  return hour >= 6 && hour < 18 ? 1 : 2;
+}
+
+// Ventana [inicio, fin) del turno que contiene fechaRef (default: ahora). Compone turnoDe +
+// ventanaTurno, así el llamador no reimplementa el cruce de medianoche de T2.
+export function ventanaActual(fechaRef = new Date()) {
+  return ventanaTurno(turnoDe(fechaRef), fechaRef);
+}
+
+// ¿Una finalización de turno (instante UTC `finalizadoEn`) sigue VIGENTE respecto a `ahora`?
+// Vigente = cae dentro de la ventana [inicio, fin) del turno actual. Fuente única de verdad de la
+// persistencia D-040: una finalización se mantiene mientras dure su turno y expira sola cuando
+// arranca el siguiente. Pura y testeable con inputs fijos. NULL/vacío → false (turno vivo).
+export function finalizacionVigente(finalizadoEn, ahora = new Date()) {
+  if (!finalizadoEn) return false;
+  const t = new Date(finalizadoEn).getTime();
+  if (Number.isNaN(t)) return false;
+  const { inicio, fin } = ventanaActual(ahora);
+  return t >= inicio.getTime() && t < fin.getTime();
+}
+
 // F19: serializadores de fecha en wallclock Bogotá. Usan el offset puro -5h (Colombia sin
 // DST) y leen con getUTC*() después del shift — mismo patrón canónico que colombiaParts.
 // Centralizados acá para que ciet.js, mand-sweeper.js y futuros callers no reinventen el

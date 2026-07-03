@@ -9,7 +9,7 @@ import sql from 'mssql';
 import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { resolveCargo } from '../utils/entra-roles.js';
-import { getTurnoColombia } from '../utils/turno.js';
+import { getTurnoColombia, ventanaActual } from '../utils/turno.js';
 import { broadcastUsuariosActivos } from '../utils/ws-usuarios-activos.js';
 import { asyncH, loadAppSession } from './_middleware.js';
 import { aplicarRateLimit } from './_shared.js';
@@ -64,6 +64,10 @@ router.post('/select-context', asyncH(async (req, res) => {
   }
 
   const turno = getTurnoColombia();
+  // D-040 (persistencia por ventana de turno): la ventana [inicio, fin) del turno actual acota si
+  // una finalización previa sigue vigente. Se pasa a la reactivación para PRESERVARla dentro del
+  // mismo turno (re-login / volver a la unidad) y limpiarla solo si es de un turno pasado.
+  const { inicio: ventanaInicio, fin: ventanaFin } = ventanaActual();
   // Dedupe por (usuario_id, planta_id, cargo_id). Sesión de app POR TURNO: al reactivar REFRESCAMOS
   // inicio_sesion y turno. UPDLOCK+HOLDLOCK serializa pestañas.
   const transaction = new sql.Transaction(db);
@@ -75,6 +79,8 @@ router.post('/select-context', asyncH(async (req, res) => {
       .input('planta_id', sql.VarChar(10), planta_id)
       .input('cargo_id', sql.Int, cargo_id)
       .input('turno', sql.TinyInt, turno)
+      .input('ventana_inicio', sql.DateTime2, ventanaInicio)
+      .input('ventana_fin', sql.DateTime2, ventanaFin)
       .query(`
         -- D-035 (sesión única por persona): al entrar a una unidad, desactivar cualquier OTRA
         -- sesión de app activa de este usuario (otra planta/cargo).
@@ -100,10 +106,16 @@ router.post('/select-context', asyncH(async (req, res) => {
                  inicio_sesion        = SYSUTCDATETIME(),
                  turno                = @turno,
                  ultima_actividad     = SYSUTCDATETIME(),
-                 -- D-040: reactivar = turno nuevo → limpiar la finalización. Sin este reset,
-                 -- un usuario que finalizó y volvió por "Operar otra unidad" a la misma planta
-                 -- seguiría "finalizado" (bug simétrico al reset accidental de /abrir).
-                 turno_finalizado_en  = NULL
+                 -- D-040 (persistencia por ventana): reactivar NO reabre el turno si la finalización
+                 -- sigue dentro de la ventana del turno actual (re-login / volver a la unidad en el
+                 -- MISMO turno la PRESERVA). Solo se limpia si es de un turno pasado (o ya era NULL),
+                 -- así "empieza el siguiente turno" la expira sola. Reemplaza el reset incondicional
+                 -- que reabría el turno en cada reactivación (causa del bug).
+                 turno_finalizado_en  = CASE
+                   WHEN turno_finalizado_en >= @ventana_inicio AND turno_finalizado_en < @ventana_fin
+                   THEN turno_finalizado_en
+                   ELSE NULL
+                 END
            WHERE sesion_id = @sesion_id;
         END
         ELSE

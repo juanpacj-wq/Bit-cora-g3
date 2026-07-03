@@ -1,5 +1,6 @@
 import sql from 'mssql';
 import { getDB } from '../db.js';
+import { finalizacionVigente } from '../utils/turno.js';
 
 // AUD-23 (BIT-AUDSEG-2026-001): el nombre de columna NUNCA debe provenir del valor recibido,
 // ni siquiera tras la allowlist. Mapeamos accion → literal de columna vía objeto fijo: el string
@@ -32,10 +33,13 @@ export function plantaMatch(sesion, planta_id) {
   return !!sesion && sesion.planta_id === planta_id;
 }
 
-// D-040: ¿la sesión de app tiene el turno finalizado? Fuente única = sesion_activa.turno_finalizado_en
-// (NULL = turno vivo). Base del write-gate de bitácoras genéricas. Puro y testeable.
+// D-040: ¿la sesión de app tiene el turno finalizado y VIGENTE? Fuente única =
+// sesion_activa.turno_finalizado_en (NULL = turno vivo), pero acotada a la ventana del turno actual
+// (persistencia por ventana): una finalización de un turno pasado ya no bloquea — expira sola al
+// arrancar el siguiente turno. Cierra la brecha del borde de turno antes de que el sweeper expulse
+// la sesión. Base del write-gate de bitácoras genéricas.
 export function turnoFinalizado(sesion) {
-  return !!sesion && sesion.turno_finalizado_en != null;
+  return !!sesion && finalizacionVigente(sesion.turno_finalizado_en);
 }
 
 export async function canEditarRegistro(sesion, registro) {

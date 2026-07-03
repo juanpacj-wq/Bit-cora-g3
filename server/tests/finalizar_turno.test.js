@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { setupSessions, cleanupTestRegistros, call, TEST_PLANTA, TEST_TAG } from './helpers.js';
-import { periodoFromFechaBogota, turnoFromPeriodo } from '../utils/turno.js';
+import { periodoFromFechaBogota, turnoFromPeriodo, ventanaActual } from '../utils/turno.js';
 
 let ctx;
 let BIT_GEN, TIPO_GEN, GEN_SESION, GEN_UID;
@@ -39,6 +39,16 @@ async function setFinalizado(uid, val) {
   await db.request()
     .input('u', sql.Int, uid)
     .input('v', sql.DateTime2, val ? new Date() : null)
+    .query(`UPDATE bitacora.sesion_activa SET turno_finalizado_en=@v WHERE usuario_id=@u AND activa=1`);
+}
+
+// D-040 persistencia por ventana: setea turno_finalizado_en a un instante ARBITRARIO (para simular
+// una finalización de un turno pasado / stale).
+async function setFinalizadoAt(uid, date) {
+  const db = await getDB();
+  await db.request()
+    .input('u', sql.Int, uid)
+    .input('v', sql.DateTime2, date)
     .query(`UPDATE bitacora.sesion_activa SET turno_finalizado_en=@v WHERE usuario_id=@u AND activa=1`);
 }
 
@@ -237,6 +247,45 @@ test('4e. tras revertir, POST a la genérica vuelve a funcionar (201)', async ()
   const { status, data } = await call('POST', '/api/registros', { sesion_id: GEN_SESION, body: genBody() });
   assert.notEqual(data.codigo, 'turno_finalizado', JSON.stringify(data));
   assert.equal(status, 201, JSON.stringify(data));
+});
+
+test('4f. persistencia por ventana: una finalización de un turno PASADO NO bloquea (201)', async () => {
+  // Finalización stale (hace 2 días) → ya expiró: el write-gate la ignora (loadSession la sirve como
+  // null y turnoFinalizado es window-aware). Prueba end-to-end de "expira al arrancar el próximo turno".
+  await setFinalizadoAt(GEN_UID, new Date(Date.now() - 2 * 24 * 3600 * 1000));
+  const { status, data } = await call('POST', '/api/registros', { sesion_id: GEN_SESION, body: genBody() });
+  assert.equal(status, 201, JSON.stringify(data));
+  assert.notEqual(data.codigo, 'turno_finalizado', JSON.stringify(data));
+  await setFinalizado(GEN_UID, false);
+});
+
+test('7. reactivación (simula select-context): finalización VIGENTE se preserva, STALE se limpia', async () => {
+  // select-context lee la cookie Entra (no alcanzable por el backdoor X-Sesion-Id), así que aquí se
+  // ejecuta el MISMO CASE acotado a la ventana que aplica server/routes/sesion.js al reactivar la
+  // sesión (branch WHEN MATCHED). Guarda la invariante de "no reabrir dentro del mismo turno".
+  const db = await getDB();
+  const { inicio, fin } = ventanaActual();
+  const reactivar = async () => {
+    await db.request()
+      .input('u', sql.Int, GEN_UID)
+      .input('ini', sql.DateTime2, inicio)
+      .input('fin', sql.DateTime2, fin)
+      .query(`
+        UPDATE bitacora.sesion_activa
+           SET turno_finalizado_en = CASE
+                 WHEN turno_finalizado_en >= @ini AND turno_finalizado_en < @fin
+                 THEN turno_finalizado_en ELSE NULL END
+         WHERE usuario_id=@u AND activa=1`);
+  };
+  // VIGENTE (ahora) → sobrevive la reactivación (re-login / volver a la unidad en el mismo turno).
+  await setFinalizado(GEN_UID, true);
+  await reactivar();
+  assert.ok((await colFinalizado(GEN_UID)) != null, 'una finalización vigente debe sobrevivir la reactivación');
+  // STALE (turno pasado) → se limpia (empezó el siguiente turno).
+  await setFinalizadoAt(GEN_UID, new Date(Date.now() - 2 * 24 * 3600 * 1000));
+  await reactivar();
+  assert.equal(await colFinalizado(GEN_UID), null, 'una finalización de un turno pasado debe limpiarse en la reactivación');
+  await setFinalizado(GEN_UID, false);
 });
 
 test('5. finalizar-forzado marca turno_finalizado_en del objetivo', async () => {
