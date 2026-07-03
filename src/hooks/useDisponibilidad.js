@@ -45,12 +45,15 @@ async function requestWithBody(url, { method = 'POST', body } = {}) {
 
 export function useDisponibilidad(dispBitacoraId) {
   const getEstado = useCallback(
-    (planta_id, { historial_limit = 20, historial_offset = 0 } = {}) => {
+    (planta_id, { historial_limit = 20, historial_offset = 0, desde, hasta } = {}) => {
       const qs = new URLSearchParams({
         planta_id,
         historial_limit: String(historial_limit),
         historial_offset: String(historial_offset),
       });
+      // Filtro de AÑO: ventana [desde, hasta) que acota el historial (el vigente no se filtra).
+      if (desde) qs.set('desde', desde);
+      if (hasta) qs.set('hasta', hasta);
       return api.get(`/api/disponibilidad?${qs.toString()}`);
     },
     []
@@ -60,8 +63,13 @@ export function useDisponibilidad(dispBitacoraId) {
   // Sin desde/hasta → ventana = toda la historia de la planta. Alimenta el panel de
   // acumulados; el estado vigente crece en vivo client-side reusando el tick de TiempoEnEstado.
   const getMetricas = useCallback(
-    (planta_id) =>
-      api.get(`/api/disponibilidad/metricas?planta_id=${encodeURIComponent(planta_id)}`),
+    (planta_id, { desde, hasta } = {}) => {
+      const qs = new URLSearchParams({ planta_id });
+      // Filtro de AÑO: acota los acumulados/donut/factor a la ventana [desde, hasta).
+      if (desde) qs.set('desde', desde);
+      if (hasta) qs.set('hasta', hasta);
+      return api.get(`/api/disponibilidad/metricas?${qs.toString()}`);
+    },
     []
   );
 

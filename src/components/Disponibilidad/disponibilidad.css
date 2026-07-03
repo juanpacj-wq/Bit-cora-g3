@@ -49,6 +49,9 @@
 .disp-root .topbar h1{font-size:20px;color:var(--ink-dark);font-weight:700}
 .disp-root .topbar .sub{font-size:12px;color:var(--muted);margin-top:2px}
 .disp-root .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.disp-root .yearsel{display:inline-flex;align-items:center;gap:7px;background:#fff;border:1px solid var(--line);border-radius:9px;padding:0 10px;height:38px;box-shadow:var(--shadow);color:var(--ink-dark);cursor:pointer}
+.disp-root .yearsel svg{width:15px;height:15px;color:var(--ink);flex-shrink:0}
+.disp-root .yearsel select{border:none;background:transparent;font-family:inherit;font-size:12px;font-weight:600;color:var(--ink-dark);cursor:pointer;outline:none;padding:2px 2px 2px 0}
 .disp-root .seg{display:flex;background:#fff;border:1px solid var(--line);border-radius:9px;padding:3px;box-shadow:var(--shadow)}
 .disp-root .seg-item{padding:6px 14px;font-size:12px;font-weight:600;border-radius:7px;color:var(--muted);cursor:pointer;border:none;background:transparent}
 .disp-root .seg-item.active{background:var(--green);color:#fff}
@@ -139,6 +142,13 @@
 .disp-root .bdg-res{background:var(--blue)}
 .disp-root .bdg-ind{background:var(--red)}
 .disp-root .bdg-mant{background:var(--amber)}
+
+/* buscador de detalle en el header del historial */
+.disp-root .hist-head-right{display:flex;align-items:center;gap:12px}
+.disp-root .hist-search{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:0 9px;height:32px}
+.disp-root .hist-search svg{width:14px;height:14px;color:var(--muted);flex-shrink:0}
+.disp-root .hist-search input{border:none;background:transparent;font-family:inherit;font-size:12px;color:var(--ink-dark);outline:none;width:150px}
+.disp-root .hist-search input::placeholder{color:var(--muted)}
 
 /* table scroll container + ver más */
 .disp-root .table-scroll{overflow:auto;flex:1;min-height:0}
