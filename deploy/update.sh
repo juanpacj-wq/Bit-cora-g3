@@ -12,7 +12,7 @@
 set -euo pipefail
 
 APP_DIR=/var/www/bitacora
-BRANCH=sec/audseg-remediation           # rama que sirve producción
+BRANCH=main                             # rama que sirve producción
 export APP_BASE_PATH=/bitacora          # DEBE coincidir con el .env y el nginx
 
 cd "$APP_DIR"
