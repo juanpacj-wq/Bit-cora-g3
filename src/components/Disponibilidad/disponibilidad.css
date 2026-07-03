@@ -49,9 +49,44 @@
 .disp-root .topbar h1{font-size:20px;color:var(--ink-dark);font-weight:700}
 .disp-root .topbar .sub{font-size:12px;color:var(--muted);margin-top:2px}
 .disp-root .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.disp-root .yearsel{display:inline-flex;align-items:center;gap:7px;background:#fff;border:1px solid var(--line);border-radius:9px;padding:0 10px;height:38px;box-shadow:var(--shadow);color:var(--ink-dark);cursor:pointer}
-.disp-root .yearsel svg{width:15px;height:15px;color:var(--ink);flex-shrink:0}
-.disp-root .yearsel select{border:none;background:transparent;font-family:inherit;font-size:12px;font-weight:600;color:var(--ink-dark);cursor:pointer;outline:none;padding:2px 2px 2px 0}
+/* selector de AÑO custom (YearDropdown) — trigger pill + popover redondeado */
+.disp-root .yeardd{position:relative}
+.disp-root .yeardd-trigger{
+  display:inline-flex;align-items:center;gap:8px;min-width:120px;height:38px;padding:0 12px;
+  background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);
+  color:var(--ink-dark);font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;
+  transition:border-color .16s ease,box-shadow .16s ease;
+}
+.disp-root .yeardd-trigger:hover{border-color:var(--green)}
+.disp-root .yeardd.open .yeardd-trigger{border-color:var(--green);box-shadow:0 0 0 3px rgba(22,180,134,.15)}
+.disp-root .yeardd-trigger svg{width:15px;height:15px;flex-shrink:0}
+.disp-root .yeardd-cal{color:var(--green-deep)}
+.disp-root .yeardd-label{flex:1;text-align:left;font-variant-numeric:tabular-nums}
+.disp-root .yeardd-caret{color:var(--muted);transition:transform .18s ease}
+.disp-root .yeardd.open .yeardd-caret{transform:rotate(180deg)}
+
+.disp-root .yeardd-menu{
+  position:absolute;top:calc(100% + 6px);right:0;z-index:40;
+  min-width:150px;max-height:288px;overflow-y:auto;padding:6px;
+  background:#fff;border:1px solid var(--line);border-radius:12px;
+  box-shadow:0 14px 34px rgba(40,90,100,.18);
+  animation:yearddIn .14s ease-out;
+}
+@keyframes yearddIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.disp-root .yeardd-item{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;
+  padding:9px 12px;border:none;border-radius:8px;background:transparent;
+  font-family:inherit;font-size:13px;font-weight:600;color:var(--ink);cursor:pointer;text-align:left;
+  font-variant-numeric:tabular-nums;transition:background .12s ease,color .12s ease;
+}
+.disp-root .yeardd-item:hover{background:rgba(22,180,134,.10);color:var(--ink-dark)}
+.disp-root .yeardd-item.active{background:var(--green);color:#fff}
+.disp-root .yeardd-item.active:hover{background:var(--green-deep)}
+.disp-root .yeardd-check{width:15px;height:15px;flex-shrink:0}
+/* scrollbar fino para el menú */
+.disp-root .yeardd-menu::-webkit-scrollbar{width:8px}
+.disp-root .yeardd-menu::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px;border:2px solid #fff}
+.disp-root .yeardd-menu::-webkit-scrollbar-track{background:transparent}
 .disp-root .seg{display:flex;background:#fff;border:1px solid var(--line);border-radius:9px;padding:3px;box-shadow:var(--shadow)}
 .disp-root .seg-item{padding:6px 14px;font-size:12px;font-weight:600;border-radius:7px;color:var(--muted);cursor:pointer;border:none;background:transparent}
 .disp-root .seg-item.active{background:var(--green);color:#fff}

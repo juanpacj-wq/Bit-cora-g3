@@ -1,14 +1,20 @@
 /**
  * Mapeo App Role de Entra ID → cargo local (lov_bit.cargo.nombre) + resolución por precedencia.
  *
- * Los 12 App Roles (claim `roles`, por su `value`) calzan 1:1 con los 12 cargos sembrados en
+ * Los 13 App Roles (claim `roles`, por su `value`) calzan 1:1 con los 13 cargos sembrados en
  * db.js. Como la selección manual de cargo se ELIMINÓ, cuando el token trae varios roles (un
  * usuario en varios grupos) elegimos UNO por jerarquía fija (PRECEDENCE): gana la mayor
  * capacidad. El set completo de roles se registra aparte para auditoría.
+ *
+ * ADMINISTRADOR_DEBUGGING (D-039): rol de administrador/debugging para pruebas funcionales. NO es
+ * un superusuario por código — se modela como un cargo real más ('Administrador y Debugging') que
+ * tiene todos los permisos por la MISMA matriz data-driven que el resto (blindado ante auditoría:
+ * cero bypass, toda acción atribuida). Gana por precedencia sobre cualquier otro rol.
  */
 
 // value de App Role → nombre EXACTO del cargo en lov_bit.cargo (MERGE en db.js).
 export const ROLE_TO_CARGO = {
+  ADMINISTRADOR_DEBUGGING:       'Administrador y Debugging',
   GERENTE_PRODUCCION:            'Gerente de Producción',
   JEFE_DE_TURNO:                 'Ingeniero Jefe de Turno',
   INGENIERO_OPERACION:           'Ingeniero de Operación',
@@ -23,10 +29,12 @@ export const ROLE_TO_CARGO = {
   COORDINADOR_CARBON_MAQUINARIA: 'Coordinador de carbón y maquinaria',
 };
 
-// Jerarquía: a mayor capacidad, mayor precedencia. Gerente (solo lectura) queda al final para
-// que cualquier rol operativo gane si coexisten. Entre operadores el orden es indistinto (un
-// usuario rara vez tiene dos roles de operador), pero se fija para que la elección sea determinista.
+// Jerarquía: a mayor capacidad, mayor precedencia. Admin (acceso total) va PRIMERO para que gane
+// si coexiste con cualquier otro rol. Gerente (solo lectura) queda al final para que cualquier rol
+// operativo gane si coexisten. Entre operadores el orden es indistinto (un usuario rara vez tiene
+// dos roles de operador), pero se fija para que la elección sea determinista.
 export const PRECEDENCE = [
+  'ADMINISTRADOR_DEBUGGING',
   'JEFE_DE_TURNO',
   'INGENIERO_OPERACION',
   'INGENIERO_QUIMICO',

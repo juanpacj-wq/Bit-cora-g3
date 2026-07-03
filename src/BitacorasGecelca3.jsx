@@ -1284,9 +1284,24 @@ function GrillaRegistros({
 
   const ocultos = registros.length - regs.length;
 
+  // UX: al crear un registro nuevo ("+ Nuevo Registro") el borrador se agrega al final de la lista
+  // (ordenada por fecha asc, y el borrador nace a la hora actual → último). Si el scroll estaba
+  // arriba, el nuevo registro quedaba fuera de vista. Bajamos al fondo SOLO cuando aparece un
+  // borrador nuevo (por su `_localId`), no en cada edición/guardado.
+  const scrollRef = useRef(null);
+  const draftId = regs.find((r) => !r.registro_id)?._localId || null;
+  const prevDraftId = useRef(null);
+  useEffect(() => {
+    if (draftId && draftId !== prevDraftId.current) {
+      const el = scrollRef.current;
+      if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    }
+    prevDraftId.current = draftId;
+  }, [draftId]);
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="flex-1 overflow-auto px-6 py-4">
+      <div ref={scrollRef} className="flex-1 overflow-auto px-6 py-4">
         {hayFiltrosActivos && ocultos > 0 && regs.length > 0 && (
           <div className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg border border-amber-200 bg-amber-50 text-xs text-amber-700">
             <AlertTriangle size={14} className="shrink-0" />
@@ -1382,6 +1397,10 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
   const fechaEventoDia = toBogotaDate(reg.fecha_evento);
   const fechaSospechosa = !!fechaEventoDia
     && Math.abs(new Date(fechaEventoDia) - new Date(getTodayBogota())) > 7 * 86_400_000;
+  // El turno se auto-sincroniza con la hora al editar el datetime, pero el select permite
+  // sobrescribirlo. Si quedó incoherente con la hora, lo marcamos (y el guardado lo bloquea).
+  const turnoNoCoincide = reg.turno != null
+    && Number(reg.turno) !== turnoFromFechaLocal(toBogotaLocal(reg.fecha_evento));
   const hasExtras = camposExtraDef.length > 0;
   const camposExtraValores = parseCamposExtra(reg.campos_extra);
   const updateCampoExtra = (campo, valorRaw, tipo) => {
@@ -1437,11 +1456,20 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
               <select
                 value={reg.turno || 1}
                 onChange={(e) => onUpdate("turno", parseInt(e.target.value, 10))}
-                className="w-full px-3 py-1.5 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-white"
+                className={`w-full px-3 py-1.5 rounded-lg border text-sm focus:outline-none focus:ring-2 bg-white ${
+                  turnoNoCoincide
+                    ? "border-red-400 bg-red-50 focus:ring-red-400"
+                    : "border-gray-300 focus:ring-emerald-400"
+                }`}
               >
                 <option value={1}>Turno 1</option>
                 <option value={2}>Turno 2</option>
               </select>
+              {turnoNoCoincide && (
+                <p className="text-[11px] text-red-600 leading-tight">
+                  La hora no coincide con el turno.
+                </p>
+              )}
             </div>
           ) : (
             <div>
@@ -1860,6 +1888,12 @@ export default function App() {
   const handleSaveRegistro = useCallback(async (reg) => {
     if (!reg.tipo_evento_id) { showToast("Selecciona un tipo de evento", "error"); return false; }
     if (!reg.detalle || !reg.detalle.trim()) { showToast("Escribe una descripción", "error"); return false; }
+    // El turno debe corresponder a la hora del evento (T1 [06,17], T2 [18,05]). El select permite
+    // sobrescribir el turno manualmente; acá bloqueamos guardar si quedó incoherente con la hora.
+    if (Number(reg.turno) !== turnoFromFechaLocal(toBogotaLocal(reg.fecha_evento))) {
+      showToast("La hora no coincide con el turno", "error");
+      return false;
+    }
 
     try {
       const fechaEventoIso = bogotaLocalToIso(reg.fecha_evento);

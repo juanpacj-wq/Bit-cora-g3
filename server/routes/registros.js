@@ -293,6 +293,12 @@ router.post('/', asyncH(async (req, res) => {
   if (!turno) {
     return sendJSON(res, 400, { error: 'turno es requerido' });
   }
+  // El turno debe corresponder a la hora del evento (T1 [06,17], T2 [18,05]). En MAND se deriva
+  // del periodo; solo validamos el camino no-MAND que recibe el turno del body (defensa en
+  // profundidad: el front ya lo bloquea, pero la BD es la fuente de verdad).
+  if (!isMAND && parseInt(turno, 10) !== turnoFromPeriodo(periodoFromFechaBogota(fecha_evento))) {
+    return sendJSON(res, 400, { error: 'La hora no coincide con el turno', codigo: 'turno_no_coincide' });
+  }
 
   // F6: validación funcionariocnd para MAND/Autorización.
   if (isMAND && teRow.tipo_evento_nombre === 'Autorización') {
@@ -538,7 +544,7 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
     .input('registro_id', sql.Int, registro_id)
     .query(`
       SELECT ra.registro_id, ra.estado, ra.bitacora_id, ra.planta_id, ra.creado_por,
-             ra.fecha_evento, ra.fecha_fin_estado, ra.campos_extra, b.codigo AS bitacora_codigo
+             ra.fecha_evento, ra.turno, ra.fecha_fin_estado, ra.campos_extra, b.codigo AS bitacora_codigo
       FROM bitacora.registro_activo ra
       INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
       WHERE ra.registro_id = @registro_id
@@ -614,6 +620,15 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
   }
 
   // F6: turno NO se reactualiza en PUT; si llega en el body se respeta.
+  // El turno efectivo debe corresponder a la hora efectiva del evento (mismo criterio que el POST).
+  // Solo no-MAND (MAND deriva el turno del periodo). Con COALESCE, "efectivo" = body ?? valor actual.
+  if (!isMAND) {
+    const turnoEfectivo = turno != null ? parseInt(turno, 10) : reg.turno;
+    const fechaEfectiva = fecha_evento ? new Date(fecha_evento) : reg.fecha_evento;
+    if (fechaEfectiva && turnoEfectivo !== turnoFromPeriodo(periodoFromFechaBogota(fechaEfectiva))) {
+      return sendJSON(res, 400, { error: 'La hora no coincide con el turno', codigo: 'turno_no_coincide' });
+    }
+  }
   const transaction = new sql.Transaction(db);
   await transaction.begin();
   try {

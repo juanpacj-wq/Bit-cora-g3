@@ -695,9 +695,13 @@ export async function initDB() {
   // Cargos definitivos según LISTADO DE PERSONAL 2026.xlsx.
   // puede_cerrar_turno=1 para Ingeniero Jefe de Turno e Ingeniero de Operación (mismo poder operativo,
   // roles distintos en UI y snapshots).
+  // D-039: 'Administrador y Debugging' (rol ADMIN, App Role ADMINISTRADOR_DEBUGGING) con
+  // puede_cerrar_turno=1 y solo_lectura=0; sus permisos de bitácora los da la matriz de abajo
+  // (puede_ver=1 y puede_crear=1 en todas). No es un superusuario por código.
   await db.request().batch(`
     MERGE lov_bit.cargo AS t
     USING (VALUES
+      ('Administrador y Debugging',            0, 1),
       ('Gerente de Producción',                1, 0),
       ('Ingeniero Jefe de Turno',              0, 1),
       ('Ingeniero de Operación',               0, 1),
@@ -896,6 +900,8 @@ export async function initDB() {
     ;WITH matriz AS (
       SELECT c.cargo_id, b.bitacora_id,
         CASE
+          -- D-039: Administrador y Debugging ve TODO (va primero para ganar sobre cualquier cláusula).
+          WHEN c.nombre = 'Administrador y Debugging' THEN 1
           -- F3: CIET es read-only para TODOS los cargos (los registros se generan automáticamente).
           WHEN b.codigo = 'CIET' THEN 1
           -- F6: MAND la ve TODO el mundo (la fila operativa la usan JdT/IngOp pero el resto
@@ -924,6 +930,8 @@ export async function initDB() {
           ELSE 0
         END AS puede_ver,
         CASE
+          -- D-039: Administrador y Debugging crea en TODO (va primero para ganar sobre cualquier cláusula).
+          WHEN c.nombre = 'Administrador y Debugging' THEN 1
           -- F3: nadie crea en CIET (registros automáticos).
           WHEN b.codigo = 'CIET' THEN 0
           -- F6: en MAND solo crean JdT e IngOp (preguntas.md punto 1).
@@ -1081,9 +1089,11 @@ export async function initDB() {
       SELECT bitacora_id, 'Deshacer disponibilidad', 3 FROM lov_bit.bitacora WHERE codigo='CIET';
   `);
 
-  // F12.A6: DISP visible para TODOS los cargos; creación solo para JdT/IngOp. La matriz
-  // INSERT de arriba ya cubre los cargos sembrados, pero forzamos defensivamente para
-  // sobrevivir cargos nuevos o renumeraciones — el match es por nombre, no por id.
+  // F12.A6: DISP visible para TODOS los cargos; creación solo para JdT/IngOp (+ Administrador y
+  // Debugging, D-039). La matriz INSERT de arriba ya cubre los cargos sembrados, pero forzamos
+  // defensivamente para sobrevivir cargos nuevos o renumeraciones — el match es por nombre, no por id.
+  // OJO: este UPDATE re-computa puede_crear de TODA fila DISP, así que cualquier cargo que deba
+  // crear en DISP debe estar en el IN de abajo, no solo en la matriz.
   await db.request()
     .input('bitacora_id', sql.Int, DISP_BITACORA_ID)
     .query(`
@@ -1097,7 +1107,7 @@ export async function initDB() {
 
       UPDATE p
       SET puede_ver   = 1,
-          puede_crear = CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación')
+          puede_crear = CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación','Administrador y Debugging')
                              THEN 1 ELSE 0 END
       FROM lov_bit.cargo_bitacora_permiso p
       INNER JOIN lov_bit.cargo c ON c.cargo_id = p.cargo_id
