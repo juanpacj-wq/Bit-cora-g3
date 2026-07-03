@@ -73,6 +73,9 @@ export function useDisponibilidad(dispBitacoraId) {
     []
   );
 
+  // Años disponibles para el filtro de AÑO (rango contiguo desde el primer registro DISP).
+  const getAnios = useCallback(() => api.get('/api/disponibilidad/anios'), []);
+
   const crear = useCallback(
     ({ planta_id, evento, codigo, fecha_inicio_estado, detalle }) => {
       if (!dispBitacoraId) throw new Error('bitacora_id de DISP no resuelto');
@@ -114,7 +117,7 @@ export function useDisponibilidad(dispBitacoraId) {
   );
 
   return useMemo(
-    () => ({ getEstado, getMetricas, crear, editar, deshacer }),
-    [getEstado, getMetricas, crear, editar, deshacer]
+    () => ({ getEstado, getMetricas, getAnios, crear, editar, deshacer }),
+    [getEstado, getMetricas, getAnios, crear, editar, deshacer]
   );
 }
