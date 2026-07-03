@@ -33,12 +33,34 @@ import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
 import { asset } from "./config/paths";
 
 const COLORS = {
-  greenPrimary: "#31a354", greenDark: "#006f36",
+  greenPrimary: "#31a354", greenDark: "#006f36", greenDeepest: "#011a0e",
   blueDark: "#003566", blueDeep: "#001d3d", blueDeepest: "#011027",
   red: "#DC3545", yellow: "#FFC107",
   grayLight: "#f8f9fa", grayMid: "#e9ecef", grayBorder: "#dee2e6",
   grayText: "#6c757d", white: "#ffffff",
 };
+
+// Tema visual del header por unidad: azul = GEC3, verde = GEC32, para que sea obvio en qué
+// unidad se hizo login. En tema verde los acentos (badge de turno, avatar) se invierten a
+// azul — sobre el gradiente verde los acentos verdes se camuflan. Clases Tailwind como
+// literales completos (requisito del JIT). Fallback azul para plantas desconocidas (TST).
+const TEMA_UNIDAD = {
+  GEC3: {
+    gradiente: `linear-gradient(90deg, ${COLORS.blueDeepest} 0%, ${COLORS.blueDark} 100%)`,
+    textoSuave: "text-blue-300",
+    textoReloj: "text-blue-200",
+    badgeBg: COLORS.greenPrimary,
+    avatarBg: COLORS.greenDark,
+  },
+  GEC32: {
+    gradiente: `linear-gradient(90deg, ${COLORS.greenDeepest} 0%, ${COLORS.greenDark} 100%)`,
+    textoSuave: "text-emerald-300",
+    textoReloj: "text-emerald-200",
+    badgeBg: COLORS.blueDark,
+    avatarBg: COLORS.blueDeep,
+  },
+};
+const temaUnidad = (plantaId) => TEMA_UNIDAD[plantaId] || TEMA_UNIDAD.GEC3;
 
 const ICON_MAP = {
   Activity, Settings, Flame, Droplets, Gauge, Zap, Cpu,
@@ -529,6 +551,7 @@ function HeaderMenu({ vista, onDashboard, onToggleVista, onCambiarUnidad, onLogo
 }
 
 function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista, onDashboard, onCambiarUnidad }) {
+  const tema = temaUnidad(sesion?.planta_id);
   const [reloj, setReloj] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
@@ -595,22 +618,22 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
 
   return (
     <header className="text-white px-6 py-3 flex items-center justify-between shadow-lg relative z-10"
-      style={{ background: `linear-gradient(90deg, ${COLORS.blueDeepest} 0%, ${COLORS.blueDark} 100%)` }}>
+      style={{ background: tema.gradiente }}>
       <div className="flex items-center gap-4">
         <img src={asset("/G3 blanco.png")} alt="Gecelca3" className="h-10" onError={(e) => { e.target.style.display = "none"; }} />
         <div>
           <h1 className="text-lg font-bold tracking-tight">Bitácoras de Planta</h1>
-          <p className="text-xs text-blue-300 opacity-80">Sistema de Registro Operativo</p>
+          <p className={`text-xs ${tema.textoSuave} opacity-80`}>Sistema de Registro Operativo</p>
         </div>
       </div>
 
       <div className="hidden md:flex items-center gap-6 text-sm">
-        <div className="flex items-center gap-2 text-blue-200">
+        <div className={`flex items-center gap-2 ${tema.textoReloj}`}>
           <Clock size={16} />
           <span className="capitalize">{fechaStr}</span>
           <span className="font-mono font-bold text-white">{horaStr}</span>
         </div>
-        <span className="px-3 py-1 rounded-lg text-xs font-bold" style={{ backgroundColor: COLORS.greenPrimary }}>
+        <span className="px-3 py-1 rounded-lg text-xs font-bold" style={{ backgroundColor: tema.badgeBg }}>
           {getTurnoLabel(sesion?.turno)}
         </span>
       </div>
@@ -698,10 +721,10 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
 
         <div className="text-right hidden sm:block">
           <div className="text-sm font-semibold">{user.nombre_completo}</div>
-          <div className="text-xs text-blue-300">{cargoNombre} — {plantaNombre}</div>
+          <div className={`text-xs ${tema.textoSuave}`}>{cargoNombre} — {plantaNombre}</div>
         </div>
         <div className="w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold"
-          style={{ backgroundColor: COLORS.greenDark }}>
+          style={{ backgroundColor: tema.avatarBg }}>
           {iniciales(user.nombre_completo)}
         </div>
         <HeaderMenu
