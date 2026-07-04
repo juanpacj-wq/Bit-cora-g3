@@ -589,6 +589,50 @@ extiende igual cuando exista. (d) Contrato nuevo = **Contrato 3** en
 
 ---
 
+## D-044 — Blindaje de `conformacion_turno` contra usuarios sintéticos (`es_sintetico`)
+
+**Fecha:** 2026-07-04
+
+**Contexto:** la tabla `bitacora.conformacion_turno` acumulaba usuarios de test (`test_jdt`,
+`test_ingop`, `test_opcarbon`, `test_coord_cym`, …) en el histórico **inmutable** de plantas
+**reales** (GEC3/GEC32) y de la planta de test (TST). Causa raíz: la suite corre contra la BD
+productiva (D-030) y sus fixtures escriben sesiones directamente en `bitacora.sesion_activa` sobre
+GEC3 (`helpers.js` defaultea `planta='GEC3'`; `consumos_combustible`/`rol_coordinador` la
+hardcodean). `buildConformacionSnapshot` fotografía **toda** `sesion_activa` de la ventana sin
+distinguir real de fixture; el sweeper (cada 60s) y el catchup de arranque (7 días) la disparan de
+continuo, así que cualquier sesión de test viva al cierre de un turno real quedaba grabada para
+siempre (PK idempotente). La limpieza (`cleanupTestRegistros`) sólo cubría 4 de los 6 usuarios test
+y perdía la carrera contra el sweeper. (La "diferencia de 1 día" entre `fecha_operativa` y
+`snapshot_en` en filas T2 **no** es bug: T2 cruza medianoche, así que `fecha_operativa`=día de
+inicio (§4.7) y el snapshot cae el día calendario siguiente — inevitable en cualquier convención.)
+
+**Decisión:** columna `lov_bit.usuario.es_sintetico BIT NOT NULL DEFAULT 0` como **chokepoint
+blindado**. (1) Migración idempotente (`db.js`, `migrateSnapshots`) + seed en cada arranque:
+`UPDATE es_sintetico=1 WHERE username LIKE 'test\_%'` (convención dura: todo fixture nace
+`test_*`). (2) `buildConformacionSnapshot` filtra `WHERE (@incluir_sinteticos=1 OR
+u.es_sintetico=0)`; **producción NUNCA pasa `incluirSinteticos`** → default `false` → sintéticos
+excluidos siempre, viva donde viva la sesión. El flag es un escape hatch **exclusivo de los unit
+tests** del agregado puro (duración/ventana T2/`fin_inferido`), custodiado por un guardrail
+estático que falla si algún archivo de producción lo activa. (3) Reparación one-shot idempotente
+(`db.js`, guardada por `migracion_aplicada 'D043.repair'`): purga de `conformacion_turno` las filas
+sintéticas y las de planta TST ya grabadas. (4) `cleanupTestRegistros` limpia por `es_sintetico=1`
+(cubre los 6 usuarios). (5) Se **conserva** la convención de `fecha_operativa`=día de inicio para T2
+(sin migración de datos).
+
+**Consecuencias:** (a) es estructuralmente imposible que un usuario de test contamine la
+conformación real, incluso si un fixture se desvía a GEC3/GEC32 — no depende de disciplina de
+limpieza. (b) La reparación borra la contaminación histórica una sola vez y queda auditable.
+(c) Regresión codificada: el test E2E del trigger ahora **asegura la exclusión** (antes aseguraba
+la inclusión). (d) Fix **backend-only** por decisión del owner; no existe UI que consuma la tabla
+(se lee cruda) — la legibilidad de T2 (renderizar sólo columnas `*_bogota`, rotular el cruce de
+medianoche) queda como fase de front pendiente. (e) **Pendiente/hallazgo lateral:** `setupOpCarbon`
+y `setupCoordinador` hardcodean `turno:1` (deberían usar `getTurnoColombia()` como `setupSessions`)
+→ flakiness 401 dependiente de la hora; y mover esos seeders a `TEST_PLANTA` (B1, verificado sin
+acople sesión↔body) es higiene D-030 aún deseable aunque el chokepoint ya cierra el bug. Cross-ref:
+[[D-025]] (conformación), [[D-030]] (planta de test), [[D-041]] (misma clase: suite vs BD prod).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

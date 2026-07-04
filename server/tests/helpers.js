@@ -195,11 +195,14 @@ export async function cleanupTestRegistros() {
     UPDATE bitacora.sesion_activa SET activa = 0
     WHERE usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE username IN (${usernames}))
   `);
-  // conformacion-turno-2026-05: snapshots seedeados por los tests E2E/builder. Limpiar por
-  // usuario_id porque la PK incluye fecha/planta/turno y los tests usan fechas históricas.
+  // conformacion-turno-2026-05 + D-044: snapshots seedeados por los tests E2E/builder. Limpiar por
+  // es_sintetico=1 (no por los 4 usernames de TEST_USERS): cubre TAMBIÉN a test_opcarbon y
+  // test_coord_cym, que otros suites siembran y que la versión vieja dejaba filtrados para siempre
+  // en conformacion_turno. La PK incluye fecha/planta/turno y los tests usan fechas históricas, así
+  // que se borra por usuario. es_sintetico jamás matchea un operador real (D-044).
   await db.request().query(`
     DELETE FROM bitacora.conformacion_turno
-    WHERE usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE username IN (${usernames}))
+    WHERE usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE es_sintetico = 1)
   `);
 }
 

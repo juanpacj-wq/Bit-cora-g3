@@ -330,6 +330,18 @@ async function migrateSchemaV2(db) {
     IF COL_LENGTH('lov_bit.usuario','azure_tid') IS NULL
       ALTER TABLE lov_bit.usuario ADD azure_tid VARCHAR(64) NULL;
   `);
+
+  // D-044: marca de identidad SINTÉTICA (fixture de test). La suite corre contra la BD productiva
+  // (D-030) y siembra usuarios test_* con sesiones sobre plantas reales; el builder de
+  // conformación (que fotografía TODA sesion_activa de la ventana) los absorbía en el histórico
+  // inmutable de GEC3/GEC32. es_sintetico es el chokepoint blindado: el builder excluye
+  // es_sintetico=1, así que ninguna sesión de prueba puede contaminar la conformación real,
+  // viva donde viva la sesión. Se seedea abajo por convención de username (test\_%).
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.usuario','es_sintetico') IS NULL
+      ALTER TABLE lov_bit.usuario ADD es_sintetico BIT NOT NULL
+        CONSTRAINT DF_usuario_es_sintetico DEFAULT 0;
+  `);
   await db.request().batch(`
     IF NOT EXISTS (
       SELECT 1 FROM sys.indexes WHERE name='UQ_usuario_oid' AND object_id=OBJECT_ID('lov_bit.usuario')
@@ -2145,6 +2157,36 @@ export async function initDB() {
   // titular vigente es el row Entra del UPN configurado.
   await enforceSingletonFlag(db, 'es_jefe_planta', JEFE_PLANTA_UPNS, 'emunoz');
   await enforceSingletonFlag(db, 'es_jdt_default', JDT_DEFAULT_UPNS, 'ofedullo');
+
+  // D-044: seed idempotente del flag sintético. Convención dura: todo usuario de fixture nace con
+  // username `test_*` (test_jdt/ingop/gerente/ingquim/opcarbon/coord_cym). Corre en CADA arranque
+  // (barato, indexado por username) para capturar usuarios test recién sembrados por la suite.
+  // ESCAPE '\' porque '_' es comodín de un carácter en LIKE de T-SQL.
+  await db.request().batch(`
+    UPDATE lov_bit.usuario SET es_sintetico = 1
+    WHERE es_sintetico = 0 AND username LIKE 'test\\_%' ESCAPE '\\';
+  `);
+
+  // D-044: reparación one-shot del histórico ya contaminado. Purga de bitacora.conformacion_turno
+  // las filas de usuarios sintéticos y las de la planta de test (TST) que el builder viejo grabó
+  // sobre GEC3/GEC32/TST antes del blindaje. Guardada por migracion_aplicada → corre una sola vez
+  // y queda auditable. La no-recurrencia la garantiza el filtro es_sintetico=0 del builder.
+  try {
+    await db.request().batch(`
+      IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='D044.repair')
+      BEGIN
+        DELETE ct FROM bitacora.conformacion_turno ct
+        WHERE ct.planta_id = '${TEST_PLANTA_ID}'
+           OR EXISTS (
+             SELECT 1 FROM lov_bit.usuario u
+             WHERE u.usuario_id = ct.usuario_id AND u.es_sintetico = 1
+           );
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('D044.repair');
+      END
+    `);
+  } catch (err) {
+    console.error('[initDB D-044 repair] fallo (no bloqueante):', err.message);
+  }
 
   // Q3=d conformacion-turno-2026-05: catchup al arranque. Detecta (planta, turno, fecha_operativa)
   // de los últimos 7 días Bogotá que NO tengan snapshot en conformacion_turno, y para cada uno

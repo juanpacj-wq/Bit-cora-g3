@@ -9,13 +9,19 @@ function fechaRefBogotaMediodia(fecha_operativa) {
   return new Date(`${fecha_operativa}T12:00:00.000-05:00`);
 }
 
-export async function buildConformacionSnapshot(pool, { fecha_operativa, planta_id, turno }) {
+// D-044: `incluirSinteticos` es un escape hatch EXCLUSIVO de los unit tests del agregado puro
+// (duración, ventana T2, fin_inferido). Producción NUNCA lo pasa → default false → los usuarios
+// sintéticos (es_sintetico=1, fixtures test_*) quedan SIEMPRE excluidos del snapshot real. Un
+// guardrail estático (describe 'D-044 blindaje' en conformacion_turno.test.js) falla si algún
+// archivo de producción lo setea.
+export async function buildConformacionSnapshot(pool, { fecha_operativa, planta_id, turno, incluirSinteticos = false }) {
   const fechaRef = fechaRefBogotaMediodia(fecha_operativa);
   const { inicio: ventanaInicio, fin: ventanaFin } = ventanaTurno(turno, fechaRef);
 
   const r = await pool.request()
     .input('planta_id', sql.VarChar(10), planta_id)
     .input('turno', sql.TinyInt, turno)
+    .input('incluir_sinteticos', sql.Bit, incluirSinteticos ? 1 : 0)
     .input('ventana_inicio', sql.DateTime2, ventanaInicio)
     .input('ventana_fin', sql.DateTime2, ventanaFin)
     .query(`
@@ -54,6 +60,12 @@ export async function buildConformacionSnapshot(pool, { fecha_operativa, planta_
       FROM SesionesEnTurno st
       INNER JOIN lov_bit.usuario u ON u.usuario_id = st.usuario_id
       INNER JOIN lov_bit.cargo   c ON c.cargo_id   = st.cargo_id
+      -- D-044: chokepoint blindado. La suite corre contra la BD productiva (D-030) y siembra
+      -- usuarios test_* con sesion_activa sobre plantas reales; sin este filtro el builder los
+      -- fotografiaba en el histórico inmutable de GEC3/GEC32. Excluye es_sintetico=1 SIEMPRE en
+      -- producción (@incluir_sinteticos=0), independiente de la planta. Solo los unit tests del
+      -- agregado puro pasan @incluir_sinteticos=1. NUNCA quitar este predicado.
+      WHERE (@incluir_sinteticos = 1 OR u.es_sintetico = 0)
       GROUP BY st.usuario_id, u.nombre_completo, st.cargo_id, c.nombre
     `);
 

@@ -830,7 +830,8 @@ ALTER TABLE bitacora.conformacion_turno ADD snapshot_en_bogota   AS DATEADD(HOUR
 
 **Semántica y reglas de poblado:**
 
-- **`fecha_operativa`** = fecha Bogotá del **inicio** del turno. Para T2 (que cruza medianoche) se usa el día del inicio (18:00 Bogotá), no el del fin (05:59 del día siguiente).
+- **`fecha_operativa`** = fecha Bogotá del **inicio** del turno. Para T2 (que cruza medianoche) se usa el día del inicio (18:00 Bogotá), no el del fin (05:59 del día siguiente). **Corolario (D-044):** en filas T2, `snapshot_en` y `fin_sesion` caen el día calendario SIGUIENTE a `fecha_operativa` — no es un error, es inherente al turno noche (ninguna convención puede hacer coincidir inicio, fin y snapshot en un turno que cruza medianoche). Las columnas crudas son UTC; presentar siempre `*_bogota`.
+- **Blindaje anti-sintéticos (D-044):** el builder excluye `lov_bit.usuario.es_sintetico=1` (columna `BIT NOT NULL DEFAULT 0`, migración en `db.js::migrateSnapshots`; seed idempotente `UPDATE es_sintetico=1 WHERE username LIKE 'test\_%'`). Evita que los fixtures de test (la suite corre contra la BD prod, D-030) queden grabados en el histórico inmutable de GEC3/GEC32. El parámetro `incluirSinteticos` de `buildConformacionSnapshot` es un escape hatch **solo para unit tests**; producción usa el default (`false`).
 - **Filtro del builder** (`server/utils/conformacion-snapshot.js::buildConformacionSnapshot`): una sesión cuenta para el turno X si `sa.inicio_sesion BETWEEN ventana_inicio AND ventana_fin` del turno X (intervalo medio-abierto). Derivación: el modelo `sesion_activa.turno` se fija al login (D-003), por lo que "ser del turno X" = "haber arrancado en la ventana de X". El intento inicial de filtrar por solape produjo duraciones absurdas en BD productiva (jefes con sesiones eternas + sesiones limbo).
 - **`fin_sesion`**:
   - Logout explícito → `cerrada_en` directo, `fin_inferido=0`.

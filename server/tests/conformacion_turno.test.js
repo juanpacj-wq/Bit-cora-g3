@@ -1,5 +1,8 @@
 import { test, describe, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import {
@@ -92,6 +95,7 @@ describe('buildConformacionSnapshot', () => {
     const db = await getDB();
     const filas = await buildConformacionSnapshot(db, {
       fecha_operativa: FECHA_T1, planta_id: PLANTA_ID, turno: 1,
+      incluirSinteticos: true, // D-044: unit test del agregado puro con usuarios test_* (fixtures)
     });
     assert.deepEqual(filas, []);
   });
@@ -107,6 +111,7 @@ describe('buildConformacionSnapshot', () => {
     const db = await getDB();
     const filas = await buildConformacionSnapshot(db, {
       fecha_operativa: FECHA_T1, planta_id: PLANTA_ID, turno: 1,
+      incluirSinteticos: true, // D-044: unit test del agregado puro con usuarios test_* (fixtures)
     });
     assert.equal(filas.length, 1);
     assert.equal(filas[0].fin_inferido, 0);
@@ -125,6 +130,7 @@ describe('buildConformacionSnapshot', () => {
     const db = await getDB();
     const filas = await buildConformacionSnapshot(db, {
       fecha_operativa: FECHA_T1, planta_id: PLANTA_ID, turno: 1,
+      incluirSinteticos: true, // D-044: unit test del agregado puro con usuarios test_* (fixtures)
     });
     assert.equal(filas.length, 1);
     assert.equal(filas[0].fin_inferido, 1);
@@ -146,6 +152,7 @@ describe('buildConformacionSnapshot', () => {
     const db = await getDB();
     const filas = await buildConformacionSnapshot(db, {
       fecha_operativa: FECHA_T1, planta_id: PLANTA_ID, turno: 1,
+      incluirSinteticos: true, // D-044: unit test del agregado puro con usuarios test_* (fixtures)
     });
     assert.equal(filas.length, 2);
     const cargos = filas.map(f => f.cargo_nombre).sort();
@@ -172,6 +179,7 @@ describe('buildConformacionSnapshot', () => {
     const db = await getDB();
     const filas = await buildConformacionSnapshot(db, {
       fecha_operativa: FECHA_T1, planta_id: PLANTA_ID, turno: 1,
+      incluirSinteticos: true, // D-044: unit test del agregado puro con usuarios test_* (fixtures)
     });
     assert.equal(filas.length, 1);
     assert.equal(filas[0].duracion_min, (4 + 5) * 60);
@@ -193,6 +201,7 @@ describe('buildConformacionSnapshot', () => {
     const db = await getDB();
     const filas = await buildConformacionSnapshot(db, {
       fecha_operativa: FECHA_T2_INICIO, planta_id: PLANTA_ID, turno: 2,
+      incluirSinteticos: true, // D-044: unit test del agregado puro con usuarios test_* (fixtures)
     });
     assert.equal(filas.length, 1);
     assert.equal(filas[0].duracion_min, 8 * 60);
@@ -317,9 +326,13 @@ describe('POST /api/conformacion-turno/trigger', () => {
     assert.equal(r.recordset[0].n, 0, 'no debe haber filas de test users sin sesiones manuales previas');
   });
 
-  test('JdT con sesión de test user → trigger inserta la fila test; segunda call es idempotente', async () => {
+  // D-044 (regresión del blindaje): el trigger es un camino de PRODUCCIÓN (no pasa
+  // incluirSinteticos), así que una sesión de usuario sintético (test_*) en la ventana NO debe
+  // llegar nunca a conformacion_turno de una planta real. Este test codifica el fix: antes, el
+  // builder fotografiaba a los usuarios de test en el histórico inmutable de GEC3/GEC32.
+  test('JdT con sesión de usuario sintético → trigger la EXCLUYE (blindaje D-044)', async () => {
     await insertSesionManual({
-      usuario_id: ctx.usuarios.ingOp.usuario_id,
+      usuario_id: ctx.usuarios.ingOp.usuario_id, // es_sintetico=1 (fixture test_ingop)
       cargo_id: cargoByName['Ingeniero de Operación'],
       turno: 1,
       inicio_iso: VENTANA_T1_INICIO_UTC,
@@ -333,31 +346,88 @@ describe('POST /api/conformacion-turno/trigger', () => {
     assert.equal(r1.status, 200, JSON.stringify(r1.data));
 
     const db = await getDB();
-    const q = `
-      SELECT COUNT(*) AS n, MAX(duracion_min) AS dur FROM bitacora.conformacion_turno
-      WHERE fecha_operativa = @fecha AND turno = 1 AND planta_id = @planta
-        AND usuario_id = @uid
-    `;
     const post1 = await db.request()
       .input('fecha', sql.Date, FECHA_T1)
       .input('planta', sql.VarChar(10), PLANTA_ID)
       .input('uid', sql.Int, ctx.usuarios.ingOp.usuario_id)
-      .query(q);
-    assert.equal(post1.recordset[0].n, 1, 'la fila del test user debe existir tras el primer trigger');
-    assert.equal(post1.recordset[0].dur, 11 * 60);
+      .query(`
+        SELECT COUNT(*) AS n FROM bitacora.conformacion_turno
+        WHERE fecha_operativa = @fecha AND turno = 1 AND planta_id = @planta
+          AND usuario_id = @uid
+      `);
+    assert.equal(post1.recordset[0].n, 0,
+      'BLINDAJE: un usuario sintético NUNCA debe aparecer en la conformación real');
+  });
+});
 
-    // Segunda call — debe ser idempotente (no duplica)
-    const r2 = await call('POST', '/api/conformacion-turno/trigger', {
-      sesion_id: ctx.sesiones.jdt,
-      body: { fecha_operativa: FECHA_T1, planta_id: PLANTA_ID, turno: 1 },
+// D-044 — guardrails ESTRUCTURALES del blindaje contra usuarios sintéticos (fixtures test_*).
+// Viven en este mismo archivo (no en uno separado) a propósito: node --test corre los archivos en
+// PARALELO y dos suites que tocan los mismos usuarios test_* + conformacion_turno se pisan; aquí
+// comparten el before()/after() serial de arriba. Cubren los invariantes que una auditoría exige:
+// el escape hatch no vive en producción, el seed marca todos los fixtures y a ningún real, y el
+// builder por default excluye sintéticos.
+describe('D-044 blindaje anti-sintéticos', () => {
+  const SERVER_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+  function* archivosJs(dir) {
+    for (const nombre of readdirSync(dir)) {
+      if (nombre === 'tests' || nombre === 'node_modules') continue; // tests SÍ usan el hatch
+      const ruta = join(dir, nombre);
+      if (statSync(ruta).isDirectory()) yield* archivosJs(ruta);
+      else if (nombre.endsWith('.js')) yield ruta;
+    }
+  }
+
+  test('GUARDRAIL estático: ningún archivo de producción activa incluirSinteticos', () => {
+    const ofensores = [];
+    for (const ruta of archivosJs(SERVER_DIR)) {
+      const src = readFileSync(ruta, 'utf8');
+      if (/incluirSinteticos\s*[:=]\s*true/.test(src)) ofensores.push(ruta);
+    }
+    assert.deepEqual(ofensores, [],
+      `incluirSinteticos:true solo puede vivir en tests. Ofensores: ${ofensores.join(', ')}`);
+  });
+
+  test('el seed marca es_sintetico=1 en TODOS los usuarios test_*', async () => {
+    const db = await getDB();
+    const r = await db.request().query(`
+      SELECT COUNT(*) AS sin_marcar FROM lov_bit.usuario
+      WHERE username LIKE 'test\\_%' ESCAPE '\\' AND es_sintetico = 0
+    `);
+    assert.equal(r.recordset[0].sin_marcar, 0,
+      'todo usuario test_* debe quedar es_sintetico=1 tras el seed idempotente de initDB');
+  });
+
+  test('el seed NUNCA marca es_sintetico=1 a un operador real', async () => {
+    const db = await getDB();
+    const r = await db.request().query(`
+      SELECT COUNT(*) AS reales_marcados FROM lov_bit.usuario
+      WHERE es_sintetico = 1 AND username NOT LIKE 'test\\_%' ESCAPE '\\'
+    `);
+    assert.equal(r.recordset[0].reales_marcados, 0,
+      'es_sintetico=1 jamás debe caer sobre un usuario que no sea fixture test_*');
+  });
+
+  test('builder (default de producción) excluye sesión de usuario sintético en la ventana', async () => {
+    const FECHA = '2026-05-19';
+    const INICIO_UTC = '2026-05-19T11:00:00.000Z'; // 06:00 Bogotá T1
+    const db = await getDB();
+    await clearConformacionTest({ fecha: FECHA });
+    const sesionId = await insertSesionManual({
+      usuario_id: ctx.usuarios.ingOp.usuario_id, // es_sintetico=1 (fixture test_ingop)
+      cargo_id: cargoByName['Ingeniero de Operación'],
+      turno: 1, inicio_iso: INICIO_UTC, cerrada_iso: '2026-05-19T22:00:00.000Z',
     });
-    assert.equal(r2.status, 200);
 
-    const post2 = await db.request()
-      .input('fecha', sql.Date, FECHA_T1)
-      .input('planta', sql.VarChar(10), PLANTA_ID)
-      .input('uid', sql.Int, ctx.usuarios.ingOp.usuario_id)
-      .query(q);
-    assert.equal(post2.recordset[0].n, 1, 'idempotencia: la fila sigue siendo única');
+    const filas = await buildConformacionSnapshot(db, {
+      fecha_operativa: FECHA, planta_id: PLANTA_ID, turno: 1,
+      // SIN incluirSinteticos → default false → camino de producción
+    });
+    await db.request().input('id', sql.Int, sesionId)
+      .query(`DELETE FROM bitacora.sesion_activa WHERE sesion_id = @id`);
+
+    const sinteticoPresente = filas.some(f => f.usuario_id === ctx.usuarios.ingOp.usuario_id);
+    assert.equal(sinteticoPresente, false,
+      'BLINDAJE: el builder de producción NUNCA debe devolver un usuario sintético');
   });
 });
