@@ -398,12 +398,18 @@ function LoginScreen({ auth, plantas, onReady, showToast }) {
           <div className="absolute top-10 left-10 w-3 h-3 rounded-full bg-white opacity-40" />
           <div className="absolute bottom-16 right-20 w-2 h-2 rounded-full bg-white opacity-50" />
 
-          {/* Foto de la planta enmarcada */}
+          {/* Foto de la planta enmarcada. El marco tiene altura fija + degradado de fondo propio:
+              si la imagen falla (red corporativa), onError la oculta y queda el degradado de marca
+              —panel intencional, NO una caja vacía como antes—. La foto pesa ~180 KB (antes 2 MB,
+              causa del render vacío intermitente). width/height evitan reflow; eager + fetchPriority
+              la priorizan en el primer paint. */}
           <div className="relative w-full max-w-sm">
-            <div className="relative rounded-3xl overflow-hidden shadow-2xl ring-1 ring-white/20">
+            <div className="relative h-[460px] rounded-3xl overflow-hidden shadow-2xl ring-1 ring-white/20"
+              style={{ background: `linear-gradient(160deg, ${COLORS.blueDeep} 0%, ${COLORS.greenDark} 100%)` }}>
               <img src={asset("/planta-gecelca3.jpg")} alt="Planta Gecelca3"
-                className="w-full h-[460px] object-cover"
-                onError={(e) => { e.target.style.display = "none"; }} />
+                width={880} height={889} loading="eager" decoding="async" fetchPriority="high"
+                className="w-full h-full object-cover"
+                onError={(e) => { e.currentTarget.style.display = "none"; }} />
               <div className="absolute inset-0 pointer-events-none"
                 style={{ background: `linear-gradient(180deg, transparent 60%, ${COLORS.blueDeepest}33 100%)` }} />
             </div>
