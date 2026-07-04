@@ -48,9 +48,9 @@ Decisiones destiladas de las fases F1–F22. Formato corto: Contexto / Decisión
 
 **Contexto:** "cerrar la bitácora" tiene que respetar el turno operativo (cuándo ocurrieron los eventos), no la hora del request.
 
-**Decisión:** el cierre individual y masivo agrupa registros por `(planta, turno, bitacora)` y usa `ventanaTurno(turno, fecha_referencia)` para decidir cuáles cerrar. `fecha_cierre_operativo = CAST(DATEADD(HOUR, -5, SYSUTCDATETIME()) AS DATE)`.
+**Decisión:** el cierre de turno agrupa registros por `(planta, turno, bitacora)` y usa `ventanaTurno(turno, fecha_referencia)` para decidir cuáles cerrar. `fecha_cierre_operativo = CAST(DATEADD(HOUR, -5, SYSUTCDATETIME()) AS DATE)`. (D-042: el cierre de turno masivo es el único cierre; el cierre individual fue eliminado.)
 
-**Consecuencias:** MAND y DISP están explícitamente excluidos del cierre cronológico (cada uno tiene su propia mecánica). Edge case T4 (`fecha_evento` idéntica) resuelto 2026-05-13 con tiebreaker `, registro_id ASC` en el `SELECT TOP 1` (cierre individual + masivo).
+**Consecuencias:** MAND y DISP están explícitamente excluidos del cierre cronológico (cada uno tiene su propia mecánica). Edge case T4 (`fecha_evento` idéntica) resuelto 2026-05-13 con tiebreaker `, registro_id ASC` en el `SELECT TOP 1` del cierre de turno.
 
 ---
 
@@ -546,6 +546,18 @@ dashboard). (d) La cookie no viaja a `/dashboard` (aislamiento entre apps). Cros
 
 ---
 
+## D-042 — Eliminación del cierre individual de bitácora (cierre de turno = único cierre)
+
+**Fecha:** 2026-07-03
+
+**Contexto:** existían dos formas de cerrar registros al histórico: (a) **cierre individual** por bitácora (`POST /api/cierre/bitacora`, botón "Cerrar Turno" por pestaña) y (b) **cierre de turno masivo** (`POST /api/cierre/masivo`, botón "Cerrar Masivo"). Los dos botones convivían en el header de cada bitácora genérica, con lógica idéntica de cierre cronológico duplicada. Operativamente el cierre individual no aportaba valor —el turno se cierra completo, no bitácora por bitácora— y los dos botones casi iguales generaban ruido y confusión de usabilidad. El cierre individual además arrastraba un aparato de rechazos por bitácora automática (`400 mand_cierre_individual_no_permitido`, `422 bitacora_no_cerrable`) que solo existía para gatear ese botón.
+
+**Decisión:** eliminar por completo el cierre individual —backend, frontend, tests y documentación—. El **cierre de turno masivo es el único cierre** del sistema. Concretamente: (1) se borraron del router `server/routes/cierre.js` el endpoint `POST /api/cierre/bitacora` y el `GET /api/cierre/preview` (preview individual); sobreviven `POST /api/cierre/masivo` y `GET /api/cierre/preview-masivo`. (2) Se borraron del hook `src/hooks/useCierre.js` `cerrarBitacora`, `previewCierre` y el `cierreMasivo` muerto (no consumido); sobreviven `previewMasivo` y `cerrarMasivoConFinalizacionForzada`. (3) En `BitacorasGecelca3.jsx` se eliminó el botón/handler de cierre individual (`handleCerrarTurno`, prop `onCerrarTurno`); el único botón de cierre —renombrado a **"Cerrar Turno"**— dispara el masivo con su modal de pendientes (`CierrePendientesModal`). (4) Con el endpoint fuera, desaparecen los códigos de rechazo del cierre individual (`mand_cierre_individual_no_permitido`, `bitacora_no_cerrable`): MAND/DISP simplemente quedan excluidos del cierre de turno vía `AND b.codigo NOT IN ('DISP','MAND')` (la única regla vigente). (5) Tests: los 4 tests de gating `puede_cerrar_turno` de `auth_middleware.test.js` se migraron al endpoint sobreviviente `/api/cierre/masivo`; el test de TZ de cierre (`cierre_y_fechas.test.js::B2`) se migró a `/api/cierre/masivo`; se removieron los tests que probaban los rechazos del cierre individual (A2, A3 y el test 7 de `sala_de_mando_batch.test.js`). La exclusión MAND/DISP del cierre sigue cubierta por A1/A4.
+
+**Consecuencias:** (a) Superficie de API más chica y una sola ruta de cierre → menos código duplicado y menos confusión de UX (un botón, una acción). (b) **RF-030** (cierre individual) y **RF-065** (sus rechazos) quedan retirados/actualizados en `BIT-RF-2026-001.md`; **RF-031** pasa a describir el cierre de turno como acción autónoma (ya no "iteración de RF-030"). (c) El cierre cronológico por ventana de turno (D-005) es intacto: vive ahora solo en el bucle de `/api/cierre/masivo`. (d) Ningún cambio de esquema de BD: `registro_historico`, snapshots y CIET `'Cierre de turno'` siguen igual. Cross-ref: [[D-005]] (cierre cronológico), [[D-040]] (finalizar turno), [[D-004]] (CIET).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
@@ -579,4 +591,4 @@ dashboard). (d) La cookie no viaja a `/dashboard` (aislamiento entre apps). Cros
 
 - **F15**: definir cómo el dashboard productivo va a renderizar el badge de disponibilidad por planta. Ver `dashboard-gen-gec3/docs/decisions.md` cuando se aborde.
 - **T3 (CIET `fecha_cerrada`): CERRADO 2026-05-13 — formato Bogotá.** El sweeper diario corre a 23:59:59 hora Bogotá (= 04:59 UTC del día siguiente); registrar `fecha_cerrada` en UTC desfasaría el día operativo (un cierre del 2026-05-13 23:59 Bogotá quedaría como 2026-05-14 04:59 UTC). Implementación: `server/utils/ciet.js:184-186` usa `fechaBogotaStr(fecha)` desde F19. Este es el único campo de la BD que NO es UTC; documentado como excepción justificada al patrón global "BD en UTC, presentación con offset Bogotá" (D-020).
-- **T4 (cierre cronológico tiebreaker): CERRADO 2026-05-13 — `ORDER BY fecha_evento ASC, registro_id ASC`.** Razón: dos registros con `fecha_evento` idéntica (posible en batch insert con un mismo `SYSUTCDATETIME()` o seeds) producían orden no-determinístico en SQL Server. Tiebreaker `registro_id ASC` garantiza determinismo. Aplicado en `server/server.js:1741` (cierre individual) y `:1840` (cierre masivo). Test de regresión: `server/tests/fechas_bogota.test.js::C5`.
+- **T4 (cierre cronológico tiebreaker): CERRADO 2026-05-13 — `ORDER BY fecha_evento ASC, registro_id ASC`.** Razón: dos registros con `fecha_evento` idéntica (posible en batch insert con un mismo `SYSUTCDATETIME()` o seeds) producían orden no-determinístico en SQL Server. Tiebreaker `registro_id ASC` garantiza determinismo. Aplicado en el cierre de turno (`server/routes/cierre.js`). Test de regresión: `server/tests/fechas_bogota.test.js::C5`.

@@ -830,7 +830,7 @@ export async function initDB() {
   // El seed nuevo se hace en F12.A4 ('Cambio de Disponibilidad' único).
 
   // F3: tipos de evento CIET. Se generan automáticamente desde /api/bitacora/finalizar y
-  // /api/cierre/bitacora — ningún cargo tiene puede_crear=1 en CIET.
+  // /api/cierre/masivo — ningún cargo tiene puede_crear=1 en CIET.
   await db.request().batch(`
     INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden)
     SELECT b.bitacora_id, s.nombre, s.orden

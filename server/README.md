@@ -66,11 +66,11 @@ Al arrancar, `initDB()` crea esquemas, tablas, índices, vistas y datos semilla 
 | PUT | `/api/registros/:id` | Editar (solo `estado='borrador'`; los snapshots son inmutables) |
 | DELETE | `/api/registros/:id` | Eliminar (solo borrador, soft-delete autorización asociada) |
 
-### Cierre
+### Cierre de turno (D-042: único cierre)
 | Método | Ruta | Descripción |
 |---|---|---|
-| POST | `/api/cierre/bitacora` | Cierra una bitácora (transaccional) |
-| POST | `/api/cierre/masivo` | Cierra todas las bitácoras de una planta |
+| GET | `/api/cierre/preview-masivo` | Preview de pendientes (bitácoras con borradores + ingenieros sin finalizar) |
+| POST | `/api/cierre/masivo` | Cierra el turno: archiva los borradores de todas las bitácoras genéricas de la planta |
 
 ### Históricos
 | Método | Ruta | Descripción |

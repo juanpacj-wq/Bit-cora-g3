@@ -172,8 +172,8 @@ describe('F21.A — helpers TZ-agnósticos en sub-proceso (UTC, Bogotá, Tokyo, 
   }
 });
 
-// T4 (2026-05-13) — regresión: el SELECT TOP 1 del cierre cronológico
-// (server.js:1741 cierre individual y :1840 cierre masivo) ordenaba sólo por fecha_evento
+// T4 (2026-05-13) — regresión: el SELECT TOP 1 del cierre cronológico (cierre de turno masivo,
+// `server/routes/cierre.js`) ordenaba sólo por fecha_evento
 // ASC. Dos registros con fecha_evento idéntica (posible en batch insert con un mismo
 // SYSUTCDATETIME() o en seeds) producían orden no-determinístico en SQL Server.
 // Tiebreaker aplicado: `ORDER BY fecha_evento ASC, registro_id ASC`. Este test inserta

@@ -229,14 +229,9 @@ test('6. Re-save: cambio en P3, vaciar P5, sumar P6 → 1 actualizado, 1 elimina
   assert.equal(data.resumen.eliminados, 1);
 });
 
-test('7. POST /api/cierre/bitacora con MAND → 400 con motivo específico', async () => {
-  const { status, data } = await call('POST', '/api/cierre/bitacora', {
-    sesion_id: ctx.sesiones.jdt,
-    body: { bitacora_id: MAND_BITACORA_ID, planta_id: PLANTA_ID },
-  });
-  assert.equal(status, 400, JSON.stringify(data));
-  assert.equal(data.error, 'mand_cierre_individual_no_permitido');
-});
+// D-042: se eliminó el test del rechazo de cierre individual MAND — el cierre individual por
+// bitácora ya no existe. MAND queda fuera del cierre de turno (masivo) por su exclusión
+// `codigo NOT IN ('DISP','MAND')`, cubierta en cierre_y_fechas.test.js (A1).
 
 test('9. T1 regression — registro con fecha_evento UTC del día siguiente (22:30 Bogotá HOY) aparece en grilla del día Bogotá', async () => {
   // F19.A: GET /api/sala-de-mando antes filtraba con CAST(fecha_evento AS DATE) = @fecha

@@ -114,26 +114,9 @@ test('A1. /api/cierre/preview-masivo NO lista DISP', async () => {
   assert.ok(!ids.includes(MAND_ID), `MAND (${MAND_ID}) NO debe aparecer: ${JSON.stringify(ids)}`);
 });
 
-test('A2. POST /api/cierre/bitacora con bitacora_id=DISP retorna 422', async () => {
-  const { status, data } = await call('POST', '/api/cierre/bitacora', {
-    sesion_id: ctx.sesiones.jdt,
-    body: { bitacora_id: DISP_ID, planta_id: TEST_PLANTA },
-  });
-  assert.equal(status, 422, JSON.stringify(data));
-  assert.equal(data.error, 'bitacora_no_cerrable');
-});
-
-test('A3. POST /api/cierre/bitacora con bitacora_id=MAND retorna 400 (F16)', async () => {
-  const { status, data } = await call('POST', '/api/cierre/bitacora', {
-    sesion_id: ctx.sesiones.jdt,
-    body: { bitacora_id: MAND_ID, planta_id: TEST_PLANTA },
-  });
-  // F16 cambió 422 → 400 con código específico para que el frontend pueda gatear el botón
-  // sin ambigüedad. El cierre individual MAND quedó bloqueado: el cierre es automático vía
-  // mand-sweeper.js al cambiar el día Bogotá.
-  assert.equal(status, 400, JSON.stringify(data));
-  assert.equal(data.error, 'mand_cierre_individual_no_permitido');
-});
+// D-042: el cierre individual por bitácora fue eliminado. DISP/MAND ya no se rechazan con un
+// código de error de cierre individual — quedan simplemente fuera del cierre de turno (masivo),
+// que los excluye vía `AND b.codigo NOT IN ('DISP','MAND')`. Esa exclusión la cubren A1 y A4.
 
 test('A4. /api/cierre/masivo NO mueve el vigente DISP al histórico', async () => {
   const db = await getDB();
@@ -236,9 +219,9 @@ test('B2. cerrado_en y fecha_cierre_operativo del histórico están en zona cons
   });
 
   const tBefore = Date.now();
-  const { status, data } = await call('POST', '/api/cierre/bitacora', {
+  const { status, data } = await call('POST', '/api/cierre/masivo', {
     sesion_id: ctx.sesiones.jdt,
-    body: { bitacora_id: CALDERA_ID, planta_id: TEST_PLANTA },
+    body: { planta_id: TEST_PLANTA },
   });
   const tAfter = Date.now();
   assert.equal(status, 200, JSON.stringify(data));

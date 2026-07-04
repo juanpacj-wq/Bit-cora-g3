@@ -1018,7 +1018,7 @@ function CategoriaTab({ categoria, activeId, onSelect, registrosPorBitacora }) {
 
 function BarraEstado({
   bitacora, registros, estadoBitacora, puedeCrear, esJefeTurno,
-  onCerrarTurno, onCerrarMasivo, onFinalizarTurno, finalizandoTurno, turnoFinalizado,
+  onCerrarMasivo, onFinalizarTurno, finalizandoTurno, turnoFinalizado,
   onRevertirTurno, revirtiendoTurno,
   filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
   filtroFecha, setFiltroFecha, onCommitFecha, filtroTurno, setFiltroTurno,
@@ -1219,27 +1219,15 @@ function BarraEstado({
         )
       )}
 
-      {/* "Cerrar Turno" individual: oculto en MAND. El cierre del día MAND es automático
-          vía sweeper diario (`server/utils/mand-sweeper.js`); el backend ya rechaza el
-          intento con 400 `mand_cierre_individual_no_permitido` (defensa en profundidad).
-          En la pestaña Operación 24h, el único botón de acción del header es "Guardar". */}
-      {!isMand && esJefeTurno && borradores + cerrados > 0 && (
-        <button onClick={onCerrarTurno}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
-          style={{ backgroundColor: COLORS.blueDark }}>
-          <Lock size={16} />
-          Cerrar Turno
-        </button>
-      )}
-
-      {/* F4: cierre masivo con popup de pendientes — solo cargos puede_cerrar_turno.
-          F17: oculto en MAND (sweeper automático en lugar de cierre manual). */}
+      {/* D-042: cierre de turno (único cierre — el cierre individual por bitácora fue eliminado).
+          Con popup de pendientes; solo cargos puede_cerrar_turno. Oculto en MAND: su cierre del día
+          es automático vía sweeper diario (`server/utils/mand-sweeper.js`). */}
       {!isMand && esJefeTurno && (
         <button onClick={onCerrarMasivo}
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
           style={{ backgroundColor: COLORS.blueDeep }}>
           <Lock size={16} />
-          Cerrar Masivo
+          Cerrar Turno
         </button>
       )}
     </div>
@@ -2010,32 +1998,7 @@ export default function App() {
     });
   }, [registrosHook, sesion, activeBitacora, showToast]);
 
-  const handleCerrarTurno = useCallback(async () => {
-    const bit = bitacorasPermitidas.find((b) => b.bitacora_id === activeBitacora);
-    let incompletos = 0;
-    try {
-      const preview = await cierre.previewCierre(sesion.planta_id, activeBitacora);
-      incompletos = preview.reduce((acc, p) => acc + (p.incompletos || 0), 0);
-    } catch {}
-    const aviso = incompletos > 0 ? `\n\n⚠ ${incompletos} registro(s) sin detalle se cerrarán igualmente.` : "";
-    setModal({
-      title: "Cerrar turno",
-      message: `¿Cerrar la bitácora "${bit?.nombre}"? Los registros se moverán al histórico y no podrán editarse.${aviso}`,
-      confirmLabel: "Cerrar turno", confirmColor: "blue", icon: Lock,
-      onConfirm: async () => {
-        try {
-          const res = await cierre.cerrarBitacora(activeBitacora, sesion.planta_id);
-          await registrosHook.getActivos({ planta_id: sesion.planta_id, bitacora_id: activeBitacora });
-          setModal(null);
-          showToast(`Cierre completado: ${res.registros_cerrados} registro(s)`);
-        } catch (e) {
-          showToast(e.message, "error");
-        }
-      },
-    });
-  }, [bitacorasPermitidas, activeBitacora, sesion, cierre, registrosHook, showToast]);
-
-  // F4: botón "Cerrar Masivo" — abre modal con preview de pendientes antes de cerrar.
+  // D-042: botón "Cerrar Turno" (único cierre) — abre modal con preview de pendientes antes de cerrar.
   const handleCerrarMasivo = useCallback(async () => {
     try {
       const preview = await cierre.previewMasivo(sesion.planta_id);
@@ -2217,7 +2180,6 @@ export default function App() {
               estadoBitacora={estadoBitacora}
               puedeCrear={puedeCrear}
               esJefeTurno={esJefeTurno}
-              onCerrarTurno={handleCerrarTurno}
               onCerrarMasivo={handleCerrarMasivo}
               onFinalizarTurno={handleFinalizarTurno}
               finalizandoTurno={finalizandoTurno}

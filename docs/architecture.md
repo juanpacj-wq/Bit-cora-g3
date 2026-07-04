@@ -88,8 +88,7 @@ Bit-cora-g3/server/
 | `POST /api/registros` | Crear evento. Rama especial para DISP (ver flujo transaccional). |
 | `PUT /api/registros/:id` | Editar. Rama especial DISP (side-effect en N-1). |
 | `DELETE /api/registros/:id` | Eliminar. |
-| `POST /api/cierre/bitacora` | Cierre individual por bitácora+turno. **Devuelve 400 si `bitacora.codigo='MAND'`**. |
-| `POST /api/cierre/masivo` | Cierra todas las bitácoras del turno (`b.codigo NOT IN ('DISP','MAND')`). |
+| `POST /api/cierre/masivo` | **Cierre de turno (único cierre — D-042).** Archiva los borradores de todas las bitácoras genéricas del turno (`b.codigo NOT IN ('DISP','MAND')`). Preview vía `GET /api/cierre/preview-masivo`. |
 | `GET /api/disponibilidad?planta_id=` | Vista mini-dashboard DISP (vigente + historial paginado). |
 | `POST /api/disponibilidad/deshacer` | Borra vigente + restaura último histórico. Emite CIET 'Deshacer disponibilidad' con audit completo. |
 | `GET /api/disponibilidad/metricas?planta_id=&desde=&hasta=` | **D-024/D-026** — tiempo agregado por estado + acumulados (`disponible`, `no_disponible`) en una ventana + `ahora` (reloj UTC del server). Lee directo de `bitacora.disponibilidad_estado` (la vista `v_disp_intervalos` se dropeó en D-026). Consumido por el panel "Acumulado histórico por estado" del mini-dashboard (D-028). |
@@ -145,7 +144,7 @@ En `BitacorasGecelca3.jsx`:
  <GrillaRegistros ... />}
 ```
 
-El header con controles (`Buscar`, `Todos los tipos`, `+ Nuevo Registro`, `Finalizar Turno`, `Cerrar Turno`, `Cerrar Masivo`) se renderiza condicionalmente: `bitacora?.codigo !== 'MAND'`. **En MAND, el único botón de acción del header es "Guardar"** (controlado por `hayCambios` lift-up del child). Todos los cierres están ocultos porque MAND se cierra automáticamente al fin del día vía sweeper (`server/utils/mand-sweeper.js`); el backend además rechaza `POST /api/cierre/bitacora` con `400 mand_cierre_individual_no_permitido`.
+El header con controles (`Buscar`, `Todos los tipos`, `+ Nuevo Registro`, `Finalizar Turno`, `Cerrar Turno`) se renderiza condicionalmente: `bitacora?.codigo !== 'MAND'`. **En MAND, el único botón de acción del header es "Guardar"** (controlado por `hayCambios` lift-up del child). El cierre está oculto porque MAND se cierra automáticamente al fin del día vía sweeper (`server/utils/mand-sweeper.js`) y queda excluido del cierre de turno (`b.codigo NOT IN ('DISP','MAND')`). El botón "Cerrar Turno" dispara el cierre de turno masivo (D-042: único cierre; el cierre individual por bitácora fue eliminado).
 
 ### Popup "Usuarios activos" (Header)
 
@@ -163,7 +162,7 @@ El popup se cierra con: Esc, click fuera (botón y popup quedan excluidos por `c
 
 ### MAND (Operación 24h)
 
-**Diferenciadora:** grilla 24 periodos × 3 tipos × 2 plantas con batch save atómico. NO acepta cierre individual ni masivo — se cierra automáticamente vía sweeper diario.
+**Diferenciadora:** grilla 24 periodos × 3 tipos × 2 plantas con batch save atómico. No se cierra por turno — se cierra automáticamente vía sweeper diario.
 
 **Modelo de guardado (frontend):**
 

@@ -120,42 +120,39 @@ test('POST /api/registros Gerente devuelve 403', async () => {
   assert.equal(status, 403);
 });
 
-test('POST /api/cierre/bitacora Ing. Operación devuelve 200 (puede_cerrar_turno=1)', async () => {
-  const { sesiones, bitByCodigo } = ctx;
-  // D6: DISP no es cerrable (F13.3 — endpoint devuelve 422). Usamos CALDERA (bitácora
-  // normal) para ejercitar la rama "puede_cerrar_turno=1 ⇒ pasa el middleware y llega
-  // al business logic". No requiere registros activos previos: el endpoint emite el
-  // CIET de cierre incluso si el SELECT oldest viene vacío.
-  const { status } = await call('POST', '/api/cierre/bitacora', {
+// D-042: el único cierre es el masivo por turno (POST /api/cierre/masivo). El gating por
+// puede_cerrar_turno se ejercita sobre ese endpoint. El cierre emite el CIET de turno incluso
+// si no hay borradores, así que no requiere sembrar registros previos.
+test('POST /api/cierre/masivo Ing. Operación devuelve 200 (puede_cerrar_turno=1)', async () => {
+  const { sesiones } = ctx;
+  const { status } = await call('POST', '/api/cierre/masivo', {
     sesion_id: sesiones.ingOp,
-    body: { bitacora_id: bitByCodigo.CALDERA, planta_id: TEST_PLANTA },
+    body: { planta_id: TEST_PLANTA },
   });
   assert.equal(status, 200);
 });
 
-test('POST /api/cierre/bitacora Ing. Químico devuelve 403', async () => {
-  const { sesiones, bitByCodigo } = ctx;
-  const { status } = await call('POST', '/api/cierre/bitacora', {
+test('POST /api/cierre/masivo Ing. Químico devuelve 403', async () => {
+  const { sesiones } = ctx;
+  const { status } = await call('POST', '/api/cierre/masivo', {
     sesion_id: sesiones.ingQuim,
-    body: { bitacora_id: bitByCodigo.DISP, planta_id: TEST_PLANTA },
+    body: { planta_id: TEST_PLANTA },
   });
   assert.equal(status, 403);
 });
 
-test('POST /api/cierre/bitacora JdT devuelve 200', async () => {
-  const { sesiones, bitByCodigo } = ctx;
-  // D6: idem comentario arriba — usamos CALDERA porque DISP devuelve 422 (no cerrable).
-  const { status } = await call('POST', '/api/cierre/bitacora', {
+test('POST /api/cierre/masivo JdT devuelve 200', async () => {
+  const { sesiones } = ctx;
+  const { status } = await call('POST', '/api/cierre/masivo', {
     sesion_id: sesiones.jdt,
-    body: { bitacora_id: bitByCodigo.CALDERA, planta_id: TEST_PLANTA },
+    body: { planta_id: TEST_PLANTA },
   });
   assert.equal(status, 200);
 });
 
-test('POST /api/cierre/bitacora sin header devuelve 401', async () => {
-  const { bitByCodigo } = ctx;
-  const { status } = await call('POST', '/api/cierre/bitacora', {
-    body: { bitacora_id: bitByCodigo.DISP, planta_id: TEST_PLANTA },
+test('POST /api/cierre/masivo sin header devuelve 401', async () => {
+  const { status } = await call('POST', '/api/cierre/masivo', {
+    body: { planta_id: TEST_PLANTA },
   });
   assert.equal(status, 401);
 });
