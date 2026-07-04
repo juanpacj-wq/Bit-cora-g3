@@ -13,6 +13,7 @@ import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from '../utils/snapsh
 import { upsertEventoDashboard } from '../utils/notificador.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
+import { notifyDashboard } from '../utils/notify-dashboard.js';
 import { asyncH, loadAppSession } from './_middleware.js';
 
 const router = express.Router();
@@ -350,6 +351,11 @@ router.post('/guardar', asyncH(async (req, res) => {
 
     await transaction.commit();
     broadcastConteoBitacoras(planta_id).catch(() => {});
+    // Push cross-repo al dashboard (fire-and-forget) SOLO si algo cambió: evita ruido cuando el
+    // guardar fue no-op. Nunca bloquea la respuesta al operador (ver notify-dashboard.js).
+    if (creados + actualizados + eliminados > 0) {
+      notifyDashboard({ plantas: [planta_id], fecha }).catch(() => {});
+    }
     return sendJSON(res, 200, { resumen: { creados, actualizados, eliminados } });
   } catch (err) {
     try { await transaction.rollback(); } catch {}

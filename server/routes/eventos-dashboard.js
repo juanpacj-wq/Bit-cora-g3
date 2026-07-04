@@ -10,6 +10,7 @@ import sql from 'mssql';
 import { getDB, TEST_PLANTA_ID } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { puedeCerrarTurno } from '../middleware/permissions.js';
+import { notifyDashboard } from '../utils/notify-dashboard.js';
 import { asyncH, loadAppSession } from './_middleware.js';
 
 const router = express.Router();
@@ -96,6 +97,9 @@ router.delete('/:id(\\d+)', loadAppSession, asyncH(async (req, res) => {
   if (!result.rowsAffected[0]) {
     return sendJSON(res, 404, { error: 'Evento no encontrado' });
   }
+  // F7 vacía celdas MAND por acá (fuera del batch de sala-de-mando/guardar) → avisar al dashboard
+  // para reflejo instantáneo del borrado (Contrato 3). Fire-and-forget.
+  notifyDashboard({ plantas: [sesion.planta_id], fecha: null }).catch(() => {});
   return sendJSON(res, 200, { ok: true });
 }));
 

@@ -7,6 +7,7 @@ import sql from 'mssql';
 import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { puedeCerrarTurno } from '../middleware/permissions.js';
+import { notifyDashboard } from '../utils/notify-dashboard.js';
 import { asyncH, loadAppSession } from './_middleware.js';
 
 const router = express.Router();
@@ -56,6 +57,9 @@ router.delete('/:id(\\d+)', asyncH(async (req, res) => {
   if (!result.rowsAffected[0]) {
     return sendJSON(res, 404, { error: 'Autorización no encontrada' });
   }
+  // Deprecated pero aún montado: si algo sigue anulando AUTH por acá, avisar al dashboard
+  // igual que el resto de mutaciones de evento_dashboard (Contrato 3). Fire-and-forget.
+  notifyDashboard({ plantas: [sesion.planta_id], fecha: null }).catch(() => {});
   return sendJSON(res, 200, { ok: true });
 }));
 

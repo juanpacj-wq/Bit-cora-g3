@@ -17,6 +17,7 @@ import {
   snapshotJDTs, snapshotJefes, snapshotIngenieros, snapshotGerentesProduccion,
 } from '../utils/snapshots.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
+import { notifyDashboard } from '../utils/notify-dashboard.js';
 import { asyncH, loadAppSession, bloquearSiTurnoFinalizado } from './_middleware.js';
 import { getDispBitacoraId } from './_shared.js';
 
@@ -368,6 +369,7 @@ router.post('/', asyncH(async (req, res) => {
       `);
     const registro = ins.recordset[0];
 
+    let dashboardTocado = false;
     if (notificar && camposFinal) {
       const periodo = camposFinal.periodo;
       const valor = camposFinal.valor_mw ?? camposFinal.valor_autorizado_mw;
@@ -382,11 +384,14 @@ router.post('/', asyncH(async (req, res) => {
           registro_origen_id: registro.registro_id,
           tipo: dashboardTipo,
         });
+        dashboardTocado = true;
       }
     }
 
     await transaction.commit();
     broadcastConteoBitacoras(planta_id).catch(() => {});
+    // Push al dashboard solo si tocamos evento_dashboard (Contrato 3). Fire-and-forget.
+    if (dashboardTocado) notifyDashboard({ plantas: [planta_id], fecha: null }).catch(() => {});
     return sendJSON(res, 201, { registro });
   } catch (err) {
     try { await transaction.rollback(); } catch {}
@@ -661,6 +666,7 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
     // F6: si notifica al dashboard y cambió valor/periodo, reescribir evento_dashboard.
     const dashboardTipo = teRow.notificar_dashboard_tipo
       || (hasNotificarDashboard(teRow.definicion_campos) ? 'AUTH' : null);
+    let dashboardTocado = false;
     if (camposFinal && dashboardTipo) {
       const periodo = camposFinal.periodo;
       const valor = camposFinal.valor_mw ?? camposFinal.valor_autorizado_mw;
@@ -678,10 +684,13 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
           registro_origen_id: registro_id,
           tipo: dashboardTipo,
         });
+        dashboardTocado = true;
       }
     }
 
     await transaction.commit();
+    // Push al dashboard solo si tocamos evento_dashboard (Contrato 3). Fire-and-forget.
+    if (dashboardTocado) notifyDashboard({ plantas: [reg.planta_id], fecha: null }).catch(() => {});
     return sendJSON(res, 200, { registro: upd.recordset[0] });
   } catch (err) {
     try { await transaction.rollback(); } catch {}
@@ -709,13 +718,16 @@ router.delete('/:id(\\d+)', asyncH(async (req, res) => {
     return sendJSON(res, 403, { error: 'Sin permiso para eliminar este registro' });
   }
 
-  await db.request()
+  const del = await db.request()
     .input('registro_id', sql.Int, registro_id)
     .query(`
       UPDATE bitacora.evento_dashboard SET activa = 0 WHERE registro_origen_id = @registro_id;
       DELETE FROM bitacora.registro_activo WHERE registro_id = @registro_id AND estado = 'borrador';
     `);
   broadcastConteoBitacoras(reg.planta_id).catch(() => {});
+  // rowsAffected[0] = filas de evento_dashboard desactivadas (el UPDATE es el 1er statement). Solo
+  // avisamos al dashboard si de verdad se soft-deleteó un evento visible (Contrato 3). Fire-and-forget.
+  if ((del.rowsAffected?.[0] ?? 0) > 0) notifyDashboard({ plantas: [reg.planta_id], fecha: null }).catch(() => {});
   return sendJSON(res, 200, { ok: true });
 }));
 

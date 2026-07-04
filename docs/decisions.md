@@ -558,6 +558,37 @@ dashboard). (d) La cookie no viaja a `/dashboard` (aislamiento entre apps). Cros
 
 ---
 
+## D-043 — Push `eventos-changed` al dashboard (emisor del webhook)
+
+**Fecha:** 2026-07-04
+
+**Contexto:** el dashboard reflejaba los eventos MAND (`evento_dashboard`) solo por polling de 60s
+(su hook `useEventosBitacora`). Se pidió reflejo casi instantáneo sin subir la carga. Bitácora es
+el escritor de `evento_dashboard`, así que es el único que sabe *cuándo* cambió — el lugar natural
+para emitir la señal.
+
+**Decisión:** tras cada `commit` que toca `evento_dashboard`, disparar un webhook
+**fire-and-forget** al backend del dashboard (`notifyDashboard()` en `utils/notify-dashboard.js`:
+`fetch` POST, timeout 1.5s, **nunca lanza ni bloquea** la respuesta al operador; no-op si
+`DASHBOARD_NOTIFY_URL` está vacío → instancia sin dashboard local). Enganchado en **todos** los
+puntos de mutación de `evento_dashboard`, cada uno guardado para no emitir en no-ops:
+`sala-de-mando/guardar` (`routes/mand.js`, si `creados+actualizados+eliminados>0`), `POST` y
+`PUT /api/registros` (flag `dashboardTocado` cuando corre el upsert), `DELETE /api/registros`
+(si `rowsAffected[0]>0`), `DELETE /api/eventos-dashboard/:id` (F7 vacía celdas MAND por acá) y
+`DELETE /api/autorizaciones/:id` (deprecated F9, aún montado). NO se engancha el sweeper diario
+(`utils/mand-sweeper.js`): su soft-delete es del rollover de día, no afecta la vista "hoy". Env:
+`DASHBOARD_NOTIFY_URL` +
+`DASHBOARD_NOTIFY_TOKEN` opcional (debe coincidir con `INTERNAL_NOTIFY_TOKEN` del dashboard).
+
+**Consecuencias:** (a) reflejo ~0s manteniendo el poll del dashboard como red de seguridad.
+(b) Fire-and-forget: si el dashboard está caído, el guardar de bitácora igual responde 200.
+(c) DISP (Contrato 2) **no** emite todavía — su consumo en el dashboard es F15 pendiente; se
+extiende igual cuando exista. (d) Contrato nuevo = **Contrato 3** en
+`../../docs/interfaces-cross-repo.md`; lado receptor en dashboard [[DASH D-122]]. Cross-ref:
+[[D-006]], [[D-009]] (contrato `evento_dashboard`).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
