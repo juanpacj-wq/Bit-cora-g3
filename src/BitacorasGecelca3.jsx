@@ -30,6 +30,7 @@ import { useBitacoraSesion, useFinalizarTurno, useRevertirTurno } from "./hooks/
 import { useAppRoute } from "./hooks/useAppRoute";
 import { buildHash } from "./routing/appRoute";
 import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
+import { FILTROS_VACIOS } from "./utils/filtros";
 import { asset } from "./config/paths";
 
 const COLORS = {
@@ -1672,16 +1673,19 @@ export default function App() {
 
   const [activeBitacora, setActiveBitacora] = useState(null);
   const [tiposEvento, setTiposEvento] = useState([]);
-  const [filtroTexto, setFiltroTexto] = useState("");
-  const [filtroTipo, setFiltroTipo] = useState("");
-  // F11/R2/R3: "día de trabajo" (antes solo filtro) para bitácoras no-MAND. Default = HOY (Bogotá):
-  // filtra la lista a ese día Y determina el día en que "Nuevo Registro" crea el borrador. Sin
-  // persistencia (se retiró el sessionStorage). "Borrar filtros" lo vacía a '' = todos los días
-  // (escape hatch de visualización). Nunca acepta días futuros.
-  const [filtroFecha, setFiltroFecha] = useState(() => getTodayBogota());
-  const [filtroTurno, setFiltroTurno] = useState('');
+  // F11/R2/R3: filtros de la BarraEstado (bitácoras no-MAND). Default = TODOS vacíos (FILTROS_VACIOS,
+  // fuente única): la lista arranca mostrando TODOS los registros, sin pre-filtro por día. Antes el
+  // día sembraba HOY y ocultaba registros de otros días (incongruente con el badge del tab, que cuenta
+  // todos los borradores). La `fecha` sigue teniendo doble función — filtra la lista Y fija el día en
+  // que "Nuevo Registro" crea el borrador; con fecha vacía el borrador cae en HOY (ver handleAddRegistro).
+  // Sin persistencia. Nunca acepta días futuros. "Borrar filtros" vuelve a este mismo estado vacío.
+  const [filtroTexto, setFiltroTexto] = useState(FILTROS_VACIOS.texto);
+  const [filtroTipo, setFiltroTipo] = useState(FILTROS_VACIOS.tipo);
+  const [filtroFecha, setFiltroFecha] = useState(FILTROS_VACIOS.fecha);
+  const [filtroTurno, setFiltroTurno] = useState(FILTROS_VACIOS.turno);
   const limpiarFiltros = useCallback(() => {
-    setFiltroTexto(''); setFiltroTipo(''); setFiltroFecha(''); setFiltroTurno('');
+    setFiltroTexto(FILTROS_VACIOS.texto); setFiltroTipo(FILTROS_VACIOS.tipo);
+    setFiltroFecha(FILTROS_VACIOS.fecha); setFiltroTurno(FILTROS_VACIOS.turno);
   }, []);
   const [toast, setToast] = useState(null);
   const [modal, setModal] = useState(null);
@@ -1812,7 +1816,9 @@ export default function App() {
     if (!target) target = bitacorasPermitidas[0]; // fallback: codigo nulo o no permitido
     if (target.bitacora_id !== activeBitacoraRef.current) {
       setActiveBitacora(target.bitacora_id);
-      setFiltroTexto(''); setFiltroTipo(''); setFiltroFecha(getTodayBogota()); setFiltroTurno(''); setDraftLocal(null);
+      // Al cambiar de bitácora los filtros vuelven al estado vacío (mostrar todo), no a "hoy".
+      setFiltroTexto(FILTROS_VACIOS.texto); setFiltroTipo(FILTROS_VACIOS.tipo);
+      setFiltroFecha(FILTROS_VACIOS.fecha); setFiltroTurno(FILTROS_VACIOS.turno); setDraftLocal(null);
     }
     if (target.codigo === 'DISP') {
       // Sembrar planta: param de la ruta → planta ya elegida → unidad del login (default).
