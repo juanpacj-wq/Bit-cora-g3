@@ -633,6 +633,46 @@ acople sesión↔body) es higiene D-030 aún deseable aunque el chokepoint ya ci
 
 ---
 
+## D-045 — Entidad explícita de turno (`turno_unidad`): apertura/cierre/extensión con ciclo de vida propio
+
+**Fecha:** 2026-07-05
+
+**Contexto:** el turno era **implícito y disperso** (`sesion_activa.turno` fijado al login [[D-003]], ventana
+derivada en `utils/turno.js`, conformación reconstruida por sweeper + catchup, cierre por bucle masivo
+[[D-042]]). La auditoría 2026-07-04 halló dos bugs de esa dispersión: **H1** (el catchup de conformación
+derivaba `fecha_operativa` de `sesion_activa.inicio_sesion` = hora del **login**, así que un T2 con logins
+post-medianoche quedaba mal/sin conformar) y **H2** (el sweeper disparaba conformación en paralelo, pudiendo
+snapshotear un turno todavía sin sellar). No existía forma de responder "¿qué turnos NO cerró un coordinador?".
+
+**Decisión:** convertir el turno en **entidad de primera clase**. (1) Cabecera `bitacora.turno_unidad` (1 fila
+por `(fecha_operativa, planta, turno)`, estado `PROGRAMADO→ABIERTO→CERRADO`, `inicio/fin_nominal`,
+`inicio/fin_real`, `extendido`/`veces_extendido`, `motivo_cierre ∈ {MANUAL, AUTO_SIN_PERSONAL,
+AUTO_SIN_RESPUESTA}`, `cerrado_por`) + detalle vivo `bitacora.turno_participante` (UPSERT al entrar =
+participación viva) + FK `turno_id` nullable en `sesion_activa`/`registro_activo`/`registro_historico`/
+`conformacion_turno`. (2) **Apertura automática** por el `turno-sweeper` (sin solape: sucesor nace PROGRAMADO
+mientras el actual sigue extendido). (3) **Cierre unificado atómico** (`cerrarTurno`): sella la cabecera +
+**congela `conformacion_turno` desde `turno_participante`** (no desde `sesion_activa` — cierra H1/H2) + archiva
+los registros del turno por `turno_id` + CIET + activa el sucesor, todo en una transacción. (4) **Flujo 6-a-6**:
+al pasar `fin_nominal` el sweeper cierra `AUTO_SIN_PERSONAL` (sin gente) o `AUTO_SIN_RESPUESTA` (tras 60 min de
+gracia con gente sin decidir), o mantiene un **bloqueo** (modal front) mientras haya gente en gracia; JdT/IngOp
+extienden (`fin_nominal → próximo umbral`) o cierran. (5) `GET /api/turno/seguimiento` (+ vista
+`v_turno_seguimiento`) da la visibilidad de turnos por día/unidad. (6) El front migra "Cerrar Turno" a
+`POST /api/turno/cerrar` (retira `useCierre`/`CierrePendientesModal` del masivo [[D-042]]) + modal bloqueante
+`TurnoTransicionModal`. (7) Purga one-time de arranque limpio (script manual `sql/snippets/`, ejecutada
+2026-07-05: registros/histórico/conformación/`evento_dashboard`/turno_unidad → 0; DISP intacto).
+
+**Consecuencias:** (a) H1/H2 quedan cerrados **por construcción**: la conformación es un producto atómico del
+cierre, con `fecha_operativa`/`turno` de la cabecera (no del login). (b) La finalización individual [[D-040]]
+convive (es presencia por-bitácora, ortogonal al cierre de la cabecera). (c) La conformación conserva el
+blindaje anti-sintéticos [[D-044]] (`incluirSinteticos` sólo en unit tests). (d) MAND (cierre diario) y DISP
+(estado continuo) siguen **fuera**: nunca reciben `turno_id`. (e) El `/api/cierre/masivo` backend sobrevive
+hasta que se retire junto a sus tests; el front ya no lo usa. (f) La UI de seguimiento vive como sub-pestaña de
+Históricos (sin routing hash [[D-035]]). (g) Baseline de tests full-green; +34 tests nuevos (dominio + endpoint
++ guardrail de purga). Cross-ref: [[D-003]] (turno al login), [[D-025]] (conformación), [[D-040]]
+(finalización), [[D-042]] (cierre masivo reemplazado), [[D-044]] (sintéticos), [[D-035]] (sesión única/routing).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

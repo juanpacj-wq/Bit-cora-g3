@@ -5,13 +5,19 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 2.0 |
-| Fecha | 2026-07-03 |
+| Versión | 2.1 |
+| Fecha | 2026-07-05 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
 
 > **Convenciones:** las tablas de catálogos viven en `lov_bit`; las tablas operativas en `bitacora`. Los campos JSON usan `NVARCHAR(MAX)` y se validan en la capa de aplicación.
+
+> **Cambios v2.1 (2026-07-05) — Entidad explícita de turno (D-045):**
+> - **Nueva §4.10:** DDL de `bitacora.turno_unidad` (cabecera, ciclo `PROGRAMADO→ABIERTO→CERRADO`, `motivo_cierre`, extensión) + `bitacora.turno_participante` (participación viva) + FK `turno_id` NULLABLE en `sesion_activa`/`registro_activo`/`registro_historico`/`conformacion_turno` + vista `v_turno_seguimiento` (migración `F29.A1/A2/A3`).
+> - **§4.7 `conformacion_turno`:** cambia la **fuente de poblado** — ahora se congela desde `turno_participante` como producto atómico de `cerrarTurno` (D-045). **Retirados** el disparo por sweeper y el catchup de `initDB()` (cerraban H1/H2 de la auditoría 2026-07-04: la `fecha_operativa` ya no se deriva del login post-medianoche). El builder sobrevive solo para el trigger manual.
+> - **§7.5 corregida** (hallazgo D1 auditoría): los turnos estaban definidos **invertidos** (decían T1 00:00–11:59 / T2 12:00–23:59 y "editable por registro"). Lo correcto: **T1 `[06:00,18:00)`**, **T2 `[18:00,06:00)`** (cruza medianoche), fijado al login (D-003). §7.6 reescrita al cierre por turno.
+> - **Purga de arranque limpio** (script manual `sql/snippets/purga-arranque-limpio-D045.sql`, ejecutada 2026-07-05): vació `registro_activo`/`registro_historico`/`conformacion_turno`/`evento_dashboard`/`turno_unidad`/`turno_participante`; `disponibilidad_estado` intacta.
 
 > **Cambios v2.0 (2026-07-03) — Finalizar turno revertible (D-040):**
 > - **§3 `sesion_activa`**: nueva columna `turno_finalizado_en DATETIME2 NULL` (+ calculada `turno_finalizado_en_bogota`) como **fuente única** de la finalización de turno (NULL = vivo; no-NULL = finalizado). Revertible. La setea `POST /api/bitacora/finalizar`/`finalizar-forzado`; la limpia el nuevo `POST /api/bitacora/revertir-turno` (self-service) y `select-context` al reactivar.
@@ -838,12 +844,17 @@ ALTER TABLE bitacora.conformacion_turno ADD snapshot_en_bogota   AS DATEADD(HOUR
   - Sin logout (sweeper cierra `sesion_bitacora` pero D-003 deja `sesion_activa.activa=1`) → `fin_efectivo = ventana_fin`, `fin_inferido=1`.
 - **`duracion_min`** = `SUM(DATEDIFF(MINUTE, inicio_efectivo, fin_efectivo))` agregando todos los logins del mismo usuario en el mismo turno.
 
-**Trigger híbrido (Q3=d):**
+**Poblado (D-045 — desde la cabecera de turno):** la conformación se congela como **producto atómico del cierre del
+turno** (`server/utils/turno-entidad.js::cerrarTurno`), leyendo `bitacora.turno_participante` (§4.8) — NO reconstruyendo
+`sesion_activa`. Mapea `primer_ingreso → inicio_sesion`, `COALESCE(ultimo_egreso, ahora) → fin_sesion`,
+`presencia_acumulada_min → duracion_min`, `fin_inferido=0`, y estampa `turno_id`. La PK natural la mantiene idempotente.
 
-1. **`server/utils/turno-sweeper.js` (F4)** extendido: tras finalizar `sesion_bitacora` por agotamiento del turno, recopila `(planta, turno, fecha_operativa)` únicos y dispara `buildConformacionSnapshot` + `persistConformacionSnapshot` en transacciones aisladas (try/catch por conformación; un fallo no rompe los demás ni el cierre ya commiteado).
-2. **Catchup en `server/db.js::initDB()`** al arranque: detecta `(planta, turno, fecha_operativa)` de los últimos 7 días Bogotá sin snapshot, filtra "ventana ya cerró" en JS (`ventanaTurno().fin < now`), y persiste. Resiliencia ante crashes del server al cambio de turno.
-
-PK natural rechaza duplicados → idempotente entre runs concurrentes y entre sweeper/catchup/trigger admin.
+> ⚠️ **Retirado en D-045 (cierra H1/H2 de la auditoría 2026-07-04):** el modelo previo poblaba la conformación por
+> **(1)** el `turno-sweeper` (tras finalizar `sesion_bitacora`) y **(2)** un **catchup en `initDB()`** de 7 días. El catchup
+> derivaba `fecha_operativa` de `sesion_activa.inicio_sesion` (la hora del **login**), así que un T2 con logins post-medianoche
+> quedaba mal/sin conformar (**H1**); y el sweeper podía snapshotear un turno aún sin sellar (**H2**). Ambos caminos se
+> eliminaron; el builder `buildConformacionSnapshot` sobrevive **solo** para el trigger MANUAL de recálculo (recibe
+> `fecha_operativa` del request → no reintroduce H1).
 
 **Endpoints expuestos:**
 
@@ -1032,6 +1043,75 @@ GROUP BY c.planta_id, c.fecha, c.periodo;
 `db.js::initDB()` ejecuta el bloque F26.B1 una sola vez (gateado por flag en `bitacora.migracion_aplicada`). Dentro de una transacción única: crea `lov_bit.combustible` + índice + UQ, MERGE de 18 seeds del catálogo, crea `bitacora.consumo_combustible` + índice + columnas Bogotá, crea `v_consumo_periodo`, INSERT IF NOT EXISTS de la fila `COMB` en `lov_bit.bitacora`, seed one-shot de permisos en `cargo_bitacora_permiso` (Operador Carbón y Caliza + JdT crean; resto ven), validación de conteo (`THROW` si <18), INSERT flag F26.B1. Ortogonal a F26.A1 (DISP). La matriz canónica de §2.6 se extendió con CASE clauses para `b.codigo='COMB'` → los permisos persisten en restarts subsecuentes vía el rebuild de matriz, sin depender del flag F26.B1.
 
 **Cross-ref:** ADR [[D-027]] documenta la decisión completa. §2.7 detalla el catálogo. Paridad de `modificado_por` con [[D-019]] (MAND).
+
+---
+
+### 4.10 `turno_unidad` + `turno_participante` — entidad explícita de turno (D-045)
+
+El turno pasa de implícito (disperso en `sesion_activa.turno` + ventana derivada + conformación reconstruida) a **entidad de primera clase** con ciclo de vida propio (`PROGRAMADO → ABIERTO → CERRADO`). Migración idempotente `F29.A1/A2/A3` en `db.js::initDB()`.
+
+```sql
+-- F29.A1: cabecera. 1 fila por (fecha_operativa, planta, turno).
+CREATE TABLE bitacora.turno_unidad (
+    turno_unidad_id  INT IDENTITY(1,1) PRIMARY KEY,
+    fecha_operativa  DATE          NOT NULL,   -- día Bogotá del INICIO del turno (T2 = día de inicio)
+    planta_id        VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+    turno            TINYINT       NOT NULL CHECK (turno IN (1, 2)),
+    estado           VARCHAR(12)   NOT NULL CHECK (estado IN ('PROGRAMADO','ABIERTO','CERRADO')),
+    inicio_nominal   DATETIME2     NOT NULL,   -- umbral 06:00/18:00 de la ventana
+    fin_nominal      DATETIME2     NOT NULL,   -- corre al próximo umbral al EXTENDER
+    inicio_real      DATETIME2     NULL,       -- al pasar a ABIERTO
+    fin_real         DATETIME2     NULL,       -- al CERRAR
+    extendido        BIT           NOT NULL DEFAULT 0,
+    veces_extendido  INT           NOT NULL DEFAULT 0,
+    cerrado_por      INT           NULL REFERENCES lov_bit.usuario(usuario_id),
+    cerrado_en       DATETIME2     NULL,
+    motivo_cierre    VARCHAR(20)   NULL CHECK (motivo_cierre IN ('MANUAL','AUTO_SIN_PERSONAL','AUTO_SIN_RESPUESTA')),
+    creado_por       INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+    creado_en        DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    -- + 6 columnas *_bogota calculadas
+    CONSTRAINT UQ_turno_unidad_natural UNIQUE (fecha_operativa, planta_id, turno)
+);
+-- Máx 1 ABIERTO por unidad (la invariante real); PROGRAMADO y ABIERTO coexisten (sucesor sin solape).
+CREATE UNIQUE INDEX UQ_turno_unidad_abierto_por_planta ON bitacora.turno_unidad(planta_id) WHERE estado = 'ABIERTO';
+CREATE INDEX IX_turno_unidad_vigente ON bitacora.turno_unidad(planta_id, estado) WHERE estado IN ('PROGRAMADO','ABIERTO');
+
+-- F29.A1: detalle vivo. 1 fila por (turno, usuario), UPSERT al re-ingresar (participación viva).
+CREATE TABLE bitacora.turno_participante (
+    turno_participante_id     INT IDENTITY(1,1) PRIMARY KEY,
+    turno_id                  INT           NOT NULL REFERENCES bitacora.turno_unidad(turno_unidad_id),
+    usuario_id                INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+    cargo_id                  INT           NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+    usuario_nombre            VARCHAR(200)  NOT NULL,
+    cargo_nombre              VARCHAR(100)  NOT NULL,
+    primer_ingreso            DATETIME2     NOT NULL,   -- NO se pisa en el re-ingreso
+    ultimo_egreso             DATETIME2     NULL,
+    presencia_acumulada_min   INT           NOT NULL DEFAULT 0,  -- suma de lapsos [ingreso, egreso)
+    finalizado_individual_en  DATETIME2     NULL,       -- D-040 (presencia por-bitácora, ortogonal al cierre)
+    creado_en                 DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    -- + 4 columnas *_bogota calculadas
+    CONSTRAINT UQ_turno_participante_natural UNIQUE (turno_id, usuario_id)
+);
+
+-- F29.A2: FK turno_id NULLABLE en las 4 tablas que un turno gobierna (filas pre-feature quedan NULL).
+ALTER TABLE bitacora.sesion_activa       ADD turno_id INT NULL REFERENCES bitacora.turno_unidad(turno_unidad_id);
+ALTER TABLE bitacora.registro_activo     ADD turno_id INT NULL REFERENCES bitacora.turno_unidad(turno_unidad_id);
+ALTER TABLE bitacora.registro_historico  ADD turno_id INT NULL REFERENCES bitacora.turno_unidad(turno_unidad_id);
+ALTER TABLE bitacora.conformacion_turno  ADD turno_id INT NULL REFERENCES bitacora.turno_unidad(turno_unidad_id);
+
+-- F29.A3: vista de seguimiento (SELECT plano para GET /api/turno/seguimiento).
+CREATE OR ALTER VIEW bitacora.v_turno_seguimiento AS ...  -- turno_unidad + cerrado_por→nombre + COUNT(participante) + duración real/nominal
+```
+
+**Ciclo de vida y reglas:**
+
+- **Apertura automática** (`turno-sweeper.js::abrirTurnosVigentes`, autor SISTEMA): siempre existe la fila del turno vigente por unidad (GEC3/GEC32). **Sin solape:** si la unidad ya tiene un ABIERTO (p.ej. el anterior extendido) el vigente nace `PROGRAMADO` y se activa al cerrar el anterior.
+- **Cierre atómico** (`turno-entidad.js::cerrarTurno`): sella la cabecera + congela `conformacion_turno` desde `turno_participante` (§4.7) + archiva registros por `turno_id` a `registro_historico` + CIET + activa el sucesor, en **una** transacción. Reemplaza el cierre masivo [[D-042]].
+- **Flujo 6-a-6** (`transicionarTurnosVencidos`): al pasar `fin_nominal`, si no hay personal → `AUTO_SIN_PERSONAL` inmediato; con personal sin decidir tras `GRACIA_CIERRE_MIN=60` → `AUTO_SIN_RESPUESTA`; dentro de la gracia → bloqueo (modal front). JdT/IngOp extienden (`fin_nominal → próximo umbral`) o cierran.
+- **Participación viva** (`marcarParticipante` en `select-context`): entrar a la unidad marca participación aunque no se registre nada; `presencia_acumulada_min` se acumula al egreso.
+- **Estampado** (`registros.js`): el INSERT genérico resuelve el turno ABIERTO de la planta y guarda `registro_activo.turno_id`. **MAND y DISP quedan fuera** — nunca reciben `turno_id`.
+
+**Cross-ref:** ADR [[D-045]]. Cierra H1/H2 de la auditoría 2026-07-04 (ver §4.7). Purga de arranque limpio: `sql/snippets/purga-arranque-limpio-D045.sql` (script manual, ejecutado 2026-07-05).
 
 ---
 
@@ -1252,15 +1332,26 @@ Los nombres humanos de los roles se resuelven **del lado del cliente** parseando
 
 ### 7.5 Turnos
 
-- **Turno 1:** 00:00 – 11:59 hora Colombia (UTC−5, sin horario de verano).
-- **Turno 2:** 12:00 – 23:59 hora Colombia.
-- Se determina automáticamente al crear el registro pero es editable por el ingeniero.
+- **Turno 1 (diurno):** 06:00 – 17:59 hora Colombia (UTC−5, sin horario de verano) — ventana `[06:00, 18:00)`.
+- **Turno 2 (nocturno):** 18:00 – 05:59 hora Colombia — ventana `[18:00, 06:00)`, **cruza medianoche**.
+- Son **2 turnos** (no 3). La fuente única de la ventana es `ventanaTurno(turno, fechaRef)` en `server/utils/turno.js`.
+- El turno se **fija al login** (`sesion_activa.turno = getTurnoColombia()`, D-003) — NO se elige ni edita por registro.
+- **Convención `fecha_operativa`:** para T2 (que cruza medianoche) es el **día de inicio** del turno (§4.7).
+- ⚠️ *Corrección (D-045, hallazgo D1 auditoría 2026-07-04): esta sección definía antes los turnos invertidos
+  (T1 00:00–11:59 / T2 12:00–23:59) y "editable por registro". Ambas afirmaciones eran erróneas.*
 
-### 7.6 Flujo de cierre
+### 7.6 Flujo de cierre (D-045 — cierre por turno)
 
-- **Individual:** el JdT cierra una bitácora específica. Mueve los registros de esa combinación bitácora+planta.
-- **Masivo:** cierre de todas las bitácoras con registros activos para una planta. Se ejecuta como bucle de cierres individuales independientes (si alguno falla, los demás continúan y el resumen final lo reporta).
-- **Registros incompletos:** se notifica pero no bloquea la acción — la responsabilidad de cerrar es del JdT.
+- **Cierre por turno (único, D-045):** sella la cabecera `turno_unidad` de la unidad y, en **una transacción
+  atómica** (`server/utils/turno-entidad.js::cerrarTurno`), congela `conformacion_turno` desde `turno_participante`,
+  archiva a `registro_historico` los registros del turno (por `turno_id`), emite CIET `Cierre de turno` y activa el
+  turno sucesor (`PROGRAMADO → ABIERTO`). Endpoint `POST /api/turno/cerrar` (gated `puede_cerrar_turno`).
+- **Manual vs automático:** el JdT/IngOp cierra manual (`motivo=MANUAL`) o extiende al umbral; si nadie decide, el
+  `turno-sweeper` auto-cierra `AUTO_SIN_PERSONAL` (sin personal) o `AUTO_SIN_RESPUESTA` (tras 60 min de gracia).
+- **Fuera de alcance:** MAND (cierre diario automático, §7.9) y DISP (estado continuo, §7.8) **no** tienen `turno_id`
+  ni entran a la cabecera de turno.
+- *Histórico: el cierre individual por bitácora se eliminó (D-042); el cierre masivo por planta (`/api/cierre/masivo`)
+  fue reemplazado por el cierre por turno (D-045) — el endpoint legacy sobrevive hasta que se retire con sus tests.*
 
 ### 7.7 Lo que NO se forzó en BD (a propósito)
 
