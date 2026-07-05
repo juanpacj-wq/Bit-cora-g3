@@ -8,8 +8,8 @@ import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { hasPermisoBitacora, plantaMatch, canEditarRegistro } from '../middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from '../utils/campos.js';
-import { periodoFromFechaBogota, turnoFromPeriodo, fechaBogotaStr, getTurnoColombia, ventanaActual } from '../utils/turno.js';
-import { resolverTurnoAbierto, abrirTurnoSiFalta } from '../utils/turno-entidad.js';
+import { periodoFromFechaBogota, turnoFromPeriodo, fechaBogotaStr } from '../utils/turno.js';
+import { resolverTurnoAbierto, resolverOAbrirTurnoAbierto } from '../utils/turno-entidad.js';
 import {
   findEventoDashboard, upsertEventoDashboard, hasNotificarDashboard,
   findVigente, findUltimoCerrado, insertNuevoEstado, cerrarVigente, actualizarVigente,
@@ -19,7 +19,7 @@ import {
 } from '../utils/snapshots.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { notifyDashboard } from '../utils/notify-dashboard.js';
-import { asyncH, loadAppSession, bloquearSiTurnoFinalizado } from './_middleware.js';
+import { asyncH, loadAppSession, bloquearSiTurnoFinalizado, respTurnoCerrado } from './_middleware.js';
 import { getDispBitacoraId } from './_shared.js';
 
 // ── Helpers DISP (movidos de server.js — solo los usan las ramas DISP de POST/PUT) ──────────────
@@ -319,24 +319,16 @@ router.post('/', asyncH(async (req, res) => {
   const notificar = dashboardTipo != null;
   const fechaEventoDate = new Date(fecha_evento);
 
-  // D-045 E5: estampar el turno ABIERTO de la unidad en el registro (para el cierre por turno de E6).
-  // EXENTOS: MAND (ciclo por día, endpoint propio en mand.js) y DISP (salió arriba con su propio INSERT).
-  // Política del borde de ventana: si no hay turno ABIERTO aún, se intenta crearlo (abrirTurnoSiFalta);
-  // si aun así no se resuelve, turno_id queda NULL (best-effort, no bloquea el registro). turno_id es un
-  // dato ADICIONAL: no reemplaza la columna `turno` ni el gate `turno_no_coincide`.
+  // D-045 (write-gate por unidad): el registro se estampa con el turno ABIERTO de la unidad. Si la
+  // unidad NO tiene turno abierto (cierre manual anticipado o auto-cierre sin sucesor) se BLOQUEA la
+  // creación con 409 turno_cerrado. Antes se insertaba con turno_id=NULL ("crear registros en un turno
+  // ya cerrado"). resolverOAbrirTurnoAbierto cubre el borde de ventana (abre el turno vigente si el
+  // sweeper aún no lo hizo). EXENTO: MAND (ciclo por día, endpoint propio); DISP/COMB no pasan por acá.
   let turnoIdRegistro = null;
   if (!isMAND) {
-    try {
-      let turnoAbierto = await resolverTurnoAbierto(db, planta_id);
-      if (!turnoAbierto) {
-        const { inicio } = ventanaActual();
-        await abrirTurnoSiFalta(db, planta_id, getTurnoColombia(), fechaBogotaStr(inicio));
-        turnoAbierto = await resolverTurnoAbierto(db, planta_id);
-      }
-      turnoIdRegistro = turnoAbierto?.turno_unidad_id ?? null;
-    } catch (err) {
-      console.error('[registros] no se pudo resolver turno_id (registro sin turno):', err.message);
-    }
+    const turnoAbierto = await resolverOAbrirTurnoAbierto(db, planta_id);
+    if (!turnoAbierto) return respTurnoCerrado(res);
+    turnoIdRegistro = turnoAbierto.turno_unidad_id;
   }
 
   const transaction = new sql.Transaction(db);
@@ -584,6 +576,12 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
   if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
   const reg = check.recordset[0];
 
+  // D-045 write-gate por unidad: si el turno de la unidad está cerrado (sin ABIERTO) nadie edita en
+  // genéricas hasta reabrir. MAND fuera (ciclo por día, sin cabecera de turno).
+  if (reg.bitacora_codigo !== 'MAND' && !(await resolverTurnoAbierto(db, reg.planta_id))) {
+    return respTurnoCerrado(res);
+  }
+
   if (reg.estado !== 'borrador') {
     return sendJSON(res, 409, { error: 'Solo se pueden editar registros en borrador' });
   }
@@ -730,9 +728,20 @@ router.delete('/:id(\\d+)', asyncH(async (req, res) => {
   const db = await getDB();
   const check = await db.request()
     .input('registro_id', sql.Int, registro_id)
-    .query(`SELECT registro_id, estado, bitacora_id, planta_id, creado_por FROM bitacora.registro_activo WHERE registro_id = @registro_id`);
+    .query(`
+      SELECT ra.registro_id, ra.estado, ra.bitacora_id, ra.planta_id, ra.creado_por, b.codigo AS bitacora_codigo
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+      WHERE ra.registro_id = @registro_id
+    `);
   if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
   const reg = check.recordset[0];
+
+  // D-045 write-gate por unidad: turno cerrado → nadie borra en genéricas hasta reabrir. MAND fuera.
+  if (reg.bitacora_codigo !== 'MAND' && !(await resolverTurnoAbierto(db, reg.planta_id))) {
+    return respTurnoCerrado(res);
+  }
+
   if (reg.estado !== 'borrador') {
     return sendJSON(res, 409, { error: 'Solo se pueden eliminar registros en borrador' });
   }

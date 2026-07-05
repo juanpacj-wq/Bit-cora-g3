@@ -123,6 +123,20 @@ export function bloquearSiTurnoFinalizado(req, res) {
   return false;
 }
 
+// ── Write-gate D-045 (turno CERRADO — a nivel de unidad, para TODOS) ─────────────────────────────
+// Distinto del anterior (D-040 es por-usuario, revertible individualmente): cuando la UNIDAD no tiene
+// turno ABIERTO (cierre manual anticipado o auto-cierre sin sucesor) nadie puede crear/editar/borrar en
+// bitácoras genéricas hasta que se abra el siguiente turno (por ventana o reapertura manual). MAND/DISP/
+// COMB quedan fuera (endpoints propios). El llamador resuelve el turno abierto con
+// `resolverOAbrirTurnoAbierto`; este helper solo formatea el 409 con `codigo` estable (D-032).
+export function respTurnoCerrado(res) {
+  return sendJSON(res, 409, {
+    error: 'turno_cerrado',
+    codigo: 'turno_cerrado',
+    mensaje: 'El turno de esta unidad está cerrado. Un Jefe de Turno debe reabrirlo para volver a registrar.',
+  });
+}
+
 // ── asyncH — envuelve un handler async y enruta el throw a expressErrorHandler (D-032) ──────────
 // Reemplaza el try/catch global del if-chain: cualquier error del handler cae en next(err) → el
 // error-handler de Express lo sanea (sin filtrar internals).

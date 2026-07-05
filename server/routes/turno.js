@@ -7,7 +7,10 @@ import sql from 'mssql';
 import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { puedeCerrarTurno, plantaMatch } from '../middleware/permissions.js';
-import { resolverTurnoAbierto, cerrarTurno, extenderTurno, estadoTurnoActual } from '../utils/turno-entidad.js';
+import {
+  resolverTurnoAbierto, cerrarTurno, extenderTurno, estadoTurnoActual,
+  resolverTurnoReabrible, reabrirTurno,
+} from '../utils/turno-entidad.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { broadcastTurnoTransicion } from '../utils/ws-turno-transicion.js';
 import { asyncH, loadAppSession } from './_middleware.js';
@@ -100,6 +103,46 @@ router.post('/extender', asyncH(async (req, res) => {
     extendido: !!row.extendido,
     veces_extendido: row.veces_extendido,
     fin_nominal: row.fin_nominal,
+  });
+}));
+
+// POST /api/turno/reabrir { planta_id } — DES-CIERRE del turno de la ventana vigente cuando la unidad
+// quedó sin turno abierto (cierre manual anticipado / auto-cierre sin sucesor). Des-archiva los registros
+// del turno, borra su conformación y lo devuelve a ABIERTO. Gated puede_cerrar_turno + plantaMatch.
+router.post('/reabrir', asyncH(async (req, res) => {
+  const sesion = req.sesion;
+  if (!puedeCerrarTurno(sesion)) {
+    return sendJSON(res, 403, { error: 'Solo el Jefe de Turno o el Ingeniero de Operación pueden reabrir el turno' });
+  }
+  const { planta_id } = req.body || {};
+  if (!planta_id) return sendJSON(res, 400, { error: 'planta_id es requerido' });
+  if (!plantaMatch(sesion, planta_id)) {
+    return sendJSON(res, 403, { error: 'No puede reabrir el turno de otra planta' });
+  }
+
+  const pool = await getDB();
+  const reabrible = await resolverTurnoReabrible(pool, planta_id);
+  if (!reabrible) {
+    return sendJSON(res, 409, {
+      error: 'sin_turno_reabrible', codigo: 'sin_turno_reabrible',
+      mensaje: 'No hay un turno cerrado reabrible en esta unidad (la ventana ya rotó o el turno sigue abierto).',
+    });
+  }
+
+  const r = await reabrirTurno(pool, reabrible.turno_unidad_id, {
+    por_usuario: sesion.usuario_id,
+    cargo_nombre: sesion.cargo_nombre,
+  });
+  if (!r.reabierto) {
+    return sendJSON(res, 409, { error: r.motivo, codigo: r.motivo, mensaje: 'No se pudo reabrir el turno.' });
+  }
+
+  broadcastConteoBitacoras(planta_id).catch(() => {});
+  broadcastTurnoTransicion(planta_id, { estado: 'ABIERTO', bloqueo: false });
+  return sendJSON(res, 200, {
+    turno_id: reabrible.turno_unidad_id,
+    reabierto: true,
+    desarchivados: r.desarchivados,
   });
 }));
 

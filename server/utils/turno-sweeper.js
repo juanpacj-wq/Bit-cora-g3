@@ -1,7 +1,7 @@
 import sql from 'mssql';
 import { ventanaTurno, ventanaActual, fechaBogotaStr, getTurnoColombia } from './turno.js';
 import { registrarEventoCierre } from './ciet.js';
-import { abrirTurnoSiFalta, acumularPresenciaSesiones, transicionarTurnosVencidos } from './turno-entidad.js';
+import { abrirTurnoSiFalta, acumularPresenciaSesiones, transicionarTurnosVencidos, resolverTurnoAbierto } from './turno-entidad.js';
 import { broadcastTurnoTransicion } from './ws-turno-transicion.js';
 
 const INTERVAL_MS = 60_000;
@@ -27,7 +27,14 @@ export async function abrirTurnosVigentes(pool, { log = false } = {}) {
   const fechaOperativa = fechaBogotaStr(inicio);
   for (const planta_id of PLANTAS_TURNO) {
     try {
+      // Detectar apertura de un turno ABIERTO nuevo para avisar por WS: tras un cierre anticipado la
+      // unidad quedó sin ABIERTO y el front en solo-lectura; cuando la ventana siguiente lo abre, sin
+      // este aviso el front seguiría bloqueado hasta un F5 (la apertura por ventana no dispara transición).
+      const antes = await resolverTurnoAbierto(pool, planta_id);
       const row = await abrirTurnoSiFalta(pool, planta_id, turno, fechaOperativa, ahora);
+      if (row.estado === 'ABIERTO' && (!antes || antes.turno_unidad_id !== row.turno_unidad_id)) {
+        broadcastTurnoTransicion(planta_id, { estado: 'ABIERTO', bloqueo: false });
+      }
       if (log) {
         console.log(`[turno-sweeper] turno vigente asegurado: ${planta_id} T${turno} ${fechaOperativa} → ${row.estado} (#${row.turno_unidad_id})`);
       }

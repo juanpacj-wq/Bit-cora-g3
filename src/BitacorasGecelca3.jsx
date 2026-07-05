@@ -6,7 +6,7 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import {
-  LogIn, LogOut, Clock, Plus, Save, Trash2, Lock, CheckCircle2, RotateCcw,
+  LogIn, LogOut, Clock, Plus, Save, Trash2, Lock, Unlock, CheckCircle2, RotateCcw,
   AlertTriangle, X, ChevronDown, ChevronLeft, ChevronRight, Calendar,
   Search, Filter, FileText,
   Activity, Flame, Droplets, Zap, Gauge, Cpu, FlaskConical, Leaf,
@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 import TurnoTransicionModal from "./components/TurnoTransicionModal";
+import CierrePendientesModal from "./components/CierrePendientesModal";
 import LogoutModal from "./components/LogoutModal";
 import SalaDeMandoGrid from "./components/SalaDeMando/SalaDeMandoGrid";
 import DisponibilidadDashboard from "./components/Disponibilidad/DisponibilidadDashboard";
@@ -23,6 +24,7 @@ import { useAuth } from "./hooks/useAuth";
 import { useCatalogos } from "./hooks/useCatalogos";
 import { useRegistros } from "./hooks/useRegistros";
 import { useTurno } from "./hooks/useTurno";
+import { useCierre } from "./hooks/useCierre";
 import { useUsuariosActivos } from "./hooks/useUsuariosActivos";
 import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
 import { useFlipReorder } from "./hooks/useFlipReorder";
@@ -634,11 +636,17 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
         <span className="px-3 py-1 rounded-lg text-xs font-bold" style={{ backgroundColor: tema.badgeBg }}>
           {getTurnoLabel(sesion?.turno)}
         </span>
-        {/* D-045 E8: estado del turno de la unidad (abierto / extendido / en transición). */}
-        {turnoEstado === 'ABIERTO' && (
+        {/* D-045: estado del turno de la unidad. ABIERTO → abierto / extendido / en transición;
+            cualquier otro (sin turno abierto: cerrado anticipado o auto-cerrado) → "Turno cerrado". */}
+        {turnoEstado === 'ABIERTO' ? (
           <span className="px-3 py-1 rounded-lg text-xs font-bold text-white"
             style={{ backgroundColor: turnoBloqueo ? '#D97706' : turnoExtendido ? '#1D4ED8' : '#059669' }}>
             {turnoBloqueo ? 'En transición' : turnoExtendido ? 'Turno extendido' : 'Turno abierto'}
+          </span>
+        ) : (
+          <span className="px-3 py-1 rounded-lg text-xs font-bold text-white flex items-center gap-1.5"
+            style={{ backgroundColor: '#DC2626' }}>
+            <Lock size={12} /> Turno cerrado
           </span>
         )}
       </div>
@@ -1031,7 +1039,7 @@ function CategoriaTab({ categoria, activeId, onSelect, registrosPorBitacora }) {
 
 function BarraEstado({
   bitacora, registros, estadoBitacora, puedeCrear, esJefeTurno,
-  onCerrarTurno, onFinalizarTurno, finalizandoTurno, turnoFinalizado,
+  onCerrarTurno, onReabrirTurno, onFinalizarTurno, finalizandoTurno, turnoFinalizado, turnoUnidadCerrado,
   onRevertirTurno, revirtiendoTurno,
   filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
   filtroFecha, setFiltroFecha, onCommitFecha, filtroTurno, setFiltroTurno,
@@ -1198,10 +1206,10 @@ function BarraEstado({
           </button>
         )
       ) : (
-        // D-040: gate de UI acotado a genéricas. Este botón vive en la rama !isMand de una
+        // D-040/D-045: gate de UI acotado a genéricas. Este botón vive en la rama !isMand de una
         // BarraEstado que solo se monta para no-DISP/COMB → es exclusivo de bitácoras genéricas.
-        // Restamos turnoFinalizado SOLO acá (MAND "Guardar" arriba y DISP/COMB quedan crudos).
-        puedeCrear && !turnoFinalizado && (
+        // Restamos turnoFinalizado (individual) y turnoUnidadCerrado (unidad sin turno abierto) SOLO acá.
+        puedeCrear && !turnoFinalizado && !turnoUnidadCerrado && (
           <button onClick={onAddRegistro}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all"
             style={{ backgroundColor: COLORS.greenPrimary }}>
@@ -1211,36 +1219,51 @@ function BarraEstado({
         )
       )}
 
-      {/* F4/D-040: "Finalizar turno" para todo ingeniero logueado. Ahora es REVERTIBLE: cuando el
-          turno está finalizado el botón togglea a "Revertir finalización" (self-service, sin permiso
-          especial). F17: oculto en MAND (cierre del día es automático vía sweeper). */}
-      {!isMand && onFinalizarTurno && (
+      {/* F4/D-040 · acción INDIVIDUAL (afecta solo a quien la pulsa) → estilo OUTLINE para distinguirla
+          del cierre de unidad (solid). Es REVERTIBLE y self-service. F17: oculta en MAND. D-045: oculta
+          si la unidad ya está cerrada (no hay turno abierto que finalizar/revertir). */}
+      {!isMand && !turnoUnidadCerrado && onFinalizarTurno && (
         turnoFinalizado ? (
           <button onClick={onRevertirTurno} disabled={revirtiendoTurno}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
-            style={{ backgroundColor: COLORS.blueDark }}>
+            title="Vuelve a habilitar TU registro en las bitácoras. Solo te afecta a ti."
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-white border-2 hover:bg-blue-50 transition-all disabled:opacity-60"
+            style={{ borderColor: COLORS.blueDark, color: COLORS.blueDark }}>
             <RotateCcw size={16} />
-            {revirtiendoTurno ? 'Revirtiendo…' : 'Revertir finalización'}
+            {revirtiendoTurno ? 'Revirtiendo…' : 'Revertir mi finalización'}
           </button>
         ) : (
           <button onClick={onFinalizarTurno} disabled={finalizandoTurno}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all disabled:opacity-60"
-            style={{ backgroundColor: COLORS.greenDark }}>
+            title="Registra que TÚ terminaste tu turno. Es individual y reversible; NO cierra la unidad."
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-white border-2 hover:bg-emerald-50 transition-all disabled:opacity-60"
+            style={{ borderColor: COLORS.greenDark, color: COLORS.greenDark }}>
             <CheckCircle2 size={16} />
-            {finalizandoTurno ? 'Finalizando…' : 'Finalizar Turno'}
+            {finalizandoTurno ? 'Finalizando…' : 'Finalizar mi turno'}
           </button>
         )
       )}
 
-      {/* D-045 E8: cierre de turno por cabecera (POST /api/turno/cerrar, reemplaza el masivo D-042).
-          Solo cargos puede_cerrar_turno. Oculto en MAND: su cierre del día es automático vía sweeper
-          diario (`server/utils/mand-sweeper.js`). */}
-      {!isMand && esJefeTurno && (
+      {/* D-045 · acción de UNIDAD (afecta a TODOS) → estilo SOLID. Cierre de turno por cabecera
+          (POST /api/turno/cerrar). Solo cargos puede_cerrar_turno. Oculto en MAND (cierre del día
+          automático vía sweeper). Oculto si la unidad ya está cerrada (ahí aparece "Reabrir Turno"). */}
+      {!isMand && esJefeTurno && !turnoUnidadCerrado && (
         <button onClick={onCerrarTurno}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
+          title="Cierra el turno de TODA la unidad: archiva los registros y congela la conformación. Afecta a todos."
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
           style={{ backgroundColor: COLORS.blueDeep }}>
           <Lock size={16} />
           Cerrar Turno
+        </button>
+      )}
+
+      {/* D-045 (reabrir) · acción de UNIDAD → SOLID. Cuando la unidad quedó sin turno abierto (cierre
+          anticipado), el JdT/IngOp puede reabrirlo. Reemplaza a "Cerrar Turno" mientras está cerrada. */}
+      {!isMand && esJefeTurno && turnoUnidadCerrado && onReabrirTurno && (
+        <button onClick={onReabrirTurno}
+          title="Reabre el turno de la unidad: devuelve los registros a borrador y habilita el registro para todos."
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
+          style={{ backgroundColor: COLORS.greenDark }}>
+          <Unlock size={16} />
+          Reabrir Turno
         </button>
       )}
     </div>
@@ -1666,6 +1689,13 @@ export default function App() {
   const registrosHook = useRegistros();
   // D-045 E8: estado del turno + acciones cerrar/extender (reemplaza useCierre/cierre masivo).
   const turnoHook = useTurno(auth.ready, auth.sesion?.sesion_id, auth.sesion?.planta_id, auth.turno);
+  const cierre = useCierre(); // D-045: preview de pendientes + finalización forzada del popup de cierre
+  const [cierreModalOpen, setCierreModalOpen] = useState(false);
+  const [cerrandoTurno, setCerrandoTurno] = useState(false);
+  const bitacorasMap = useMemo(
+    () => new Map((catalogos.bitacoras || []).map((b) => [b.bitacora_id, b.nombre])),
+    [catalogos.bitacoras],
+  );
   const usuariosActivos = useUsuariosActivos(auth.ready, auth.sesion?.sesion_id);
   const { counts: registrosPorBitacora } = useBitacoraCounts(
     auth.ready,
@@ -1737,6 +1767,13 @@ export default function App() {
   // vive en localStorage (divergía del backend y el reset de /abrir lo dejaba inconsistente). El
   // turno-sweeper la muere sola a fin de turno; select-context la limpia al reactivar (turno nuevo).
   const turnoFinalizado = sesion?.turno_finalizado_en != null;
+
+  // D-045 (write-gate por unidad): cuando la unidad NO tiene turno ABIERTO (cierre manual anticipado
+  // o auto-cierre sin sucesor) las bitácoras genéricas quedan en solo-lectura para TODOS —no solo para
+  // quien finalizó— hasta que se abra el siguiente turno (por ventana o reapertura manual). estadoTurno
+  // Actual devuelve 'ABIERTO' o null (nunca 'CERRADO'), así que null ≡ unidad sin turno abierto. Durante
+  // la transición (bloqueo) el estado sigue 'ABIERTO' y lo cubre el modal, no este gate.
+  const turnoUnidadCerrado = turnoHook.estado !== 'ABIERTO';
 
   // Las bitácoras visibles se separan en (a) categorías agrupadas en un solo botón fijo
   // a la izquierda y (b) bitácoras "sueltas" que siguen siendo tabs reordenables por count.
@@ -2028,18 +2065,56 @@ export default function App() {
     return r;
   }, [turnoHook, refrescarRegistrosActivos, showToast]);
 
-  // Botón manual "Cerrar Turno" del header (JdT/IngOp) — mismo cierre por cabecera, con confirmación.
+  // Botón manual "Cerrar Turno" del header (JdT/IngOp) — abre el popup de pendientes (bitácoras con
+  // borradores + ingenieros sin finalizar) y carga el preview. El cierre real lo dispara el confirm.
   const handleCerrarTurno = useCallback(() => {
+    const planta = auth.sesion?.planta_id;
+    if (!planta) return;
+    setCierreModalOpen(true);
+    cierre.cargarPreview(planta);
+  }, [auth, cierre]);
+
+  // Confirmación del popup: finaliza forzado a los ingenieros pendientes y luego cierra el turno.
+  const handleConfirmCierre = useCallback(async () => {
+    const p = cierre.preview;
+    const pendientes = (p && p !== 'loading' ? p.ingenieros_no_finalizados : []) || [];
+    setCerrandoTurno(true);
+    try {
+      if (pendientes.length > 0) {
+        await cierre.finalizarForzado(pendientes.map((u) => u.usuario_id));
+      }
+      await cerrarTurnoUnidad();
+      setCierreModalOpen(false);
+      cierre.limpiar();
+    } catch (e) {
+      showToast(e.message, 'error');
+    } finally {
+      setCerrandoTurno(false);
+    }
+  }, [cierre, cerrarTurnoUnidad, showToast]);
+
+  const handleCancelCierre = useCallback(() => {
+    setCierreModalOpen(false);
+    cierre.limpiar();
+  }, [cierre]);
+
+  // D-045 (reabrir): des-cierra el turno de la ventana vigente cuando la unidad quedó sin turno abierto
+  // (cierre anticipado). Solo JdT/IngOp. Des-archiva los registros y devuelve la unidad a operación.
+  const handleReabrirTurno = useCallback(() => {
     setModal({
-      title: 'Cerrar turno',
-      message: 'Vas a cerrar el turno de esta unidad: se archivan los registros del turno y se congela la conformación. Esta acción no se revierte. ¿Continuar?',
-      confirmLabel: 'Cerrar turno', confirmColor: 'blue', icon: Lock,
+      title: 'Reabrir turno',
+      message: 'Vas a reabrir el turno de esta unidad: los registros archivados vuelven a borrador y la unidad queda operativa de nuevo. ¿Continuar?',
+      confirmLabel: 'Reabrir turno', confirmColor: 'green', icon: Unlock,
       onConfirm: async () => {
-        try { await cerrarTurnoUnidad(); setModal(null); }
-        catch (e) { showToast(e.message, 'error'); }
+        try {
+          const r = await turnoHook.reabrir();
+          await refrescarRegistrosActivos();
+          setModal(null);
+          showToast(`Turno reabierto: ${r?.desarchivados ?? 0} registro(s) devuelto(s) a borrador.`);
+        } catch (e) { showToast(e.message, 'error'); }
       },
     });
-  }, [cerrarTurnoUnidad, showToast]);
+  }, [turnoHook, refrescarRegistrosActivos, showToast]);
 
   // Acciones del modal bloqueante de transición (el modal maneja su propia confirmación en 2 pasos).
   const handleTurnoExtender = useCallback(async () => {
@@ -2207,9 +2282,11 @@ export default function App() {
               puedeCrear={puedeCrear}
               esJefeTurno={esJefeTurno}
               onCerrarTurno={handleCerrarTurno}
+              onReabrirTurno={handleReabrirTurno}
               onFinalizarTurno={handleFinalizarTurno}
               finalizandoTurno={finalizandoTurno}
               turnoFinalizado={turnoFinalizado}
+              turnoUnidadCerrado={turnoUnidadCerrado}
               onRevertirTurno={handleRevertirTurno}
               revirtiendoTurno={revirtiendoTurno}
               filtroTexto={filtroTexto} setFiltroTexto={setFiltroTexto}
@@ -2224,9 +2301,20 @@ export default function App() {
             />
           )}
 
-          {/* D-040: aviso de turno finalizado. Solo en bitácoras GENÉRICAS (donde el registro
-              queda bloqueado). MAND/DISP/COMB siguen operables → no muestran el banner. */}
-          {bitacoraActiva && !['DISP', 'COMB', 'MAND'].includes(bitacoraActiva.codigo) && turnoFinalizado && (
+          {/* D-045: aviso de turno de la unidad CERRADO (bloqueo para todos). Tiene precedencia sobre
+              el aviso de finalización individual. Solo en bitácoras GENÉRICAS. */}
+          {bitacoraActiva && !['DISP', 'COMB', 'MAND'].includes(bitacoraActiva.codigo) && turnoUnidadCerrado && (
+            <div role="status"
+              className="flex items-center gap-2 mt-3 rounded-xl border px-4 py-3 text-sm font-medium"
+              style={{ backgroundColor: '#FEE2E2', borderColor: '#FECACA', color: '#991B1B' }}>
+              <Lock size={16} className="shrink-0" />
+              <span>El turno de esta unidad está cerrado. El registro en bitácoras está bloqueado hasta que un Jefe de Turno abra el siguiente turno.</span>
+            </div>
+          )}
+
+          {/* D-040: aviso de turno finalizado por este usuario. Solo si la unidad NO está cerrada (ese
+              aviso manda). MAND/DISP/COMB siguen operables → no muestran el banner. */}
+          {bitacoraActiva && !['DISP', 'COMB', 'MAND'].includes(bitacoraActiva.codigo) && turnoFinalizado && !turnoUnidadCerrado && (
             <div role="status"
               className="flex items-center gap-2 mt-3 rounded-xl border px-4 py-3 text-sm font-medium"
               style={{ backgroundColor: '#FEF3C7', borderColor: '#FDE68A', color: '#92400E' }}>
@@ -2264,17 +2352,18 @@ export default function App() {
               showToast={showToast}
             />
           ) : (
-            /* D-040: la grilla genérica se bloquea cuando el turno está finalizado (paridad con el
-               write-gate del backend). `bloqueado` pone TODA la grilla en solo-lectura (sin editar,
-               borrar ni entrar en modo edición); MAND/DISP/COMB reciben el puedeCrear crudo. */
+            /* D-040/D-045: la grilla genérica se bloquea cuando (a) el turno está finalizado por este
+               usuario (D-040, individual) o (b) la unidad no tiene turno abierto (D-045, para todos).
+               `bloqueado` pone TODA la grilla en solo-lectura (sin editar, borrar ni entrar en modo
+               edición); MAND/DISP/COMB reciben el puedeCrear crudo. */
             <GrillaRegistros
               registros={registrosDeBitacora}
               bitacora={bitacoraActiva}
               tiposEvento={tiposEvento}
               jefeNombre={catalogos.jefe?.nombre_completo}
               jdtNombre={null}
-              puedeCrear={puedeCrear && !turnoFinalizado}
-              bloqueado={turnoFinalizado}
+              puedeCrear={puedeCrear && !turnoFinalizado && !turnoUnidadCerrado}
+              bloqueado={turnoFinalizado || turnoUnidadCerrado}
               onUpdateLocal={handleUpdateLocal}
               onSaveRegistro={handleSaveRegistro}
               onDeleteRegistro={handleDeleteRegistro}
@@ -2316,8 +2405,22 @@ export default function App() {
         open={turnoHook.bloqueo}
         puedeDecidir={turnoHook.puedeDecidir}
         accionando={turnoHook.accionando}
+        plantaNombre={plantaNombre}
+        turno={turnoHook.turno}
+        finNominal={turnoHook.finNominal}
         onExtender={handleTurnoExtender}
         onCerrar={handleTurnoCerrarModal}
+      />
+
+      {/* D-045: popup de pendientes antes del cierre manual (bitácoras con borradores + ingenieros sin
+          finalizar). "Cerrar de todas formas" finaliza forzado a los pendientes y cierra el turno. */}
+      <CierrePendientesModal
+        open={cierreModalOpen}
+        preview={cierre.preview}
+        bitacorasMap={bitacorasMap}
+        loading={cerrandoTurno}
+        onConfirm={handleConfirmCierre}
+        onCancel={handleCancelCierre}
       />
 
       <style>{`

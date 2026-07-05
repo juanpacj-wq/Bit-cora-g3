@@ -1,5 +1,5 @@
 import sql from 'mssql';
-import { ventanaTurno, ventanaActual } from './turno.js';
+import { ventanaTurno, ventanaActual, getTurnoColombia, fechaBogotaStr } from './turno.js';
 import { USUARIO_SISTEMA_ID } from '../db.js';
 import { registrarEventoCierre } from './ciet.js';
 
@@ -142,6 +142,21 @@ export async function resolverTurnoAbierto(pool, planta_id) {
       WHERE planta_id = @p AND estado = 'ABIERTO'
     `);
   return r.recordset[0] ?? null;
+}
+
+// D-045 (write-gate) — resuelve el turno ABIERTO de la unidad, abriendo el de la ventana vigente si
+// aún no existe (borde de ventana: el sweeper corre c/60s, un registro puede llegar antes). Devuelve
+// la fila ABIERTO o `null` si la unidad NO tiene turno abierto — cierre manual anticipado o auto-cierre
+// sin sucesor (la ventana ya tiene su fila CERRADA, así que abrirTurnoSiFalta la devuelve sin reabrir).
+// Un `null` es la señal de "turno cerrado → bloquear escritura en bitácoras genéricas".
+export async function resolverOAbrirTurnoAbierto(pool, planta_id, { ahora = new Date() } = {}) {
+  let t = await resolverTurnoAbierto(pool, planta_id);
+  if (!t) {
+    const { inicio } = ventanaActual(ahora);
+    await abrirTurnoSiFalta(pool, planta_id, getTurnoColombia(), fechaBogotaStr(inicio), ahora);
+    t = await resolverTurnoAbierto(pool, planta_id);
+  }
+  return t;
 }
 
 // Promueve el PROGRAMADO más antiguo de la unidad a ABIERTO (inicio_real=ahora), pero SÓLO si la
@@ -335,6 +350,118 @@ export async function cerrarTurno(pool, turno_id, {
     const cerrado = await _leerTurno(() => new sql.Request(tx), turno_id);
     await tx.commit();
     return { cerrado, sucesor, archivados, conformados };
+  } catch (e) {
+    try { await tx.rollback(); } catch { /* rollback best-effort */ }
+    throw e;
+  }
+}
+
+// D-045 (reabrir) — el turno CERRADO de la VENTANA VIGENTE de la unidad (el único reabrible: su
+// ventana aún contiene `ahora`). Devuelve la fila o null si el turno de la ventana no está CERRADO
+// (no existe, sigue ABIERTO o ya rotó a la ventana siguiente).
+export async function resolverTurnoReabrible(pool, planta_id, { ahora = new Date() } = {}) {
+  const { inicio } = ventanaActual(ahora);
+  const r = await pool.request()
+    .input('p', sql.VarChar(10), planta_id)
+    .input('t', sql.TinyInt, getTurnoColombia())
+    .input('f', sql.Date, fechaBogotaStr(inicio))
+    .query(`
+      SELECT TOP 1 *
+      FROM bitacora.turno_unidad
+      WHERE planta_id = @p AND turno = @t AND fecha_operativa = @f AND estado = 'CERRADO'
+    `);
+  return r.recordset[0] ?? null;
+}
+
+// D-045 (reabrir) — DES-CIERRE de un turno CERRADO de la ventana vigente: revierte el cierre para que
+// la unidad vuelva a operar SIN crear un turno nuevo (el UNIQUE natural (fecha,planta,turno) lo impide).
+// Espejo inverso de cerrarTurno, atómico:
+//   1) valida: estado CERRADO, sin otro ABIERTO en la unidad, y la ventana aún contiene `ahora`.
+//   2) des-archiva los registros del turno (registro_historico → registro_activo, estado 'borrador',
+//      preservando registro_id vía IDENTITY_INSERT).
+//   3) borra la conformación congelada del turno (un cierre posterior la recongela fresca).
+//   4) reabre la cabecera (ABIERTO, limpia fin_real/motivo/cerrado_*, fin_nominal ← fin de la ventana,
+//      extendido=0; veces_extendido se conserva como historial).
+//   5) CIET 'reapertura'.
+// Devuelve { reabierto, desarchivados } o { reabierto:null, motivo } si no aplica (el endpoint lo mapea
+// a 409 con `codigo` estable). NUNCA reabre si hay otro ABIERTO (el sucesor ya arrancó → reabrir no aplica).
+export async function reabrirTurno(pool, turno_id, { por_usuario, cargo_nombre = null, ahora = new Date() } = {}) {
+  if (!por_usuario) throw new Error('reabrirTurno: por_usuario es requerido');
+  const tx = new sql.Transaction(pool);
+  await tx.begin();
+  try {
+    const cur = await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .query(`SELECT * FROM bitacora.turno_unidad WITH (UPDLOCK, HOLDLOCK) WHERE turno_unidad_id = @id`);
+    const row = cur.recordset[0];
+    if (!row) { await tx.commit(); return { reabierto: null, motivo: 'no_existe' }; }
+    if (row.estado !== 'CERRADO') { await tx.commit(); return { reabierto: null, motivo: 'no_cerrado' }; }
+
+    // No puede haber otro ABIERTO en la unidad (el índice único lo bloquearía; error claro antes de fallar).
+    const abierto = await new sql.Request(tx)
+      .input('p', sql.VarChar(10), row.planta_id)
+      .query(`SELECT TOP 1 turno_unidad_id FROM bitacora.turno_unidad WITH (UPDLOCK, HOLDLOCK) WHERE planta_id = @p AND estado = 'ABIERTO'`);
+    if (abierto.recordset[0]) { await tx.commit(); return { reabierto: null, motivo: 'ya_abierto' }; }
+
+    // La ventana del turno debe seguir conteniendo `ahora` (no reabrir un turno de una ventana pasada).
+    const { inicio, fin } = ventanaTurno(row.turno, fechaRefBogotaMediodia(row.fecha_operativa));
+    if (!(ahora >= inicio && ahora < fin)) { await tx.commit(); return { reabierto: null, motivo: 'ventana_vencida' }; }
+
+    // 2) Des-archivar los registros del turno (preserva registro_id → IDENTITY_INSERT).
+    const des = await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .query(`
+        SET IDENTITY_INSERT bitacora.registro_activo ON;
+        INSERT INTO bitacora.registro_activo
+          (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+           estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
+           modificado_por, modificado_en, turno_id)
+        SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+               'borrador', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
+               modificado_por, modificado_en, turno_id
+        FROM bitacora.registro_historico
+        WHERE turno_id = @id AND estado = 'cerrado';
+        SET IDENTITY_INSERT bitacora.registro_activo OFF;
+
+        DELETE FROM bitacora.registro_historico WHERE turno_id = @id AND estado = 'cerrado';
+      `);
+    const desarchivados = des.rowsAffected?.[0] ?? 0;
+
+    // 3) Borrar la conformación congelada del turno (se recongela fresca en un cierre posterior).
+    await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .query(`DELETE FROM bitacora.conformacion_turno WHERE turno_id = @id`);
+
+    // 4) Reabrir la cabecera.
+    await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .input('fin', sql.DateTime2, fin)
+      .query(`
+        UPDATE bitacora.turno_unidad
+        SET estado = 'ABIERTO', fin_real = NULL, motivo_cierre = NULL, cerrado_por = NULL,
+            cerrado_en = NULL, fin_nominal = @fin, extendido = 0
+        WHERE turno_unidad_id = @id
+      `);
+
+    // 4b) Reabrir = unidad operativa para TODOS: limpiar la finalización individual (D-040) que el
+    //     cierre haya forzado (o que un usuario haya marcado), para que nadie quede bloqueado tras reabrir.
+    await new sql.Request(tx)
+      .input('p', sql.VarChar(10), row.planta_id)
+      .query(`
+        UPDATE bitacora.sesion_activa SET turno_finalizado_en = NULL
+        WHERE planta_id = @p AND activa = 1 AND turno_finalizado_en IS NOT NULL
+      `);
+
+    // 5) CIET 'reapertura' (atribuido al actor).
+    await registrarEventoCierre(tx, {
+      tipo: 'reapertura',
+      sesion: { usuario_id: por_usuario, planta_id: row.planta_id, turno: row.turno, cargo_nombre },
+      motivo: 'reapertura-manual',
+    });
+
+    const reabierto = await _leerTurno(() => new sql.Request(tx), turno_id);
+    await tx.commit();
+    return { reabierto, desarchivados };
   } catch (e) {
     try { await tx.rollback(); } catch { /* rollback best-effort */ }
     throw e;

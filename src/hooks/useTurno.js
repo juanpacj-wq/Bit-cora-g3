@@ -85,8 +85,22 @@ export function useTurno(ready, sesionId, plantaId, initialTurno = null) {
     }
   }, [plantaId, refetch]);
 
+  // D-045 (reabrir) — des-cierra el turno de la ventana vigente cuando la unidad quedó sin turno abierto.
+  const reabrir = useCallback(async () => {
+    if (!plantaId) return null;
+    setAccionando(true);
+    try {
+      const r = await api.post('/api/turno/reabrir', { planta_id: plantaId });
+      await refetch();
+      return r;
+    } finally {
+      setAccionando(false);
+    }
+  }, [plantaId, refetch]);
+
   return {
     estado: turno?.estado ?? null,
+    turno: turno?.turno ?? null,
     bloqueo: !!turno?.bloqueo,
     puedeDecidir: !!turno?.puede_decidir,
     extendido: !!turno?.extendido,
@@ -94,6 +108,7 @@ export function useTurno(ready, sesionId, plantaId, initialTurno = null) {
     accionando,
     cerrar,
     extender,
+    reabrir,
     refetch,
   };
 }
