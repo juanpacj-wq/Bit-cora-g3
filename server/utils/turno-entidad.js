@@ -19,8 +19,16 @@ export const MOTIVOS_CIERRE = ['MANUAL', 'AUTO_SIN_PERSONAL', 'AUTO_SIN_RESPUEST
 // fecha_operativa es la fecha Bogotá del INICIO del turno (convención del proyecto). Forzar
 // mediodía Bogotá (−05:00) garantiza que ventanaTurno() vea hour=12 y derive la ventana correcta
 // para ambos turnos sin depender de "ahora". Mismo patrón que conformacion-snapshot.js.
+// Acepta string 'YYYY-MM-DD' (abrirTurnoSiFalta) o un Date (columna DATE leída de la BD, que mssql
+// devuelve a MEDIANOCHE UTC). En el caso Date leemos las partes UTC directas —NO el shift −5h de
+// fechaBogotaStr—: un DATE no tiene hora, su valor ya ES la fecha operativa; aplicarle el offset la
+// correría un día atrás. Sin esta normalización, interpolar un Date daba `Invalid Date` y el guard de
+// ventana de reabrirTurno fallaba siempre con 'ventana_vencida'.
 function fechaRefBogotaMediodia(fecha_operativa) {
-  return new Date(`${fecha_operativa}T12:00:00.000-05:00`);
+  const ymd = fecha_operativa instanceof Date
+    ? `${fecha_operativa.getUTCFullYear()}-${String(fecha_operativa.getUTCMonth() + 1).padStart(2, '0')}-${String(fecha_operativa.getUTCDate()).padStart(2, '0')}`
+    : fecha_operativa;
+  return new Date(`${ymd}T12:00:00.000-05:00`);
 }
 
 // ---------------------------------------------------------------------------

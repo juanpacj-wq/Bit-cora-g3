@@ -17,6 +17,7 @@ import {
   resolverTurnoAbierto,
   activarSucesor,
   cerrarTurno,
+  reabrirTurno,
   extenderTurno,
   marcarParticipante,
   acumularPresenciaSesiones,
@@ -272,6 +273,48 @@ describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
     // Cerrar y volver a extender → null (no está ABIERTO).
     await cerrarTurno(pool, A.turno_unidad_id, { motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID });
     assert.equal(await extenderTurno(pool, A.turno_unidad_id, { ahora: new Date('2026-04-11T11:00:00Z') }), null);
+  });
+
+  // --- D-045 (reabrir): des-cierre. REGRESIÓN del bug de fecha_operativa: la columna DATE vuelve de la
+  //     BD como Date (medianoche UTC); interpolarla en fechaRefBogotaMediodia daba Invalid Date → la
+  //     ventana quedaba NaN y reabrirTurno devolvía SIEMPRE 'ventana_vencida' aunque la ventana fuera vigente.
+  test('reabrirTurno des-cierra un CERRADO cuya ventana contiene ahora (fecha_operativa Date de BD)', async () => {
+    await limpiarTurnos();
+    const A = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+    await cerrarTurno(pool, A.turno_unidad_id, { motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID, ahora: new Date('2026-04-10T16:00:00Z') });
+    // 16:30Z = 11:30 Bogotá, dentro de la ventana T1 [11:00Z, 23:00Z) → debe reabrir.
+    const r = await reabrirTurno(pool, A.turno_unidad_id, { por_usuario: USUARIO_SISTEMA_ID, ahora: new Date('2026-04-10T16:30:00Z') });
+    assert.equal(r.motivo, undefined, `no debería fallar (motivo=${r.motivo})`);
+    assert.ok(r.reabierto, 'reabierto no nulo');
+    assert.equal(r.reabierto.estado, 'ABIERTO');
+    assert.equal(r.reabierto.motivo_cierre, null);
+    assert.equal(r.reabierto.fin_real, null);
+    assert.equal(r.reabierto.extendido, false);
+    assert.equal(iso(r.reabierto.fin_nominal), '2026-04-10T23:00:00.000Z'); // fin de la ventana T1
+    const vig = await resolverTurnoAbierto(pool, P);
+    assert.equal(vig.turno_unidad_id, A.turno_unidad_id, 'vuelve a ser el ABIERTO de la unidad');
+  });
+
+  test('reabrirTurno con ahora FUERA de la ventana → ventana_vencida', async () => {
+    await limpiarTurnos();
+    const A = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+    await cerrarTurno(pool, A.turno_unidad_id, { motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID, ahora: new Date('2026-04-10T16:00:00Z') });
+    // Al día siguiente: la ventana T1 del 10 ya venció → no reabre.
+    const r = await reabrirTurno(pool, A.turno_unidad_id, { por_usuario: USUARIO_SISTEMA_ID, ahora: new Date('2026-04-11T16:30:00Z') });
+    assert.equal(r.reabierto, null);
+    assert.equal(r.motivo, 'ventana_vencida');
+  });
+
+  test('reabrirTurno guards: no_cerrado (sigue ABIERTO) y ya_abierto (otro ABIERTO en la unidad)', async () => {
+    await limpiarTurnos();
+    const A = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+    const r1 = await reabrirTurno(pool, A.turno_unidad_id, { por_usuario: USUARIO_SISTEMA_ID, ahora: new Date('2026-04-10T16:00:00Z') });
+    assert.equal(r1.motivo, 'no_cerrado');
+    await cerrarTurno(pool, A.turno_unidad_id, { motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID, ahora: new Date('2026-04-10T16:00:00Z') });
+    const B = await abrirTurnoSiFalta(pool, P, 2, '2026-04-10', new Date('2026-04-10T23:30:00Z')); // nuevo ABIERTO
+    assert.equal(B.estado, 'ABIERTO');
+    const r2 = await reabrirTurno(pool, A.turno_unidad_id, { por_usuario: USUARIO_SISTEMA_ID, ahora: new Date('2026-04-10T16:30:00Z') });
+    assert.equal(r2.motivo, 'ya_abierto');
   });
 
   // --- D-045 E4: participación viva ---
