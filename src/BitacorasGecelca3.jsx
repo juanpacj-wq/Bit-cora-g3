@@ -2308,7 +2308,7 @@ export default function App() {
               className="flex items-center gap-2 mt-3 rounded-xl border px-4 py-3 text-sm font-medium"
               style={{ backgroundColor: '#FEE2E2', borderColor: '#FECACA', color: '#991B1B' }}>
               <Lock size={16} className="shrink-0" />
-              <span>El turno de esta unidad está cerrado. El registro en bitácoras está bloqueado hasta que un Jefe de Turno abra el siguiente turno.</span>
+              <span>El turno de esta unidad está cerrado. El registro en bitácoras está bloqueado hasta que se abra el siguiente turno.</span>
             </div>
           )}
 
