@@ -13,7 +13,8 @@
 //   3. registro_activo           ← entradas creadas por test users o tagged TEST-RUN.
 //   4. registro_historico        ← idem.
 //   5. mand_cierre_log           ← (planta=GEC3, fecha_cerrada >= 2026-05-01).
-//   6. sesion_activa             ← sesiones de los test users.
+//   6. sesion_activa             ← TODAS las sesiones sintéticas (es_sintetico=1), no solo las 4.
+//   7. conformacion_turno        ← snapshots sintéticos (es_sintetico=1).
 
 import sql from 'mssql';
 import { getDB, TEST_PLANTA_ID } from '../db.js';
@@ -101,18 +102,22 @@ async function main() {
     `);
   counts.mand_cierre_log = r.rowsAffected[0];
 
-  // 6. sesion_activa: marca inactivas las sesiones de los test users (no DELETE para preservar
-  // FK con `sesion_bitacora`, que sí persistirá referenciable si algún test reactivara).
+  // 6. sesion_activa: marca inactivas TODAS las sesiones sintéticas (es_sintetico=1), no solo las de
+  // los 4 TEST_USERNAMES — cubre también test_opcarbon/test_coord_cym/… que suites puntuales siembran
+  // en GEC3 y que la whitelist de 4 dejaba activas en el panel CONECTADOS de prod (bug 2026-07-05).
+  // No DELETE: preserva la FK con `sesion_bitacora`. es_sintetico=1 jamás matchea un operador real (D-044).
   r = await db.request().query(`
     UPDATE bitacora.sesion_activa SET activa = 0
-    WHERE usuario_id IN (${idList}) AND activa = 1;
+    WHERE activa = 1
+      AND usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE es_sintetico = 1);
   `);
   counts.sesion_activa_desactivadas = r.rowsAffected[0];
 
-  // 7. conformacion_turno: snapshots seedeados por tests dirigidos del builder/endpoints.
+  // 7. conformacion_turno: snapshots seedeados por tests dirigidos del builder/endpoints. Por
+  // es_sintetico=1 (paridad con cleanupTestRegistros): cubre cualquier fixture, no solo los 4.
   r = await db.request().query(`
     DELETE FROM bitacora.conformacion_turno
-    WHERE usuario_id IN (${idList});
+    WHERE usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE es_sintetico = 1);
   `);
   counts.conformacion_turno = r.rowsAffected[0];
 

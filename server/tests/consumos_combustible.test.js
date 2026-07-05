@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { hashPassword } from '../utils/password.js';
-import { setupSessions, call, PLANTA_ID, TEST_TAG } from './helpers.js';
+import { setupSessions, call, PLANTA_ID, TEST_TAG, deactivateSyntheticSessions } from './helpers.js';
 
 // D-027: tests del módulo Combustibles → Consumos (F26.B1).
 // 12 tests cubren: catálogo (1, 2), batch CRUD (3, 7), validaciones (4, 5, 6),
@@ -71,6 +71,9 @@ before(async () => {
 after(async () => {
   await cleanConsumos('GEC3', TEST_FECHA);
   await cleanConsumos('GEC32', TEST_FECHA);
+  // Este suite crea sesiones sintéticas en GEC3 (setupSessions + test_opcarbon). Desactivarlas SIEMPRE
+  // aquí para no dejarlas en el panel CONECTADOS de prod (D-030). Cubre las 4 TEST_USERS + test_opcarbon.
+  await deactivateSyntheticSessions();
 });
 
 test('1. GET catalogo GEC3 devuelve 8 combustibles en orden correcto', async () => {

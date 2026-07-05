@@ -47,6 +47,20 @@ TZ=UTC npm test
 3. **Cleanup explícito** en `before/after`: las tablas con UNIQUE constraints (`mand_cierre_log` (planta, fecha)) deben limpiarse para que tests re-corran de un día al siguiente.
 4. **Date.now() mock:** Node 20 permite `mock.method(Date, 'now', () => fixedMs)` — restaurar en `finally`. Solo afecta el proceso del test, NO el servidor.
 5. **Subprocess para TZ:** la única forma de testear TZ override en el handler es lanzar el server en sub-proceso con `TZ` distinto. Hoy no se hace — deuda en §Deuda.
+6. **Desactivar sesiones sintéticas en `after()`:** si un suite crea sesiones (`setupSessions` o un INSERT propio a `sesion_activa`), su `after()` DEBE llamar `deactivateSyntheticSessions()` (o `cleanupTestRegistros()`, que ya la invoca). Ver la sección de aislamiento de sesiones — es una regla dura, no opcional.
+
+## Aislamiento de sesiones contra producción (D-030) — regla dura
+
+La suite corre contra la **BD de producción** (D-030), así que una sesión de test dejada `activa=1` en una planta real (GEC3/GEC32) **aparece en el panel CONECTADOS real de los operadores**. Pasó el 2026-07-05: `test_opcarbon` y `test_coord_cym` quedaban colgadas en GEC3 tras cada corrida porque el cleanup de sesiones era una **whitelist de 4 usernames** que no las contemplaba.
+
+**Invariante:** toda limpieza de sesiones de test se hace por `es_sintetico=1` (el discriminador que el seed de `initDB` garantiza SOLO sobre fixtures `test_*` y NUNCA sobre un operador real — verificado en `conformacion_turno.test.js`), nunca por una lista de usernames.
+
+Blindaje en tres capas:
+1. **`deactivateSyntheticSessions()` (`helpers.js`)** desactiva TODA sesión `es_sintetico=1`. `cleanupTestRegistros()` la llama.
+2. **Cada suite que crea sesiones la invoca en su `after()`** (fix de raíz).
+3. **`zzz_session_leak_guard.test.js`** (ÚLTIMO en el script `test`) es la red de seguridad + tripwire: su `after()` desactiva todo lo sintético pase lo que pase (prod queda limpia aunque un test crashee), y su `test()` **FALLA nombrando al ofensor** si algún suite dejó una sesión sintética activa en una planta real → una regresión futura sale ROJA de inmediato.
+
+Nunca desactivar sesiones de test por username; usar siempre `es_sintetico=1`. Si agregás un fixture nuevo, basta con que su suite llame `deactivateSyntheticSessions()` en `after()` — el guard lo cubre igual, pero minimiza la ventana durante la corrida.
 
 ## Deuda conocida
 
@@ -71,11 +85,7 @@ cd Bit-cora-g3/server
 npm run test:reset-db
 ```
 
-El script (`tests/reset-db.js`) tiene una **whitelist hardcoded de usernames test** (`test_jdt`, `test_ingop`, `test_gerente`, `test_ingquim`) y solo borra filas:
-- creadas por esos usuarios (`creado_por IN (whitelist_ids)`), o
-- tagueadas con `TEST_TAG` (`detalle LIKE 'TEST-RUN-%'`).
-
-Adicionalmente limpia `mand_cierre_log` solo para `planta_id='GEC3' AND fecha_cerrada >= '2026-05-01'`. **Jamás toca filas de usuarios reales** — validado contra inserción de fila con `creado_por=emunoz` (sobrevive el reset).
+El script (`tests/reset-db.js`) borra `registro_activo`/`registro_historico`/`evento_dashboard` por **whitelist de 4 usernames** (`creado_por IN (ids)`) o por `TEST_TAG` (`detalle LIKE 'TEST-RUN-%'`); y desactiva sesiones + borra `conformacion_turno` por **`es_sintetico=1`** (cubre TODOS los fixtures, incl. `test_opcarbon`/`test_coord_cym`, no solo los 4). Adicionalmente limpia `mand_cierre_log` solo para `planta_id='GEC3' AND fecha_cerrada >= '2026-05-01'`. **Jamás toca filas de usuarios reales** — `es_sintetico=1` nunca matchea un operador real (D-044), y las tablas por-whitelist se validaron contra inserción con `creado_por=emunoz` (sobrevive el reset).
 
 Idempotente, sin prompt, exit code 0/1 — apto para CI o scripting.
 

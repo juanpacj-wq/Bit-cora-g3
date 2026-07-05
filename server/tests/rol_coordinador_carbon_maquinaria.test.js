@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { hashPassword } from '../utils/password.js';
-import { setupSessions, call, PLANTA_ID } from './helpers.js';
+import { setupSessions, call, PLANTA_ID, deactivateSyntheticSessions } from './helpers.js';
 
 // D-029: rol "Coordinador de carbón y maquinaria".
 // Lectura + llenado de Carbón y Caliza (CYC) y Maquinaria (MAQU), + llenado en
@@ -83,6 +83,9 @@ after(async () => {
     .input('p', sql.VarChar(10), 'GEC3')
     .input('f', sql.Date, TEST_FECHA)
     .query(`DELETE FROM bitacora.consumo_combustible WHERE planta_id=@p AND fecha=@f`);
+  // Este suite crea sesiones sintéticas en GEC3 (setupSessions + test_coord_cym). Desactivarlas SIEMPRE
+  // aquí para no dejarlas en el panel CONECTADOS de prod (D-030). Cubre las 4 TEST_USERS + test_coord_cym.
+  await deactivateSyntheticSessions();
 });
 
 test('1. El cargo existe con flags correctos (solo_lectura=0, puede_cerrar_turno=0)', async () => {

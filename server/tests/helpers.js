@@ -27,6 +27,24 @@ export async function cleanDispTestPlanta() {
     .query(`DELETE FROM bitacora.disponibilidad_estado WHERE planta_id = @tp;`);
 }
 
+// D-030/D-044: ÚNICA vía para desactivar sesiones de test. Opera por `es_sintetico=1` (NO por una
+// whitelist de usernames): cubre TODOS los fixtures `test_*` — incluidos los que siembran suites
+// puntuales (`test_opcarbon` en consumos, `test_coord_cym` en rol_coordinador, …). La versión vieja,
+// basada en los 4 TEST_USERS, dejaba esas dos sesiones ACTIVAS en GEC3 y visibles en el panel
+// CONECTADOS de PRODUCCIÓN tras cada corrida (la suite corre contra prod, D-030). `es_sintetico=1`
+// jamás matchea un operador real (invariante del seed, verificado en conformacion_turno.test.js).
+// Contrato: todo test que cree sesiones DEBE llamarla en su `after()`; además el guard final
+// `zzz_session_leak_guard.test.js` la corre como red de seguridad y falla si algo se coló.
+export async function deactivateSyntheticSessions() {
+  const db = await getDB();
+  const r = await db.request().query(`
+    UPDATE bitacora.sesion_activa SET activa = 0
+    WHERE activa = 1
+      AND usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE es_sintetico = 1)
+  `);
+  return r.rowsAffected[0];
+}
+
 export async function call(method, path, { body, sesion_id } = {}) {
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -190,11 +208,10 @@ export async function cleanupTestRegistros() {
           AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_historico);
       `);
   }
-  const usernames = TEST_USERS.map((u) => `'${u.username}'`).join(',');
-  await db.request().query(`
-    UPDATE bitacora.sesion_activa SET activa = 0
-    WHERE usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE username IN (${usernames}))
-  `);
+  // D-030/D-044: desactivar TODA sesión sintética (es_sintetico=1), no solo los 4 TEST_USERS. La
+  // whitelist vieja dejaba test_opcarbon/test_coord_cym ACTIVAS en GEC3 → panel CONECTADOS de prod
+  // sucio tras cada corrida. Ver deactivateSyntheticSessions.
+  await deactivateSyntheticSessions();
   // conformacion-turno-2026-05 + D-044: snapshots seedeados por los tests E2E/builder. Limpiar por
   // es_sintetico=1 (no por los 4 usernames de TEST_USERS): cubre TAMBIÉN a test_opcarbon y
   // test_coord_cym, que otros suites siembran y que la versión vieja dejaba filtrados para siempre
