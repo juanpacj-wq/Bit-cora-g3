@@ -43,6 +43,16 @@ fi
 echo "==> Build frontend (APP_BASE_PATH=$APP_BASE_PATH)"
 npm run build
 
+# D-047: si el unit de systemd cambió en el repo (p.ej. Environment=NODE_EXTRA_CA_CERTS), el
+# instalado en /etc/systemd/system NO se actualiza solo con el pull — lo sincronizamos acá.
+UNIT_SRC="$APP_DIR/deploy/bitacora-api.service"
+UNIT_DST=/etc/systemd/system/bitacora-api.service
+if ! sudo cmp -s "$UNIT_SRC" "$UNIT_DST"; then
+  echo "==> Unit de systemd cambió: lo actualizo + daemon-reload"
+  sudo cp "$UNIT_SRC" "$UNIT_DST"
+  sudo systemctl daemon-reload
+fi
+
 echo "==> Reinicio backend bitacora-api"
 sudo systemctl restart bitacora-api
 sudo systemctl --no-pager status bitacora-api | head -5
