@@ -1,11 +1,41 @@
 import sql from 'mssql';
-import { ventanaTurno, fechaBogotaStr } from './turno.js';
+import { ventanaTurno, ventanaActual, fechaBogotaStr, getTurnoColombia } from './turno.js';
 import { registrarEventoCierre } from './ciet.js';
 import { buildConformacionSnapshot, persistConformacionSnapshot } from './conformacion-snapshot.js';
+import { abrirTurnoSiFalta } from './turno-entidad.js';
 
 const INTERVAL_MS = 60_000;
 
+// D-045: unidades con cabecera de turno = las dos plantas térmicas físicas de Gecelca. MAND (cierra
+// por día) y DISP (estado continuo) NO tienen cabecera de turno; el resto de bitácoras opera sobre
+// estas mismas dos unidades. Hardcodeado como en el resto del subrepo (p.ej. el chequeo MAND de db.js).
+const PLANTAS_TURNO = ['GEC3', 'GEC32'];
+
 let timer = null;
+
+// D-045 E3: asegura que exista la fila de turno_unidad del turno VIGENTE por unidad (apertura
+// automática, autor SISTEMA). Idempotente (UPSERT por UNIQUE natural en abrirTurnoSiFalta): si la
+// unidad ya tiene un ABIERTO —p.ej. el turno anterior extendido— la fila del turno vigente nace
+// PROGRAMADO (sucesor sin solape); si no hay ninguno abierto, nace ABIERTO. Forward-only: NO
+// backfillea turnos pasados (el histórico se purga en E10). Error boundary por planta: un fallo en
+// una unidad no impide la otra ni tumba el timer. La transición PROGRAMADO→ABIERTO la dispara el
+// cierre del anterior (E6/E7); acá sólo se garantiza que la fila (ABIERTO o PROGRAMADO) exista.
+export async function abrirTurnosVigentes(pool, { log = false } = {}) {
+  const ahora = new Date();
+  const turno = getTurnoColombia();
+  const { inicio } = ventanaActual(ahora);
+  const fechaOperativa = fechaBogotaStr(inicio);
+  for (const planta_id of PLANTAS_TURNO) {
+    try {
+      const row = await abrirTurnoSiFalta(pool, planta_id, turno, fechaOperativa, ahora);
+      if (log) {
+        console.log(`[turno-sweeper] turno vigente asegurado: ${planta_id} T${turno} ${fechaOperativa} → ${row.estado} (#${row.turno_unidad_id})`);
+      }
+    } catch (err) {
+      console.error(`[turno-sweeper] error abriendo turno vigente ${planta_id} T${turno} ${fechaOperativa}:`, err.message);
+    }
+  }
+}
 
 // F4: finaliza automáticamente las sesion_bitacora cuya ventana de turno ya terminó.
 // Login Entra (cambio de conducta vs. F2): además EXPULSA la sesión de app (sesion_activa.activa=0)
@@ -150,8 +180,17 @@ export async function sweepTurnosVencidos(pool) {
 
 export function startTurnoSweeper(pool) {
   if (timer) return;
+  // D-045 E3: catchup de apertura al ARRANQUE (forward-only). Asegura la fila del turno vigente por
+  // unidad sin esperar el primer tick de 60s. Fire-and-forget: su propio error boundary interno (por
+  // planta) evita que un fallo de apertura tumbe el bootstrap; el .catch cubre un fallo global.
+  abrirTurnosVigentes(pool, { log: true }).catch((err) =>
+    console.error('[turno-sweeper] apertura de arranque falló:', err.message)
+  );
   const tick = async () => {
     try {
+      // D-045 E3: en cada tick asegura la fila del turno vigente (crea el ABIERTO al entrar la ventana,
+      // o el sucesor PROGRAMADO si el anterior sigue extendido). Idempotente → silencioso salvo error.
+      await abrirTurnosVigentes(pool);
       const n = await sweepTurnosVencidos(pool);
       if (n > 0) console.log(`[turno-sweeper] ${n} sesion_bitacora finalizadas por agotamiento de turno`);
     } catch (err) {
