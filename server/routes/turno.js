@@ -3,6 +3,7 @@
 // el front migra en E8). E7 agrega GET /actual y POST /extender + broadcast WS. E9 /seguimiento.
 
 import express from 'express';
+import sql from 'mssql';
 import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { puedeCerrarTurno, plantaMatch } from '../middleware/permissions.js';
@@ -100,6 +101,73 @@ router.post('/extender', asyncH(async (req, res) => {
     veces_extendido: row.veces_extendido,
     fin_nominal: row.fin_nominal,
   });
+}));
+
+// GET /api/turno/seguimiento?planta=&desde=&hasta= — ciclo de vida de los turnos de una unidad por
+// rango de días (D-045 E9). Cualquier sesión puede consultarlo (solo lo que ya expone el histórico:
+// estado, extensión, motivo_cierre, quién cerró, duración real vs nominal, nº de participantes). Sin
+// filtros de fecha usa los últimos 14 días Bogotá. `planta` default = la de la sesión.
+router.get('/seguimiento', asyncH(async (req, res) => {
+  const sesion = req.sesion;
+  const planta = req.query.planta || sesion.planta_id;
+  const pool = await getDB();
+  const rq = pool.request().input('planta', sql.VarChar(10), planta);
+  let where = 'planta_id = @planta';
+  if (req.query.desde) { rq.input('desde', sql.Date, req.query.desde); where += ' AND fecha_operativa >= @desde'; }
+  if (req.query.hasta) { rq.input('hasta', sql.Date, req.query.hasta); where += ' AND fecha_operativa <= @hasta'; }
+  if (!req.query.desde && !req.query.hasta) {
+    // Ventana por defecto: últimos 14 días operativos (Bogotá = UTC-5).
+    where += " AND fecha_operativa >= CAST(DATEADD(HOUR, -5, DATEADD(DAY, -14, SYSUTCDATETIME())) AS DATE)";
+  }
+  const r = await rq.query(`
+    SELECT * FROM bitacora.v_turno_seguimiento
+    WHERE ${where}
+    ORDER BY fecha_operativa DESC, turno DESC, planta_id
+  `);
+  return sendJSON(res, 200, { planta_id: planta, turnos: r.recordset });
+}));
+
+// GET /api/turno/seguimiento/:turnoId/participantes — detalle de un turno: si está CERRADO lee la
+// conformación congelada (inmutable); si sigue vivo lee turno_participante (presencia en curso). Ambos
+// exponen ingreso/fin/presencia (min) y la finalización individual cuando aplica.
+router.get('/seguimiento/:turnoId/participantes', asyncH(async (req, res) => {
+  const turnoId = Number.parseInt(req.params.turnoId, 10);
+  if (!Number.isInteger(turnoId) || turnoId <= 0) {
+    return sendJSON(res, 400, { error: 'Identificador de turno inválido' });
+  }
+  const pool = await getDB();
+  const cab = await pool.request().input('id', sql.Int, turnoId)
+    .query(`SELECT estado FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
+  if (!cab.recordset[0]) return sendJSON(res, 404, { error: 'Turno no encontrado' });
+  const cerrado = cab.recordset[0].estado === 'CERRADO';
+
+  let participantes;
+  if (cerrado) {
+    const r = await pool.request().input('id', sql.Int, turnoId).query(`
+      SELECT usuario_id, usuario_nombre, cargo_nombre,
+             inicio_sesion, fin_sesion, duracion_min, fin_inferido,
+             DATEADD(HOUR, -5, inicio_sesion) AS inicio_bogota,
+             DATEADD(HOUR, -5, fin_sesion)    AS fin_bogota,
+             CAST(NULL AS DATETIME2) AS finalizado_individual_en
+      FROM bitacora.conformacion_turno
+      WHERE turno_id = @id
+      ORDER BY usuario_nombre
+    `);
+    participantes = r.recordset;
+  } else {
+    const r = await pool.request().input('id', sql.Int, turnoId).query(`
+      SELECT usuario_id, usuario_nombre, cargo_nombre,
+             primer_ingreso AS inicio_sesion, ultimo_egreso AS fin_sesion,
+             presencia_acumulada_min AS duracion_min, CAST(0 AS BIT) AS fin_inferido,
+             primer_ingreso_bogota AS inicio_bogota, ultimo_egreso_bogota AS fin_bogota,
+             finalizado_individual_en
+      FROM bitacora.turno_participante
+      WHERE turno_id = @id
+      ORDER BY usuario_nombre
+    `);
+    participantes = r.recordset;
+  }
+  return sendJSON(res, 200, { turno_id: turnoId, cerrado, participantes });
 }));
 
 export default router;

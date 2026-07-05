@@ -2244,6 +2244,32 @@ export async function initDB() {
       INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F29.A2');
   `);
 
+  // F29.A3 — D-045 E9: vista de seguimiento de turnos. SELECT plano para GET /api/turno/seguimiento:
+  // une turno_unidad + el nombre de quien cerró + el conteo de participantes, expone las columnas
+  // *_bogota (para presentación) y la duración real vs nominal (min). No lleva trigger de solo-lectura
+  // (D-041): es una vista NO actualizable de por sí (JOIN + subconsulta agregada) y el endpoint solo lee.
+  // CREATE OR ALTER debe ser el primer statement del batch (idempotente).
+  await db.request().batch(`
+    CREATE OR ALTER VIEW bitacora.v_turno_seguimiento AS
+    SELECT
+      tu.turno_unidad_id,
+      tu.fecha_operativa,
+      tu.planta_id,
+      tu.turno,
+      tu.estado,
+      tu.inicio_nominal, tu.fin_nominal, tu.inicio_real, tu.fin_real,
+      tu.inicio_nominal_bogota, tu.fin_nominal_bogota, tu.inicio_real_bogota, tu.fin_real_bogota,
+      tu.extendido, tu.veces_extendido, tu.motivo_cierre,
+      tu.cerrado_por, uc.nombre_completo AS cerrado_por_nombre,
+      tu.cerrado_en, tu.cerrado_en_bogota,
+      CASE WHEN tu.inicio_real IS NOT NULL AND tu.fin_real IS NOT NULL
+           THEN DATEDIFF(MINUTE, tu.inicio_real, tu.fin_real) END AS duracion_real_min,
+      DATEDIFF(MINUTE, tu.inicio_nominal, tu.fin_nominal) AS duracion_nominal_min,
+      (SELECT COUNT(*) FROM bitacora.turno_participante tp WHERE tp.turno_id = tu.turno_unidad_id) AS n_participantes
+    FROM bitacora.turno_unidad tu
+    LEFT JOIN lov_bit.usuario uc ON uc.usuario_id = tu.cerrado_por;
+  `);
+
   // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de
   // auditoría interna (CIET).
   await db.request().batch(`
