@@ -47,6 +47,9 @@ export function useAuth() {
   const [ready, setReady] = useState(false);
   // Última planta usada (la devuelve /api/me) para que reentrar en un turno nuevo sea de un clic.
   const [ultimaPlanta, setUltimaPlanta] = useState(null);
+  // D-045 E8: estado del turno de la unidad (bloqueo/extensión), fallback del modal ante F5. NO se
+  // persiste (fuente = backend); solo siembra el primer render de useTurno, que luego lo mantiene vía WS.
+  const [turno, setTurno] = useState(null);
   const userRef = useRef(null);
   const sesionRef = useRef(null);
 
@@ -66,6 +69,7 @@ export function useAuth() {
           setUser(r.user);
           setSesion(r.sesion || null);
           setUltimaPlanta(r.ultimaPlanta || null);
+          setTurno(r.turno || null);
           persistAuth(r.user, r.sesion || null);
         } else {
           persistAuth(null, null);
@@ -160,7 +164,7 @@ export function useAuth() {
   }, []);
 
   return {
-    user, sesion, loading, error, ready, ultimaPlanta,
+    user, sesion, loading, error, ready, ultimaPlanta, turno,
     loginWithMicrosoft, selectContext, logout, logoutLocal, clearSesion, patchSesion,
   };
 }

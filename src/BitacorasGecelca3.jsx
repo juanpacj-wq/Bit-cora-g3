@@ -14,7 +14,7 @@ import {
   LayoutDashboard, MonitorCog, Menu, ArrowLeftRight,
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
-import CierrePendientesModal from "./components/CierrePendientesModal";
+import TurnoTransicionModal from "./components/TurnoTransicionModal";
 import LogoutModal from "./components/LogoutModal";
 import SalaDeMandoGrid from "./components/SalaDeMando/SalaDeMandoGrid";
 import DisponibilidadDashboard from "./components/Disponibilidad/DisponibilidadDashboard";
@@ -22,7 +22,7 @@ import ConsumosGrid from "./components/Combustibles/ConsumosGrid";
 import { useAuth } from "./hooks/useAuth";
 import { useCatalogos } from "./hooks/useCatalogos";
 import { useRegistros } from "./hooks/useRegistros";
-import { useCierre } from "./hooks/useCierre";
+import { useTurno } from "./hooks/useTurno";
 import { useUsuariosActivos } from "./hooks/useUsuariosActivos";
 import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
 import { useFlipReorder } from "./hooks/useFlipReorder";
@@ -548,7 +548,7 @@ function HeaderMenu({ vista, onDashboard, onToggleVista, onCambiarUnidad, onLogo
   );
 }
 
-function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista, onDashboard, onCambiarUnidad }) {
+function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista, onDashboard, onCambiarUnidad, turnoEstado, turnoBloqueo, turnoExtendido }) {
   const tema = temaUnidad(sesion?.planta_id);
   const [reloj, setReloj] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
@@ -634,6 +634,13 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
         <span className="px-3 py-1 rounded-lg text-xs font-bold" style={{ backgroundColor: tema.badgeBg }}>
           {getTurnoLabel(sesion?.turno)}
         </span>
+        {/* D-045 E8: estado del turno de la unidad (abierto / extendido / en transición). */}
+        {turnoEstado === 'ABIERTO' && (
+          <span className="px-3 py-1 rounded-lg text-xs font-bold text-white"
+            style={{ backgroundColor: turnoBloqueo ? '#D97706' : turnoExtendido ? '#1D4ED8' : '#059669' }}>
+            {turnoBloqueo ? 'En transición' : turnoExtendido ? 'Turno extendido' : 'Turno abierto'}
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-3">
@@ -1024,7 +1031,7 @@ function CategoriaTab({ categoria, activeId, onSelect, registrosPorBitacora }) {
 
 function BarraEstado({
   bitacora, registros, estadoBitacora, puedeCrear, esJefeTurno,
-  onCerrarMasivo, onFinalizarTurno, finalizandoTurno, turnoFinalizado,
+  onCerrarTurno, onFinalizarTurno, finalizandoTurno, turnoFinalizado,
   onRevertirTurno, revirtiendoTurno,
   filtroTexto, setFiltroTexto, filtroTipo, setFiltroTipo,
   filtroFecha, setFiltroFecha, onCommitFecha, filtroTurno, setFiltroTurno,
@@ -1225,11 +1232,11 @@ function BarraEstado({
         )
       )}
 
-      {/* D-042: cierre de turno (único cierre — el cierre individual por bitácora fue eliminado).
-          Con popup de pendientes; solo cargos puede_cerrar_turno. Oculto en MAND: su cierre del día
-          es automático vía sweeper diario (`server/utils/mand-sweeper.js`). */}
+      {/* D-045 E8: cierre de turno por cabecera (POST /api/turno/cerrar, reemplaza el masivo D-042).
+          Solo cargos puede_cerrar_turno. Oculto en MAND: su cierre del día es automático vía sweeper
+          diario (`server/utils/mand-sweeper.js`). */}
       {!isMand && esJefeTurno && (
-        <button onClick={onCerrarMasivo}
+        <button onClick={onCerrarTurno}
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm hover:shadow-md"
           style={{ backgroundColor: COLORS.blueDeep }}>
           <Lock size={16} />
@@ -1657,7 +1664,8 @@ export default function App() {
   const auth = useAuth();
   const catalogos = useCatalogos(auth.sesion?.cargo_id, auth.ready);
   const registrosHook = useRegistros();
-  const cierre = useCierre();
+  // D-045 E8: estado del turno + acciones cerrar/extender (reemplaza useCierre/cierre masivo).
+  const turnoHook = useTurno(auth.ready, auth.sesion?.sesion_id, auth.sesion?.planta_id, auth.turno);
   const usuariosActivos = useUsuariosActivos(auth.ready, auth.sesion?.sesion_id);
   const { counts: registrosPorBitacora } = useBitacoraCounts(
     auth.ready,
@@ -1703,7 +1711,6 @@ export default function App() {
   // F4/D-040: hooks para "Finalizar Turno" / "Revertir finalización" del header.
   const { finalizar: finalizarTurno, loading: finalizandoTurno } = useFinalizarTurno();
   const { revertir: revertirTurno, loading: revirtiendoTurno } = useRevertirTurno();
-  const [pendientesModal, setPendientesModal] = useState(null);
   // F17: estado lifted desde SalaDeMandoGrid para que el botón "Guardar" del header sepa
   // si hay diff pendiente y dispare la batch via ref. mandSaveRef.current es la fn que
   // el child registra al montar (registerSaveHandler).
@@ -2004,36 +2011,46 @@ export default function App() {
     });
   }, [registrosHook, sesion, activeBitacora, showToast]);
 
-  // D-042: botón "Cerrar Turno" (único cierre) — abre modal con preview de pendientes antes de cerrar.
-  const handleCerrarMasivo = useCallback(async () => {
-    try {
-      const preview = await cierre.previewMasivo(sesion.planta_id);
-      setPendientesModal({ preview });
-    } catch (e) {
-      showToast(e.message, 'error');
+  // D-045 E8: cierre de turno por cabecera (reemplaza el cierre masivo D-042). Sella la cabecera del
+  // turno de la unidad, congela la conformación desde turno_participante y archiva los registros del
+  // turno — atómico en el backend (POST /api/turno/cerrar). Confirmación con el ConfirmModal existente.
+  const refrescarRegistrosActivos = useCallback(async () => {
+    if (activeBitacora && sesion?.planta_id) {
+      try { await registrosHook.getActivos({ planta_id: sesion.planta_id, bitacora_id: activeBitacora }); } catch { /* noop */ }
     }
-  }, [cierre, sesion, showToast]);
+  }, [activeBitacora, sesion, registrosHook]);
 
-  const handleConfirmMasivo = useCallback(async () => {
-    if (!pendientesModal?.preview) return;
-    const usuarios_pendientes = pendientesModal.preview.ingenieros_no_finalizados.map((u) => u.usuario_id);
-    try {
-      const r = await cierre.cerrarMasivoConFinalizacionForzada({
-        planta_id: sesion.planta_id,
-        usuarios_pendientes,
-      });
-      if (activeBitacora) {
-        await registrosHook.getActivos({ planta_id: sesion.planta_id, bitacora_id: activeBitacora });
-      }
-      setPendientesModal(null);
-      // F17: ya no avisamos a SalaDeMandoGrid — la grilla MAND solo muestra HOY y no
-      // depende de la lista de días pendientes (eliminada en F16/F17).
-      const totalCerrados = (r.resumen || []).reduce((acc, x) => acc + (x.registros_cerrados || 0), 0);
-      showToast(`Cierre masivo: ${totalCerrados} registro(s) cerrado(s), ${r.finalizados.length} ingeniero(s) finalizado(s)`);
-    } catch (e) {
-      showToast(e.message, 'error');
-    }
-  }, [pendientesModal, cierre, sesion, activeBitacora, registrosHook, showToast]);
+  const cerrarTurnoUnidad = useCallback(async () => {
+    const r = await turnoHook.cerrar();
+    await refrescarRegistrosActivos();
+    const archivados = (r?.archivados || []).reduce((acc, x) => acc + (x.registros_cerrados || 0), 0);
+    showToast(`Turno cerrado: ${archivados} registro(s) archivado(s), ${r?.conformados ?? 0} en conformación.`);
+    return r;
+  }, [turnoHook, refrescarRegistrosActivos, showToast]);
+
+  // Botón manual "Cerrar Turno" del header (JdT/IngOp) — mismo cierre por cabecera, con confirmación.
+  const handleCerrarTurno = useCallback(() => {
+    setModal({
+      title: 'Cerrar turno',
+      message: 'Vas a cerrar el turno de esta unidad: se archivan los registros del turno y se congela la conformación. Esta acción no se revierte. ¿Continuar?',
+      confirmLabel: 'Cerrar turno', confirmColor: 'blue', icon: Lock,
+      onConfirm: async () => {
+        try { await cerrarTurnoUnidad(); setModal(null); }
+        catch (e) { showToast(e.message, 'error'); }
+      },
+    });
+  }, [cerrarTurnoUnidad, showToast]);
+
+  // Acciones del modal bloqueante de transición (el modal maneja su propia confirmación en 2 pasos).
+  const handleTurnoExtender = useCallback(async () => {
+    try { await turnoHook.extender(); showToast('Turno extendido hasta el próximo cambio de turno.'); }
+    catch (e) { showToast(e.message, 'error'); }
+  }, [turnoHook, showToast]);
+
+  const handleTurnoCerrarModal = useCallback(async () => {
+    try { await cerrarTurnoUnidad(); }
+    catch (e) { showToast(e.message, 'error'); }
+  }, [cerrarTurnoUnidad, showToast]);
 
   // F4/D-040: "Finalizar Turno" — marca sesion_activa.turno_finalizado_en (fuente única) y emite
   // un CIET. No cierra registros (eso es del JdT/IngOp). El estado se refleja en cliente con
@@ -2160,6 +2177,9 @@ export default function App() {
         plantaNombre={plantaNombre}
         usuariosActivos={usuariosActivos.usuarios}
         sesionActualId={sesion?.sesion_id}
+        turnoEstado={turnoHook.estado}
+        turnoBloqueo={turnoHook.bloqueo}
+        turnoExtendido={turnoHook.extendido}
         onLogout={handleLogout}
         vista={vista}
         onToggleVista={() => setVista((v) => (v === 'historicos' ? 'bitacoras' : 'historicos'))}
@@ -2186,7 +2206,7 @@ export default function App() {
               estadoBitacora={estadoBitacora}
               puedeCrear={puedeCrear}
               esJefeTurno={esJefeTurno}
-              onCerrarMasivo={handleCerrarMasivo}
+              onCerrarTurno={handleCerrarTurno}
               onFinalizarTurno={handleFinalizarTurno}
               finalizandoTurno={finalizandoTurno}
               turnoFinalizado={turnoFinalizado}
@@ -2289,16 +2309,16 @@ export default function App() {
         onConfirm={handleLogoutConfirm}
       />
 
-      {pendientesModal && (
-        <CierrePendientesModal
-          open={true}
-          preview={pendientesModal.preview}
-          bitacorasMap={new Map(catalogos.bitacoras.map((b) => [b.bitacora_id, b.nombre]))}
-          loading={cierre.loading}
-          onConfirm={handleConfirmMasivo}
-          onCancel={() => setPendientesModal(null)}
-        />
-      )}
+      {/* D-045 E8: modal BLOQUEANTE al cambio de turno (z-50, inhabilita la unidad). Accionable para
+          JdT/IngOp (extender/cerrar), informativo para el resto. Se muestra cuando el backend marca
+          bloqueo=true (via WS turno-transicion o /api/me al recargar). */}
+      <TurnoTransicionModal
+        open={turnoHook.bloqueo}
+        puedeDecidir={turnoHook.puedeDecidir}
+        accionando={turnoHook.accionando}
+        onExtender={handleTurnoExtender}
+        onCerrar={handleTurnoCerrarModal}
+      />
 
       <style>{`
         @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
