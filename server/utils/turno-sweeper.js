@@ -2,7 +2,7 @@ import sql from 'mssql';
 import { ventanaTurno, ventanaActual, fechaBogotaStr, getTurnoColombia } from './turno.js';
 import { registrarEventoCierre } from './ciet.js';
 import { buildConformacionSnapshot, persistConformacionSnapshot } from './conformacion-snapshot.js';
-import { abrirTurnoSiFalta } from './turno-entidad.js';
+import { abrirTurnoSiFalta, acumularPresenciaSesiones } from './turno-entidad.js';
 
 const INTERVAL_MS = 60_000;
 
@@ -158,6 +158,14 @@ export async function sweepTurnosVencidos(pool) {
       if (ahora >= fin) expirados.push(s.sesion_id);
     }
     if (expirados.length > 0) {
+      // D-045 E4 (presencia): cerrar el lapso de presencia de las sesiones que se van a expulsar ANTES
+      // de ponerlas activa=0 (la acumulación necesita inicio_sesion + turno_id con la sesión aún activa).
+      // Error boundary propio: un fallo acá no debe impedir la expulsión del turno.
+      try {
+        await acumularPresenciaSesiones(pool, expirados);
+      } catch (err) {
+        console.error('[turno-sweeper] error acumulando presencia al expulsar:', err.message);
+      }
       // AUD-41: lista parametrizada (@id0,@id1,...) en vez de CSV concatenado.
       const reqExp = pool.request();
       const placeholdersExp = expirados.map((id, i) => {

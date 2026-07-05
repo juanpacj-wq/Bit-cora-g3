@@ -9,7 +9,13 @@ import sql from 'mssql';
 import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { resolveCargo } from '../utils/entra-roles.js';
-import { getTurnoColombia, ventanaActual } from '../utils/turno.js';
+import { getTurnoColombia, ventanaActual, fechaBogotaStr } from '../utils/turno.js';
+import {
+  resolverTurnoAbierto,
+  abrirTurnoSiFalta,
+  marcarParticipante,
+  acumularPresenciaSesiones,
+} from '../utils/turno-entidad.js';
 import { broadcastUsuariosActivos } from '../utils/ws-usuarios-activos.js';
 import { asyncH, loadAppSession } from './_middleware.js';
 import { aplicarRateLimit } from './_shared.js';
@@ -68,6 +74,35 @@ router.post('/select-context', asyncH(async (req, res) => {
   // una finalización previa sigue vigente. Se pasa a la reactivación para PRESERVARla dentro del
   // mismo turno (re-login / volver a la unidad) y limpiarla solo si es de un turno pasado.
   const { inicio: ventanaInicio, fin: ventanaFin } = ventanaActual();
+
+  // D-045 E4 (participación viva): resolver la cabecera del turno ABIERTO de la unidad para vincularla
+  // a la sesión y marcar participación. Si aún no existe (borde de ventana, antes del tick del sweeper)
+  // se crea acá (idempotente). Todo el bloque es best-effort: si falla, el login sigue sin turno_id
+  // (participación no marcada) en vez de tumbar el ingreso.
+  let turnoId = null;
+  try {
+    let turnoAbierto = await resolverTurnoAbierto(db, planta_id);
+    if (!turnoAbierto) {
+      await abrirTurnoSiFalta(db, planta_id, turno, fechaBogotaStr(ventanaInicio));
+      turnoAbierto = await resolverTurnoAbierto(db, planta_id);
+    }
+    turnoId = turnoAbierto?.turno_unidad_id ?? null;
+  } catch (err) {
+    console.error('[select-context] no se pudo resolver turno_unidad (participación no marcada):', err.message);
+  }
+
+  // D-045 E4 (presencia): antes de reactivar/desactivar, cerrar el lapso de presencia de TODAS las
+  // sesiones activas del usuario (la que se refresca acá y las que "sesión única" va a desactivar) —
+  // se suma [inicio_sesion, ahora) a su turno_participante. Best-effort.
+  try {
+    const activas = await db.request()
+      .input('usuario_id', sql.Int, sUser.usuario_id)
+      .query(`SELECT sesion_id FROM bitacora.sesion_activa WHERE usuario_id = @usuario_id AND activa = 1 AND turno_id IS NOT NULL`);
+    await acumularPresenciaSesiones(db, activas.recordset.map((r) => r.sesion_id));
+  } catch (err) {
+    console.error('[select-context] no se pudo acumular presencia previa:', err.message);
+  }
+
   // Dedupe por (usuario_id, planta_id, cargo_id). Sesión de app POR TURNO: al reactivar REFRESCAMOS
   // inicio_sesion y turno. UPDLOCK+HOLDLOCK serializa pestañas.
   const transaction = new sql.Transaction(db);
@@ -79,6 +114,7 @@ router.post('/select-context', asyncH(async (req, res) => {
       .input('planta_id', sql.VarChar(10), planta_id)
       .input('cargo_id', sql.Int, cargo_id)
       .input('turno', sql.TinyInt, turno)
+      .input('turno_id', sql.Int, turnoId)
       .input('ventana_inicio', sql.DateTime2, ventanaInicio)
       .input('ventana_fin', sql.DateTime2, ventanaFin)
       .query(`
@@ -105,6 +141,7 @@ router.post('/select-context', asyncH(async (req, res) => {
                  cerrada_en           = NULL,
                  inicio_sesion        = SYSUTCDATETIME(),
                  turno                = @turno,
+                 turno_id             = @turno_id,   -- D-045 E4: vínculo a la cabecera del turno
                  ultima_actividad     = SYSUTCDATETIME(),
                  -- D-040 (persistencia por ventana): reactivar NO reabre el turno si la finalización
                  -- sigue dentro de la ventana del turno actual (re-login / volver a la unidad en el
@@ -120,8 +157,8 @@ router.post('/select-context', asyncH(async (req, res) => {
         END
         ELSE
         BEGIN
-          INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno)
-          VALUES (@usuario_id, @planta_id, @cargo_id, @turno);
+          INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno, turno_id)
+          VALUES (@usuario_id, @planta_id, @cargo_id, @turno, @turno_id);
           SET @sesion_id = SCOPE_IDENTITY();
         END
 
@@ -140,6 +177,20 @@ router.post('/select-context', asyncH(async (req, res) => {
     try { await transaction.rollback(); } catch {}
     throw err;
   }
+
+  // D-045 E4 (participación viva): tras crear/reactivar la sesión, marcar al usuario como participante
+  // del turno vigente (UPSERT idempotente, no pisa primer_ingreso). Best-effort: no debe tumbar el login.
+  try {
+    await marcarParticipante(db, {
+      turno_id: turnoId,
+      usuario_id: sUser.usuario_id,
+      cargo_id,
+      cargo_nombre: elegido.cargoNombre,
+    });
+  } catch (err) {
+    console.error('[select-context] no se pudo marcar participación:', err.message);
+  }
+
   broadcastUsuariosActivos().catch(() => {});
   return sendJSON(res, 200, { sesion: result.recordset[0] });
 }));
@@ -150,6 +201,16 @@ router.post('/cerrar-app', asyncH(async (req, res) => {
   const sUser = req.session?.user;
   if (!sUser?.usuario_id) return sendJSON(res, 401, { error: 'No autenticado con Microsoft' });
   const db = await getDB();
+  // D-045 E4 (presencia): cerrar el lapso de presencia antes de expulsar (necesita inicio_sesion +
+  // turno_id de las sesiones aún activas). Best-effort — un fallo acá no debe impedir el cierre de app.
+  try {
+    const activas = await db.request()
+      .input('usuario_id', sql.Int, sUser.usuario_id)
+      .query(`SELECT sesion_id FROM bitacora.sesion_activa WHERE usuario_id = @usuario_id AND activa = 1 AND turno_id IS NOT NULL`);
+    await acumularPresenciaSesiones(db, activas.recordset.map((r) => r.sesion_id));
+  } catch (err) {
+    console.error('[cerrar-app] no se pudo acumular presencia:', err.message);
+  }
   await db.request()
     .input('usuario_id', sql.Int, sUser.usuario_id)
     .query(`

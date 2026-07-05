@@ -82,6 +82,16 @@ router.post('/finalizar', asyncH(async (req, res) => {
 
     let evento_ciet = null;
     if (cambio) {
+      // D-045 E4: reflejar la finalización individual en turno_participante del turno vigente (la fila
+      // que se congela en la conformación en E6). turno_id se toma de la sesión activa del usuario.
+      await new sql.Request(transaction)
+        .input('usuario_id', sql.Int, sesion.usuario_id)
+        .query(`
+          UPDATE tp SET finalizado_individual_en = SYSUTCDATETIME()
+          FROM bitacora.turno_participante tp
+          INNER JOIN bitacora.sesion_activa sa ON sa.turno_id = tp.turno_id AND sa.usuario_id = tp.usuario_id
+          WHERE sa.usuario_id = @usuario_id AND sa.activa = 1 AND sa.turno_id IS NOT NULL;
+        `);
       evento_ciet = await registrarEventoCierre(transaction, {
         tipo: 'finalizacion',
         sesion,
@@ -124,6 +134,15 @@ router.post('/revertir-turno', asyncH(async (req, res) => {
 
     let evento_ciet = null;
     if (result.recordset.length > 0) {
+      // D-045 E4: al revertir la finalización, limpiar también finalizado_individual_en del participante.
+      await new sql.Request(transaction)
+        .input('usuario_id', sql.Int, sesion.usuario_id)
+        .query(`
+          UPDATE tp SET finalizado_individual_en = NULL
+          FROM bitacora.turno_participante tp
+          INNER JOIN bitacora.sesion_activa sa ON sa.turno_id = tp.turno_id AND sa.usuario_id = tp.usuario_id
+          WHERE sa.usuario_id = @usuario_id AND sa.activa = 1 AND sa.turno_id IS NOT NULL;
+        `);
       evento_ciet = await registrarEventoCierre(transaction, {
         tipo: 'reapertura',
         sesion,
@@ -189,6 +208,16 @@ router.post('/finalizar-forzado', asyncH(async (req, res) => {
         `);
 
       if ((upd.rowsAffected[0] || 0) > 0) {
+        // D-045 E4: reflejar la finalización forzada en turno_participante del objetivo (su turno vigente).
+        await new sql.Request(transaction)
+          .input('usuario_id', sql.Int, usuario_id)
+          .input('planta_id', sql.VarChar(10), sesion.planta_id)
+          .query(`
+            UPDATE tp SET finalizado_individual_en = SYSUTCDATETIME()
+            FROM bitacora.turno_participante tp
+            INNER JOIN bitacora.sesion_activa sa ON sa.turno_id = tp.turno_id AND sa.usuario_id = tp.usuario_id
+            WHERE sa.usuario_id = @usuario_id AND sa.planta_id = @planta_id AND sa.activa = 1 AND sa.turno_id IS NOT NULL;
+          `);
         const ciet = await registrarEventoCierre(transaction, {
           tipo: 'finalizacion',
           sesion: targetSesion,

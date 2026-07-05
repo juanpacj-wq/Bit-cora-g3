@@ -240,6 +240,60 @@ export async function cerrarTurno(pool, turno_id, { motivo, cerrado_por, ahora =
   }
 }
 
+// D-045 E4 — PARTICIPACIÓN VIVA.
+// UPSERT del participante de un turno: entrar a la unidad marca participación aunque el usuario no
+// registre nada ni esté al cierre. Idempotente (MERGE + HOLDLOCK, serializa pestañas/re-login). NUNCA
+// pisa primer_ingreso en el re-ingreso — solo refresca el cargo (por si cambió el App Role). El
+// usuario_nombre se desnormaliza desde lov_bit.usuario al insertar. Devuelve la fila. No-op si turno_id
+// es null (borde de ventana sin turno resuelto → participación no marcada, login sigue).
+export async function marcarParticipante(pool, { turno_id, usuario_id, cargo_id, cargo_nombre }) {
+  if (!turno_id) return null;
+  await pool.request()
+    .input('turno_id', sql.Int, turno_id)
+    .input('usuario_id', sql.Int, usuario_id)
+    .input('cargo_id', sql.Int, cargo_id)
+    .input('cargo_nombre', sql.VarChar(100), cargo_nombre)
+    .query(`
+      MERGE bitacora.turno_participante WITH (HOLDLOCK) AS t
+      USING (SELECT @turno_id AS turno_id, @usuario_id AS usuario_id) AS s
+        ON t.turno_id = s.turno_id AND t.usuario_id = s.usuario_id
+      WHEN MATCHED THEN
+        UPDATE SET cargo_id = @cargo_id, cargo_nombre = @cargo_nombre
+      WHEN NOT MATCHED THEN
+        INSERT (turno_id, usuario_id, cargo_id, usuario_nombre, cargo_nombre, primer_ingreso)
+        VALUES (@turno_id, @usuario_id, @cargo_id,
+                (SELECT nombre_completo FROM lov_bit.usuario WHERE usuario_id = @usuario_id),
+                @cargo_nombre, SYSUTCDATETIME());
+    `);
+  const r = await pool.request()
+    .input('turno_id', sql.Int, turno_id)
+    .input('usuario_id', sql.Int, usuario_id)
+    .query(`SELECT * FROM bitacora.turno_participante WHERE turno_id = @turno_id AND usuario_id = @usuario_id`);
+  return r.recordset[0] ?? null;
+}
+
+// D-045 E4 — acumula la presencia del lapso activo `[sesion_activa.inicio_sesion, ahora)` en el
+// turno_participante correspondiente (por turno_id vigente de la sesión) y marca ultimo_egreso.
+// DEBE llamarse ANTES de poner activa=0 (necesita inicio_sesion y turno_id de la sesión aún activa).
+// El modelo de presencia usa inicio_sesion como "último ingreso": select-context lo refresca en cada
+// (re)ingreso, así que cada lapso [ingreso, egreso) se suma en su egreso sin doble conteo. Filtra
+// activa=1 → una sesión ya inactiva (lapso ya sumado en su expulsión) se ignora (idempotente).
+export async function acumularPresenciaSesiones(pool, sesionIds) {
+  if (!sesionIds || sesionIds.length === 0) return;
+  const req = pool.request();
+  const ph = sesionIds.map((id, i) => { req.input('sid' + i, sql.Int, id); return '@sid' + i; }).join(',');
+  await req.query(`
+    UPDATE tp
+      SET presencia_acumulada_min = tp.presencia_acumulada_min
+            + DATEDIFF(MINUTE, sa.inicio_sesion, SYSUTCDATETIME()),
+          ultimo_egreso = SYSUTCDATETIME()
+    FROM bitacora.turno_participante tp
+    INNER JOIN bitacora.sesion_activa sa
+      ON sa.turno_id = tp.turno_id AND sa.usuario_id = tp.usuario_id
+    WHERE sa.activa = 1 AND sa.turno_id IS NOT NULL AND sa.sesion_id IN (${ph});
+  `);
+}
+
 // Extiende un turno ABIERTO: extendido=1, veces_extendido+1, fin_nominal=próximo umbral. Devuelve la
 // fila actualizada o null si el turno no estaba ABIERTO. `opts.por_usuario`/`opts.detalle` se aceptan
 // como parte del contrato pero se consumen en E7 (CIET de extensión + gating puede_cerrar_turno);

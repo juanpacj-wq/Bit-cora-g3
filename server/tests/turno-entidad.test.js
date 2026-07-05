@@ -6,6 +6,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { initDB, getDB, TEST_PLANTA_ID, USUARIO_SISTEMA_ID } from '../db.js';
+import { getTurnoColombia } from '../utils/turno.js';
 import {
   GRACIA_CIERRE_MIN,
   MOTIVOS_CIERRE,
@@ -17,6 +18,8 @@ import {
   activarSucesor,
   cerrarTurno,
   extenderTurno,
+  marcarParticipante,
+  acumularPresenciaSesiones,
 } from '../utils/turno-entidad.js';
 
 const iso = (d) => new Date(d).toISOString();
@@ -110,6 +113,12 @@ describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
 
   async function limpiarTurnos() {
     await pool.request().input('p', sql.VarChar(10), P).query(`
+      -- NULL-ear turno_id de cualquier sesion_activa que apunte a un turno de TST antes de borrar el
+      -- turno (evita violación de FK sesion_activa.turno_id → turno_unidad).
+      UPDATE sa SET turno_id = NULL
+        FROM bitacora.sesion_activa sa
+        INNER JOIN bitacora.turno_unidad tu ON tu.turno_unidad_id = sa.turno_id
+       WHERE tu.planta_id = @p;
       DELETE tp FROM bitacora.turno_participante tp
         INNER JOIN bitacora.turno_unidad tu ON tu.turno_unidad_id = tp.turno_id
        WHERE tu.planta_id = @p;
@@ -229,5 +238,71 @@ describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
     // Cerrar y volver a extender → null (no está ABIERTO).
     await cerrarTurno(pool, A.turno_unidad_id, { motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID });
     assert.equal(await extenderTurno(pool, A.turno_unidad_id, { ahora: new Date('2026-04-11T11:00:00Z') }), null);
+  });
+
+  // --- D-045 E4: participación viva ---
+  test('marcarParticipante crea la fila (primer_ingreso) y en el re-ingreso NO pisa primer_ingreso ni duplica', async () => {
+    await limpiarTurnos();
+    const cargos = (await pool.request().query(`SELECT TOP 2 cargo_id, nombre FROM lov_bit.cargo ORDER BY cargo_id`)).recordset;
+    const t = await abrirTurnoSiFalta(pool, P, 1, '2026-04-12', new Date('2026-04-12T15:00:00Z'));
+
+    const p1 = await marcarParticipante(pool, {
+      turno_id: t.turno_unidad_id, usuario_id: USUARIO_SISTEMA_ID, cargo_id: cargos[0].cargo_id, cargo_nombre: cargos[0].nombre,
+    });
+    assert.ok(p1.primer_ingreso, 'primer_ingreso seteado');
+    assert.equal(p1.usuario_id, USUARIO_SISTEMA_ID);
+    assert.equal(p1.cargo_nombre, cargos[0].nombre);
+    assert.equal(p1.presencia_acumulada_min, 0);
+
+    // Re-ingreso: cambia cargo → se refresca; primer_ingreso NO se pisa; sigue habiendo 1 sola fila.
+    const p2 = await marcarParticipante(pool, {
+      turno_id: t.turno_unidad_id, usuario_id: USUARIO_SISTEMA_ID, cargo_id: cargos[1].cargo_id, cargo_nombre: cargos[1].nombre,
+    });
+    assert.equal(iso(p2.primer_ingreso), iso(p1.primer_ingreso), 'primer_ingreso preservado');
+    assert.equal(p2.cargo_nombre, cargos[1].nombre, 'cargo refrescado');
+    const n = (await pool.request().input('t', sql.Int, t.turno_unidad_id)
+      .query(`SELECT COUNT(*) AS n FROM bitacora.turno_participante WHERE turno_id=@t`)).recordset[0].n;
+    assert.equal(n, 1);
+
+    // turno_id null → no-op.
+    assert.equal(await marcarParticipante(pool, { turno_id: null, usuario_id: USUARIO_SISTEMA_ID, cargo_id: cargos[0].cargo_id, cargo_nombre: 'x' }), null);
+  });
+
+  test('acumularPresenciaSesiones suma [inicio_sesion, ahora) y marca ultimo_egreso; ignora sesiones inactivas', async () => {
+    await limpiarTurnos();
+    const cargo = (await pool.request().query(`SELECT TOP 1 cargo_id, nombre FROM lov_bit.cargo ORDER BY cargo_id`)).recordset[0];
+    const t = await abrirTurnoSiFalta(pool, P, 1, '2026-04-12', new Date('2026-04-12T15:00:00Z'));
+    await marcarParticipante(pool, { turno_id: t.turno_unidad_id, usuario_id: USUARIO_SISTEMA_ID, cargo_id: cargo.cargo_id, cargo_nombre: cargo.nombre });
+
+    // Sesión de app en TST para SISTEMA, turno=actual (no la expulsa el sweeper), inicio 10 min atrás.
+    const ins = await pool.request()
+      .input('u', sql.Int, USUARIO_SISTEMA_ID)
+      .input('p', sql.VarChar(10), P)
+      .input('c', sql.Int, cargo.cargo_id)
+      .input('turno', sql.TinyInt, getTurnoColombia())
+      .input('tid', sql.Int, t.turno_unidad_id)
+      .query(`
+        INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno, turno_id, inicio_sesion)
+        OUTPUT INSERTED.sesion_id
+        VALUES (@u, @p, @c, @turno, @tid, DATEADD(MINUTE, -10, SYSUTCDATETIME()))
+      `);
+    const sesionId = ins.recordset[0].sesion_id;
+    try {
+      await acumularPresenciaSesiones(pool, [sesionId]);
+      let tp = (await pool.request().input('t', sql.Int, t.turno_unidad_id)
+        .query(`SELECT presencia_acumulada_min, ultimo_egreso FROM bitacora.turno_participante WHERE turno_id=@t AND usuario_id=${USUARIO_SISTEMA_ID}`)).recordset[0];
+      assert.ok(tp.presencia_acumulada_min >= 9 && tp.presencia_acumulada_min <= 11, `~10 min (fue ${tp.presencia_acumulada_min})`);
+      assert.ok(tp.ultimo_egreso, 'ultimo_egreso seteado');
+
+      // Sesión inactiva → no vuelve a acumular (filtro activa=1).
+      await pool.request().input('s', sql.Int, sesionId).query(`UPDATE bitacora.sesion_activa SET activa=0 WHERE sesion_id=@s`);
+      const antes = tp.presencia_acumulada_min;
+      await acumularPresenciaSesiones(pool, [sesionId]);
+      tp = (await pool.request().input('t', sql.Int, t.turno_unidad_id)
+        .query(`SELECT presencia_acumulada_min FROM bitacora.turno_participante WHERE turno_id=@t AND usuario_id=${USUARIO_SISTEMA_ID}`)).recordset[0];
+      assert.equal(tp.presencia_acumulada_min, antes, 'sesión inactiva no acumula');
+    } finally {
+      await pool.request().input('s', sql.Int, sesionId).query(`UPDATE bitacora.sesion_activa SET turno_id=NULL WHERE sesion_id=@s; DELETE FROM bitacora.sesion_activa WHERE sesion_id=@s;`);
+    }
   });
 });
