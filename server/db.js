@@ -1123,6 +1123,19 @@ export async function initDB() {
       SELECT bitacora_id, 'Reapertura de turno', 4 FROM lov_bit.bitacora WHERE codigo='CIET';
   `);
 
+  // D-045 E7: tipo CIET 'Extensión de turno' (orden 5). POST /api/turno/extender lo emite cuando
+  // un JdT/IngOp corre fin_nominal al próximo umbral (registrarEventoCierre con tipo:'extension').
+  await db.request().batch(`
+    IF EXISTS (SELECT 1 FROM lov_bit.bitacora WHERE codigo='CIET')
+      AND NOT EXISTS (
+        SELECT 1 FROM lov_bit.tipo_evento te
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+        WHERE b.codigo='CIET' AND te.nombre = 'Extensión de turno'
+      )
+      INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden)
+      SELECT bitacora_id, 'Extensión de turno', 5 FROM lov_bit.bitacora WHERE codigo='CIET';
+  `);
+
   // F12.A6: DISP visible para TODOS los cargos; creación solo para JdT/IngOp (+ Administrador y
   // Debugging, D-039). La matriz INSERT de arriba ya cubre los cargos sembrados, pero forzamos
   // defensivamente para sobrevivir cargos nuevos o renumeraciones — el match es por nombre, no por id.

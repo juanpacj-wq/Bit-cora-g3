@@ -35,6 +35,8 @@ import sesionRouter from '../routes/sesion.js';
 import bitacoraRouter from '../routes/bitacora.js';
 import registrosRouter from '../routes/registros.js';
 import turnoRouter from '../routes/turno.js';
+import { estadoTurnoActual } from '../utils/turno-entidad.js'; // D-045 E7: estado del turno en /api/me
+import { puedeCerrarTurno } from '../middleware/permissions.js';
 import { detectRoles } from './roles.js';
 import {
   isConfigured as m365Configured, m365Config,
@@ -244,7 +246,7 @@ export async function buildAuthApp() {
     if (!u) return res.status(401).json({ authenticated: false });
     // Adjuntamos la sesión de app vigente (sesion_activa.activa=1) si existe, y la última
     // planta usada (para que reentrar en un turno nuevo sea de un clic).
-    let sesion = null, ultimaPlanta = null;
+    let sesion = null, ultimaPlanta = null, turno = null;
     try {
       sesion = await loadSession(req);
       const db = await getDB();
@@ -252,10 +254,16 @@ export async function buildAuthApp() {
         .input('uid', sql.Int, u.usuario_id)
         .query(`SELECT TOP 1 planta_id FROM bitacora.sesion_activa WHERE usuario_id=@uid ORDER BY inicio_sesion DESC`);
       ultimaPlanta = r.recordset[0]?.planta_id ?? null;
+      // D-045 E7: estado del turno de la unidad de la sesión (bloqueo/extensión), fallback del modal
+      // ante recarga/reconexión sin depender del WS. Best-effort: si falla, `turno` queda null.
+      if (sesion?.planta_id) {
+        const estado = await estadoTurnoActual(db, sesion.planta_id);
+        turno = { ...estado, puede_decidir: puedeCerrarTurno(sesion) };
+      }
     } catch (err) {
       console.error('[api/me]', err.message);
     }
-    res.json({ authenticated: true, user: u, sesion, ultimaPlanta });
+    res.json({ authenticated: true, user: u, sesion, ultimaPlanta, turno });
   });
 
   // ── Logout: cierra la sesión de app + destruye la cookie + front-channel a Microsoft ──

@@ -20,6 +20,8 @@ import {
   extenderTurno,
   marcarParticipante,
   acumularPresenciaSesiones,
+  estadoTurnoActual,
+  transicionarTurnosVencidos,
 } from '../utils/turno-entidad.js';
 
 const iso = (d) => new Date(d).toISOString();
@@ -112,18 +114,50 @@ describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
   const P = TEST_PLANTA_ID;
 
   async function limpiarTurnos() {
+    // Limpia TODO el rastro de turnos de TST en orden de FK: primero las filas que referencian
+    // turno_unidad por turno_id (sesion_activa NULL-eada, conformación, histórico, registros activos
+    // incl. CIETs de cierre/extensión, participantes), luego la cabecera. E7: los auto-cierres y las
+    // extensiones producen conformación/histórico/CIET → sin esto el DELETE de turno_unidad FK-falla.
     await pool.request().input('p', sql.VarChar(10), P).query(`
-      -- NULL-ear turno_id de cualquier sesion_activa que apunte a un turno de TST antes de borrar el
-      -- turno (evita violación de FK sesion_activa.turno_id → turno_unidad).
       UPDATE sa SET turno_id = NULL
         FROM bitacora.sesion_activa sa
         INNER JOIN bitacora.turno_unidad tu ON tu.turno_unidad_id = sa.turno_id
        WHERE tu.planta_id = @p;
+      DELETE FROM bitacora.conformacion_turno WHERE planta_id = @p;
+      DELETE FROM bitacora.registro_historico WHERE planta_id = @p;
+      DELETE FROM bitacora.registro_activo WHERE planta_id = @p;
       DELETE tp FROM bitacora.turno_participante tp
         INNER JOIN bitacora.turno_unidad tu ON tu.turno_unidad_id = tp.turno_id
        WHERE tu.planta_id = @p;
       DELETE FROM bitacora.turno_unidad WHERE planta_id = @p;
     `);
+  }
+
+  // E7: desactiva toda sesion_activa de TST (simula "sin personal" en la unidad).
+  async function apagarSesionesTST() {
+    await pool.request().input('p', sql.VarChar(10), P)
+      .query(`UPDATE bitacora.sesion_activa SET activa = 0 WHERE planta_id = @p`);
+  }
+
+  // E7: inserta una sesion_activa ACTIVA en TST (simula "personal presente"). Devuelve sesion_id.
+  async function sesionActivaTST() {
+    const cargo = (await pool.request().query(`SELECT TOP 1 cargo_id FROM lov_bit.cargo ORDER BY cargo_id`)).recordset[0];
+    const r = await pool.request()
+      .input('u', sql.Int, USUARIO_SISTEMA_ID)
+      .input('p', sql.VarChar(10), P)
+      .input('c', sql.Int, cargo.cargo_id)
+      .input('turno', sql.TinyInt, getTurnoColombia())
+      .query(`
+        INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno, activa, inicio_sesion)
+        OUTPUT INSERTED.sesion_id
+        VALUES (@u, @p, @c, @turno, 1, SYSUTCDATETIME())
+      `);
+    return r.recordset[0].sesion_id;
+  }
+
+  async function borrarSesionTST(sesionId) {
+    await pool.request().input('s', sql.Int, sesionId)
+      .query(`UPDATE bitacora.sesion_activa SET turno_id=NULL, activa=0 WHERE sesion_id=@s; DELETE FROM bitacora.sesion_activa WHERE sesion_id=@s;`);
   }
 
   before(async () => {
@@ -405,6 +439,106 @@ describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
         DELETE FROM bitacora.registro_historico WHERE planta_id=@p;
         DELETE FROM bitacora.registro_activo WHERE planta_id=@p;
       `);
+    }
+  });
+
+  // --- D-045 E7: estado del turno, auto-cierre por umbral, extensión ---
+  test('estadoTurnoActual: ABIERTO sin bloqueo antes del fin, con bloqueo al pasar fin, null sin turno', async () => {
+    await limpiarTurnos();
+    await abrirTurnoSiFalta(pool, P, 1, '2026-04-14', new Date('2026-04-14T15:00:00Z')); // fin_nominal 23:00Z
+    const antes = await estadoTurnoActual(pool, P, { ahora: new Date('2026-04-14T20:00:00Z') });
+    assert.equal(antes.estado, 'ABIERTO');
+    assert.equal(antes.bloqueo, false);
+    assert.equal(antes.extendido, false);
+    const pasado = await estadoTurnoActual(pool, P, { ahora: new Date('2026-04-14T23:30:00Z') });
+    assert.equal(pasado.bloqueo, true);
+    await limpiarTurnos();
+    const vacio = await estadoTurnoActual(pool, P);
+    assert.equal(vacio.estado, null);
+    assert.equal(vacio.bloqueo, false);
+  });
+
+  test('transicionarTurnosVencidos: sin personal → AUTO_SIN_PERSONAL (cierre inmediato, cerrado_por SISTEMA)', async () => {
+    await limpiarTurnos();
+    await apagarSesionesTST();
+    const t = await abrirTurnoSiFalta(pool, P, 1, '2026-04-14', new Date('2026-04-14T15:00:00Z')); // fin 23:00Z
+    try {
+      const trans = await transicionarTurnosVencidos(pool, { ahora: new Date('2026-04-14T23:05:00Z'), plantas: [P] });
+      const mine = trans.find((x) => x.turno_unidad_id === t.turno_unidad_id);
+      assert.ok(mine, 'el turno vencido de TST fue transicionado');
+      assert.equal(mine.accion, 'cerrado');
+      assert.equal(mine.motivo, 'AUTO_SIN_PERSONAL');
+      const row = (await pool.request().input('id', sql.Int, t.turno_unidad_id)
+        .query(`SELECT estado, motivo_cierre, cerrado_por FROM bitacora.turno_unidad WHERE turno_unidad_id=@id`)).recordset[0];
+      assert.equal(row.estado, 'CERRADO');
+      assert.equal(row.motivo_cierre, 'AUTO_SIN_PERSONAL');
+      assert.equal(row.cerrado_por, USUARIO_SISTEMA_ID);
+    } finally {
+      await limpiarTurnos();
+    }
+  });
+
+  test('transicionarTurnosVencidos: con personal + pasada la gracia (>=60min) → AUTO_SIN_RESPUESTA', async () => {
+    await limpiarTurnos();
+    await apagarSesionesTST();
+    const t = await abrirTurnoSiFalta(pool, P, 1, '2026-04-14', new Date('2026-04-14T15:00:00Z')); // fin 23:00Z
+    const sid = await sesionActivaTST();
+    try {
+      // 23:00Z + 61 min = 2026-04-15T00:01Z → minutosDesdeUmbral=61 >= 60 → AUTO_SIN_RESPUESTA
+      const trans = await transicionarTurnosVencidos(pool, { ahora: new Date('2026-04-15T00:01:00Z'), plantas: [P] });
+      const mine = trans.find((x) => x.turno_unidad_id === t.turno_unidad_id);
+      assert.ok(mine);
+      assert.equal(mine.accion, 'cerrado');
+      assert.equal(mine.motivo, 'AUTO_SIN_RESPUESTA');
+    } finally {
+      await borrarSesionTST(sid);
+      await limpiarTurnos();
+    }
+  });
+
+  test('transicionarTurnosVencidos: con personal dentro de la gracia → bloqueo (NO cierra)', async () => {
+    await limpiarTurnos();
+    await apagarSesionesTST();
+    const t = await abrirTurnoSiFalta(pool, P, 1, '2026-04-14', new Date('2026-04-14T15:00:00Z')); // fin 23:00Z
+    const sid = await sesionActivaTST();
+    try {
+      // 23:00Z + 30 min = 23:30Z → dentro de la gracia (60) → bloqueo, sin cierre
+      const trans = await transicionarTurnosVencidos(pool, { ahora: new Date('2026-04-14T23:30:00Z'), plantas: [P] });
+      const mine = trans.find((x) => x.turno_unidad_id === t.turno_unidad_id);
+      assert.ok(mine);
+      assert.equal(mine.accion, 'bloqueo');
+      const row = (await pool.request().input('id', sql.Int, t.turno_unidad_id)
+        .query(`SELECT estado FROM bitacora.turno_unidad WHERE turno_unidad_id=@id`)).recordset[0];
+      assert.equal(row.estado, 'ABIERTO', 'sigue abierto durante la gracia');
+    } finally {
+      await borrarSesionTST(sid);
+      await limpiarTurnos();
+    }
+  });
+
+  test('extenderTurno con por_usuario corre fin_nominal, marca extendido y emite CIET "Extensión de turno"', async () => {
+    await limpiarTurnos();
+    const cargo = (await pool.request().query(`SELECT TOP 1 cargo_id, nombre FROM lov_bit.cargo ORDER BY cargo_id`)).recordset[0];
+    const t = await abrirTurnoSiFalta(pool, P, 1, '2026-04-14', new Date('2026-04-14T15:00:00Z'));
+    try {
+      const ext = await extenderTurno(pool, t.turno_unidad_id, {
+        ahora: new Date('2026-04-14T23:00:00Z'), por_usuario: USUARIO_SISTEMA_ID, cargo_nombre: cargo.nombre, detalle: 'prueba E7',
+      });
+      assert.equal(ext.extendido, true);
+      assert.equal(ext.veces_extendido, 1);
+      // fin corrido al próximo umbral (06:00 día+1 = 2026-04-15T11:00:00Z)
+      assert.equal(iso(ext.fin_nominal), '2026-04-15T11:00:00.000Z');
+      // CIET 'Extensión de turno' emitido en la bitácora CIET (planta TST).
+      const ciet = (await pool.request().input('p', sql.VarChar(10), P).query(`
+        SELECT COUNT(*) AS n
+        FROM bitacora.registro_activo ra
+        INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = ra.tipo_evento_id
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+        WHERE ra.planta_id = @p AND b.codigo = 'CIET' AND te.nombre = 'Extensión de turno'
+      `)).recordset[0].n;
+      assert.equal(ciet, 1, 'se emitió exactamente 1 CIET de extensión');
+    } finally {
+      await limpiarTurnos();
     }
   });
 });

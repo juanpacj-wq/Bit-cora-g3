@@ -395,22 +395,114 @@ export async function acumularPresenciaSesiones(pool, sesionIds) {
   `);
 }
 
-// Extiende un turno ABIERTO: extendido=1, veces_extendido+1, fin_nominal=próximo umbral. Devuelve la
-// fila actualizada o null si el turno no estaba ABIERTO. `opts.por_usuario`/`opts.detalle` se aceptan
-// como parte del contrato pero se consumen en E7 (CIET de extensión + gating puede_cerrar_turno);
-// acá sólo mueven el estado de la cabecera.
+// D-045 E7 — EXTIENDE un turno ABIERTO: `extendido=1`, `veces_extendido+1`, `fin_nominal=próximo
+// umbral`, en UNA transacción que además emite el CIET 'Extensión de turno' si viene `por_usuario`
+// (la extensión es siempre manual/gateada, así que producción siempre lo pasa; los unit tests que
+// solo verifican el movimiento del umbral lo omiten y no se emite CIET). Devuelve la fila actualizada
+// o null si el turno no estaba ABIERTO. `detalle` opcional va como `motivo` del CIET.
 export async function extenderTurno(pool, turno_id, opts = {}) {
-  const { ahora = new Date() } = opts;
+  const { ahora = new Date(), por_usuario = null, cargo_nombre = null, detalle = null } = opts;
   const nuevoFin = proximoUmbral(ahora);
-  const r = await pool.request()
-    .input('id', sql.Int, turno_id)
-    .input('fin', sql.DateTime2, nuevoFin)
-    .query(`
-      UPDATE bitacora.turno_unidad
-      SET extendido = 1, veces_extendido = veces_extendido + 1, fin_nominal = @fin
-      OUTPUT INSERTED.turno_unidad_id
-      WHERE turno_unidad_id = @id AND estado = 'ABIERTO'
-    `);
-  if (!r.recordset[0]) return null;
-  return _leerTurno(() => pool.request(), turno_id);
+  const tx = new sql.Transaction(pool);
+  await tx.begin();
+  try {
+    const r = await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .input('fin', sql.DateTime2, nuevoFin)
+      .query(`
+        UPDATE bitacora.turno_unidad
+        SET extendido = 1, veces_extendido = veces_extendido + 1, fin_nominal = @fin
+        OUTPUT INSERTED.turno_unidad_id, INSERTED.planta_id, INSERTED.turno
+        WHERE turno_unidad_id = @id AND estado = 'ABIERTO'
+      `);
+    if (!r.recordset[0]) {
+      await tx.commit();
+      return null;
+    }
+    const { planta_id, turno } = r.recordset[0];
+    if (por_usuario) {
+      await registrarEventoCierre(tx, {
+        tipo: 'extension',
+        sesion: { usuario_id: por_usuario, planta_id, turno, cargo_nombre },
+        forzado: false,
+        motivo: detalle || null,
+      });
+    }
+    const row = await _leerTurno(() => new sql.Request(tx), turno_id);
+    await tx.commit();
+    return row;
+  } catch (e) {
+    try { await tx.rollback(); } catch { /* rollback best-effort */ }
+    throw e;
+  }
+}
+
+// D-045 E7 — ESTADO del turno vigente de una unidad, para `GET /api/turno/actual` y `/api/me`. Toma la
+// fila ABIERTO (máx 1 por índice único) y deriva `bloqueo` con la lógica pura `estadoBloqueo`. Sin la
+// fila ABIERTO devuelve un estado "vacío" (nadie operando aún). `puede_decidir` lo agrega el caller
+// (depende del cargo de la sesión, no de la cabecera).
+export async function estadoTurnoActual(pool, planta_id, { ahora = new Date() } = {}) {
+  const row = await resolverTurnoAbierto(pool, planta_id);
+  if (!row) {
+    return { estado: null, turno: null, fecha_operativa: null, fin_nominal: null, extendido: false, veces_extendido: 0, bloqueo: false };
+  }
+  return {
+    turno_unidad_id: row.turno_unidad_id,
+    estado: row.estado,
+    turno: row.turno,
+    fecha_operativa: row.fecha_operativa,
+    fin_nominal: row.fin_nominal,
+    extendido: !!row.extendido,
+    veces_extendido: row.veces_extendido,
+    bloqueo: estadoBloqueo(row, ahora),
+  };
+}
+
+// D-045 E7 — TRANSICIONES del sweeper (flujo 6-a-6). Recorre los turnos ABIERTO de las `plantas` dadas
+// que ya pasaron su `fin_nominal` (`estadoBloqueo`) y decide, por unidad:
+//   - sin personal (0 `sesion_activa activa=1`) → cierre inmediato AUTO_SIN_PERSONAL.
+//   - con personal y `minutosDesdeUmbral >= GRACIA_CIERRE_MIN` → cierre AUTO_SIN_RESPUESTA.
+//   - con personal dentro de la gracia → NO cierra: reporta `accion:'bloqueo'` (el caller avisa por WS).
+// Cierra con `cerrado_por=SISTEMA` (acto atómico `cerrarTurno` → sella+congela+archiva+CIET+sucesor).
+// NO transmite por WS (evita ciclo de imports): devuelve el resumen y el sweeper hace el broadcast.
+// `plantas` por defecto = las unidades con cabecera; los tests pasan `[TEST_PLANTA]` para no tocar prod.
+// Error boundary por unidad: un fallo en una no impide las demás. Idempotente (cerrar un CERRADO no-op).
+export async function transicionarTurnosVencidos(pool, { ahora = new Date(), plantas } = {}) {
+  if (!USUARIO_SISTEMA_ID) {
+    throw new Error('transicionarTurnosVencidos: USUARIO_SISTEMA_ID no inicializado (initDB no corrió)');
+  }
+  const filtroPlantas = Array.isArray(plantas) && plantas.length > 0;
+  const req = pool.request();
+  let where = `estado = 'ABIERTO'`;
+  if (filtroPlantas) {
+    where += ' AND planta_id IN (' + plantas.map((p, i) => { req.input('p' + i, sql.VarChar(10), p); return '@p' + i; }).join(',') + ')';
+  }
+  const abiertos = (await req.query(`SELECT * FROM bitacora.turno_unidad WHERE ${where}`)).recordset;
+
+  const transiciones = [];
+  for (const row of abiertos) {
+    if (!estadoBloqueo(row, ahora)) continue; // aún dentro de su ventana (o extendido) → nada
+    try {
+      const hay = await pool.request()
+        .input('p', sql.VarChar(10), row.planta_id)
+        .query(`SELECT TOP 1 1 AS x FROM bitacora.sesion_activa WHERE planta_id = @p AND activa = 1`);
+      const hayPersonal = !!hay.recordset[0];
+      const minutosDesdeUmbral = Math.floor((ahora.getTime() - new Date(row.fin_nominal).getTime()) / 60000);
+      const motivo = motivoAutoCierre({ hayPersonal, minutosDesdeUmbral });
+      if (!motivo) {
+        transiciones.push({ planta_id: row.planta_id, turno_unidad_id: row.turno_unidad_id, accion: 'bloqueo' });
+        continue;
+      }
+      const res = await cerrarTurno(pool, row.turno_unidad_id, {
+        motivo, cerrado_por: USUARIO_SISTEMA_ID, cargo_nombre: 'SISTEMA', ahora,
+      });
+      transiciones.push({
+        planta_id: row.planta_id, turno_unidad_id: row.turno_unidad_id, accion: 'cerrado', motivo,
+        sucesor_id: res.sucesor?.turno_unidad_id ?? null,
+      });
+    } catch (err) {
+      console.error(`[turno-transicion] error en ${row.planta_id} #${row.turno_unidad_id}:`, err.message);
+    }
+  }
+  return transiciones;
 }

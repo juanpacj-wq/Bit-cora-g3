@@ -5,6 +5,7 @@ import http from 'http';
 import { initDB, getDB } from './db.js';
 import { attachWSS, broadcastUsuariosActivos } from './utils/ws-usuarios-activos.js';
 import { attachWSConteoBitacoras } from './utils/ws-conteo-bitacoras.js';
+import { attachWSTurnoTransicion } from './utils/ws-turno-transicion.js'; // D-045 E7
 // F9: turno-sweeper reemplazó al viejo sesion-sweeper (eliminado). Finaliza sesion_bitacora
 // cuando la ventana del turno termina, sin tocar sesion_activa.activa.
 import { startTurnoSweeper, stopTurnoSweeper } from './utils/turno-sweeper.js';
@@ -24,6 +25,7 @@ initDB()
     const server = http.createServer(app);
     attachWSS(server);
     attachWSConteoBitacoras(server);
+    attachWSTurnoTransicion(server); // D-045 E7: canal de bloqueo/extensión/cierre por planta
     const db = await getDB();
     startTurnoSweeper(db);
     startMandSweeper(db);

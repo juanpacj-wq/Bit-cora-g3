@@ -1,7 +1,8 @@
 import sql from 'mssql';
 import { ventanaTurno, ventanaActual, fechaBogotaStr, getTurnoColombia } from './turno.js';
 import { registrarEventoCierre } from './ciet.js';
-import { abrirTurnoSiFalta, acumularPresenciaSesiones } from './turno-entidad.js';
+import { abrirTurnoSiFalta, acumularPresenciaSesiones, transicionarTurnosVencidos } from './turno-entidad.js';
+import { broadcastTurnoTransicion } from './ws-turno-transicion.js';
 
 const INTERVAL_MS = 60_000;
 
@@ -32,6 +33,28 @@ export async function abrirTurnosVigentes(pool, { log = false } = {}) {
       }
     } catch (err) {
       console.error(`[turno-sweeper] error abriendo turno vigente ${planta_id} T${turno} ${fechaOperativa}:`, err.message);
+    }
+  }
+}
+
+// D-045 E7: transiciona los turnos ABIERTO vencidos de las unidades con cabecera (flujo 6-a-6) y avisa
+// por WS a la planta. `transicionarTurnosVencidos` decide cierre (AUTO_SIN_PERSONAL / AUTO_SIN_RESPUESTA)
+// o bloqueo (personal aún en gracia) y devuelve el resumen; acá lo transmitimos. Solo GEC3/GEC32
+// (PLANTAS_TURNO) — TST queda fuera para no interferir con los tests de dominio. Error boundary propio.
+export async function transicionarYAvisar(pool) {
+  let transiciones = [];
+  try {
+    transiciones = await transicionarTurnosVencidos(pool, { plantas: PLANTAS_TURNO });
+  } catch (err) {
+    console.error('[turno-sweeper] error en transiciones de turno:', err.message);
+    return;
+  }
+  for (const t of transiciones) {
+    if (t.accion === 'cerrado') {
+      console.log(`[turno-sweeper] turno #${t.turno_unidad_id} ${t.planta_id} auto-cerrado (${t.motivo}); sucesor #${t.sucesor_id ?? '—'}`);
+      broadcastTurnoTransicion(t.planta_id, { estado: 'CERRADO', bloqueo: false, motivo: t.motivo });
+    } else if (t.accion === 'bloqueo') {
+      broadcastTurnoTransicion(t.planta_id, { estado: 'ABIERTO', bloqueo: true });
     }
   }
 }
@@ -175,6 +198,9 @@ export function startTurnoSweeper(pool) {
       // D-045 E3: en cada tick asegura la fila del turno vigente (crea el ABIERTO al entrar la ventana,
       // o el sucesor PROGRAMADO si el anterior sigue extendido). Idempotente → silencioso salvo error.
       await abrirTurnosVigentes(pool);
+      // D-045 E7: cerrar/bloquear turnos vencidos ANTES de expulsar sesiones (el cierre atómico usa la
+      // presencia de las sesiones aún activas; la expulsión de sweepTurnosVencidos viene después).
+      await transicionarYAvisar(pool);
       const n = await sweepTurnosVencidos(pool);
       if (n > 0) console.log(`[turno-sweeper] ${n} sesion_bitacora finalizadas por agotamiento de turno`);
     } catch (err) {
