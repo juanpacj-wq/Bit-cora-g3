@@ -58,7 +58,10 @@ export async function mejorarTexto({ texto, bitacoraCodigo, fetchFn = fetch }) {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (e) {
-    throw errIA(`fetch falló: ${e?.name || 'Error'}`); // sin e.message: puede traer la URL
+    // sin e.message (puede traer la URL); e.cause.code sí es seguro y es lo que ops necesita
+    // para diagnosticar (SELF_SIGNED_CERT_IN_CHAIN = falta la CA corporativa, ENOTFOUND = DNS…).
+    const causa = e?.cause?.code || e?.cause?.name;
+    throw errIA(`fetch falló: ${e?.name || 'Error'}${causa ? ` (${causa})` : ''}`);
   }
   if (!resp.ok) throw errIA(`HTTP ${resp.status}`);
 
