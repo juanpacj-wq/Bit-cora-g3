@@ -1,0 +1,233 @@
+// D-045 E2 — dominio de la cabecera de turno (utils/turno-entidad.js).
+// Parte 1: lógica pura (umbral, bloqueo, auto-cierre) sin DB ni HTTP, con foco en el cruce de
+// medianoche T2 y los bordes de umbral 06:00/18:00 Bogotá.
+// Parte 2: operaciones de BD contra TEST_PLANTA ('TST', D-030) — nunca sobre GEC3/GEC32.
+import { test, describe, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import sql from 'mssql';
+import { initDB, getDB, TEST_PLANTA_ID, USUARIO_SISTEMA_ID } from '../db.js';
+import {
+  GRACIA_CIERRE_MIN,
+  MOTIVOS_CIERRE,
+  proximoUmbral,
+  estadoBloqueo,
+  motivoAutoCierre,
+  abrirTurnoSiFalta,
+  resolverTurnoAbierto,
+  activarSucesor,
+  cerrarTurno,
+  extenderTurno,
+} from '../utils/turno-entidad.js';
+
+const iso = (d) => new Date(d).toISOString();
+
+// ---------------------------------------------------------------------------
+// Parte 1 — lógica pura
+// ---------------------------------------------------------------------------
+describe('turno-entidad · lógica pura', () => {
+  test('GRACIA_CIERRE_MIN y MOTIVOS_CIERRE son las constantes esperadas', () => {
+    assert.equal(GRACIA_CIERRE_MIN, 60);
+    assert.deepEqual(MOTIVOS_CIERRE, ['MANUAL', 'AUTO_SIN_PERSONAL', 'AUTO_SIN_RESPUESTA']);
+  });
+
+  describe('proximoUmbral — bordes de umbral y cruce de medianoche T2', () => {
+    // Bogotá = UTC−5. Umbrales 06:00 y 18:00 Bogotá.
+    test('T1 mediodía (12:00 Bogotá) → 18:00 Bogotá mismo día', () => {
+      // 12:00 Bogotá 2026-04-10 = 17:00Z
+      assert.equal(iso(proximoUmbral(new Date('2026-04-10T17:00:00Z'))), '2026-04-10T23:00:00.000Z');
+    });
+    test('umbral 18:00 Bogotá exacto → SIGUIENTE umbral 06:00 día+1 (no el mismo)', () => {
+      // 18:00 Bogotá 2026-04-10 = 23:00Z → próximo = 06:00 Bogotá 2026-04-11 = 11:00Z
+      assert.equal(iso(proximoUmbral(new Date('2026-04-10T23:00:00Z'))), '2026-04-11T11:00:00.000Z');
+    });
+    test('medianoche (00:00 Bogotá, T2 tras cruzar) → 06:00 Bogotá mismo día', () => {
+      // 00:00 Bogotá 2026-04-11 = 05:00Z → próximo = 06:00 Bogotá 2026-04-11 = 11:00Z
+      assert.equal(iso(proximoUmbral(new Date('2026-04-11T05:00:00Z'))), '2026-04-11T11:00:00.000Z');
+    });
+    test('05:59 Bogotá (T2, aún antes del umbral) → 06:00 Bogotá mismo día', () => {
+      // 05:59 Bogotá 2026-04-11 = 10:59Z → 06:00 Bogotá 2026-04-11 = 11:00Z
+      assert.equal(iso(proximoUmbral(new Date('2026-04-11T10:59:00Z'))), '2026-04-11T11:00:00.000Z');
+    });
+    test('umbral 06:00 Bogotá exacto → SIGUIENTE umbral 18:00 mismo día', () => {
+      // 06:00 Bogotá 2026-04-11 = 11:00Z → 18:00 Bogotá 2026-04-11 = 23:00Z
+      assert.equal(iso(proximoUmbral(new Date('2026-04-11T11:00:00Z'))), '2026-04-11T23:00:00.000Z');
+    });
+  });
+
+  describe('estadoBloqueo', () => {
+    const finT1 = '2026-04-10T23:00:00Z'; // 18:00 Bogotá
+    test('ABIERTO antes del fin_nominal → no bloquea', () => {
+      const row = { estado: 'ABIERTO', fin_nominal: finT1 };
+      assert.equal(estadoBloqueo(row, new Date('2026-04-10T22:00:00Z')), false);
+    });
+    test('ABIERTO justo en el fin_nominal → bloquea', () => {
+      const row = { estado: 'ABIERTO', fin_nominal: finT1 };
+      assert.equal(estadoBloqueo(row, new Date('2026-04-10T23:00:00Z')), true);
+    });
+    test('ABIERTO pasado el fin_nominal → bloquea', () => {
+      const row = { estado: 'ABIERTO', fin_nominal: finT1 };
+      assert.equal(estadoBloqueo(row, new Date('2026-04-10T23:30:00Z')), true);
+    });
+    test('PROGRAMADO/CERRADO nunca bloquean', () => {
+      assert.equal(estadoBloqueo({ estado: 'PROGRAMADO', fin_nominal: finT1 }, new Date('2026-04-11T00:00:00Z')), false);
+      assert.equal(estadoBloqueo({ estado: 'CERRADO', fin_nominal: finT1 }, new Date('2026-04-11T00:00:00Z')), false);
+    });
+    test('tras extender (fin_nominal movido al próximo umbral) deja de bloquear y RE-bloquea al nuevo umbral', () => {
+      // Extendido: fin_nominal ahora 06:00 Bogotá día+1 = 2026-04-11T11:00:00Z
+      const extendido = { estado: 'ABIERTO', fin_nominal: '2026-04-11T11:00:00Z' };
+      // 23:30Z (18:30 Bogotá) < nuevo fin → no bloquea (la extensión cubre ahora)
+      assert.equal(estadoBloqueo(extendido, new Date('2026-04-10T23:30:00Z')), false);
+      // Al llegar el nuevo umbral 06:00 → vuelve a bloquear
+      assert.equal(estadoBloqueo(extendido, new Date('2026-04-11T11:00:00Z')), true);
+    });
+    test('entradas nulas/incompletas → no bloquea', () => {
+      assert.equal(estadoBloqueo(null, new Date()), false);
+      assert.equal(estadoBloqueo({ estado: 'ABIERTO', fin_nominal: null }, new Date()), false);
+    });
+  });
+
+  describe('motivoAutoCierre', () => {
+    test('sin personal → AUTO_SIN_PERSONAL (inmediato)', () => {
+      assert.equal(motivoAutoCierre({ hayPersonal: false, minutosDesdeUmbral: 0 }), 'AUTO_SIN_PERSONAL');
+    });
+    test('con personal, dentro de la gracia (<60) → null', () => {
+      assert.equal(motivoAutoCierre({ hayPersonal: true, minutosDesdeUmbral: 30 }), null);
+      assert.equal(motivoAutoCierre({ hayPersonal: true, minutosDesdeUmbral: 59 }), null);
+    });
+    test('con personal, alcanzada la gracia (>=60) → AUTO_SIN_RESPUESTA', () => {
+      assert.equal(motivoAutoCierre({ hayPersonal: true, minutosDesdeUmbral: 60 }), 'AUTO_SIN_RESPUESTA');
+      assert.equal(motivoAutoCierre({ hayPersonal: true, minutosDesdeUmbral: 90 }), 'AUTO_SIN_RESPUESTA');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parte 2 — operaciones de BD (TEST_PLANTA)
+// ---------------------------------------------------------------------------
+describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
+  let pool;
+  const P = TEST_PLANTA_ID;
+
+  async function limpiarTurnos() {
+    await pool.request().input('p', sql.VarChar(10), P).query(`
+      DELETE tp FROM bitacora.turno_participante tp
+        INNER JOIN bitacora.turno_unidad tu ON tu.turno_unidad_id = tp.turno_id
+       WHERE tu.planta_id = @p;
+      DELETE FROM bitacora.turno_unidad WHERE planta_id = @p;
+    `);
+  }
+
+  before(async () => {
+    await initDB();
+    pool = await getDB();
+    // Sembrar TEST_PLANTA idempotentemente (FK de turno_unidad → lov_bit.planta).
+    await pool.request().input('planta', sql.VarChar(10), P).query(`
+      MERGE lov_bit.planta AS t USING (SELECT @planta AS planta_id) AS s ON t.planta_id = s.planta_id
+      WHEN NOT MATCHED THEN INSERT (planta_id, nombre, activa) VALUES (@planta, 'Test Synthetic', 1);
+    `);
+    await limpiarTurnos();
+  });
+
+  after(async () => {
+    await limpiarTurnos();
+  });
+
+  test('abrirTurnoSiFalta crea ABIERTO cuando la unidad no tiene ninguno (ventana + inicio_real + SISTEMA)', async () => {
+    await limpiarTurnos();
+    const ahora = new Date('2026-04-10T15:00:00Z');
+    const row = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', ahora);
+    assert.equal(row.estado, 'ABIERTO');
+    assert.equal(row.turno, 1);
+    // T1 2026-04-10 → [06:00, 18:00) Bogotá = [11:00Z, 23:00Z)
+    assert.equal(iso(row.inicio_nominal), '2026-04-10T11:00:00.000Z');
+    assert.equal(iso(row.fin_nominal), '2026-04-10T23:00:00.000Z');
+    assert.equal(iso(row.inicio_real), iso(ahora));
+    assert.equal(row.creado_por, USUARIO_SISTEMA_ID);
+    assert.equal(row.extendido, false);
+    assert.equal(row.veces_extendido, 0);
+  });
+
+  test('abrirTurnoSiFalta es idempotente: 2ª llamada devuelve la misma fila sin duplicar', async () => {
+    await limpiarTurnos();
+    const a = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+    const b = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T16:00:00Z'));
+    assert.equal(a.turno_unidad_id, b.turno_unidad_id);
+    const c = await pool.request().input('p', sql.VarChar(10), P).query(
+      `SELECT COUNT(*) AS n FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa='2026-04-10' AND turno=1`
+    );
+    assert.equal(c.recordset[0].n, 1);
+  });
+
+  test('abrirTurnoSiFalta crea PROGRAMADO (sin solape) si la unidad ya tiene un ABIERTO', async () => {
+    await limpiarTurnos();
+    const abierto = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+    assert.equal(abierto.estado, 'ABIERTO');
+    // Segunda ventana (T2 mismo día) mientras la T1 sigue abierta → nace PROGRAMADO.
+    const prog = await abrirTurnoSiFalta(pool, P, 2, '2026-04-10', new Date('2026-04-10T15:05:00Z'));
+    assert.equal(prog.estado, 'PROGRAMADO');
+    assert.equal(prog.inicio_real, null);
+    // T2 2026-04-10 → [18:00 día, 06:00 día+1) = [23:00Z, 11:00Z día+1)
+    assert.equal(iso(prog.inicio_nominal), '2026-04-10T23:00:00.000Z');
+    assert.equal(iso(prog.fin_nominal), '2026-04-11T11:00:00.000Z');
+  });
+
+  test('resolverTurnoAbierto devuelve el ABIERTO de la unidad (o null si no hay)', async () => {
+    await limpiarTurnos();
+    assert.equal(await resolverTurnoAbierto(pool, P), null);
+    const abierto = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+    const r = await resolverTurnoAbierto(pool, P);
+    assert.equal(r.turno_unidad_id, abierto.turno_unidad_id);
+    assert.equal(r.estado, 'ABIERTO');
+  });
+
+  test('activarSucesor no hace nada mientras haya un ABIERTO; cerrarTurno cierra y activa el PROGRAMADO', async () => {
+    await limpiarTurnos();
+    const A = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+    const B = await abrirTurnoSiFalta(pool, P, 2, '2026-04-10', new Date('2026-04-10T15:05:00Z'));
+    // Con A abierto, no se puede activar el sucesor todavía.
+    assert.equal(await activarSucesor(pool, P), null);
+
+    const cierre = new Date('2026-04-10T23:10:00Z');
+    const { cerrado, sucesor } = await cerrarTurno(pool, A.turno_unidad_id, {
+      motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID, ahora: cierre,
+    });
+    assert.equal(cerrado.estado, 'CERRADO');
+    assert.equal(cerrado.motivo_cierre, 'MANUAL');
+    assert.equal(cerrado.cerrado_por, USUARIO_SISTEMA_ID);
+    assert.equal(iso(cerrado.fin_real), iso(cierre));
+    // El cierre activó el sucesor B → ahora es el ABIERTO de la unidad.
+    assert.equal(sucesor.turno_unidad_id, B.turno_unidad_id);
+    assert.equal(sucesor.estado, 'ABIERTO');
+    assert.equal(iso(sucesor.inicio_real), iso(cierre));
+    const vigente = await resolverTurnoAbierto(pool, P);
+    assert.equal(vigente.turno_unidad_id, B.turno_unidad_id);
+  });
+
+  test('cerrarTurno es idempotente (2º cierre → cerrado:null) y valida motivo/cerrado_por', async () => {
+    await limpiarTurnos();
+    const A = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+    const primero = await cerrarTurno(pool, A.turno_unidad_id, { motivo: 'AUTO_SIN_PERSONAL', cerrado_por: USUARIO_SISTEMA_ID });
+    assert.equal(primero.cerrado.estado, 'CERRADO');
+    const segundo = await cerrarTurno(pool, A.turno_unidad_id, { motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID });
+    assert.equal(segundo.cerrado, null);
+    await assert.rejects(() => cerrarTurno(pool, A.turno_unidad_id, { motivo: 'XXX', cerrado_por: USUARIO_SISTEMA_ID }), /motivo inválido/);
+    await assert.rejects(() => cerrarTurno(pool, A.turno_unidad_id, { motivo: 'MANUAL' }), /cerrado_por/);
+  });
+
+  test('extenderTurno mueve fin_nominal al próximo umbral y marca extendido/veces; sobre no-ABIERTO → null', async () => {
+    await limpiarTurnos();
+    const A = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+    // Extender al llegar el umbral 18:00 (23:00Z) → nuevo fin = 06:00 día+1 = 2026-04-11T11:00:00Z
+    const ext = await extenderTurno(pool, A.turno_unidad_id, { ahora: new Date('2026-04-10T23:00:00Z') });
+    assert.equal(ext.extendido, true);
+    assert.equal(ext.veces_extendido, 1);
+    assert.equal(iso(ext.fin_nominal), '2026-04-11T11:00:00.000Z');
+    // Extender de nuevo en el nuevo umbral 06:00 (11:00Z día+1) → fin = 18:00 día+1 = 23:00Z día+1
+    const ext2 = await extenderTurno(pool, A.turno_unidad_id, { ahora: new Date('2026-04-11T11:00:00Z') });
+    assert.equal(ext2.veces_extendido, 2);
+    assert.equal(iso(ext2.fin_nominal), '2026-04-11T23:00:00.000Z');
+    // Cerrar y volver a extender → null (no está ABIERTO).
+    await cerrarTurno(pool, A.turno_unidad_id, { motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID });
+    assert.equal(await extenderTurno(pool, A.turno_unidad_id, { ahora: new Date('2026-04-11T11:00:00Z') }), null);
+  });
+});
