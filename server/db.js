@@ -2124,6 +2124,115 @@ export async function initDB() {
     }
   }
 
+  // ---------- F29 — D-045: entidad explícita de turno (cabecera + participante + FK) ----------
+  // Solo DDL idempotente; ninguna otra capa lee/escribe estas tablas todavía (llega en E2+).
+  // Convención TZ: BD UTC (SYSUTCDATETIME()), presentación Bogotá via columnas calculadas *_bogota.
+  // Documentado en BIT-MODBD-2026-001.md (§ turno_unidad/turno_participante) y docs/decisions.md D-045.
+  //
+  // F29.A1: cabecera bitacora.turno_unidad (1 fila por fecha_operativa+planta+turno) + detalle vivo
+  // bitacora.turno_participante (1 fila por turno+usuario, UPSERT al re-ingresar). Cada statement va
+  // gateado con IF NOT EXISTS → idempotente sin depender del flag; el flag es audit trail (patrón F22.D1).
+  //
+  // Regla de vigencia (verificada contra el diseño de sin-solape): PROGRAMADO y ABIERTO PUEDEN
+  // coexistir por unidad (el sucesor nace PROGRAMADO mientras el turno actual sigue extendido y se
+  // activa al cerrar el anterior). Por eso el índice ÚNICO se filtra a estado='ABIERTO' (máx 1 ABIERTO
+  // por planta, la invariante real), NO a (PROGRAMADO,ABIERTO). Un índice no único aparte sirve el
+  // lookup del vigente. La UNIQUE natural (fecha_operativa, planta_id, turno) evita duplicar la fila.
+  await db.request().batch(`
+    IF OBJECT_ID('bitacora.turno_unidad', 'U') IS NULL
+    CREATE TABLE bitacora.turno_unidad (
+      turno_unidad_id  INT IDENTITY(1,1) PRIMARY KEY,
+      fecha_operativa  DATE          NOT NULL,
+      planta_id        VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+      turno            TINYINT       NOT NULL CONSTRAINT CK_turno_unidad_turno CHECK (turno IN (1, 2)),
+      estado           VARCHAR(12)   NOT NULL
+          CONSTRAINT CK_turno_unidad_estado
+          CHECK (estado IN ('PROGRAMADO', 'ABIERTO', 'CERRADO')),
+      inicio_nominal   DATETIME2     NOT NULL,
+      fin_nominal      DATETIME2     NOT NULL,
+      inicio_real      DATETIME2     NULL,
+      fin_real         DATETIME2     NULL,
+      extendido        BIT           NOT NULL CONSTRAINT DF_turno_unidad_extendido DEFAULT 0,
+      veces_extendido  INT           NOT NULL CONSTRAINT DF_turno_unidad_veces_ext DEFAULT 0,
+      cerrado_por      INT           NULL REFERENCES lov_bit.usuario(usuario_id),
+      cerrado_en       DATETIME2     NULL,
+      motivo_cierre    VARCHAR(20)   NULL
+          CONSTRAINT CK_turno_unidad_motivo
+          CHECK (motivo_cierre IN ('MANUAL', 'AUTO_SIN_PERSONAL', 'AUTO_SIN_RESPUESTA')),
+      creado_por       INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+      creado_en        DATETIME2     NOT NULL CONSTRAINT DF_turno_unidad_creado_en DEFAULT SYSUTCDATETIME(),
+      inicio_nominal_bogota AS DATEADD(HOUR, -5, inicio_nominal),
+      fin_nominal_bogota    AS DATEADD(HOUR, -5, fin_nominal),
+      inicio_real_bogota    AS DATEADD(HOUR, -5, inicio_real),
+      fin_real_bogota       AS DATEADD(HOUR, -5, fin_real),
+      cerrado_en_bogota     AS DATEADD(HOUR, -5, cerrado_en),
+      creado_en_bogota      AS DATEADD(HOUR, -5, creado_en),
+      CONSTRAINT UQ_turno_unidad_natural UNIQUE (fecha_operativa, planta_id, turno)
+    );
+
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='UQ_turno_unidad_abierto_por_planta')
+      CREATE UNIQUE INDEX UQ_turno_unidad_abierto_por_planta
+        ON bitacora.turno_unidad(planta_id)
+        WHERE estado = 'ABIERTO';
+
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_turno_unidad_vigente')
+      CREATE INDEX IX_turno_unidad_vigente
+        ON bitacora.turno_unidad(planta_id, estado)
+        WHERE estado IN ('PROGRAMADO', 'ABIERTO');
+
+    IF OBJECT_ID('bitacora.turno_participante', 'U') IS NULL
+    CREATE TABLE bitacora.turno_participante (
+      turno_participante_id     INT IDENTITY(1,1) PRIMARY KEY,
+      turno_id                  INT           NOT NULL REFERENCES bitacora.turno_unidad(turno_unidad_id),
+      usuario_id                INT           NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+      cargo_id                  INT           NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+      usuario_nombre            VARCHAR(200)  NOT NULL,
+      cargo_nombre              VARCHAR(100)  NOT NULL,
+      primer_ingreso            DATETIME2     NOT NULL,
+      ultimo_egreso             DATETIME2     NULL,
+      presencia_acumulada_min   INT           NOT NULL CONSTRAINT DF_turno_part_presencia DEFAULT 0,
+      finalizado_individual_en  DATETIME2     NULL,
+      creado_en                 DATETIME2     NOT NULL CONSTRAINT DF_turno_part_creado_en DEFAULT SYSUTCDATETIME(),
+      primer_ingreso_bogota           AS DATEADD(HOUR, -5, primer_ingreso),
+      ultimo_egreso_bogota            AS DATEADD(HOUR, -5, ultimo_egreso),
+      finalizado_individual_en_bogota AS DATEADD(HOUR, -5, finalizado_individual_en),
+      creado_en_bogota                AS DATEADD(HOUR, -5, creado_en),
+      CONSTRAINT UQ_turno_participante_natural UNIQUE (turno_id, usuario_id)
+    );
+
+    IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F29.A1')
+      INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F29.A1');
+  `);
+
+  // F29.A2: FK turno_id nullable en las 4 tablas que un turno gobierna. Nullable SIEMPRE — las filas
+  // pre-feature y el histórico viejo quedan NULL (nada las estampa hasta E5/E6). El índice del vigente
+  // de turno_unidad ya soporta el lookup por turno_id en turno_participante (UNIQUE lo cubre como col
+  // líder), así que no se agrega un IX redundante. ADD column con IF COL_LENGTH → idempotente.
+  await db.request().batch(`
+    IF COL_LENGTH('bitacora.sesion_activa', 'turno_id') IS NULL
+      ALTER TABLE bitacora.sesion_activa
+        ADD turno_id INT NULL
+          CONSTRAINT FK_sesion_activa_turno REFERENCES bitacora.turno_unidad(turno_unidad_id);
+
+    IF COL_LENGTH('bitacora.registro_activo', 'turno_id') IS NULL
+      ALTER TABLE bitacora.registro_activo
+        ADD turno_id INT NULL
+          CONSTRAINT FK_registro_activo_turno REFERENCES bitacora.turno_unidad(turno_unidad_id);
+
+    IF COL_LENGTH('bitacora.registro_historico', 'turno_id') IS NULL
+      ALTER TABLE bitacora.registro_historico
+        ADD turno_id INT NULL
+          CONSTRAINT FK_registro_historico_turno REFERENCES bitacora.turno_unidad(turno_unidad_id);
+
+    IF COL_LENGTH('bitacora.conformacion_turno', 'turno_id') IS NULL
+      ALTER TABLE bitacora.conformacion_turno
+        ADD turno_id INT NULL
+          CONSTRAINT FK_conformacion_turno_turno REFERENCES bitacora.turno_unidad(turno_unidad_id);
+
+    IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F29.A2')
+      INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F29.A2');
+  `);
+
   // F10: bitacora_oculta expuesto para que /api/historicos pueda filtrar bitácoras de
   // auditoría interna (CIET).
   await db.request().batch(`
