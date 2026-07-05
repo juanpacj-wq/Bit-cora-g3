@@ -275,6 +275,59 @@ describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
     assert.equal(await extenderTurno(pool, A.turno_unidad_id, { ahora: new Date('2026-04-11T11:00:00Z') }), null);
   });
 
+  // --- D-045 (huérfanos): cerrarTurno debe archivar también los BORRADORES sin turno_id (legacy
+  //     pre-write-gate) cuya fecha_evento cae en la ventana del turno, y NO los de otra ventana. ---
+  test('cerrarTurno archiva borradores HUÉRFANOS (turno_id NULL) en-ventana; deja fuera los de otra ventana', async () => {
+    await limpiarTurnos();
+    const A = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+    // Bitácora visible (no DISP/MAND/CIET) con al menos un tipo_evento.
+    const bit = (await pool.request().query(`
+      SELECT TOP 1 b.bitacora_id AS bid,
+             (SELECT TOP 1 tipo_evento_id FROM lov_bit.tipo_evento te WHERE te.bitacora_id = b.bitacora_id) AS te
+      FROM lov_bit.bitacora b
+      WHERE b.oculta = 0 AND b.codigo NOT IN ('DISP','MAND','CIET','COMB')
+        AND EXISTS (SELECT 1 FROM lov_bit.tipo_evento te WHERE te.bitacora_id = b.bitacora_id)
+      ORDER BY b.bitacora_id`)).recordset[0];
+
+    async function insertHuerfano(fechaEventoIso) {
+      const r = await pool.request()
+        .input('b', sql.Int, bit.bid).input('p', sql.VarChar(10), P)
+        .input('fe', sql.DateTime2, new Date(fechaEventoIso)).input('te', sql.Int, bit.te)
+        .input('u', sql.Int, USUARIO_SISTEMA_ID)
+        .query(`
+          INSERT INTO bitacora.registro_activo
+            (bitacora_id, planta_id, fecha_evento, turno, detalle, tipo_evento_id, estado,
+             ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, turno_id)
+          OUTPUT INSERTED.registro_id
+          VALUES (@b, @p, @fe, 1, 'HUERFANO TEST', @te, 'borrador', '[]', '[]', '[]', @u, NULL)`);
+      return r.recordset[0].registro_id;
+    }
+
+    // Ventana T1 2026-04-10 = [11:00Z, 23:00Z). Cierre a 16:00Z.
+    const dentro = await insertHuerfano('2026-04-10T12:00:00Z'); // en-ventana → debe archivar
+    const fuera = await insertHuerfano('2026-04-10T10:00:00Z');  // antes de inicio_nominal → NO
+
+    const res = await cerrarTurno(pool, A.turno_unidad_id, {
+      motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID, ahora: new Date('2026-04-10T16:00:00Z'),
+    });
+    assert.equal(res.cerrado.estado, 'CERRADO');
+
+    const q = (rid) => pool.request().input('r', sql.Int, rid);
+    // dentro → en histórico, atribuido a este turno; fuera de registro_activo.
+    const histDentro = (await q(dentro).query(`SELECT turno_id FROM bitacora.registro_historico WHERE registro_id=@r`)).recordset;
+    assert.equal(histDentro.length, 1, 'huérfano en-ventana archivado al histórico');
+    assert.equal(histDentro[0].turno_id, A.turno_unidad_id, 'atribuido a este turno (COALESCE)');
+    const raDentro = (await q(dentro).query(`SELECT 1 AS x FROM bitacora.registro_activo WHERE registro_id=@r`)).recordset;
+    assert.equal(raDentro.length, 0, 'huérfano en-ventana ya no está en registro_activo');
+
+    // fuera → sigue como borrador, NO archivado.
+    const raFuera = (await q(fuera).query(`SELECT estado FROM bitacora.registro_activo WHERE registro_id=@r`)).recordset;
+    assert.equal(raFuera.length, 1);
+    assert.equal(raFuera[0].estado, 'borrador', 'huérfano fuera de ventana NO se archiva');
+    const histFuera = (await q(fuera).query(`SELECT 1 AS x FROM bitacora.registro_historico WHERE registro_id=@r`)).recordset;
+    assert.equal(histFuera.length, 0);
+  });
+
   // --- D-045 (reabrir): des-cierre. REGRESIÓN del bug de fecha_operativa: la columna DATE vuelve de la
   //     BD como Date (medianoche UTC); interpolarla en fechaRefBogotaMediodia daba Invalid Date → la
   //     ventana quedaba NaN y reabrirTurno devolvía SIEMPRE 'ventana_vencida' aunque la ventana fuera vigente.
