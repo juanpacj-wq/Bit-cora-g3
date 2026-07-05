@@ -167,6 +167,30 @@ export async function resolverOAbrirTurnoAbierto(pool, planta_id, { ahora = new 
   return t;
 }
 
+// D-046 (write-gate de transición) — resuelve el turno de la unidad para una ESCRITURA, distinguiendo
+// TRES estados operables (no solo abierto/cerrado):
+//   ABIERTO    → dentro de ventana, se puede escribir. Devuelve la fila en `turno`.
+//   TRANSICION → ABIERTO pero ya cruzó `fin_nominal` (gavela de gracia: esperando cerrar/extender). El
+//                turno sigue ABIERTO en BD (bloqueo es computado por estadoBloqueo), pero la escritura
+//                debe bloquearse igual que si estuviera cerrado — cierra el hueco de que la gracia solo
+//                la tapara el modal del front (evadible) y el de ≤60s de latencia del sweeper.
+//   CERRADO    → la unidad NO tiene turno ABIERTO (cierre manual anticipado o auto-cierre sin sucesor).
+// `abrir=true` abre el turno de la ventana vigente si falta (paridad con resolverOAbrirTurnoAbierto, para
+// el POST); PUT/DELETE usan `abrir=false` (no se abre un turno solo para editar/borrar). Se evalúa con
+// `estadoBloqueo` por-request, así el bloqueo actúa al instante de cruzar el umbral, sin depender del tick
+// del sweeper. Al extender (fin_nominal → próximo umbral) estadoBloqueo vuelve a false → se desbloquea solo.
+export async function resolverTurnoParaEscritura(pool, planta_id, { abrir = false, ahora = new Date() } = {}) {
+  let t = await resolverTurnoAbierto(pool, planta_id);
+  if (!t && abrir) {
+    const { inicio } = ventanaActual(ahora);
+    await abrirTurnoSiFalta(pool, planta_id, getTurnoColombia(), fechaBogotaStr(inicio), ahora);
+    t = await resolverTurnoAbierto(pool, planta_id);
+  }
+  if (!t) return { estado: 'CERRADO', turno: null };
+  if (estadoBloqueo(t, ahora)) return { estado: 'TRANSICION', turno: t };
+  return { estado: 'ABIERTO', turno: t };
+}
+
 // Promueve el PROGRAMADO más antiguo de la unidad a ABIERTO (inicio_real=ahora), pero SÓLO si la
 // unidad no tiene ya un ABIERTO (respeta el índice único). Devuelve la fila activada o null.
 // Opera sobre una transacción dada (para componerse dentro de cerrarTurno).

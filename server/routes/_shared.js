@@ -24,21 +24,30 @@ function clientIp(req) {
   return req.socket?.remoteAddress || 'desconocida';
 }
 
+function responder429(res, retryAfterMs) {
+  res.writeHead(429, {
+    'Content-Type': 'application/json',
+    'Retry-After': String(Math.ceil(retryAfterMs / 1000)),
+    ...CORS_HEADERS,
+  });
+  res.end(JSON.stringify({
+    error: 'Demasiadas solicitudes. Espera unos segundos e intenta de nuevo.',
+    codigo: 'rate_limit',
+  }));
+}
+
 // Aplica rate limiting a un endpoint sensible. Devuelve true si pasa; si excede responde 429
 // (con Retry-After) y devuelve false — el handler debe `return` sin seguir.
 export function aplicarRateLimit(req, res, tag, { max, windowMs }) {
   const r = rateLimitCheck(_rateLimitMap, `${tag}:${clientIp(req)}`, Date.now(), { max, windowMs });
-  if (!r.allowed) {
-    res.writeHead(429, {
-      'Content-Type': 'application/json',
-      'Retry-After': String(Math.ceil(r.retryAfterMs / 1000)),
-      ...CORS_HEADERS,
-    });
-    res.end(JSON.stringify({
-      error: 'Demasiadas solicitudes. Espera unos segundos e intenta de nuevo.',
-      codigo: 'rate_limit',
-    }));
-    return false;
-  }
+  if (!r.allowed) { responder429(res, r.retryAfterMs); return false; }
+  return true;
+}
+
+// D-047: tope GLOBAL (todas las IPs comparten el contador) para endpoints que consumen una
+// cuota externa compartida (free tier de Gemini). Misma semántica que aplicarRateLimit.
+export function aplicarRateLimitGlobal(req, res, tag, { max, windowMs }) {
+  const r = rateLimitCheck(_rateLimitMap, `${tag}:*`, Date.now(), { max, windowMs });
+  if (!r.allowed) { responder429(res, r.retryAfterMs); return false; }
   return true;
 }

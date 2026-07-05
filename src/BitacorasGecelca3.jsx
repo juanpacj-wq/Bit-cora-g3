@@ -12,6 +12,7 @@ import {
   Activity, Flame, Droplets, Zap, Gauge, Cpu, FlaskConical, Leaf,
   Settings, FileCheck, Edit3, Eye, XCircle, Check, Users, History,
   LayoutDashboard, MonitorCog, Menu, ArrowLeftRight,
+  Sparkles, Loader2, Undo2,
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 import TurnoTransicionModal from "./components/TurnoTransicionModal";
@@ -30,6 +31,7 @@ import { useBitacoraCounts } from "./hooks/useBitacoraCounts";
 import { useFlipReorder } from "./hooks/useFlipReorder";
 import { useBitacoraSesion, useFinalizarTurno, useRevertirTurno } from "./hooks/useBitacoraSesion";
 import { useAppRoute } from "./hooks/useAppRoute";
+import { useMejorarTexto, MAX_TEXTO_IA } from "./hooks/useMejorarTexto";
 import { buildHash } from "./routing/appRoute";
 import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
 import { FILTROS_VACIOS } from "./utils/filtros";
@@ -1278,6 +1280,7 @@ function GrillaRegistros({
   registros, bitacora, tiposEvento, jefeNombre, jdtNombre,
   puedeCrear, bloqueado = false, onUpdateLocal, onSaveRegistro, onDeleteRegistro,
   filtroTexto, filtroTipo, filtroFecha, filtroTurno, onLimpiarFiltros,
+  showToast,
 }) {
   const [editingId, setEditingId] = useState(null);
 
@@ -1405,6 +1408,8 @@ function GrillaRegistros({
                 onDelete={() => onDeleteRegistro(reg)}
                 puedeEditar={!bloqueado && (reg.estado === "borrador" || !reg.registro_id)}
                 bloqueado={bloqueado}
+                bitacoraCodigo={bitacora?.codigo}
+                showToast={showToast}
               />
             ))}
           </div>
@@ -1435,7 +1440,34 @@ function AutoGrowTextarea({ value, className, ...props }) {
   );
 }
 
-function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre, camposExtraDef = [], isEditing, onStartEdit, onCancelEdit, onUpdate, onSave, onDelete, puedeEditar, bloqueado = false }) {
+function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre, camposExtraDef = [], isEditing, onStartEdit, onCancelEdit, onUpdate, onSave, onDelete, puedeEditar, bloqueado = false, bitacoraCodigo, showToast = () => {} }) {
+  // D-047: mejora con IA del campo detalle. textoPrevio guarda el original para "Deshacer";
+  // se invalida si el usuario edita a mano o sale del modo edición.
+  const { mejorar, mejorando } = useMejorarTexto();
+  const [textoPrevio, setTextoPrevio] = useState(null);
+  useEffect(() => { if (!isEditing) setTextoPrevio(null); }, [isEditing]);
+
+  const handleMejorar = async () => {
+    const original = (reg.detalle || "").trim();
+    if (!original || mejorando) return;
+    if (original.length > MAX_TEXTO_IA) {
+      showToast(`La descripción supera los ${MAX_TEXTO_IA} caracteres para mejorar con IA.`, "error");
+      return;
+    }
+    try {
+      const corregido = await mejorar(original, bitacoraCodigo);
+      if (corregido && corregido !== original) {
+        setTextoPrevio(reg.detalle);
+        onUpdate("detalle", corregido);
+        showToast("Texto mejorado. Revisa y guarda el registro.", "success");
+      } else {
+        showToast("El texto ya estaba correcto.", "success");
+      }
+    } catch (err) {
+      showToast(err.message, "error"); // ya viene saneado (D-032 / rate_limit / sin_conexion)
+    }
+  };
+
   const tipoNombre = reg.tipo_evento_nombre
     || tiposEvento.find((t) => t.tipo_evento_id === reg.tipo_evento_id)?.nombre
     || "";
@@ -1559,12 +1591,44 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
         <div className={hasExtras ? "lg:col-span-3" : "lg:col-span-5"}>
           <label className="text-xs text-gray-400 lg:hidden">Descripción</label>
           {isEditing ? (
-            <AutoGrowTextarea
-              value={reg.detalle || ""}
-              onChange={(e) => onUpdate("detalle", e.target.value)}
-              placeholder="Describe el evento operativo..."
-              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none min-h-[4.5rem]"
-            />
+            <>
+              <AutoGrowTextarea
+                value={reg.detalle || ""}
+                onChange={(e) => { setTextoPrevio(null); onUpdate("detalle", e.target.value); }}
+                placeholder="Describe el evento operativo..."
+                className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none min-h-[4.5rem]"
+              />
+              {/* D-047: pill "AI" (corrección ortográfica vía backend) + Deshacer local */}
+              <div className="mt-1.5 flex items-center justify-end gap-2">
+                {textoPrevio != null && (
+                  <button
+                    type="button"
+                    onClick={() => { onUpdate("detalle", textoPrevio); setTextoPrevio(null); }}
+                    className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors"
+                    title="Restaurar el texto original"
+                  >
+                    <Undo2 size={13} /> Deshacer
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleMejorar}
+                  disabled={mejorando || !(reg.detalle || "").trim()}
+                  title="Mejorar con IA"
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold text-gray-700 transition-all hover:shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{
+                    border: "1.5px solid transparent",
+                    background:
+                      "linear-gradient(#ffffff,#ffffff) padding-box, linear-gradient(90deg, #22d3ee 0%, #31a354 55%, #FFC107 100%) border-box",
+                  }}
+                >
+                  {mejorando
+                    ? <Loader2 size={13} className="animate-spin" style={{ color: COLORS.greenPrimary }} />
+                    : <Sparkles size={13} style={{ color: COLORS.greenPrimary }} />}
+                  {mejorando ? "Mejorando…" : "AI"}
+                </button>
+              </div>
+            </>
           ) : (
             <p className="text-sm text-gray-700 leading-relaxed line-clamp-2">
               {reg.detalle || <span className="text-gray-400 italic">Sin descripción</span>}
@@ -1771,9 +1835,14 @@ export default function App() {
   // D-045 (write-gate por unidad): cuando la unidad NO tiene turno ABIERTO (cierre manual anticipado
   // o auto-cierre sin sucesor) las bitácoras genéricas quedan en solo-lectura para TODOS —no solo para
   // quien finalizó— hasta que se abra el siguiente turno (por ventana o reapertura manual). estadoTurno
-  // Actual devuelve 'ABIERTO' o null (nunca 'CERRADO'), así que null ≡ unidad sin turno abierto. Durante
-  // la transición (bloqueo) el estado sigue 'ABIERTO' y lo cubre el modal, no este gate.
+  // Actual devuelve 'ABIERTO' o null (nunca 'CERRADO'), así que null ≡ unidad sin turno abierto.
   const turnoUnidadCerrado = turnoHook.estado !== 'ABIERTO';
+
+  // D-046 (write-gate de transición): durante la gavela de gracia el estado sigue 'ABIERTO' (el turno
+  // cruzó su umbral pero aún no cierra). Antes esto lo tapaba SOLO el modal (evadible). Ahora la grilla
+  // queda en solo-lectura de verdad también en transición — defensa en profundidad, espejo del 409
+  // turno_en_transicion del backend. Se levanta solo al extender/cerrar (el hook refetchea por WS).
+  const turnoEnTransicion = turnoHook.bloqueo;
 
   // Las bitácoras visibles se separan en (a) categorías agrupadas en un solo botón fijo
   // a la izquierda y (b) bitácoras "sueltas" que siguen siendo tabs reordenables por count.
@@ -1959,6 +2028,20 @@ export default function App() {
     );
   }, [draftLocal, registrosHook]);
 
+  // D-046: los write-gates de turno responden 409 con `error` = slug (turno_cerrado / turno_en_transicion)
+  // y `mensaje` amigable + `codigo` estable. Mostramos el `mensaje` (no el slug crudo de `error`, que es lo
+  // que trae e.message) y refetcheamos el estado del turno para que la grilla pase a solo-lectura / aparezca
+  // el modal de inmediato, sin esperar el broadcast del sweeper (cierra el hueco de ≤60s para quien intentó
+  // escribir en plena transición). Otros errores salen tal cual.
+  const surfaceWriteError = useCallback((e) => {
+    if (e?.codigo === 'turno_en_transicion' || e?.codigo === 'turno_cerrado') {
+      turnoHook.refetch?.();
+      showToast(e.body?.mensaje || e.message, "error");
+      return;
+    }
+    showToast(e.message, "error");
+  }, [turnoHook, showToast]);
+
   const handleSaveRegistro = useCallback(async (reg) => {
     if (!reg.tipo_evento_id) { showToast("Selecciona un tipo de evento", "error"); return false; }
     if (!reg.detalle || !reg.detalle.trim()) { showToast("Escribe una descripción", "error"); return false; }
@@ -1999,10 +2082,10 @@ export default function App() {
       }
       return true;
     } catch (e) {
-      showToast(e.message, "error");
+      surfaceWriteError(e);
       return false;
     }
-  }, [registrosHook, user, sesion, activeBitacora, showToast]);
+  }, [registrosHook, user, sesion, activeBitacora, showToast, surfaceWriteError]);
 
   // R4: cambiar el día de trabajo con un borrador sin guardar abre un popup (Guardar borrador /
   // Descartar / Cancelar) para que el borrador no bloquee navegar a otro día y crear registros allí.
@@ -2042,11 +2125,11 @@ export default function App() {
           setModal(null);
           showToast("Registro eliminado");
         } catch (e) {
-          showToast(e.message, "error");
+          surfaceWriteError(e);
         }
       },
     });
-  }, [registrosHook, sesion, activeBitacora, showToast]);
+  }, [registrosHook, sesion, activeBitacora, showToast, surfaceWriteError]);
 
   // D-045 E8: cierre de turno por cabecera (reemplaza el cierre masivo D-042). Sella la cabecera del
   // turno de la unidad, congela la conformación desde turno_participante y archiva los registros del
@@ -2352,18 +2435,19 @@ export default function App() {
               showToast={showToast}
             />
           ) : (
-            /* D-040/D-045: la grilla genérica se bloquea cuando (a) el turno está finalizado por este
-               usuario (D-040, individual) o (b) la unidad no tiene turno abierto (D-045, para todos).
-               `bloqueado` pone TODA la grilla en solo-lectura (sin editar, borrar ni entrar en modo
-               edición); MAND/DISP/COMB reciben el puedeCrear crudo. */
+            /* D-040/D-045/D-046: la grilla genérica se bloquea cuando (a) el turno está finalizado por
+               este usuario (D-040, individual), (b) la unidad no tiene turno abierto (D-045, para todos)
+               o (c) el turno está en la gavela de transición/gracia (D-046, para todos). `bloqueado` pone
+               TODA la grilla en solo-lectura (sin editar, borrar ni entrar en modo edición); MAND/DISP/
+               COMB reciben el puedeCrear crudo. */
             <GrillaRegistros
               registros={registrosDeBitacora}
               bitacora={bitacoraActiva}
               tiposEvento={tiposEvento}
               jefeNombre={catalogos.jefe?.nombre_completo}
               jdtNombre={null}
-              puedeCrear={puedeCrear && !turnoFinalizado && !turnoUnidadCerrado}
-              bloqueado={turnoFinalizado || turnoUnidadCerrado}
+              puedeCrear={puedeCrear && !turnoFinalizado && !turnoUnidadCerrado && !turnoEnTransicion}
+              bloqueado={turnoFinalizado || turnoUnidadCerrado || turnoEnTransicion}
               onUpdateLocal={handleUpdateLocal}
               onSaveRegistro={handleSaveRegistro}
               onDeleteRegistro={handleDeleteRegistro}
@@ -2372,6 +2456,7 @@ export default function App() {
               filtroFecha={filtroFecha}
               filtroTurno={filtroTurno}
               onLimpiarFiltros={limpiarFiltros}
+              showToast={showToast}
             />
           )}
         </>

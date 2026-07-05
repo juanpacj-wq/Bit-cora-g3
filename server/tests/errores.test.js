@@ -58,6 +58,18 @@ test('error desconocido → 500 error_interno, nunca el mensaje crudo', () => {
   assert.doesNotMatch(mensajeUsuario(new Error('algún detalle interno sensible')), /sensible/);
 });
 
+test('D-047: fallo del servicio IA (codigo custom del cliente Gemini) → 503 saneado', () => {
+  for (const codigoIA of ['ia_no_disponible', 'ia_no_configurada']) {
+    const err = Object.assign(new Error('[ia] HTTP 500'), { codigo: codigoIA });
+    const { status, codigo } = clasificarError(err);
+    assert.equal(status, 503, codigoIA);
+    assert.equal(codigo, codigoIA);
+    const msg = mensajeUsuario(err);
+    assert.equal(msg, ETIQUETAS[codigoIA]);
+    assert.doesNotMatch(msg, /gemini|googleapis|x-goog|HTTP 500/i, 'no debe filtrar el proveedor ni detalles técnicos');
+  }
+});
+
 test('toda etiqueta es texto amigable en español, no un slug', () => {
   for (const [codigo, texto] of Object.entries(ETIQUETAS)) {
     assert.ok(texto.length > 15 && /\s/.test(texto), `etiqueta ${codigo} parece un slug: "${texto}"`);

@@ -137,6 +137,19 @@ export function respTurnoCerrado(res) {
   });
 }
 
+// ── Write-gate D-046 (turno EN TRANSICIÓN — gavela de gracia, a nivel de unidad, para TODOS) ──────
+// Hermano de respTurnoCerrado: cuando el turno cruzó `fin_nominal` pero aún NO se cerró (sigue ABIERTO,
+// esperando que el Jefe de Turno cierre o extienda), la escritura en bitácoras genéricas se bloquea igual.
+// Antes la gracia solo la tapaba el modal del front (evadible); esto la hace real en backend. Se levanta
+// solo al extender (fin_nominal → próximo umbral) o pasa a `turno_cerrado` al cerrar. MAND/DISP/COMB fuera.
+export function respTurnoEnTransicion(res) {
+  return sendJSON(res, 409, {
+    error: 'turno_en_transicion',
+    codigo: 'turno_en_transicion',
+    mensaje: 'El turno de esta unidad está en transición de cierre. Espera a que el Jefe de Turno lo cierre o lo extienda para continuar.',
+  });
+}
+
 // ── asyncH — envuelve un handler async y enruta el throw a expressErrorHandler (D-032) ──────────
 // Reemplaza el try/catch global del if-chain: cualquier error del handler cae en next(err) → el
 // error-handler de Express lo sanea (sin filtrar internals).

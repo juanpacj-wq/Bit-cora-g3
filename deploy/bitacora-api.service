@@ -10,6 +10,11 @@ WorkingDirectory=/var/www/bitacora/server
 # de EnvironmentFile de systemd, que tiene un parseo distinto (comillas/comentarios inline).
 # El .env vive en la raíz del repo desplegado y contiene DB_*, M365_*, SESSION_*, NODE_ENV y
 # APP_BASE_PATH=/bitacora (ver .env.example).
+# D-047: el FortiGate corporativo intercepta el TLS saliente (fetch a Gemini). Node NO usa el
+# almacén del sistema: se le pasa la CA corporativa acá (entorno real del proceso — vía --env-file
+# no está garantizado). Instalarla antes con los comandos de DEPLOY.md § CA corporativa.
+# NUNCA "resolverlo" con NODE_TLS_REJECT_UNAUTHORIZED=0 (desactiva TODA la verificación TLS).
+Environment=NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/corp-fortigate-ca.crt
 ExecStart=/usr/bin/node --env-file=/var/www/bitacora/.env server.js
 Restart=always
 RestartSec=5

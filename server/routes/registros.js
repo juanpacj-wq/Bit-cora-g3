@@ -9,7 +9,7 @@ import { sendJSON } from '../utils/http.js';
 import { hasPermisoBitacora, plantaMatch, canEditarRegistro } from '../middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from '../utils/campos.js';
 import { periodoFromFechaBogota, turnoFromPeriodo, fechaBogotaStr } from '../utils/turno.js';
-import { resolverTurnoAbierto, resolverOAbrirTurnoAbierto } from '../utils/turno-entidad.js';
+import { resolverTurnoParaEscritura } from '../utils/turno-entidad.js';
 import {
   findEventoDashboard, upsertEventoDashboard, hasNotificarDashboard,
   findVigente, findUltimoCerrado, insertNuevoEstado, cerrarVigente, actualizarVigente,
@@ -19,7 +19,7 @@ import {
 } from '../utils/snapshots.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { notifyDashboard } from '../utils/notify-dashboard.js';
-import { asyncH, loadAppSession, bloquearSiTurnoFinalizado, respTurnoCerrado } from './_middleware.js';
+import { asyncH, loadAppSession, bloquearSiTurnoFinalizado, respTurnoCerrado, respTurnoEnTransicion } from './_middleware.js';
 import { getDispBitacoraId } from './_shared.js';
 
 // ── Helpers DISP (movidos de server.js — solo los usan las ramas DISP de POST/PUT) ──────────────
@@ -319,16 +319,18 @@ router.post('/', asyncH(async (req, res) => {
   const notificar = dashboardTipo != null;
   const fechaEventoDate = new Date(fecha_evento);
 
-  // D-045 (write-gate por unidad): el registro se estampa con el turno ABIERTO de la unidad. Si la
-  // unidad NO tiene turno abierto (cierre manual anticipado o auto-cierre sin sucesor) se BLOQUEA la
-  // creación con 409 turno_cerrado. Antes se insertaba con turno_id=NULL ("crear registros en un turno
-  // ya cerrado"). resolverOAbrirTurnoAbierto cubre el borde de ventana (abre el turno vigente si el
-  // sweeper aún no lo hizo). EXENTO: MAND (ciclo por día, endpoint propio); DISP/COMB no pasan por acá.
+  // D-045/D-046 (write-gate por unidad): el registro se estampa con el turno ABIERTO de la unidad. Si la
+  // unidad NO tiene turno abierto (cierre manual anticipado o auto-cierre sin sucesor) → 409 turno_cerrado;
+  // si el turno cruzó su umbral y está en la gavela de gracia (TRANSICION) → 409 turno_en_transicion (D-046,
+  // el bloqueo de la gracia deja de ser solo el modal del front). Antes se insertaba con turno_id=NULL
+  // ("crear registros en un turno ya cerrado"). `abrir:true` cubre el borde de ventana (abre el turno
+  // vigente si el sweeper aún no lo hizo). EXENTO: MAND (ciclo por día, endpoint propio); DISP/COMB no pasan por acá.
   let turnoIdRegistro = null;
   if (!isMAND) {
-    const turnoAbierto = await resolverOAbrirTurnoAbierto(db, planta_id);
-    if (!turnoAbierto) return respTurnoCerrado(res);
-    turnoIdRegistro = turnoAbierto.turno_unidad_id;
+    const r = await resolverTurnoParaEscritura(db, planta_id, { abrir: true });
+    if (r.estado === 'CERRADO') return respTurnoCerrado(res);
+    if (r.estado === 'TRANSICION') return respTurnoEnTransicion(res);
+    turnoIdRegistro = r.turno.turno_unidad_id;
   }
 
   const transaction = new sql.Transaction(db);
@@ -576,10 +578,13 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
   if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
   const reg = check.recordset[0];
 
-  // D-045 write-gate por unidad: si el turno de la unidad está cerrado (sin ABIERTO) nadie edita en
-  // genéricas hasta reabrir. MAND fuera (ciclo por día, sin cabecera de turno).
-  if (reg.bitacora_codigo !== 'MAND' && !(await resolverTurnoAbierto(db, reg.planta_id))) {
-    return respTurnoCerrado(res);
+  // D-045/D-046 write-gate por unidad: turno cerrado (sin ABIERTO) → 409 turno_cerrado; turno en la gavela
+  // de gracia (TRANSICION) → 409 turno_en_transicion. Nadie edita en genéricas hasta reabrir/extender.
+  // MAND fuera (ciclo por día, sin cabecera de turno).
+  if (reg.bitacora_codigo !== 'MAND') {
+    const r = await resolverTurnoParaEscritura(db, reg.planta_id, { abrir: false });
+    if (r.estado === 'CERRADO') return respTurnoCerrado(res);
+    if (r.estado === 'TRANSICION') return respTurnoEnTransicion(res);
   }
 
   if (reg.estado !== 'borrador') {
@@ -737,9 +742,12 @@ router.delete('/:id(\\d+)', asyncH(async (req, res) => {
   if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
   const reg = check.recordset[0];
 
-  // D-045 write-gate por unidad: turno cerrado → nadie borra en genéricas hasta reabrir. MAND fuera.
-  if (reg.bitacora_codigo !== 'MAND' && !(await resolverTurnoAbierto(db, reg.planta_id))) {
-    return respTurnoCerrado(res);
+  // D-045/D-046 write-gate por unidad: turno cerrado → 409 turno_cerrado; en gavela de gracia (TRANSICION)
+  // → 409 turno_en_transicion. Nadie borra en genéricas hasta reabrir/extender. MAND fuera.
+  if (reg.bitacora_codigo !== 'MAND') {
+    const r = await resolverTurnoParaEscritura(db, reg.planta_id, { abrir: false });
+    if (r.estado === 'CERRADO') return respTurnoCerrado(res);
+    if (r.estado === 'TRANSICION') return respTurnoEnTransicion(res);
   }
 
   if (reg.estado !== 'borrador') {

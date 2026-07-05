@@ -35,6 +35,7 @@ import sesionRouter from '../routes/sesion.js';
 import bitacoraRouter from '../routes/bitacora.js';
 import registrosRouter from '../routes/registros.js';
 import turnoRouter from '../routes/turno.js';
+import iaRouter from '../routes/ia.js';
 import { estadoTurnoActual } from '../utils/turno-entidad.js'; // D-045 E7: estado del turno en /api/me
 import { puedeCerrarTurno } from '../middleware/permissions.js';
 import { detectRoles } from './roles.js';
@@ -310,6 +311,7 @@ export async function buildAuthApp() {
   app.use('/api/auth', sesionRouter);                      // E10 (select-context, cerrar-app, usuarios-activos)
   app.use('/api/bitacora', bitacoraRouter);                // E10 (abrir, finalizar, counts, ...)
   app.use('/api/registros', registrosRouter);              // E10 (activos, POST/PUT/DELETE + rama DISP)
+  app.use('/api/ia', iaRouter);                            // D-047 (mejorar-texto vía Gemini)
 
   // ── 404: ninguna ruta ni router matcheó ──────────────────────────────────────────────────────
   app.use((req, res) => res.status(404).json({ error: 'Not Found' }));

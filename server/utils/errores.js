@@ -26,6 +26,8 @@ export const ETIQUETAS = {
   cuerpo_invalido: 'La información enviada no tiene un formato válido. Recarga la página e intenta de nuevo.',
   cuerpo_demasiado_grande: 'La información enviada es demasiado grande. Reduce el tamaño e intenta de nuevo.',
   config_sistema: 'Hay un problema de configuración del sistema. Contacta a soporte.',
+  ia_no_configurada: 'La mejora de texto con IA no está configurada en este servidor. Puedes seguir escribiendo la descripción manualmente.',
+  ia_no_disponible: 'El servicio de mejora de texto con IA no está disponible en este momento. Intenta más tarde o escribe la descripción manualmente.',
   error_interno: 'Ocurrió un error inesperado. Intenta de nuevo; si el problema continúa, contacta a soporte.',
 };
 
@@ -72,6 +74,14 @@ export function clasificarError(err) {
   //    un JSON.parse manual en otro lado lanzaría SyntaxError. Ambos → 400.
   if (name === 'SyntaxError' || err instanceof SyntaxError || err?.type === 'entity.parse.failed') {
     return { status: 400, codigo: 'cuerpo_invalido' };
+  }
+
+  // 5.5) D-047: fallos del servicio IA externo (Gemini). El cliente IA (utils/ia/gemini-client.js)
+  //      normaliza TODO fallo (timeout, HTTP≠200, respuesta malformada/anómala) a estos codigos
+  //      custom — no ramificamos por TimeoutError/AbortError genéricos para no capturar aborts
+  //      de otros fetches del proceso. 503 coherente con db_no_disponible.
+  if (err?.codigo === 'ia_no_disponible' || err?.codigo === 'ia_no_configurada') {
+    return { status: 503, codigo: err.codigo };
   }
 
   // 6) Desconocido: nunca exponemos el mensaje crudo.

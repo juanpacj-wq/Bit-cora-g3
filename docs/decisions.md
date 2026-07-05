@@ -673,6 +673,79 @@ Históricos (sin routing hash [[D-035]]). (g) Baseline de tests full-green; +34 
 
 ---
 
+## D-046 — Bloqueo real de la ventana de transición + herramienta de prueba del umbral
+
+**Fecha:** 2026-07-05
+
+**Contexto:** en [[D-045]] la gavela de gracia (turno que cruzó `fin_nominal` pero aún `ABIERTO`, esperando
+cerrar/extender) se resolvió con un **bloqueo solo en el front** (`TurnoTransicionModal`). Una revisión de
+auditoría halló que ese bloqueo es **puramente visual**: durante la gracia el turno sigue `ABIERTO`, y los
+tres write-gates de `registros.js` [[D-045]] solo consultan si existe turno `ABIERTO` — no miran
+`estadoBloqueo`. Por lo tanto el backend **aceptaba** POST/PUT/DELETE en bitácoras genéricas durante la
+gracia; el modal era evadible (devtools, o cualquier cliente fuera de la SPA). Además había un hueco de
+≤60s (latencia del sweeper) donde el umbral ya se cruzó pero el modal aún no aparecía. "Todos bloqueados en
+la gavela" era cierto solo visualmente.
+
+**Decisión:** hacer el bloqueo de la transición **real en backend + front**. (1) Nuevo helper
+`resolverTurnoParaEscritura` (`utils/turno-entidad.js`) que distingue tres estados de escritura —
+`ABIERTO`/`TRANSICION`/`CERRADO`— evaluando `estadoBloqueo` **por request** (bloqueo instantáneo al cruzar
+`fin_nominal`, sin depender del tick del sweeper → cierra el hueco de ≤60s). (2) Los tres write-gates
+responden `409 turno_en_transicion` (nuevo, hermano de `turno_cerrado`; `respTurnoEnTransicion` en
+`routes/_middleware.js`) cuando el estado es `TRANSICION`. Se levanta solo al **extender** (`fin_nominal →
+próximo umbral` → `estadoBloqueo=false`) o pasa a `turno_cerrado` al **cerrar**. MAND/DISP/COMB siguen
+exentos (igual que el gate `turno_cerrado`). (3) Front: `turnoEnTransicion = turnoHook.bloqueo` entra al
+gate de la grilla (`bloqueado`), que pasa a solo-lectura **real** (no solo el overlay); el manejo de error
+de guardar/borrar (`surfaceWriteError`) muestra el `mensaje` y refetchea el estado del turno para que el
+modal aparezca al instante para quien intentó escribir. (4) Herramienta de prueba manual: snippet
+`sql/snippets/simular-umbral-turno-D046.sql` adelanta `fin_nominal` del turno ABIERTO (modo `BLOQUEO` =
+ahora; `AUTOCIERRE` = ahora−61 min) para disparar el flujo real a cualquier hora; reversible con
+Extender/Reabrir. Guardrail estático `guard_simular_umbral_no_auto_ejecutable.test.js` impide que se
+auto-ejecute. Runbook multi-usuario en `docs/pruebas/prueba-umbral-cierre.md`.
+
+**Consecuencias:** (a) durante la gracia nadie escribe en genéricas: el backend rechaza y la grilla es
+read-only para todos — auditable en toda capa. (b) El bloqueo es **instantáneo** al umbral, ya no atado a la
+latencia del sweeper (el sweeper sigue siendo la fuente del broadcast WS y del auto-cierre). (c) Dos códigos
+distinguibles: `turno_en_transicion` (gracia, se levanta al extender) vs `turno_cerrado` (cerrado, requiere
+reabrir). (d) Sin estados nuevos en BD: `estadoBloqueo` sigue siendo computado; `TRANSICION` es una lectura,
+no una columna. (e) +2 tests (integración del gate en TEST_PLANTA + guardrail del snippet). Cross-ref:
+[[D-045]] (entidad de turno), [[D-040]] (finalización individual), [[D-032]] (códigos de error estables).
+
+---
+
+## D-047 — "Mejorar con IA": corrección ortográfica de `detalle` vía Google Gemini (server-side)
+
+**Fecha:** 2026-07-05
+
+**Contexto:** las descripciones (`detalle`) de las bitácoras genéricas se escriben a mano en turno y llegan
+con ortografía/puntuación dispareja al histórico inmutable y a los reportes. Se quería asistencia de IA
+100% gratis, sin dependencias npm nuevas y sin exponer credenciales al navegador. Anthropic/Claude quedó
+descartado por no tener tier gratuito; se eligió Gemini (`gemini-2.5-flash-lite`, free tier de AI Studio).
+
+**Decisión:** endpoint único `POST /api/ia/mejorar-texto` (router `routes/ia.js`, tras `requireEntra` +
+`loadAppSession`, cualquier cargo) que llama a Gemini desde `server/utils/ia/` con fetch nativo. La key
+(`GEMINI_API_KEY`) vive solo en el `.env` del server (header `x-goog-api-key`, jamás en URL); el front
+manda `{texto, bitacora_codigo}` y recibe `{texto_corregido}` que reemplaza el textarea (guardar sigue
+siendo manual, con "Deshacer" local en `RegistroRow`). El prompt de rol por bitácora se resuelve
+**server-side** (`prompts.js` — el cliente no puede inyectar el rol); solo corrige ortografía/tildes/
+puntuación, nunca terminología/cifras/tags, y ordena no obedecer instrucciones embebidas en el texto.
+Blindaje: rate limit 10/min-IP + 14/min y 400/día globales (`aplicarRateLimitGlobal`, cuota free tier
+compartida), tope 2000 chars (`MAX_TEXTO_CHARS`), timeout 12 s, `redirect:'error'`, rechazo de salida
+truncada (`finishReason≠STOP`) o >3× la entrada, `temperature 0.1` + thinking off, log de uso sin
+contenido (solo longitudes). Errores [[D-032]]: `ia_no_configurada`/`ia_no_disponible` (503). En prod el
+FortiGate intercepta TLS saliente → CA corporativa vía `NODE_EXTRA_CA_CERTS` en el unit systemd
+(DEPLOY.md §7); NUNCA desactivar la verificación TLS.
+
+**Consecuencias:** (a) feature opcional y degradable: sin key el endpoint responde 503 estable y el
+operador escribe a mano. (b) La cuota es compartida por instancia (limiter en memoria — se resetea al
+reiniciar, aceptable). (c) El texto del operador viaja a un servicio externo de Google: solo el campo
+`detalle`, nunca identidad/planta/sesión. (d) +tests: unit del cliente con `fetchFn` inyectado +
+integración de auth/validaciones/429 (el camino feliz determinista es unit-only para no depender de la
+red ni gastar cuota); `errores.test.js` entró a la lista curada del script `test` (estaba omitido).
+Cross-ref: [[D-032]] (saneamiento), [[D-037]] (routing), [[D-040]]/[[D-046]] (el botón vive dentro del
+gate `isEditing`, que ya respeta `bloqueado`).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

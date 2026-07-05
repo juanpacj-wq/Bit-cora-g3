@@ -25,6 +25,9 @@ SESSION_COOKIE_SECURE=true
 SESSION_STORE=mssql                      # tabla [auth].[AppSessions]; NO 'memory' en prod
 M365_REDIRECT_URI=https://pgen.gecelca.com.co/bitacora/auth/redirect
 M365_POST_LOGOUT_REDIRECT_URI=https://pgen.gecelca.com.co/bitacora/
+GEMINI_API_KEY=<key de Google AI Studio>  # opcional: habilita "Mejorar con IA" (D-047). Sin ella la
+                                          # feature degrada limpio (503 ia_no_configurada). Requiere
+                                          # además la CA corporativa (paso 7).
 ```
 
 ## 2. Build del frontend con el sub-path
@@ -113,6 +116,36 @@ repetir pasos 2-5 con los archivos nuevos (mismo nombre y ruta → no se toca ng
 
 Confirmar que las locations de Bitácora envían `X-Forwarded-Proto https` (ya en el snippet) —
 sin esto express-session descarta la cookie `Secure`.
+
+## 7. CA corporativa para el fetch saliente a Gemini (D-047, "Mejorar con IA")
+
+El FortiGate corporativo **intercepta el TLS saliente** (re-firma los certificados con su propia
+CA). Node NO usa el almacén del sistema, así que sin esto el fetch a Gemini falla con
+`SELF_SIGNED_CERT_IN_CHAIN`. La solución auditable es confiar en la CA corporativa vía
+`NODE_EXTRA_CA_CERTS` (línea `Environment=` ya incluida en `bitacora-api.service`). **NUNCA**
+desactivar la verificación TLS (`NODE_TLS_REJECT_UNAUTHORIZED=0`).
+
+```bash
+# 1. Extraer la CA del FortiGate desde la cadena que sirve (el 2º+ cert de la cadena):
+echo | openssl s_client -connect generativelanguage.googleapis.com:443 \
+  -servername generativelanguage.googleapis.com -showcerts 2>/dev/null \
+  | awk '/BEGIN CERTIFICATE/{i++} i>=2 && /BEGIN CERTIFICATE/,/END CERTIFICATE/' \
+  | sudo tee /usr/local/share/ca-certificates/corp-fortigate-ca.crt >/dev/null
+
+# 2. Verificar que es la CA corporativa (issuer/subject deben decir Fortinet, no Google):
+openssl x509 -in /usr/local/share/ca-certificates/corp-fortigate-ca.crt -noout -subject -issuer
+
+# 3. Registrarla en el sistema (para curl/apt) y reiniciar el backend (Node la toma del unit):
+sudo update-ca-certificates
+sudo systemctl restart bitacora-api
+
+# 4. Probar desde el propio Node del servidor (debe imprimir 403 = alcanzó Google sin key):
+NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/corp-fortigate-ca.crt \
+  node -e "fetch('https://generativelanguage.googleapis.com/v1beta/models').then(r=>console.log(r.status))"
+```
+
+**Ojo:** si el FortiGate rota su CA (cambio de equipo/firmware), el fetch vuelve a fallar con el
+mismo error — repetir pasos 1-4.
 
 ---
 
