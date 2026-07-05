@@ -1,6 +1,4 @@
 import sql from 'mssql';
-import { ventanaTurno } from './utils/turno.js';
-import { buildConformacionSnapshot, persistConformacionSnapshot } from './utils/conformacion-snapshot.js';
 import { JEFE_PLANTA_UPNS, JDT_DEFAULT_UPNS } from './auth/entra-config.js';
 
 const rawHost = process.env.DB_HOST || '';
@@ -2297,56 +2295,13 @@ export async function initDB() {
     console.error('[initDB D-044 repair] fallo (no bloqueante):', err.message);
   }
 
-  // Q3=d conformacion-turno-2026-05: catchup al arranque. Detecta (planta, turno, fecha_operativa)
-  // de los últimos 7 días Bogotá que NO tengan snapshot en conformacion_turno, y para cada uno
-  // verifica en JS si la ventana ya cerró (ahora >= ventanaTurno.fin). Resiliencia ante crashes
-  // del server justo al cambio de turno. Errores aislados — uno no rompe la inicialización.
-  try {
-    const candidatos = await db.request().query(`
-      WITH TurnosCandidatos AS (
-        SELECT DISTINCT
-          sa.planta_id,
-          sa.turno,
-          CAST(DATEADD(HOUR, -5, sa.inicio_sesion) AS DATE) AS fecha_operativa
-        FROM bitacora.sesion_activa sa
-        WHERE sa.inicio_sesion >= DATEADD(DAY, -7, SYSUTCDATETIME())
-      )
-      SELECT t.planta_id, t.turno, t.fecha_operativa
-      FROM TurnosCandidatos t
-      WHERE NOT EXISTS (
-        SELECT 1 FROM bitacora.conformacion_turno c
-        WHERE c.planta_id = t.planta_id
-          AND c.turno = t.turno
-          AND c.fecha_operativa = t.fecha_operativa
-      )
-    `);
-
-    const ahora = new Date();
-    let totalInsertadas = 0;
-    for (const row of candidatos.recordset) {
-      const fechaStr = row.fecha_operativa.toISOString().slice(0, 10);
-      const fechaRef = new Date(`${fechaStr}T12:00:00.000-05:00`);
-      const { fin } = ventanaTurno(row.turno, fechaRef);
-      if (ahora < fin) continue; // turno aún en curso, lo procesará el sweeper
-
-      try {
-        const filas = await buildConformacionSnapshot(db, {
-          fecha_operativa: fechaStr,
-          planta_id: row.planta_id,
-          turno: row.turno,
-        });
-        const { insertadas } = await persistConformacionSnapshot(db, filas);
-        totalInsertadas += insertadas;
-      } catch (err) {
-        console.error(`[initDB catchup conformacion] ${row.planta_id} T${row.turno} ${fechaStr}:`, err.message);
-      }
-    }
-    if (totalInsertadas > 0) {
-      console.log(`[initDB catchup conformacion] ${totalInsertadas} filas insertadas para turnos pasados`);
-    }
-  } catch (err) {
-    console.error('[initDB catchup conformacion] fallo general (no bloqueante):', err.message);
-  }
+  // D-045 E6: RETIRADO el catchup de conformación al arranque (cierra el hallazgo H1 de la auditoría
+  // 2026-07-04). Derivaba `fecha_operativa` de `sa.inicio_sesion` (la hora del LOGIN), así que un turno
+  // T2 iniciado antes de medianoche y con logins post-medianoche quedaba mal/sin conformar. La
+  // conformación ahora es un producto ATÓMICO del cierre de turno (`cerrarTurno` congela desde
+  // `turno_participante`, con `fecha_operativa`/`turno` de la cabecera). Ya no hay reconstrucción
+  // automática al arranque; el trigger manual `POST /api/conformacion-turno/trigger` sigue disponible
+  // como recálculo explícito (recibe `fecha_operativa` del request → no reintroduce H1).
 
   console.log('[DB] Conexión OK');
 }

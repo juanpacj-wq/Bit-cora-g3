@@ -34,6 +34,7 @@ import mandRouter from '../routes/mand.js';
 import sesionRouter from '../routes/sesion.js';
 import bitacoraRouter from '../routes/bitacora.js';
 import registrosRouter from '../routes/registros.js';
+import turnoRouter from '../routes/turno.js';
 import { detectRoles } from './roles.js';
 import {
   isConfigured as m365Configured, m365Config,
@@ -289,7 +290,8 @@ export async function buildAuthApp() {
   // Todo el backend de datos vive en routes/<dominio>.js. No queda if-chain: lo que ningún router
   // matchee cae al 404 de abajo.
   app.use('/api/catalogos', catalogosRouter);              // E2
-  app.use('/api/cierre', cierreRouter);                    // E6
+  app.use('/api/cierre', cierreRouter);                    // E6 (cierre masivo legacy; migra a /api/turno en E8)
+  app.use('/api/turno', turnoRouter);                      // D-045 E6 (cierre unificado por cabecera de turno)
   app.use('/api/historicos', historicosRouter);            // E5
   app.use('/api/autorizaciones', autorizacionesRouter);    // E4 (deprecated)
   app.use('/api/eventos-dashboard', eventosDashboardRouter); // E4

@@ -1,6 +1,7 @@
 import sql from 'mssql';
 import { ventanaTurno, ventanaActual } from './turno.js';
 import { USUARIO_SISTEMA_ID } from '../db.js';
+import { registrarEventoCierre } from './ciet.js';
 
 // D-045 — Dominio de la CABECERA de turno (bitacora.turno_unidad) + detalle vivo
 // (turno_participante). Lógica de estado puro + operaciones de BD idempotentes/atómicas.
@@ -192,16 +193,23 @@ export async function activarSucesor(pool, planta_id, ahora = new Date()) {
   }
 }
 
-// Cierre atómico de la cabecera: estado=CERRADO + fin_real + motivo + cerrado_por/en, y activación
-// del sucesor PROGRAMADO en la MISMA transacción (el cierre libera el ABIERTO → sin gap). Devuelve
-// { cerrado, sucesor }. Idempotente: si ya estaba CERRADO devuelve { cerrado:null, sucesor:null }.
+// D-045 E6 — CIERRE UNIFICADO ATÓMICO. En UNA transacción: sella la cabecera (CERRADO + fin_real +
+// motivo + cerrado_por/en), congela `conformacion_turno` desde `turno_participante` (incluye a quien
+// entró aunque no estuviera al cierre), archiva los registros del turno (por `turno_id`) a
+// `registro_historico`, emite el CIET 'Cierre de turno' con el motivo, y activa el sucesor PROGRAMADO
+// (→ ABIERTO, sin gap). Idempotente: si ya estaba CERRADO devuelve `{ cerrado:null, ... }`.
 //
-// TODO(E6): dentro de esta misma transacción, ANTES de activar el sucesor, enchufar —
-//   1) congelar bitacora.conformacion_turno desde turno_participante (turno_id = @id),
-//   2) archivar registro_activo con turno_id = @id a registro_historico,
-//   3) CIET 'Cierre de turno' con el motivo.
-// El punto de extensión es el marcado más abajo; NO archivar todavía en E2.
-export async function cerrarTurno(pool, turno_id, { motivo, cerrado_por, ahora = new Date() } = {}) {
+// Reemplaza el modelo viejo (cierre por ventana en cierre.js + conformación por sweeper/catchup) y
+// CIERRA los hallazgos H1/H2 de la auditoría 2026-07-04: la fecha de conformación ya no se deriva del
+// login (post-medianoche T2), sale de la cabecera (`fecha_operativa`, `turno`). MAND/DISP no tienen
+// `turno_id` → el filtro por turno_id ya los excluye del archivado (más el guard `codigo NOT IN`).
+//
+// `incluirSinteticos` (D-044): escape hatch EXCLUSIVO de unit tests; producción NUNCA lo pasa → los
+// usuarios `es_sintetico=1` (fixtures test_*) quedan fuera de la conformación real. `cargo_nombre` es
+// el del actor (para el CIET); en auto-cierre (E7) lo pasa SISTEMA.
+export async function cerrarTurno(pool, turno_id, {
+  motivo, cerrado_por, cargo_nombre = null, ahora = new Date(), incluirSinteticos = false,
+} = {}) {
   if (!MOTIVOS_CIERRE.includes(motivo)) {
     throw new Error(`cerrarTurno: motivo inválido '${motivo}' (esperado ${MOTIVOS_CIERRE.join('|')})`);
   }
@@ -210,6 +218,7 @@ export async function cerrarTurno(pool, turno_id, { motivo, cerrado_por, ahora =
   const tx = new sql.Transaction(pool);
   await tx.begin();
   try {
+    // 1) Sellar la cabecera (idempotente: 0 filas → ya cerrado).
     const upd = await new sql.Request(tx)
       .input('id', sql.Int, turno_id)
       .input('motivo', sql.VarChar(20), motivo)
@@ -219,21 +228,113 @@ export async function cerrarTurno(pool, turno_id, { motivo, cerrado_por, ahora =
         UPDATE bitacora.turno_unidad
         SET estado = 'CERRADO', fin_real = @ahora, motivo_cierre = @motivo,
             cerrado_por = @cerrado_por, cerrado_en = @ahora
-        OUTPUT INSERTED.turno_unidad_id, INSERTED.planta_id
+        OUTPUT INSERTED.turno_unidad_id, INSERTED.planta_id, INSERTED.fecha_operativa, INSERTED.turno
         WHERE turno_unidad_id = @id AND estado <> 'CERRADO'
       `);
     if (!upd.recordset[0]) {
       await tx.commit();
-      return { cerrado: null, sucesor: null };
+      return { cerrado: null, sucesor: null, archivados: [], conformados: 0 };
     }
-    const planta_id = upd.recordset[0].planta_id;
+    const { planta_id, fecha_operativa, turno } = upd.recordset[0];
 
-    // ---- PUNTO DE EXTENSIÓN E6 (congelar conformación + archivar + CIET) va AQUÍ ----
+    // 2) Cerrar el lapso de presencia de los participantes AÚN activos en este turno (para que
+    //    duracion_min/fin_sesion queden completos al congelar). Espejo de acumularPresenciaSesiones,
+    //    acotado al turno.
+    await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .input('ahora', sql.DateTime2, ahora)
+      .query(`
+        UPDATE tp
+          SET presencia_acumulada_min = tp.presencia_acumulada_min + DATEDIFF(MINUTE, sa.inicio_sesion, @ahora),
+              ultimo_egreso = @ahora
+        FROM bitacora.turno_participante tp
+        INNER JOIN bitacora.sesion_activa sa ON sa.turno_id = tp.turno_id AND sa.usuario_id = tp.usuario_id
+        WHERE tp.turno_id = @id AND sa.activa = 1 AND sa.turno_id = @id;
+      `);
 
+    // 3) Congelar conformación desde turno_participante (inmutable, idempotente por la PK natural).
+    //    Mapea primer_ingreso→inicio_sesion, COALESCE(ultimo_egreso, ahora)→fin_sesion,
+    //    presencia_acumulada_min→duracion_min. Excluye sintéticos salvo en unit tests (D-044).
+    const conf = await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .input('fecha_op', sql.Date, fecha_operativa)
+      .input('planta', sql.VarChar(10), planta_id)
+      .input('turno', sql.TinyInt, turno)
+      .input('ahora', sql.DateTime2, ahora)
+      .input('incluir_sinteticos', sql.Bit, incluirSinteticos ? 1 : 0)
+      .query(`
+        INSERT INTO bitacora.conformacion_turno
+          (fecha_operativa, planta_id, turno, usuario_id, usuario_nombre, cargo_id, cargo_nombre,
+           inicio_sesion, fin_sesion, duracion_min, fin_inferido, turno_id)
+        SELECT @fecha_op, @planta, @turno, tp.usuario_id, tp.usuario_nombre, tp.cargo_id, tp.cargo_nombre,
+               tp.primer_ingreso, COALESCE(tp.ultimo_egreso, @ahora), tp.presencia_acumulada_min, 0, @id
+        FROM bitacora.turno_participante tp
+        INNER JOIN lov_bit.usuario u ON u.usuario_id = tp.usuario_id
+        WHERE tp.turno_id = @id
+          AND (@incluir_sinteticos = 1 OR u.es_sintetico = 0)
+          AND NOT EXISTS (
+            SELECT 1 FROM bitacora.conformacion_turno ct
+            WHERE ct.fecha_operativa = @fecha_op AND ct.planta_id = @planta
+              AND ct.turno = @turno AND ct.usuario_id = tp.usuario_id
+          );
+      `);
+    const conformados = conf.rowsAffected[0] || 0;
+
+    // 4) Archivar los registros del turno (por turno_id) a registro_historico, preservando
+    //    registro_id + turno_id. Guard extra codigo NOT IN ('DISP','MAND') aunque el turno_id ya los
+    //    excluye (nunca se les estampa). Se capturan los conteos por bitácora para el resumen.
+    const archivadosRes = await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .query(`
+        SELECT ra.bitacora_id, b.nombre, COUNT(*) AS n
+        FROM bitacora.registro_activo ra
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+        WHERE ra.turno_id = @id AND ra.estado = 'borrador'
+          AND b.oculta = 0 AND b.codigo NOT IN ('DISP','MAND')
+        GROUP BY ra.bitacora_id, b.nombre;
+      `);
+    const archivados = archivadosRes.recordset.map((r) => ({
+      bitacora_id: r.bitacora_id, nombre: r.nombre, registros_cerrados: r.n,
+    }));
+
+    await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .input('cerrado_por', sql.Int, cerrado_por)
+      .input('ahora', sql.DateTime2, ahora)
+      .query(`
+        INSERT INTO bitacora.registro_historico
+          (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+           estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
+           modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo, turno_id)
+        SELECT ra.registro_id, ra.bitacora_id, ra.planta_id, ra.fecha_evento, ra.turno, ra.detalle,
+               ra.campos_extra, ra.tipo_evento_id, 'cerrado', ra.ingenieros_snapshot, ra.jdts_snapshot,
+               ra.jefes_snapshot, ra.creado_por, ra.creado_en, ra.modificado_por, ra.modificado_en,
+               @cerrado_por, @ahora, CAST(DATEADD(HOUR, -5, @ahora) AS DATE), ra.turno_id
+        FROM bitacora.registro_activo ra
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+        WHERE ra.turno_id = @id AND ra.estado = 'borrador'
+          AND b.oculta = 0 AND b.codigo NOT IN ('DISP','MAND');
+
+        DELETE ra
+        FROM bitacora.registro_activo ra
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+        WHERE ra.turno_id = @id AND ra.estado = 'borrador'
+          AND b.oculta = 0 AND b.codigo NOT IN ('DISP','MAND');
+      `);
+
+    // 5) CIET 'Cierre de turno' con el motivo. La sesión del CIET se arma desde la cabecera + el actor.
+    await registrarEventoCierre(tx, {
+      tipo: 'cierre',
+      sesion: { usuario_id: cerrado_por, planta_id, turno, cargo_nombre },
+      forzado: motivo !== 'MANUAL',
+      motivo,
+    });
+
+    // 6) Activar el sucesor PROGRAMADO (el cierre liberó el ABIERTO de la unidad).
     const sucesor = await activarSucesorTx(tx, planta_id, ahora);
     const cerrado = await _leerTurno(() => new sql.Request(tx), turno_id);
     await tx.commit();
-    return { cerrado, sucesor };
+    return { cerrado, sucesor, archivados, conformados };
   } catch (e) {
     try { await tx.rollback(); } catch { /* rollback best-effort */ }
     throw e;

@@ -305,4 +305,106 @@ describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
       await pool.request().input('s', sql.Int, sesionId).query(`UPDATE bitacora.sesion_activa SET turno_id=NULL WHERE sesion_id=@s; DELETE FROM bitacora.sesion_activa WHERE sesion_id=@s;`);
     }
   });
+
+  // --- D-045 E6: cierre unificado atómico (congela conformación + archiva registros + sella) ---
+  test('cerrarTurno congela conformación desde turno_participante, archiva registros por turno_id y sella la cabecera', async () => {
+    await limpiarTurnos();
+    const fechaOp = '2026-04-13';
+    // Limpiar conformación + histórico residual de TST antes de empezar (FK turno_id de F29.A2).
+    await pool.request().input('p', sql.VarChar(10), P).query(`
+      DELETE FROM bitacora.conformacion_turno WHERE planta_id=@p;
+      DELETE FROM bitacora.registro_historico WHERE planta_id=@p;
+      DELETE FROM bitacora.registro_activo WHERE planta_id=@p;
+    `);
+
+    const cargo = (await pool.request().query(`SELECT TOP 1 cargo_id, nombre FROM lov_bit.cargo ORDER BY cargo_id`)).recordset[0];
+    // Una bitácora archivable (visible, no DISP/MAND) con un tipo_evento válido.
+    const bit = (await pool.request().query(`
+      SELECT TOP 1 b.bitacora_id, b.codigo, te.tipo_evento_id
+      FROM lov_bit.bitacora b
+      INNER JOIN lov_bit.tipo_evento te ON te.bitacora_id = b.bitacora_id
+      WHERE b.oculta = 0 AND b.codigo NOT IN ('DISP','MAND')
+      ORDER BY b.bitacora_id, te.tipo_evento_id
+    `)).recordset[0];
+    assert.ok(bit, 'existe una bitácora archivable con tipo_evento');
+
+    const t = await abrirTurnoSiFalta(pool, P, 1, fechaOp, new Date(`${fechaOp}T15:00:00Z`));
+
+    // Participante (SISTEMA) que ya participó y se fue: presencia acumulada + egreso marcado.
+    await marcarParticipante(pool, {
+      turno_id: t.turno_unidad_id, usuario_id: USUARIO_SISTEMA_ID, cargo_id: cargo.cargo_id, cargo_nombre: cargo.nombre,
+    });
+    await pool.request().input('t', sql.Int, t.turno_unidad_id).query(`
+      UPDATE bitacora.turno_participante
+        SET presencia_acumulada_min = 120, ultimo_egreso = DATEADD(MINUTE, -30, SYSUTCDATETIME())
+      WHERE turno_id=@t AND usuario_id=${USUARIO_SISTEMA_ID}
+    `);
+
+    // Un registro borrador del turno, con turno_id estampado (como haría registros.js E5).
+    const reg = await pool.request()
+      .input('b', sql.Int, bit.bitacora_id)
+      .input('p', sql.VarChar(10), P)
+      .input('te', sql.Int, bit.tipo_evento_id)
+      .input('u', sql.Int, USUARIO_SISTEMA_ID)
+      .input('tid', sql.Int, t.turno_unidad_id)
+      .query(`
+        INSERT INTO bitacora.registro_activo
+          (bitacora_id, planta_id, fecha_evento, turno, detalle, tipo_evento_id, estado,
+           ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, turno_id)
+        OUTPUT INSERTED.registro_id
+        VALUES (@b, @p, SYSUTCDATETIME(), 1, 'registro de prueba D-045 E6', @te, 'borrador',
+                '[]', '[]', '[]', @u, @tid)
+      `);
+    const registroId = reg.recordset[0].registro_id;
+
+    try {
+      const cierre = new Date(`${fechaOp}T23:10:00Z`);
+      const res = await cerrarTurno(pool, t.turno_unidad_id, {
+        motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID, cargo_nombre: cargo.nombre,
+        ahora: cierre, incluirSinteticos: true, // SISTEMA no es sintético, pero lo forzamos por robustez del test
+      });
+
+      // Cabecera sellada.
+      assert.equal(res.cerrado.estado, 'CERRADO');
+      assert.equal(res.cerrado.motivo_cierre, 'MANUAL');
+      assert.equal(iso(res.cerrado.fin_real), iso(cierre));
+
+      // Conformación congelada desde turno_participante: mapea primer_ingreso→inicio_sesion,
+      // ultimo_egreso→fin_sesion, presencia_acumulada_min→duracion_min, fin_inferido=0, turno_id anclado.
+      assert.equal(res.conformados, 1);
+      const conf = (await pool.request().input('t', sql.Int, t.turno_unidad_id)
+        .query(`SELECT * FROM bitacora.conformacion_turno WHERE turno_id=@t`)).recordset;
+      assert.equal(conf.length, 1);
+      assert.equal(conf[0].usuario_id, USUARIO_SISTEMA_ID);
+      assert.equal(conf[0].duracion_min, 120);
+      assert.equal(conf[0].fin_inferido, false);
+      assert.equal(conf[0].turno, 1);
+      assert.equal(conf[0].planta_id, P);
+
+      // Registro archivado por turno_id: preserva registro_id + turno_id y sale del activo.
+      assert.equal(res.archivados.length, 1);
+      assert.equal(res.archivados[0].bitacora_id, bit.bitacora_id);
+      assert.equal(res.archivados[0].registros_cerrados, 1);
+      const enActivo = (await pool.request().input('r', sql.Int, registroId)
+        .query(`SELECT COUNT(*) AS n FROM bitacora.registro_activo WHERE registro_id=@r`)).recordset[0].n;
+      assert.equal(enActivo, 0, 'el registro salió del activo');
+      const enHist = (await pool.request().input('r', sql.Int, registroId)
+        .query(`SELECT registro_id, turno_id, estado FROM bitacora.registro_historico WHERE registro_id=@r`)).recordset[0];
+      assert.ok(enHist, 'el registro está en el histórico');
+      assert.equal(enHist.turno_id, t.turno_unidad_id, 'turno_id preservado en el histórico');
+      assert.equal(enHist.estado, 'cerrado');
+
+      // Cierre idempotente: 2ª llamada no re-congela ni re-archiva.
+      const otra = await cerrarTurno(pool, t.turno_unidad_id, { motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID });
+      assert.equal(otra.cerrado, null);
+      assert.equal(otra.conformados, 0);
+      assert.deepEqual(otra.archivados, []);
+    } finally {
+      await pool.request().input('p', sql.VarChar(10), P).query(`
+        DELETE FROM bitacora.conformacion_turno WHERE planta_id=@p;
+        DELETE FROM bitacora.registro_historico WHERE planta_id=@p;
+        DELETE FROM bitacora.registro_activo WHERE planta_id=@p;
+      `);
+    }
+  });
 });

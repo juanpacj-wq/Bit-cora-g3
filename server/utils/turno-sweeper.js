@@ -1,7 +1,6 @@
 import sql from 'mssql';
 import { ventanaTurno, ventanaActual, fechaBogotaStr, getTurnoColombia } from './turno.js';
 import { registrarEventoCierre } from './ciet.js';
-import { buildConformacionSnapshot, persistConformacionSnapshot } from './conformacion-snapshot.js';
 import { abrirTurnoSiFalta, acumularPresenciaSesiones } from './turno-entidad.js';
 
 const INTERVAL_MS = 60_000;
@@ -112,36 +111,13 @@ export async function sweepTurnosVencidos(pool) {
     }
   }
 
-  // Q3=d conformacion-turno-2026-05: tras finalizar las sesion_bitacora del turno vencido,
-  // recopilar (planta, turno, fecha_operativa) únicos y disparar el snapshot de conformación.
-  // Cada conformación en su propio error boundary — fallo en una no rompe las demás ni
-  // afecta el cierre de sesion_bitacora ya commiteado arriba. PK natural en conformacion_turno
-  // garantiza idempotencia frente a ticks repetidos del sweeper.
-  const conformacionesAEjecutar = new Map();
-  for (const { row } of porSesion.values()) {
-    const { inicio } = ventanaTurno(row.turno, row.abierta_en);
-    const fechaOperativa = fechaBogotaStr(inicio);
-    const key = `${row.planta_id}|${row.turno}|${fechaOperativa}`;
-    if (!conformacionesAEjecutar.has(key)) {
-      conformacionesAEjecutar.set(key, {
-        planta_id: row.planta_id,
-        turno: row.turno,
-        fecha_operativa: fechaOperativa,
-      });
-    }
-  }
-
-  for (const args of conformacionesAEjecutar.values()) {
-    try {
-      const filas = await buildConformacionSnapshot(pool, args);
-      const { insertadas, skipped } = await persistConformacionSnapshot(pool, filas);
-      if (insertadas > 0 || skipped > 0) {
-        console.log(`[turno-sweeper] conformacion ${args.planta_id} T${args.turno} ${args.fecha_operativa}: insertadas=${insertadas}, skipped=${skipped}`);
-      }
-    } catch (err) {
-      console.error(`[turno-sweeper] error conformacion ${args.planta_id} T${args.turno} ${args.fecha_operativa}:`, err.message);
-    }
-  }
+  // D-045 E6: RETIRADO el disparo automático de conformación por el sweeper (cierra el hallazgo H2 de
+  // la auditoría 2026-07-04). Antes acá se derivaba (planta, turno, fecha_operativa) de las sesiones
+  // finalizadas y se corría buildConformacionSnapshot; convivía con el cierre real y podía snapshotear
+  // un turno todavía sin sellar. La conformación es ahora un producto ATÓMICO de `cerrarTurno` (sella
+  // la cabecera + congela desde turno_participante en una sola transacción). El sweeper conserva SOLO
+  // la finalización de sesion_bitacora y la expulsión de sesion_activa; el auto-cierre de la cabecera
+  // vencida lo agrega E7.
 
   // Expulsión de sesión de app a fin de turno (login Entra). Se hace DESPUÉS de la conformación
   // (que filtra por la ventana de inicio_sesion y usa cerrada_en, no por activa). Recorre TODAS
