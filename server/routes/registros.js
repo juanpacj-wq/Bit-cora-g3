@@ -8,7 +8,8 @@ import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { hasPermisoBitacora, plantaMatch, canEditarRegistro } from '../middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from '../utils/campos.js';
-import { periodoFromFechaBogota, turnoFromPeriodo, fechaBogotaStr } from '../utils/turno.js';
+import { periodoFromFechaBogota, turnoFromPeriodo, fechaBogotaStr, getTurnoColombia, ventanaActual } from '../utils/turno.js';
+import { resolverTurnoAbierto, abrirTurnoSiFalta } from '../utils/turno-entidad.js';
 import {
   findEventoDashboard, upsertEventoDashboard, hasNotificarDashboard,
   findVigente, findUltimoCerrado, insertNuevoEstado, cerrarVigente, actualizarVigente,
@@ -318,6 +319,26 @@ router.post('/', asyncH(async (req, res) => {
   const notificar = dashboardTipo != null;
   const fechaEventoDate = new Date(fecha_evento);
 
+  // D-045 E5: estampar el turno ABIERTO de la unidad en el registro (para el cierre por turno de E6).
+  // EXENTOS: MAND (ciclo por día, endpoint propio en mand.js) y DISP (salió arriba con su propio INSERT).
+  // Política del borde de ventana: si no hay turno ABIERTO aún, se intenta crearlo (abrirTurnoSiFalta);
+  // si aun así no se resuelve, turno_id queda NULL (best-effort, no bloquea el registro). turno_id es un
+  // dato ADICIONAL: no reemplaza la columna `turno` ni el gate `turno_no_coincide`.
+  let turnoIdRegistro = null;
+  if (!isMAND) {
+    try {
+      let turnoAbierto = await resolverTurnoAbierto(db, planta_id);
+      if (!turnoAbierto) {
+        const { inicio } = ventanaActual();
+        await abrirTurnoSiFalta(db, planta_id, getTurnoColombia(), fechaBogotaStr(inicio));
+        turnoAbierto = await resolverTurnoAbierto(db, planta_id);
+      }
+      turnoIdRegistro = turnoAbierto?.turno_unidad_id ?? null;
+    } catch (err) {
+      console.error('[registros] no se pudo resolver turno_id (registro sin turno):', err.message);
+    }
+  }
+
   const transaction = new sql.Transaction(db);
   await transaction.begin();
   try {
@@ -359,13 +380,14 @@ router.post('/', asyncH(async (req, res) => {
       .input('jdts_snapshot', sql.NVarChar(sql.MAX), jdts_snapshot)
       .input('jefes_snapshot', sql.NVarChar(sql.MAX), jefes_snapshot)
       .input('creado_por', sql.Int, creado_por)
+      .input('turno_id', sql.Int, turnoIdRegistro)
       .query(`
         INSERT INTO bitacora.registro_activo
           (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-           estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
+           estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, turno_id)
         OUTPUT INSERTED.*
         VALUES (@bitacora_id, @planta_id, @fecha_evento, @turno, @detalle, @campos_extra, @tipo_evento_id,
-                'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por)
+                'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por, @turno_id)
       `);
     const registro = ins.recordset[0];
 
