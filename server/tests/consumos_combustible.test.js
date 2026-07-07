@@ -6,8 +6,11 @@ import { hashPassword } from '../utils/password.js';
 import { setupSessions, call, PLANTA_ID, TEST_TAG, deactivateSyntheticSessions } from './helpers.js';
 
 // D-027: tests del módulo Combustibles → Consumos (F26.B1).
-// 12 tests cubren: catálogo (1, 2), batch CRUD (3, 7), validaciones (4, 5, 6),
-// vista derivada (8), permisos (9, 10), regla D-019 paridad (11), idempotencia F26.B1 (12).
+// Cubren: catálogo (1, 2), batch CRUD (3, 7), validaciones (4, 5, 6, 13, 14, 15), vista derivada (8),
+// paridad D-019 (11), idempotencia F26.B1 (12).
+// Permisos (D-048): escriben SOLO JdT + Ingeniero de Operación. El Operador de Carbón y Caliza y el
+// Ingeniero Químico son solo-lectura (9, 10 → GET 200 / POST 403); IngOp puede crear (9b); la matriz
+// completa de escritores queda fijada en (16). Los POST de setup usan un escritor (JdT/IngOp) a propósito.
 
 let ctx;                 // setupSessions output: { sesiones, usuarios, bitByCodigo }
 let sesionOpCarbon;      // sesion_id del Operador Carbón y Caliza (cargo no cubierto por setupSessions)
@@ -97,13 +100,13 @@ test('2. GET catalogo GEC32 devuelve 10 combustibles en orden correcto', async (
 
 test('3. POST batch insert + update + delete en una transacción', async () => {
   await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon })).data;
+  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
   const alimA = cat.combustibles[0].combustible_id;
   const alimB = cat.combustibles[1].combustible_id;
   const alimC = cat.combustibles[2].combustible_id;
 
   const r1 = await call('POST', '/api/combustibles/consumos', {
-    sesion_id: sesionOpCarbon,
+    sesion_id: ctx.sesiones.jdt,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 1, combustible_id: alimA, cantidad: 12.5 },
       { periodo: 1, combustible_id: alimB, cantidad: 8.3 },
@@ -113,7 +116,7 @@ test('3. POST batch insert + update + delete en una transacción', async () => {
   assert.equal(r1.data.resumen.creados, 2);
 
   const r2 = await call('POST', '/api/combustibles/consumos', {
-    sesion_id: sesionOpCarbon,
+    sesion_id: ctx.sesiones.jdt,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 1, combustible_id: alimA, cantidad: 15.0 },   // update
       { periodo: 1, combustible_id: alimC, cantidad: 4.7 },    // insert
@@ -125,7 +128,7 @@ test('3. POST batch insert + update + delete en una transacción', async () => {
   assert.equal(r2.data.resumen.actualizados, 1);
   assert.equal(r2.data.resumen.eliminados, 1);
 
-  const post = (await call('GET', `/api/combustibles/consumos?planta_id=GEC3&fecha=${TEST_FECHA}`, { sesion_id: sesionOpCarbon })).data;
+  const post = (await call('GET', `/api/combustibles/consumos?planta_id=GEC3&fecha=${TEST_FECHA}`, { sesion_id: ctx.sesiones.jdt })).data;
   const fila = post.celdas['1'];
   assert.equal(fila[String(alimA)].cantidad, 15.0);
   assert.equal(fila[String(alimC)].cantidad, 4.7);
@@ -174,11 +177,11 @@ test('6. POST rechaza cantidad negativa', async () => {
 
 test('7. GET consumos devuelve celdas pivot correctas', async () => {
   await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon })).data;
+  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
   const idA = cat.combustibles[0].combustible_id;
   const idB = cat.combustibles[1].combustible_id;
   await call('POST', '/api/combustibles/consumos', {
-    sesion_id: sesionOpCarbon,
+    sesion_id: ctx.sesiones.jdt,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 1, combustible_id: idA, cantidad: 10.0 },
       { periodo: 1, combustible_id: idB, cantidad: 5.5 },
@@ -186,6 +189,7 @@ test('7. GET consumos devuelve celdas pivot correctas', async () => {
     ]},
   });
 
+  // Lectura desde el Operador de Carbón y Caliza: sigue viendo COMB (puede_ver=1) aunque ya no escriba (D-048).
   const { data } = await call('GET', `/api/combustibles/consumos?planta_id=GEC3&fecha=${TEST_FECHA}`, { sesion_id: sesionOpCarbon });
   assert.equal(data.celdas['1'][String(idA)].cantidad, 10.0);
   assert.equal(data.celdas['1'][String(idB)].cantidad, 5.5);
@@ -195,12 +199,12 @@ test('7. GET consumos devuelve celdas pivot correctas', async () => {
 
 test('8. v_consumo_periodo calcula total_carbon_ton, caliza_ton, acpm_gal correctamente', async () => {
   await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon })).data;
+  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
   const alims = cat.combustibles.filter((c) => c.tipo === 'ALIMENTADOR');
   const caliza = cat.combustibles.find((c) => c.tipo === 'CALIZA');
   const acpm = cat.combustibles.find((c) => c.tipo === 'ACPM');
   await call('POST', '/api/combustibles/consumos', {
-    sesion_id: sesionOpCarbon,
+    sesion_id: ctx.sesiones.jdt,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 1, combustible_id: alims[0].combustible_id, cantidad: 10.0 },
       { periodo: 1, combustible_id: alims[1].combustible_id, cantidad: 5.5 },
@@ -225,15 +229,32 @@ test('8. v_consumo_periodo calcula total_carbon_ton, caliza_ton, acpm_gal correc
     `acpm esperado 50.0, recibido ${r.acpm_gal}`);
 });
 
-test('9. Permiso: Operador Carbón y Caliza puede crear (puede_crear=true)', async () => {
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon })).data;
-  const { status } = await call('POST', '/api/combustibles/consumos', {
+test('9. Permiso D-048: Operador Carbón y Caliza SOLO lee (GET 200, POST 403)', async () => {
+  // Ve el catálogo (puede_ver=1)...
+  const cat = await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon });
+  assert.equal(cat.status, 200);
+  assert.equal(cat.data.combustibles.length, 8);
+  // ...pero ya NO puede escribir: tras D-048 su puede_crear en COMB es 0 → 403.
+  const post = await call('POST', '/api/combustibles/consumos', {
     sesion_id: sesionOpCarbon,
+    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
+      { periodo: 23, combustible_id: cat.data.combustibles[0].combustible_id, cantidad: 1.0 },
+    ]},
+  });
+  assert.equal(post.status, 403);
+});
+
+test('9b. Permiso D-048: Ingeniero de Operación PUEDE crear (POST 200)', async () => {
+  await cleanConsumos('GEC3', TEST_FECHA);
+  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.ingOp })).data;
+  const { status, data } = await call('POST', '/api/combustibles/consumos', {
+    sesion_id: ctx.sesiones.ingOp,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 23, combustible_id: cat.combustibles[0].combustible_id, cantidad: 1.0 },
     ]},
   });
-  assert.equal(status, 200);
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.resumen.creados, 1);
 });
 
 test('10. Permiso: Ingeniero Químico solo ve (POST devuelve 403, GET 200)', async () => {
@@ -252,12 +273,12 @@ test('10. Permiso: Ingeniero Químico solo ve (POST devuelve 403, GET 200)', asy
 
 test('11. modificado_por solo se setea si cantidad cambió (paridad D-019 con MAND)', async () => {
   await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon })).data;
+  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.ingOp })).data;
   const alimA = cat.combustibles[0].combustible_id;
 
-  // Insert original como Op Carbón.
+  // Insert original como Ingeniero de Operación (escritor distinto del JdT que hará los cambios).
   await call('POST', '/api/combustibles/consumos', {
-    sesion_id: sesionOpCarbon,
+    sesion_id: ctx.sesiones.ingOp,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 1, combustible_id: alimA, cantidad: 10.0, detalle: `${TEST_TAG} inicial` },
     ]},
@@ -324,12 +345,12 @@ test('13. F28.A1: GET catalogo expone cantidad_max por tipo (25/40/25000)', asyn
 
 test('14. POST rechaza ALIMENTADOR > 25 (cantidad_excede_max) y acepta exactamente 25', async () => {
   await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon })).data;
+  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
   const alimA = cat.combustibles.find((c) => c.tipo === 'ALIMENTADOR').combustible_id;
 
   // 25.001 → rechazo
   const over = await call('POST', '/api/combustibles/consumos', {
-    sesion_id: sesionOpCarbon,
+    sesion_id: ctx.sesiones.jdt,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 1, combustible_id: alimA, cantidad: 25.001 },
     ]},
@@ -340,7 +361,7 @@ test('14. POST rechaza ALIMENTADOR > 25 (cantidad_excede_max) y acepta exactamen
 
   // 25 exacto → OK (boundary inclusivo)
   const ok = await call('POST', '/api/combustibles/consumos', {
-    sesion_id: sesionOpCarbon,
+    sesion_id: ctx.sesiones.jdt,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 1, combustible_id: alimA, cantidad: 25 },
     ]},
@@ -351,12 +372,12 @@ test('14. POST rechaza ALIMENTADOR > 25 (cantidad_excede_max) y acepta exactamen
 
 test('15. POST rechaza CALIZA > 40 y ACPM > 25000; acepta límites exactos', async () => {
   await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon })).data;
+  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
   const caliza = cat.combustibles.find((c) => c.tipo === 'CALIZA').combustible_id;
   const acpm = cat.combustibles.find((c) => c.tipo === 'ACPM').combustible_id;
 
   const over = await call('POST', '/api/combustibles/consumos', {
-    sesion_id: sesionOpCarbon,
+    sesion_id: ctx.sesiones.jdt,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 2, combustible_id: caliza, cantidad: 40.5 },
       { periodo: 2, combustible_id: acpm, cantidad: 25001 },
@@ -369,7 +390,7 @@ test('15. POST rechaza CALIZA > 40 y ACPM > 25000; acepta límites exactos', asy
   assert.equal(over.data.errores.length, 2, 'una por celda fuera de rango');
 
   const ok = await call('POST', '/api/combustibles/consumos', {
-    sesion_id: sesionOpCarbon,
+    sesion_id: ctx.sesiones.jdt,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 2, combustible_id: caliza, cantidad: 40 },
       { periodo: 2, combustible_id: acpm, cantidad: 25000 },
@@ -377,4 +398,38 @@ test('15. POST rechaza CALIZA > 40 y ACPM > 25000; acepta límites exactos', asy
   });
   assert.equal(ok.status, 200);
   assert.equal(ok.data.resumen.creados, 2);
+});
+
+test('16. Blindaje D-048: matriz COMB — escriben SOLO JdT + IngOp (+ ADMIN god-mode); todos leen', async () => {
+  const db = await getDB();
+  const rows = (await db.request().query(`
+    SELECT c.nombre,
+           CAST(p.puede_ver AS INT)   AS ver,
+           CAST(p.puede_crear AS INT) AS crear
+    FROM lov_bit.cargo_bitacora_permiso p
+    JOIN lov_bit.bitacora b ON b.bitacora_id = p.bitacora_id
+    JOIN lov_bit.cargo    c ON c.cargo_id    = p.cargo_id
+    WHERE b.codigo = 'COMB'
+  `)).recordset;
+
+  // COMB es visible para TODOS los cargos (puede_ver=1) — no cambia con D-048.
+  assert.ok(rows.length > 0, 'debe haber filas de permiso COMB');
+  assert.ok(rows.every((r) => r.ver === 1), 'todos los cargos deben ver COMB (puede_ver=1)');
+
+  // La ÚNICA lista de escritores permitida: JdT + Ingeniero de Operación (cargos operativos) +
+  // 'Administrador y Debugging' (acceso total por diseño, D-039 — god-mode, toda acción atribuida).
+  const escritores = rows.filter((r) => r.crear === 1).map((r) => r.nombre).sort();
+  assert.deepEqual(
+    escritores,
+    ['Administrador y Debugging', 'Ingeniero Jefe de Turno', 'Ingeniero de Operación'].sort(),
+    `escritores COMB inesperados (D-048): ${JSON.stringify(escritores)}`
+  );
+
+  // Los cargos degradados a solo-lectura por D-048 deben tener puede_crear=0 explícito.
+  for (const nombre of ['Operador de Planta - Carbón y Caliza', 'Coordinador de carbón y maquinaria']) {
+    const r = rows.find((x) => x.nombre === nombre);
+    assert.ok(r, `debe existir fila COMB para ${nombre}`);
+    assert.equal(r.crear, 0, `${nombre} NO debe crear en COMB (D-048)`);
+    assert.equal(r.ver, 1, `${nombre} debe seguir viendo COMB`);
+  }
 });

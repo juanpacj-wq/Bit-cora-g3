@@ -746,6 +746,39 @@ gate `isEditing`, que ya respeta `bloqueado`).
 
 ---
 
+## D-048 — Escritura de COMB (Consumos de Combustibles) restringida a JdT + Ingeniero de Operación
+
+**Fecha:** 2026-07-07
+
+**Contexto:** desde D-027/D-029 la escritura (crear/editar/borrar) de `COMB` la tenían el `Operador de
+Planta - Carbón y Caliza`, el `Ingeniero Jefe de Turno` y el `Coordinador de carbón y maquinaria`. Por
+control operativo se decidió que el registro de consumos lo lleven únicamente los cargos de ingeniería de
+turno; los operadores (incluido Carbón y Caliza) y el Coordinador deben quedar en **solo-lectura** sobre
+ese módulo, igual que el resto de operadores.
+
+**Decisión:** en la matriz canónica `cargo_bitacora_permiso` (reconstruida en cada arranque, `db.js`) la
+CASE clause de `puede_crear` para `b.codigo='COMB'` pasa a `c.nombre IN ('Ingeniero Jefe de Turno',
+'Ingeniero de Operación')`; `puede_ver` sigue en 1 para todos. El bootstrap one-shot F26.B1 se alineó a la
+misma regla y se hizo auto-corrector (ambas ramas con `WHEN MATCHED THEN UPDATE`). El rol
+`Administrador y Debugging` conserva escritura porque su WHEN de acceso total ([[D-039]]) va primero —
+es god-mode por diseño, con toda acción atribuida, ortogonal a los cargos operativos. **No hay cambio de
+código de enforcement:** el endpoint `POST /api/combustibles/consumos` (crear/editar/borrar en un solo
+batch) ya valida `hasPermisoBitacora(..., 'puede_crear')` (data-driven), y el front deriva `puedeCrear`
+de la misma matriz (`BitacorasGecelca3.jsx` → `ConsumosGrid`), así que el cambio se propaga solo. El front
+además muestra un chip "Solo lectura" cuando `!puedeCrear` (comunicación, no gate — los inputs ya van
+`disabled` y el backend responde 403 aunque se evada el cliente).
+
+**Consecuencias:** (a) el `Operador de Planta - Carbón y Caliza` y el `Coordinador de carbón y maquinaria`
+pasan a solo-lectura en COMB (POST → 403); siguen viendo la grilla. (b) Se agregó al `Ingeniero de
+Operación` como escritor (antes no lo era). (c) Tests: `consumos_combustible.test.js` mueve sus POST de
+setup a un escritor (JdT/IngOp), invierte el caso del Op. Carbón (GET 200 / POST 403), suma el caso IngOp
+(POST 200) y un test-candado de la matriz completa de escritores; `rol_coordinador_carbon_maquinaria.test.js`
+invierte sus casos COMB. (d) El manual `CAPACITACIÓN.docx` queda desactualizado en el apartado de quién
+edita COMB (regenerar en la próxima pasada). Cross-ref: [[D-027]] (módulo COMB), [[D-029]] (Coordinador),
+[[D-039]] (rol ADMIN god-mode).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

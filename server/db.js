@@ -928,7 +928,7 @@ export async function initDB() {
           -- la consulta read-only para coordinación).
           WHEN b.codigo = 'MAND' THEN 1
           -- D-027 (F26.B1): COMB (Combustibles → Consumos) visible para todos los cargos;
-          -- creación restringida a Operador de Planta - Carbón y Caliza + JdT (ver puede_crear).
+          -- creación restringida a Ingeniero Jefe de Turno + Ingeniero de Operación (D-048, ver puede_crear).
           WHEN b.codigo = 'COMB' THEN 1
           -- Gerente de Producción ve todo
           WHEN c.nombre = 'Gerente de Producción'                THEN 1
@@ -957,10 +957,13 @@ export async function initDB() {
           -- F6: en MAND solo crean JdT e IngOp (preguntas.md punto 1).
           WHEN b.codigo = 'MAND' THEN
             CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN 1 ELSE 0 END
-          -- D-027 (F26.B1): COMB la crean Operador de Planta - Carbón y Caliza + JdT.
-          -- D-029: + Coordinador de carbón y maquinaria (llenado de Consumos de Combustible).
+          -- D-048: COMB (Consumos de Combustibles) la escriben SOLO Ingeniero Jefe de Turno e
+          -- Ingeniero de Operación. Los operadores (incl. Carbón y Caliza) y el Coordinador de
+          -- carbón y maquinaria quedan en solo-lectura (puede_ver=1). Histórico: D-027 la daba al
+          -- Op. Carbón + JdT; D-029 sumó al Coordinador — ambos retirados por control operativo.
+          -- (El rol 'Administrador y Debugging' ya la cubrió arriba por su WHEN de acceso total, D-039.)
           WHEN b.codigo = 'COMB' THEN
-            CASE WHEN c.nombre IN ('Operador de Planta - Carbón y Caliza','Ingeniero Jefe de Turno','Coordinador de carbón y maquinaria') THEN 1 ELSE 0 END
+            CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN 1 ELSE 0 END
           -- Gerente no crea en nada
           WHEN c.nombre = 'Gerente de Producción'                THEN 0
           -- JdT e IngOp crean en DISP, AUTH y SALA (Sala de Mando Operativa).
@@ -975,8 +978,8 @@ export async function initDB() {
           WHEN c.nombre = 'Operador de Planta - Turbogrupo'      THEN CASE WHEN b.codigo='TURBO'   THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador Maquinaria Pesada'           THEN CASE WHEN b.codigo='MAQU'    THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador de Planta - Carbón y Caliza' THEN CASE WHEN b.codigo='CYC'     THEN 1 ELSE 0 END
-          -- Coordinador de carbón y maquinaria: crea en Carbón y Caliza (CYC) y Maquinaria (MAQU);
-          -- la creación en COMB (Consumos) la cubre la CASE clause de COMB de arriba.
+          -- Coordinador de carbón y maquinaria: crea en Carbón y Caliza (CYC) y Maquinaria (MAQU).
+          -- COMB (Consumos) ya NO lo crea (D-048): la CASE clause de COMB de arriba lo excluye → solo-lectura.
           WHEN c.nombre = 'Coordinador de carbón y maquinaria'   THEN CASE WHEN b.codigo IN ('CYC','MAQU') THEN 1 ELSE 0 END
           ELSE 0
         END AS puede_crear
@@ -1968,10 +1971,13 @@ export async function initDB() {
         VALUES ('Consumos', 'COMB', 'Flame', 1, NULL, 11, 1, 0);
       `);
 
-      // 6. Permisos COMB (one-shot bootstrap). El matrix rebuild de "Datos semilla" se
-      //    actualizó en este mismo archivo para que en restarts subsecuentes preserve estos
-      //    permisos vía las nuevas CASE clauses 'COMB'. Acá seedeamos para que el primer
-      //    arranque post-F26.B1 ya tenga el módulo visible sin esperar otra reinicio.
+      // 6. Permisos COMB (one-shot bootstrap). El matrix rebuild de "Datos semilla" es la
+      //    fuente autoritativa en cada restart (CASE clauses 'COMB'); acá seedeamos para que el
+      //    PRIMER arranque de una BD fresca ya tenga el módulo con permisos correctos sin esperar
+      //    otro reinicio. DEBE expresar la MISMA regla que la matriz (D-048): escriben SOLO JdT +
+      //    Ingeniero de Operación; el resto (incl. Op. Carbón y Caliza y Coordinador) solo lee.
+      //    Ambas ramas llevan WHEN MATCHED THEN UPDATE → auto-correctoras (bajan puede_crear a 0 en
+      //    no-escritores aunque una corrida previa los hubiera dejado en 1).
       await new sql.Request(tx).batch(`
         DECLARE @comb_bid INT = (SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='COMB');
 
@@ -1980,7 +1986,7 @@ export async function initDB() {
           SELECT c.cargo_id, @comb_bid AS bitacora_id,
                  CAST(1 AS BIT) AS puede_ver, CAST(1 AS BIT) AS puede_crear
           FROM lov_bit.cargo c
-          WHERE c.nombre IN ('Operador de Planta - Carbón y Caliza', 'Ingeniero Jefe de Turno')
+          WHERE c.nombre IN ('Ingeniero Jefe de Turno', 'Ingeniero de Operación')
         ) AS s
           ON t.cargo_id = s.cargo_id AND t.bitacora_id = s.bitacora_id
         WHEN MATCHED THEN UPDATE SET puede_ver = s.puede_ver, puede_crear = s.puede_crear
@@ -1992,9 +1998,10 @@ export async function initDB() {
           SELECT c.cargo_id, @comb_bid AS bitacora_id,
                  CAST(1 AS BIT) AS puede_ver, CAST(0 AS BIT) AS puede_crear
           FROM lov_bit.cargo c
-          WHERE c.nombre NOT IN ('Operador de Planta - Carbón y Caliza', 'Ingeniero Jefe de Turno')
+          WHERE c.nombre NOT IN ('Ingeniero Jefe de Turno', 'Ingeniero de Operación')
         ) AS s
           ON t.cargo_id = s.cargo_id AND t.bitacora_id = s.bitacora_id
+        WHEN MATCHED THEN UPDATE SET puede_ver = s.puede_ver, puede_crear = s.puede_crear
         WHEN NOT MATCHED THEN INSERT (cargo_id, bitacora_id, puede_ver, puede_crear)
           VALUES (s.cargo_id, s.bitacora_id, s.puede_ver, s.puede_crear);
       `);

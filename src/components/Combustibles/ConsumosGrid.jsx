@@ -239,14 +239,24 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
               </span>
               alto
             </div>
-            <button
-              type="button"
-              onClick={onGuardar}
-              disabled={!hayCambios || !puedeCrear || loading || hayInvalidos}
-              className="comb-save"
-            >
-              Guardar
-            </button>
+            {/* D-048: el permiso de escritura en COMB es data-driven (matriz → puede_crear). Si el
+                cargo no puede crear (p. ej. Operador de Carbón y Caliza, ahora solo-lectura), se
+                oculta Guardar y se muestra un chip explícito. Los inputs ya van disabled abajo, y el
+                backend rechaza con 403 aunque se evada el front — este chip es solo comunicación. */}
+            {puedeCrear ? (
+              <button
+                type="button"
+                onClick={onGuardar}
+                disabled={!hayCambios || loading || hayInvalidos}
+                className="comb-save"
+              >
+                Guardar
+              </button>
+            ) : (
+              <span className="comb-readonly" title="No tienes permiso para editar Consumos de Combustibles">
+                Solo lectura
+              </span>
+            )}
           </div>
         </div>
 

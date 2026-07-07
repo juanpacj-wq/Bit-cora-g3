@@ -6,9 +6,10 @@ import { hashPassword } from '../utils/password.js';
 import { setupSessions, call, PLANTA_ID, deactivateSyntheticSessions } from './helpers.js';
 
 // D-029: rol "Coordinador de carbón y maquinaria".
-// Lectura + llenado de Carbón y Caliza (CYC) y Maquinaria (MAQU), + llenado en
-// Consumos de Combustible (COMB). NO cierra turno, NO es solo_lectura.
-// La matriz de permisos se reconstruye idempotentemente en cada arranque (db.js,
+// Lectura + llenado de Carbón y Caliza (CYC) y Maquinaria (MAQU). Ve Consumos de Combustible
+// (COMB) pero ya NO lo llena: D-048 dejó la escritura de COMB solo para JdT + Ingeniero de
+// Operación (el Coordinador y el Op. Carbón quedaron en solo-lectura). NO cierra turno, NO es
+// solo_lectura. La matriz de permisos se reconstruye idempotentemente en cada arranque (db.js,
 // bloque "matriz AS"); estos tests fijan ese contrato.
 
 const NOMBRE_CARGO = 'Coordinador de carbón y maquinaria';
@@ -112,11 +113,11 @@ test('3. Matriz: ve y crea en MAQU (Maquinaria)', async () => {
   assert.equal(p.puede_crear, true);
 });
 
-test('4. Matriz: ve y crea en COMB (Consumos de Combustible)', async () => {
+test('4. Matriz: ve pero NO crea en COMB (solo-lectura, D-048)', async () => {
   const p = await permiso('COMB');
   assert.ok(p, 'debe existir fila de permiso para COMB');
   assert.equal(p.puede_ver, true);
-  assert.equal(p.puede_crear, true);
+  assert.equal(p.puede_crear, false, 'D-048: el Coordinador ya no escribe COMB (solo JdT + IngOp)');
 });
 
 test('5. Matriz: NO ve ni crea en una bitácora ajena (QUIM)', async () => {
@@ -133,24 +134,28 @@ test('6. Matriz: MAND es visible (global) pero NO creable por este rol', async (
   assert.equal(p.puede_crear, false);
 });
 
-test('7. Permiso runtime: el Coordinador puede llenar Consumos (POST COMB → 200)', async () => {
+test('7. Permiso runtime D-048: el Coordinador VE pero NO llena Consumos (GET 200, POST COMB → 403)', async () => {
   const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionCoord })).data;
-  assert.equal(cat.combustibles.length, 8, 'el catálogo GEC3 debe ser visible para el Coordinador');
+  assert.equal(cat.combustibles.length, 8, 'el catálogo GEC3 debe seguir visible para el Coordinador');
   const { status } = await call('POST', '/api/combustibles/consumos', {
     sesion_id: sesionCoord,
     body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
       { periodo: 5, combustible_id: cat.combustibles[0].combustible_id, cantidad: 7.5 },
     ]},
   });
-  assert.equal(status, 200);
+  assert.equal(status, 403, 'D-048: el Coordinador ya no escribe COMB');
 });
 
 test('8. Idempotencia: re-initDB() preserva los permisos del rol (matriz reconstruida)', async () => {
   const { initDB } = await import('../db.js');
   await initDB();
-  for (const cod of ['CYC', 'MAQU', 'COMB']) {
+  // CYC y MAQU: ve + crea. COMB: solo ve (D-048 → puede_crear=false), estable tras re-initDB.
+  for (const cod of ['CYC', 'MAQU']) {
     const p = await permiso(cod);
     assert.ok(p && p.puede_ver === true && p.puede_crear === true,
       `${cod} debe seguir ver+crear tras re-initDB`);
   }
+  const comb = await permiso('COMB');
+  assert.ok(comb && comb.puede_ver === true && comb.puede_crear === false,
+    'COMB debe quedar ver=true, crear=false tras re-initDB (D-048)');
 });

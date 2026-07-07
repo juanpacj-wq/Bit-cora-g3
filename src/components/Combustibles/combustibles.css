@@ -79,6 +79,14 @@
 }
 .comb-root .comb-save:disabled{opacity:.4;cursor:not-allowed}
 
+/* chip "Solo lectura" (D-048): reemplaza a Guardar cuando el cargo no tiene puede_crear en COMB */
+.comb-root .comb-readonly{
+  display:inline-flex;align-items:center;gap:6px;
+  background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:7px;
+  padding:7px 14px;font-weight:600;font-size:12px;font-family:var(--font-sans);
+  letter-spacing:.02em;cursor:default;user-select:none;
+}
+
 /* selector de fecha */
 .comb-root .comb-fecha{display:flex;align-items:center;gap:8px}
 .comb-root .comb-fecha-nav{

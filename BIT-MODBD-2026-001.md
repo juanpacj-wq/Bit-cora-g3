@@ -376,12 +376,12 @@ INSERT INTO lov_bit.cargo_bitacora_permiso (cargo_id, bitacora_id, puede_ver, pu
 SELECT 4, bitacora_id, 1, 0 FROM lov_bit.bitacora;
 ```
 
-> **Nota v1.8 (D-027):** la matriz canónica que reconstruye `cargo_bitacora_permiso` en cada arranque (`db.js`, bloque "Matriz de permisos") se extendió con dos CASE clauses para `b.codigo = 'COMB'`:
+> **Nota v1.8 (D-027), actualizada por D-048 (2026-07-07):** la matriz canónica que reconstruye `cargo_bitacora_permiso` en cada arranque (`db.js`, bloque "Matriz de permisos") tiene dos CASE clauses para `b.codigo = 'COMB'`:
 >
 > - `puede_ver = 1` para TODOS los cargos (igual que MAND).
-> - `puede_crear = 1` solo si `c.nombre IN ('Operador de Planta - Carbón y Caliza', 'Ingeniero Jefe de Turno')`.
+> - `puede_crear = 1` solo si `c.nombre IN ('Ingeniero Jefe de Turno', 'Ingeniero de Operación')` **(D-048)**. El `Administrador y Debugging` también crea, por su WHEN de acceso total (D-039), que va primero. Antes (D-027/D-029) escribían el `Operador de Planta - Carbón y Caliza` y el `Coordinador de carbón y maquinaria`; **D-048 los degradó a solo-lectura** por control operativo.
 >
-> Esto garantiza que los permisos COMB sobreviven a restarts sin depender del bloque idempotente F26.B1 (que solo corre una vez y seedea los permisos como bootstrap del primer arranque).
+> Esto garantiza que los permisos COMB sobreviven a restarts sin depender del bloque idempotente F26.B1 (que solo corre una vez y seedea los permisos como bootstrap del primer arranque; F26.B1 se alineó a la misma regla D-048 y es auto-corrector).
 
 > **Nota D-039 (rol ADMIN):** se sembró el cargo `Administrador y Debugging` (App Role `ADMINISTRADOR_DEBUGGING`) con `solo_lectura=0`, `puede_cerrar_turno=1`. En la matriz canónica se agregó `WHEN c.nombre = 'Administrador y Debugging' THEN 1` como **primer WHEN** de `puede_ver` y `puede_crear` → ve+crea en TODAS las bitácoras activas. Acceso total data-driven, sin superusuario por código (toda acción atribuida). **Gotcha:** el override defensivo DISP (`db.js` F12.A6) recomputa `puede_crear` de toda fila DISP con un `CASE ... IN (...)`; el admin también se agregó a ese `IN` o quedaría en `puede_crear=0` en DISP. NO se añadió capacidad de hard-delete de registros cerrados/históricos (el modelo sigue append-only). Ver D-039.
 
