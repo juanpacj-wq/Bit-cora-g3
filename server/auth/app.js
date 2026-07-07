@@ -36,7 +36,7 @@ import bitacoraRouter from '../routes/bitacora.js';
 import registrosRouter from '../routes/registros.js';
 import turnoRouter from '../routes/turno.js';
 import iaRouter from '../routes/ia.js';
-import { estadoTurnoActual } from '../utils/turno-entidad.js'; // D-045 E7: estado del turno en /api/me
+import { estadoTurnoActual, acumularPresenciaSesiones } from '../utils/turno-entidad.js'; // D-045: turno en /api/me + presencia en logout
 import { puedeCerrarTurno } from '../middleware/permissions.js';
 import { detectRoles } from './roles.js';
 import {
@@ -274,6 +274,15 @@ export async function buildAuthApp() {
     if (uid) {
       try {
         const db = await getDB();
+        // D-045 E4 (presencia): cerrar el lapso [inicio_sesion, ahora) en turno_participante ANTES de
+        // poner activa=0 (la acumulación necesita inicio_sesion + turno_id de la sesión aún activa).
+        // Mismo patrón que cerrar-app/select-context/sweeper — el logout era el único camino de salida
+        // que no lo hacía y perdía la presencia del último lapso. Best-effort: no debe impedir el logout.
+        try {
+          const activas = await db.request().input('uid', sql.Int, uid)
+            .query(`SELECT sesion_id FROM bitacora.sesion_activa WHERE usuario_id=@uid AND activa=1 AND turno_id IS NOT NULL`);
+          await acumularPresenciaSesiones(db, activas.recordset.map((r) => r.sesion_id));
+        } catch (err) { console.error('[api/logout] no se pudo acumular presencia:', err.message); }
         await db.request().input('uid', sql.Int, uid)
           .query(`UPDATE bitacora.sesion_activa SET activa=0, cerrada_en=SYSUTCDATETIME() WHERE usuario_id=@uid AND activa=1`);
         _broadcast().catch(() => {});
