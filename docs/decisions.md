@@ -811,6 +811,44 @@ política de autoría. Cross-ref: [[D-032]] (códigos estables), [[D-039]] (ADMI
 
 ---
 
+## D-051 — DISP: los años del selector viajan en la respuesta del dashboard (se retira /anios)
+
+**Fecha:** 2026-07-08
+
+**Contexto:** el filtro de AÑO del dashboard DISP se poblaba con `GET /api/disponibilidad/anios`
+consultado **una sola vez al montar** el componente. Crear (backfill de planta vacía), editar o
+deshacer un registro retro-fechado no actualizaba el selector hasta un F5 — el resto del dashboard
+sí se refrescaba (fetch post-mutación + polling 30 s), pero los años no viajaban en ese refresh.
+
+**Decisión:** los años se calculan en `getAniosDisponibles` (`utils/notificador.js`, misma SQL:
+rango contiguo desc desde el MIN global Bogotá hasta el año actual) y viajan como campo `anios`
+**dentro de la respuesta de `GET /api/disponibilidad`** — la unidad de refresh del dashboard. El
+front sincroniza el selector desde cada respuesta de `getEstado` (post-crear/editar/deshacer y
+cada tick de polling) y aplica clamp: si el año seleccionado desapareció (deshacer encogió el
+rango), vuelve a "Todos" (`anioVigente`). El endpoint `/anios` y `useDisponibilidad.getAnios` se
+**eliminaron** (único consumidor: el efecto de montaje causante del bug). Lógica pura del filtro
+extraída a `src/components/Disponibilidad/anios.js`.
+
+**Consecuencias:** (a) cero requests extra: los años montan en el GET existente (una consulta MIN
+barata en el mismo handler, en paralelo). (b) Escrituras de OTRO cliente aparecen a más tardar en
+el siguiente tick de polling (30 s) — misma cadencia que el resto del dashboard; DISP no tiene
+canal WS y este fix no introduce uno. (c) Tests: `disponibilidad_anios.test.js` (e2e TEST_PLANTA:
+retro extiende `anios` en la misma respuesta, cleanup restaura baseline, `/anios` → 404) y
+`anios.test.js` (vitest puro). Cross-ref: [[D-026]] (storage DISP), [[D-030]] (TEST_PLANTA),
+[[D-020]] (año Bogotá = UTC-5).
+
+**Addendum blindaje (2026-07-09, auditoría de datos dev+prod):** piso de dominio `DISP_ANIO_MIN=2000`
+(exportado de `utils/notificador.js`) aplicado en DOBLE capa. Escritura: la rama DISP de POST/PUT
+`/api/registros` rechaza con 422 un `fecha_inicio_estado` con año Bogotá < 2000 — antes, un año typo
+(`0026` tecleado en el datetime-local) entraba por el 1er registro de una planta vacía o el PUT del
+vigente sin N-1 (solo existía el guard de futuro). Lectura: `construirRangoAnios` (función pura,
+unit-testeada) clampa el rango a `[2000, añoActual]`, así una fila corrupta PREEXISTENTE tampoco
+infla `anios` (~2000 entradas) en cada respuesta del dashboard. Front: el modal DISP pone
+`min=2000-01-01T00:00` en el datetime-local cuando no hay min cronológico (defensa en navegador;
+el backend es la fuente de verdad). Prod auditada 2026-07-09: 2 filas DISP, ambas 2026, sin anomalías.
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

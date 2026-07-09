@@ -15,39 +15,14 @@ import CambiarEstadoModal from './CambiarEstadoModal';
 import DashboardSkeleton from './Skeleton';
 import { useDisponibilidad } from '../../hooks/useDisponibilidad';
 import { PLANTAS } from './colores';
+// Filtro de AÑO (D-035 vive en la URL; el año es estado local del dashboard). Lógica pura en
+// ./anios.js (D-051): opciones, ventana [desde, hasta) y clamp del año seleccionado.
+import { ANIO_TODOS, ANIO_ACTUAL, buildAniosOpts, ventanaAnio, anioVigente } from './anios';
 
 const POLL_MS = 30_000;
 const HIST_PAGE = 20;
 
 const EMPTY_BY_PLANTA = PLANTAS.reduce((acc, p) => ({ ...acc, [p]: null }), {});
-
-// Filtro de AÑO (D-035 vive en la URL; el año es estado local del dashboard). `ANIO_TODOS` = sin
-// filtro (comportamiento histórico all-time). El año actual se calcula en Bogotá (UTC-5, sin DST).
-const ANIO_TODOS = 'todos';
-const ANIO_ACTUAL = Number(
-  new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric' }).format(new Date())
-);
-// Construye las opciones del selector: "Todos los años" (all-time) primero y fijo arriba —
-// con `sep` para dibujar un divisor debajo — seguido de la lista de años (desc). Va primero para
-// que sea visible sin scrollear la lista larga de años.
-function buildAniosOpts(anios) {
-  const lista = Array.isArray(anios) && anios.length ? anios : [ANIO_ACTUAL];
-  return [
-    { value: ANIO_TODOS, label: 'Todos los años', sep: true },
-    ...lista.map((y) => ({ value: String(y), label: String(y) })),
-  ];
-}
-
-// Ventana [desde, hasta) en UTC ISO correspondiente al año Bogotá seleccionado. `ANIO_TODOS`
-// → sin ventana (undefined) para que el backend use su default all-time.
-function ventanaAnio(anio) {
-  if (anio === ANIO_TODOS) return { desde: undefined, hasta: undefined };
-  const y = Number(anio);
-  return {
-    desde: new Date(Date.UTC(y, 0, 1, 5, 0, 0)).toISOString(),      // 1-ene 00:00 Bogotá
-    hasta: new Date(Date.UTC(y + 1, 0, 1, 5, 0, 0)).toISOString(),  // 1-ene (y+1) 00:00 Bogotá
-  };
-}
 
 // D-035: `planta`/`onPlantaChange` son controlados por el dashboard (la URL es la fuente única
 // de verdad — se retiró el sessionStorage `disponibilidad.plantaSeleccionada` para evitar doble
@@ -60,7 +35,7 @@ export default function DisponibilidadDashboard({
   puedeEditar,
   showToast,
 }) {
-  const { getEstado, getMetricas, getAnios, crear, editar, deshacer } = useDisponibilidad(bitacoraId);
+  const { getEstado, getMetricas, crear, editar, deshacer } = useDisponibilidad(bitacoraId);
 
   const plantaSeleccionada = planta;
   const setPlantaSeleccionada = onPlantaChange;
@@ -71,8 +46,10 @@ export default function DisponibilidadDashboard({
   const [dataByPlanta, setDataByPlanta] = useState(EMPTY_BY_PLANTA);
   // Filtro de AÑO: acota historial + acumulados. Default = todos los años (all-time).
   const [anio, setAnio] = useState(ANIO_TODOS);
-  // Opciones del selector, data-driven: rango real desde el primer registro DISP. Fallback = año
-  // actual hasta que llega la respuesta de /anios.
+  // Opciones del selector, data-driven: rango real desde el primer registro DISP. Se sincroniza
+  // con `anios` de CADA respuesta de getEstado (D-051) — post-mutación y polling incluidos — así
+  // un registro retro-fechado aparece en el selector al instante, sin F5. Fallback = año actual
+  // hasta que llega el primer fetch.
   const [aniosOpts, setAniosOpts] = useState(() => buildAniosOpts([ANIO_ACTUAL]));
   const [error, setError] = useState(null);
   const [modal, setModal] = useState(null); // { mode: 'crear' | 'editar' }
@@ -101,6 +78,14 @@ export default function DisponibilidadDashboard({
             loaded: true,
           },
         }));
+        // D-051: el selector de AÑO se sincroniza con la MISMA respuesta que el resto del
+        // dashboard — crear/editar/deshacer un registro retro-fechado lo refleja al instante.
+        // Si el año seleccionado desapareció (deshacer encogió el rango), clamp a "Todos"; el
+        // cambio de `anio` recrea fetchEstado y el efecto de planta refetchea sin ventana.
+        if (Array.isArray(res.anios) && res.anios.length) {
+          setAniosOpts(buildAniosOpts(res.anios));
+          setAnio((prev) => anioVigente(prev, res.anios));
+        }
         if (!silent) setError(null);
       } catch (e) {
         if (!silent) setError(e.message || 'Error al cargar disponibilidad');
@@ -108,15 +93,6 @@ export default function DisponibilidadDashboard({
     },
     [getEstado, getMetricas, anio]
   );
-
-  // Años disponibles para el selector (una sola vez al montar). Falla en silencio → fallback.
-  useEffect(() => {
-    let cancelado = false;
-    getAnios()
-      .then((r) => { if (!cancelado) setAniosOpts(buildAniosOpts(r?.anios)); })
-      .catch(() => {});
-    return () => { cancelado = true; };
-  }, [getAnios]);
 
   // Fetch al cambiar de planta. SWR: si ya hay cache, refrescamos en silencio.
   useEffect(() => {

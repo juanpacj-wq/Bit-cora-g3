@@ -311,6 +311,40 @@ export async function getEstadoCompleto(db, { planta_id, historial_limit = 20, h
   return { vigente, historial, historial_total: totalRes.recordset[0].total };
 }
 
+// D-051: piso de dominio para fechas DISP. Ningún estado de disponibilidad legítimo es anterior
+// al 2000; lo comparten el write-guard de la rama DISP (POST/PUT /api/registros → 422) y el clamp
+// de lectura de construirRangoAnios. Sin piso, UNA fila con año typo (0026 vía datetime-local)
+// inflaría el rango contiguo del selector a ~2000 entradas en CADA respuesta del dashboard.
+export const DISP_ANIO_MIN = 2000;
+
+// Construcción PURA del rango de años del selector: contiguo, descendente, clamped a
+// [DISP_ANIO_MIN, anioActual]. anioMinRaw null/typo-bajo/futuro degradan con gracia — el rango
+// nunca supera ~(anioActual - 2000 + 1) entradas aunque la BD traiga fechas corruptas
+// preexistentes. Exportada para unit tests sin BD.
+export function construirRangoAnios(anioMinRaw, anioActual) {
+  const piso = Math.max(DISP_ANIO_MIN, Math.min(anioMinRaw || anioActual, anioActual));
+  const anios = [];
+  for (let y = anioActual; y >= piso; y--) anios.push(y);
+  return anios;
+}
+
+// D-051: años (Bogotá, D-020) disponibles para el selector de AÑO del dashboard DISP — rango
+// CONTIGUO desde el primer registro (MIN sobre TODAS las plantas: selector estable entre tabs)
+// hasta el año actual, descendente. Sin registros → [año actual]. Viaja DENTRO de la respuesta
+// de GET /api/disponibilidad para que el selector se refresque con la misma cadencia que el
+// resto del dashboard (tras crear/editar/deshacer y en cada tick de polling) — era un endpoint
+// aparte consultado solo al montar, y un registro retro-fechado no aparecía sin F5.
+export async function getAniosDisponibles(db) {
+  const r = await db.request().query(`
+    SELECT MIN(YEAR(DATEADD(HOUR, -5, fecha_inicio_estado))) AS anio_min
+    FROM bitacora.disponibilidad_estado
+  `);
+  const anioActual = Number(
+    new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric' }).format(new Date())
+  );
+  return construirRangoAnios(r.recordset[0]?.anio_min, anioActual);
+}
+
 // GET /api/disponibilidad/metricas — ms acumulado por estado en la ventana [desde, hasta].
 // Sustituye la vieja query sobre `v_disp_intervalos` (dropeada en F26.A1): suma DATEDIFF_BIG
 // directo sobre `disponibilidad_estado` truncando cada intervalo a la ventana. El vigente se

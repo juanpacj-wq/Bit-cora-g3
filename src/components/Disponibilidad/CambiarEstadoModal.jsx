@@ -65,15 +65,20 @@ export default function CambiarEstadoModal({
     setPlanta(plantaActual || PLANTAS[0]);
   }, [plantaActual]);
 
+  // D-051: piso absoluto cuando no hay min cronológico (planta vacía en crear / editar sin N-1) —
+  // evita el año typo (0026) en el datetime-local. Espejo del guard 422 del backend, que es la
+  // fuente de verdad; esto es solo defensa en el navegador.
+  const MIN_ABSOLUTO_LOCAL = '2000-01-01T00:00';
+
   const minLocal = useMemo(() => {
-    if (isEdit) return toDatetimeLocal(ultimoHistorico?.fecha_inicio_estado);
+    if (isEdit) return toDatetimeLocal(ultimoHistorico?.fecha_inicio_estado) || MIN_ABSOLUTO_LOCAL;
     if (vigente?.fecha_inicio_estado) {
       // En crear, fecha nueva debe ser > vigente. min = vigente + 1 minuto.
       const d = new Date(vigente.fecha_inicio_estado);
       d.setMinutes(d.getMinutes() + 1);
       return toDatetimeLocal(d);
     }
-    return undefined;
+    return MIN_ABSOLUTO_LOCAL;
   }, [isEdit, vigente, ultimoHistorico]);
 
   const maxLocal = useMemo(() => toDatetimeLocal(new Date()), [submitting]);

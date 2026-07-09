@@ -13,7 +13,15 @@ import { resolverTurnoParaEscritura } from '../utils/turno-entidad.js';
 import {
   findEventoDashboard, upsertEventoDashboard, hasNotificarDashboard,
   findVigente, findUltimoCerrado, insertNuevoEstado, cerrarVigente, actualizarVigente,
+  DISP_ANIO_MIN,
 } from '../utils/notificador.js';
+
+// D-051: piso de fecha para DISP — el guard de futuro ya existe; sin este, un año typo (0026
+// tecleado en el datetime-local) entra por el 1er registro de una planta vacía o por el PUT del
+// vigente sin N-1, e infla el rango del selector de años en cada respuesta del dashboard.
+// Año Bogotá = UTC-5 fijo (D-020).
+const fechaDispBajoPiso = (fecha) =>
+  new Date(fecha.getTime() - 5 * 3600_000).getUTCFullYear() < DISP_ANIO_MIN;
 import {
   snapshotJDTs, snapshotJefes, snapshotIngenieros, snapshotGerentesProduccion,
 } from '../utils/snapshots.js';
@@ -162,6 +170,9 @@ router.post('/', asyncH(async (req, res) => {
     }
     if (fechaInicio.getTime() > Date.now()) {
       return sendJSON(res, 422, { error: 'fecha_inicio_estado no puede ser futuro' });
+    }
+    if (fechaDispBajoPiso(fechaInicio)) {
+      return sendJSON(res, 422, { error: `fecha_inicio_estado no puede ser anterior al año ${DISP_ANIO_MIN}` });
     }
     const codigoVal = DISP_CODIGO_POR_EVENTO[evento];
 
@@ -494,6 +505,9 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
     }
     if (fechaInicioNueva.getTime() > Date.now()) {
       return sendJSON(res, 422, { error: 'fecha_inicio_estado no puede ser futuro' });
+    }
+    if (fechaDispBajoPiso(fechaInicioNueva)) {
+      return sendJSON(res, 422, { error: `fecha_inicio_estado no puede ser anterior al año ${DISP_ANIO_MIN}` });
     }
     const codigoVal = DISP_CODIGO_POR_EVENTO[eventoNuevo];
 
