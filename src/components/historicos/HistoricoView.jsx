@@ -13,6 +13,7 @@ function defaultFiltros(plantaSesion) {
     fecha_desde: undefined,
     fecha_hasta: undefined,
     busqueda: undefined,
+    creado_por: undefined,
     page: 1,
     limit: 50,
   };

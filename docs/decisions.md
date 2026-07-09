@@ -811,6 +811,42 @@ política de autoría. Cross-ref: [[D-032]] (códigos estables), [[D-039]] (ADMI
 
 ---
 
+## D-050 — Históricos: columna Campos solo-UI, `participantes` derivado server-side, filtro por autor y detalle expandible
+
+**Fecha:** 2026-07-08
+
+**Contexto:** la vista de Históricos mostraba (a) la columna "Campos" (`campos_extra`), percibida como
+legacy — aunque para MAND/AUTH históricos contiene `periodo`/`valor_mw`/`funcionariocnd`; (b) la columna
+"Ingenieros" con `ingenieros_snapshot` crudo, que en realidad captura a *todos* los presentes salvo
+JdT/Gerente (operadores incluidos) y duplicaba gente que ya sale en las columnas JdTs/Jefes; (c) el
+detalle completo solo por hover (`title`), invisible en táctil/impresión; y (d) sin filtro por autor,
+pese a que el backend ya aceptaba `creado_por_id`.
+
+**Decisión:** (1) La columna "Campos" se elimina **SOLO de la UI**: `v_historico_busqueda` y la API siguen
+exponiendo `campos_extra` (los datos MAND/AUTH quedan auditables por API). (2) La columna pasa a
+"Participantes": los snapshots son INMUTABLES (RF §6.5), así que la exclusión se **deriva en el router**
+(`utils/participantes.js`: `ingenieros − (jdts ∪ jefes)` por `usuario_id`) y sale como campo
+`participantes` junto a los snapshots crudos — regla única server-side, corrige también el histórico
+viejo sin reescribirlo. (3) Celda Detalle con "Ver más"/"Ver menos" inline, umbral fijo 160 chars
+(`DETALLE_PREVIEW_MAX`). (4) Nuevo parámetro `?creado_por=` con `LIKE` sobre `creado_por_nombre`,
+escapado con `utils/sql-like.js` (`ESCAPE '\'`) — hardening aplicado también al `busqueda` existente
+para que `%`/`_`/`[` matcheen literal.
+
+**Consecuencias:** (a) `JsonPopover` → `UsuariosPopover` (murió la variante "campos"). (b) El front
+renderiza `r.participantes` ya derivado — si la regla cambia, se toca solo el util del server y su test.
+(c) Tests: `historicos_participantes.test.js` (unit puro; no importa `routes/historicos.js` porque
+`db.js` abre el pool al importarse), `historicos_endpoint.test.js` (HTTP sobre TEST_PLANTA con
+`registro_id` negativos — imposible colisionar con la IDENTITY real) y `detalle-cell.test.jsx` (vitest).
+Cross-ref: [[D-030]] (aislamiento TEST_PLANTA), [[D-026]] (por qué DISP ya no usa `campos_extra`).
+
+**Addendum blindaje (2026-07-09, auditoría de datos dev+prod):** los datos reales (106 históricos
+prod) están limpios, pero se blindó preventivamente: `participantesVisibles` compara `usuario_id`
+normalizado a String (snapshots de versiones viejas podrían mezclar string/número — la exclusión
+sería silenciosamente inerte) y los inputs LIKE (`busqueda`/`creado_por`) se capan a 200 chars antes
+de escapar (el peor caso escapado = 400 = tamaño exacto del parámetro; sin cap → 500 del driver).
+
+---
+
 ## D-051 — DISP: los años del selector viajan en la respuesta del dashboard (se retira /anios)
 
 **Fecha:** 2026-07-08

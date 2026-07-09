@@ -1,21 +1,34 @@
 import { useEffect, useState } from 'react';
-import { Search, Filter, Calendar, MapPin, RotateCcw, ChevronDown } from 'lucide-react';
+import { Search, Filter, Calendar, MapPin, RotateCcw, ChevronDown, User } from 'lucide-react';
 
-export function HistoricoFilters({ filtros, onChange, onReset, bitacoras, plantas }) {
-  const [textoLocal, setTextoLocal] = useState(filtros.busqueda || '');
+// Estado local con commit debounced (300 ms) hacia el filtro real, y sincronización inversa
+// cuando el filtro cambia desde afuera (p. ej. "Limpiar"). Compartido por los campos de texto.
+function useFiltroDebounced(valorFiltro, commit) {
+  const [local, setLocal] = useState(valorFiltro || '');
 
   useEffect(() => {
     const t = setTimeout(() => {
-      if ((filtros.busqueda || '') !== textoLocal) onChange({ busqueda: textoLocal, page: 1 });
+      if ((valorFiltro || '') !== local) commit(local);
     }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [textoLocal]);
+  }, [local]);
 
   useEffect(() => {
-    if ((filtros.busqueda || '') !== textoLocal) setTextoLocal(filtros.busqueda || '');
+    if ((valorFiltro || '') !== local) setLocal(valorFiltro || '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtros.busqueda]);
+  }, [valorFiltro]);
+
+  return [local, setLocal];
+}
+
+export function HistoricoFilters({ filtros, onChange, onReset, bitacoras, plantas }) {
+  const [textoLocal, setTextoLocal] = useFiltroDebounced(
+    filtros.busqueda, (v) => onChange({ busqueda: v, page: 1 })
+  );
+  const [autorLocal, setAutorLocal] = useFiltroDebounced(
+    filtros.creado_por, (v) => onChange({ creado_por: v, page: 1 })
+  );
 
   const handle = (patch) => onChange({ ...patch, page: 1 });
 
@@ -65,6 +78,16 @@ export function HistoricoFilters({ filtros, onChange, onReset, bitacoras, planta
             value={filtros.fecha_hasta || ''}
             onChange={(e) => handle({ fecha_hasta: e.target.value || undefined })}
             className="px-3 py-2 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent w-44"
+          />
+        </Field>
+
+        <Field label="Creado por" icon={<User size={14} />}>
+          <input
+            type="text"
+            value={autorLocal}
+            onChange={(e) => setAutorLocal(e.target.value)}
+            placeholder="Nombre del autor…"
+            className="pl-3 pr-4 py-2 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent w-48"
           />
         </Field>
 

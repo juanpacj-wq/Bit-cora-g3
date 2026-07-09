@@ -1,5 +1,6 @@
-import { FileText, ChevronLeft, ChevronRight } from 'lucide-react';
-import { JsonPopover } from './JsonPopover';
+import { useState } from 'react';
+import { FileText, ChevronLeft, ChevronRight, ChevronDown, ChevronUp } from 'lucide-react';
+import { UsuariosPopover } from './UsuariosPopover';
 
 // F20: render Bogotá explícito (sin importar TZ del navegador).
 const FECHA_FMT = new Intl.DateTimeFormat('es-CO', {
@@ -40,8 +41,7 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
                     <Th>Turno</Th>
                     <Th>Tipo</Th>
                     <Th>Detalle</Th>
-                    <Th>Campos</Th>
-                    <Th>Ingenieros</Th>
+                    <Th>Participantes</Th>
                     <Th>JdTs</Th>
                     <Th>Jefes</Th>
                     <Th>Creado por</Th>
@@ -67,14 +67,11 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
                       </Td>
                       <Td>{r.tipo_evento}</Td>
                       <Td className="max-w-xs">
-                        <div className="line-clamp-2 text-gray-700" title={r.detalle || ''}>
-                          {r.detalle || <span className="text-gray-300">—</span>}
-                        </div>
+                        <DetalleCell texto={r.detalle} />
                       </Td>
-                      <Td><JsonPopover json={r.campos_extra} variant="campos" /></Td>
-                      <Td><JsonPopover json={r.ingenieros_snapshot} variant="usuarios" /></Td>
-                      <Td><JsonPopover json={r.jdts_snapshot} variant="usuarios" /></Td>
-                      <Td><JsonPopover json={r.jefes_snapshot} variant="usuarios" /></Td>
+                      <Td><UsuariosPopover json={r.participantes} /></Td>
+                      <Td><UsuariosPopover json={r.jdts_snapshot} /></Td>
+                      <Td><UsuariosPopover json={r.jefes_snapshot} /></Td>
                       <Td>
                         <div className="text-gray-800">{r.creado_por_nombre || '—'}</div>
                         <div className="text-xs text-gray-400">{fmtFecha(r.creado_en)}</div>
@@ -103,6 +100,32 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
         onPageChange={onPageChange}
         onLimitChange={onLimitChange}
       />
+    </div>
+  );
+}
+
+// D-050: umbral fijo — por debajo el texto cabe completo sin control; por encima aparece
+// "Ver más"/"Ver menos" (reemplaza al hover con `title`, que era invisible en táctil/impresión).
+const DETALLE_PREVIEW_MAX = 160;
+
+export function DetalleCell({ texto }) {
+  const [expandido, setExpandido] = useState(false);
+  if (!texto) return <span className="text-gray-300">—</span>;
+  if (texto.length <= DETALLE_PREVIEW_MAX) {
+    return <div className="text-gray-700 whitespace-pre-wrap break-words">{texto}</div>;
+  }
+  return (
+    <div className="text-gray-700">
+      {expandido
+        ? <div className="whitespace-pre-wrap break-words">{texto}</div>
+        : <div className="line-clamp-2">{texto}</div>}
+      <button
+        onClick={() => setExpandido((v) => !v)}
+        aria-expanded={expandido}
+        className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-blue-700 hover:text-blue-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 rounded"
+      >
+        {expandido ? <>Ver menos <ChevronUp size={12} /></> : <>Ver más <ChevronDown size={12} /></>}
+      </button>
     </div>
   );
 }

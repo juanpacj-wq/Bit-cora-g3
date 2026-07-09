@@ -7,9 +7,15 @@ import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { asyncH, loadAppSession } from './_middleware.js';
 import { aplicarRateLimit } from './_shared.js';
+import { participantesVisibles } from '../utils/participantes.js';
+import { escapeLike } from '../utils/sql-like.js';
 
 const router = express.Router();
 router.use(loadAppSession);
+
+// D-050: cada fila sale con `participantes` derivado (snapshot ingenieros menos JdTs/Jefes,
+// que tienen columna propia). Los snapshots crudos se conservan en la respuesta (trazabilidad).
+const conParticipantes = (row) => ({ ...row, participantes: participantesVisibles(row) });
 
 // GET /api/historicos/resumen?planta_id=&fecha=
 // F10: oculta=0 esconde bitácoras de auditoría interna (CIET) del histórico visible.
@@ -65,7 +71,10 @@ router.get('/', asyncH(async (req, res) => {
   if (params.get('tipo_evento_id')) { addInput('tipo_evento_id', sql.Int, parseInt(params.get('tipo_evento_id'), 10)); where.push('tipo_evento_id = @tipo_evento_id'); }
   if (params.get('fecha_desde')) { addInput('fecha_desde', sql.Date, new Date(params.get('fecha_desde'))); where.push('fecha_cierre_operativo >= @fecha_desde'); }
   if (params.get('fecha_hasta')) { addInput('fecha_hasta', sql.Date, new Date(params.get('fecha_hasta'))); where.push('fecha_cierre_operativo <= @fecha_hasta'); }
-  if (params.get('busqueda')) { addInput('busqueda', sql.NVarChar(200), params.get('busqueda')); where.push("detalle LIKE '%' + @busqueda + '%'"); }
+  // Cap a 200 chars ANTES de escapar: el peor caso escapado duplica (→ 400, el tamaño exacto del
+  // parámetro). Sin cap, un input largo desbordaría el NVarChar y el driver respondería 500.
+  if (params.get('busqueda')) { addInput('busqueda', sql.NVarChar(400), escapeLike(params.get('busqueda').slice(0, 200))); where.push("detalle LIKE '%' + @busqueda + '%' ESCAPE '\\'"); }
+  if (params.get('creado_por')) { addInput('creado_por', sql.NVarChar(400), escapeLike(params.get('creado_por').slice(0, 200))); where.push("creado_por_nombre LIKE '%' + @creado_por + '%' ESCAPE '\\'"); }
 
   const whereSql = where.join(' AND ');
   reqData.input('offset', sql.Int, offset).input('limit', sql.Int, limit);
@@ -82,7 +91,7 @@ router.get('/', asyncH(async (req, res) => {
   `);
 
   return sendJSON(res, 200, {
-    data: dataResult.recordset,
+    data: dataResult.recordset.map(conParticipantes),
     total: countResult.recordset[0].total,
     page,
     limit,
@@ -100,7 +109,7 @@ router.get('/:id', asyncH(async (req, res) => {
   if (result.recordset.length === 0) {
     return sendJSON(res, 404, { error: 'Histórico no encontrado' });
   }
-  return sendJSON(res, 200, { registro: result.recordset[0] });
+  return sendJSON(res, 200, { registro: conParticipantes(result.recordset[0]) });
 }));
 
 export default router;

@@ -4,6 +4,10 @@
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  // D-050: JSX runtime automático, igual que @vitejs/plugin-react en la app. Sin esto, esbuild
+  // (vitest) compila .jsx al runtime clásico (React.createElement) y todo componente que no haga
+  // `import React` explícito revienta con "React is not defined" al importarse desde un test.
+  esbuild: { jsx: 'automatic' },
   test: {
     environment: 'node',
     globals: false,

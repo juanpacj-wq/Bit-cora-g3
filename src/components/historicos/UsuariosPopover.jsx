@@ -1,13 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import { Users, FileJson, X } from 'lucide-react';
+import { Users, X } from 'lucide-react';
 
 const iniciales = (nombre = '') =>
   nombre.trim().split(/\s+/).slice(0, 2).map((n) => n[0]).join('').toUpperCase() || '?';
 
-const parseJson = (raw) => {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  try { return JSON.parse(raw); } catch { return undefined; }
+// Acepta el snapshot como string JSON o como array ya parseado (p. ej. `participantes`
+// derivado por la API, D-050). undefined = JSON corrupto (se señala en la celda).
+const parseUsuarios = (raw) => {
+  if (!raw) return [];
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    try { parsed = JSON.parse(raw); } catch { return undefined; }
+  }
+  return Array.isArray(parsed) ? parsed : [];
 };
 
 function PopoverPanel({ anchorRect, onClose, children }) {
@@ -86,56 +91,11 @@ function UsuariosContent({ items, onClose }) {
   );
 }
 
-function CamposContent({ obj, onClose }) {
-  const entries = obj && typeof obj === 'object' ? Object.entries(obj) : [];
-  return (
-    <>
-      <div className="sticky top-0 bg-white flex items-center justify-between px-4 py-2.5 border-b border-gray-100">
-        <div className="text-xs uppercase tracking-wide font-semibold text-gray-500">
-          Campos ({entries.length})
-        </div>
-        <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 text-gray-400">
-          <X size={14} />
-        </button>
-      </div>
-      {entries.length === 0 ? (
-        <div className="px-4 py-6 text-sm text-gray-400 text-center">Sin datos</div>
-      ) : (
-        <table className="w-full text-sm">
-          <tbody className="divide-y divide-gray-100">
-            {entries.map(([k, v]) => (
-              <tr key={k}>
-                <td className="px-4 py-2 font-mono text-xs text-gray-500 align-top whitespace-nowrap">{k}</td>
-                <td className="px-4 py-2 text-gray-800 break-words">
-                  {v === null || v === undefined ? <span className="text-gray-300">—</span>
-                    : typeof v === 'object' ? <code className="text-xs">{JSON.stringify(v)}</code>
-                    : String(v)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </>
-  );
-}
-
-export function JsonPopover({ json, variant, emptyLabel }) {
+export function UsuariosPopover({ json, emptyLabel }) {
   const [open, setOpen] = useState(false);
   const [rect, setRect] = useState(null);
   const btnRef = useRef(null);
-  const parsed = parseJson(json);
-
-  const invalid = parsed === undefined;
-  const items = variant === 'usuarios' ? (Array.isArray(parsed) ? parsed : []) : [];
-  const count = variant === 'usuarios'
-    ? items.length
-    : (parsed && typeof parsed === 'object' ? Object.keys(parsed).length : 0);
-
-  const Icon = variant === 'usuarios' ? Users : FileJson;
-  const colorClass = variant === 'usuarios'
-    ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-    : 'bg-sky-50 text-sky-700 hover:bg-sky-100';
+  const items = parseUsuarios(json);
 
   const handleOpen = () => {
     if (!btnRef.current) return;
@@ -143,11 +103,11 @@ export function JsonPopover({ json, variant, emptyLabel }) {
     setOpen(true);
   };
 
-  if (invalid) {
+  if (items === undefined) {
     return <span className="text-xs text-red-500">(inválido)</span>;
   }
 
-  if (count === 0) {
+  if (items.length === 0) {
     return <span className="text-xs text-gray-300">{emptyLabel || '—'}</span>;
   }
 
@@ -158,16 +118,14 @@ export function JsonPopover({ json, variant, emptyLabel }) {
         onClick={handleOpen}
         aria-haspopup="dialog"
         aria-expanded={open}
-        className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-semibold transition-colors ${colorClass} focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-emerald-400`}
+        className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-semibold transition-colors bg-emerald-50 text-emerald-700 hover:bg-emerald-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-emerald-400"
       >
-        <Icon size={12} />
-        <span>{count}</span>
+        <Users size={12} />
+        <span>{items.length}</span>
       </button>
       {open && (
         <PopoverPanel anchorRect={rect} onClose={() => setOpen(false)}>
-          {variant === 'usuarios'
-            ? <UsuariosContent items={items} onClose={() => setOpen(false)} />
-            : <CamposContent obj={parsed} onClose={() => setOpen(false)} />}
+          <UsuariosContent items={items} onClose={() => setOpen(false)} />
         </PopoverPanel>
       )}
     </>
