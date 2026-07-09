@@ -23,8 +23,9 @@ export async function hasPermisoBitacora(sesion, bitacora_id, accion = 'puede_cr
   return !!r.recordset[0]?.ok;
 }
 
-// Puede cerrar turno y editar cualquier registro: hoy, Ingeniero Jefe de Turno e Ingeniero de Operación.
-// El flag vive en lov_bit.cargo.puede_cerrar_turno; loadSession() lo trae en la sesión.
+// Puede cerrar/extender/reabrir el turno de la unidad: hoy, Ingeniero Jefe de Turno e Ingeniero de
+// Operación. El flag vive en lov_bit.cargo.puede_cerrar_turno; loadSession() lo trae en la sesión.
+// D-049: este flag ya NO otorga edición/eliminación de registros ajenos (ver canEditarRegistro).
 export function puedeCerrarTurno(sesion) {
   return !!sesion && sesion.puede_cerrar_turno === true;
 }
@@ -42,11 +43,19 @@ export function turnoFinalizado(sesion) {
   return !!sesion && finalizacionVigente(sesion.turno_finalizado_en);
 }
 
+// D-049: política "solo el autor" para bitácoras GENÉRICAS. Editar o eliminar un registro exige,
+// todas a la vez: (1) misma planta que la sesión, (2) ser el AUTOR (`creado_por`) y (3) conservar
+// permiso de creación vigente (`puede_crear`) en esa bitácora. Se ELIMINÓ el bypass histórico de
+// `puede_cerrar_turno` (JdT/IngOp podían editar/borrar cualquier registro ajeno): un cargo con solo
+// `puede_ver` es estrictamente lectura, y NADIE tiene excepción — tampoco el rol ADMIN (cero bypass,
+// coherente con D-039). DISP/MAND/COMB no pasan por acá: tienen endpoints propios gateados por
+// `puede_crear` (edición colaborativa por diseño).
+// Este helper es el ENFORCEMENT (PUT/DELETE /api/registros/:id); el GET /api/registros/activos
+// expone su espejo por fila (`puede_editar`) solo como affordance de UI — mantener ambos alineados.
 export async function canEditarRegistro(sesion, registro) {
   if (!sesion || !registro) return false;
   if (registro.planta_id && registro.planta_id !== sesion.planta_id) return false;
-  if (registro.creado_por === sesion.usuario_id) return true;
-  if (puedeCerrarTurno(sesion)) return true;
+  if (registro.creado_por !== sesion.usuario_id) return false;
   return hasPermisoBitacora(sesion, registro.bitacora_id, 'puede_crear');
 }
 

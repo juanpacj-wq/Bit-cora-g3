@@ -69,6 +69,7 @@ router.use(loadAppSession);
 
 // GET /api/registros/activos?planta_id=&bitacora_id=&estado=
 router.get('/activos', asyncH(async (req, res) => {
+  const sesion = req.sesion;
   const planta_id = req.query.planta_id;
   const bitacora_id = req.query.bitacora_id;
   const estado = req.query.estado;
@@ -79,16 +80,28 @@ router.get('/activos', asyncH(async (req, res) => {
   if (planta_id) { reqQ.input('planta_id', sql.VarChar(10), planta_id); where.push('r.planta_id = @planta_id'); }
   if (bitacora_id) { reqQ.input('bitacora_id', sql.Int, parseInt(bitacora_id, 10)); where.push('r.bitacora_id = @bitacora_id'); }
   if (estado) { reqQ.input('estado', sql.VarChar(20), estado); where.push('r.estado = @estado'); }
+  // D-049: `puede_editar` es el espejo por fila de canEditarRegistro (autor + misma planta +
+  // puede_crear vigente del cargo de la sesión) para que la grilla pinte lápiz/basurero desde la
+  // verdad del servidor. Es SOLO affordance de UI: el enforcement real sigue en PUT/DELETE.
+  reqQ.input('ses_usuario', sql.Int, sesion.usuario_id);
+  reqQ.input('ses_planta', sql.VarChar(10), sesion.planta_id);
+  reqQ.input('ses_cargo', sql.Int, sesion.cargo_id);
   const result = await reqQ.query(`
     SELECT r.*,
            b.nombre AS bitacora_nombre, b.codigo AS bitacora_codigo,
            te.nombre AS tipo_evento_nombre,
            autor.nombre_completo AS creado_por_nombre,
-           r.creado_por AS creado_por_id
+           r.creado_por AS creado_por_id,
+           CAST(CASE WHEN r.creado_por = @ses_usuario
+                      AND r.planta_id = @ses_planta
+                      AND COALESCE(perm.puede_crear, 0) = 1
+                 THEN 1 ELSE 0 END AS BIT) AS puede_editar
     FROM bitacora.registro_activo r
     INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
     INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = r.tipo_evento_id
     LEFT JOIN lov_bit.usuario autor ON autor.usuario_id = r.creado_por
+    LEFT JOIN lov_bit.cargo_bitacora_permiso perm
+      ON perm.cargo_id = @ses_cargo AND perm.bitacora_id = r.bitacora_id
     WHERE ${where.join(' AND ')}
     ORDER BY r.fecha_evento ASC
   `);
@@ -590,8 +603,13 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
   if (reg.estado !== 'borrador') {
     return sendJSON(res, 409, { error: 'Solo se pueden editar registros en borrador' });
   }
+  // D-049: solo el autor (con puede_crear vigente) edita. Código estable para que el front ramifique.
   if (!(await canEditarRegistro(sesion, reg))) {
-    return sendJSON(res, 403, { error: 'Sin permiso para editar este registro' });
+    return sendJSON(res, 403, {
+      error: 'Solo el autor de este registro puede editarlo',
+      codigo: 'solo_autor',
+      mensaje: 'Solo el autor de este registro puede editarlo.',
+    });
   }
   // R3: día futuro bloqueado (slug `fecha_futura`, paridad COMB) + guard de 5 min intra-día.
   if (fecha_evento) {
@@ -753,8 +771,13 @@ router.delete('/:id(\\d+)', asyncH(async (req, res) => {
   if (reg.estado !== 'borrador') {
     return sendJSON(res, 409, { error: 'Solo se pueden eliminar registros en borrador' });
   }
+  // D-049: solo el autor (con puede_crear vigente) elimina. Código estable para que el front ramifique.
   if (!(await canEditarRegistro(sesion, reg))) {
-    return sendJSON(res, 403, { error: 'Sin permiso para eliminar este registro' });
+    return sendJSON(res, 403, {
+      error: 'Solo el autor de este registro puede eliminarlo',
+      codigo: 'solo_autor',
+      mensaje: 'Solo el autor de este registro puede eliminarlo.',
+    });
   }
 
   const del = await db.request()

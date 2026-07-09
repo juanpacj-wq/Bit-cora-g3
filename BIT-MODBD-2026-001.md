@@ -208,7 +208,7 @@ INSERT INTO lov_bit.usuario (nombre_completo, username, email, es_jefe_planta, e
 
 - Se asigna a **un único usuario global** por diseño (hoy: Omar Fedullo). No se expande a más usuarios.
 - Si se setea a `1` en N usuarios, `snapshotJDTs()` devolverá a los N como fallback (lista, sin prioridad ni filtro por planta). Esto ensucia el audit trail, no lo mejora.
-- Los **permisos operativos** (cerrar turno, editar cualquier registro) viven en `lov_bit.cargo.puede_cerrar_turno`, no aquí. `puede_cerrar_turno=1` en *Ingeniero Jefe de Turno* y en *Ingeniero de Operación* — son iguales para permisos, distintos para identidad.
+- El **permiso operativo de cerrar/extender/reabrir turno** vive en `lov_bit.cargo.puede_cerrar_turno`, no aquí. `puede_cerrar_turno=1` en *Ingeniero Jefe de Turno* y en *Ingeniero de Operación* — son iguales para permisos, distintos para identidad. (D-049: ese flag ya NO otorga edición/eliminación de registros ajenos; editar/borrar un registro genérico es exclusivo de su autor con `puede_crear` vigente.)
 - Cuando un IngOp crea un registro sin JdT en sesión, `ingenieros_snapshot` captura al IngOp real; `jdts_snapshot` contendrá al usuario con `es_jdt_default=1` como fallback. La trazabilidad del creador está intacta; la "firma" JdT es cosmética.
 - Auditoría sugerida: ejecutar `server/sql/audit_fallback_jdt.sql` mensualmente para detectar registros con fallback activo.
 

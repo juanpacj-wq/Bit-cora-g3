@@ -49,8 +49,8 @@ Roles operativos. Los IDs son convención del seed:
 
 | `cargo_id` | Nombre canónico | Permisos típicos |
 |---|---|---|
-| 1 | Ingeniero Jefe de Turno (JdT) | Crear/editar/cerrar en la mayoría de bitácoras. Es el coordinador del turno. |
-| 2 | Ingeniero de Operación (IngOp) | Crear/editar en operativa. Cierra turno propio. |
+| 1 | Ingeniero Jefe de Turno (JdT) | Ve todas las bitácoras; crea en SALA/DISP/MAND/COMB. Cierra/extiende/reabre el turno de la unidad. Es el coordinador del turno. Solo edita/borra sus propios registros (D-049). |
+| 2 | Ingeniero de Operación (IngOp) | Mismos permisos que el JdT (filas idénticas en la matriz): ve todo, crea en SALA/DISP/MAND/COMB, cierra turno. Solo edita/borra sus propios registros (D-049). |
 | 3 | Ingeniero Químico | Visualizador. Crea en su bitácora de laboratorio. |
 | 4+ | Jefes de Planta, Gerencia, Otros | Visualizadores universales, audit access. |
 

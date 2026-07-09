@@ -779,6 +779,38 @@ edita COMB (regenerar en la próxima pasada). Cross-ref: [[D-027]] (módulo COMB
 
 ---
 
+## D-049 — Edición/eliminación de registros genéricos: SOLO el autor (se retira el bypass JdT/IngOp)
+
+**Fecha:** 2026-07-08
+
+**Contexto:** `canEditarRegistro` (gate de `PUT/DELETE /api/registros/:id`) permitía a cualquier cargo con
+`puede_cerrar_turno=1` (JdT, IngOp y ADMIN) editar y **borrar físicamente** registros ajenos en CUALQUIER
+bitácora, incluidas aquellas donde solo tienen `puede_ver` (CALDERA, ANAL, AGUA, TURBO, MAQU, CYC, QUIM).
+El bypass venía del diseño original (`isJdT()`, generalizado en el commit `c36e573`) y contradecía RF-022
+(edición: solo cargos con `puede_crear`); el DELETE además no deja rastro (borrado físico sin CIET). El
+front agravaba el hueco: el gate por fila de la grilla mostraba Editar/Eliminar a cualquier viewer y el
+"Ver detalle" entraba en modo edición.
+
+**Decisión:** política **"solo el autor"** para bitácoras genéricas. `canEditarRegistro` exige (1) misma
+planta, (2) `creado_por = usuario de la sesión` y (3) `puede_crear` vigente en la bitácora — sin excepción
+para JdT/IngOp ni ADMIN (cero bypass; coherente con [[D-039]]). DISP/MAND/COMB quedan fuera: endpoints
+propios gateados por `puede_crear` (edición colaborativa por diseño). El GET `/api/registros/activos`
+expone el espejo por fila **`puede_editar`** (advisory, misma regla en SQL) y la grilla renderiza
+lápiz/basurero SOLO desde ese flag — la UI nunca decide; en filas ajenas el ojo "Ver detalle" expande la
+descripción en lectura (ya no abre inputs). Los 403 llevan `codigo: 'solo_autor'` (D-032).
+
+**Consecuencias:** (a) JdT/IngOp conservan cierre/extensión/reapertura de turno, MAND, DISP, COMB y
+`finalizar-forzado` — solo pierden la edición/borrado de registros ajenos; en SALA (compartida con el
+Op. SDM) cada quien edita únicamente lo suyo. (b) Cargos con solo `puede_ver` (Gerente, IngQuímico fuera
+de QUIM) dejan de ver affordances de edición que morían en 403. (c) Un borrador cuyo autor no está queda
+intacto hasta el cierre de turno (archivado normal) — no hay "edición delegada"; si se necesitara, sería
+una decisión nueva. (d) Tests: `registros_solo_autor.test.js` (autor 200; no-autor con permiso 403;
+regresión del bypass JdT/IngOp 403; Gerente 403; espejo del GET). (e) RF-022/RF-023 actualizados a la
+política de autoría. Cross-ref: [[D-032]] (códigos estables), [[D-039]] (ADMIN sin bypass), [[D-048]]
+(COMB solo JdT/IngOp).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

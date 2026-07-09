@@ -1276,7 +1276,9 @@ function BarraEstado({
 // Grilla
 // ============================================================
 
-function GrillaRegistros({
+// Exportada con nombre SOLO para tests de componente (grilla-solo-autor-gate.test.jsx, D-049).
+// El único consumidor de producción sigue siendo el App default de este archivo.
+export function GrillaRegistros({
   registros, bitacora, tiposEvento, jefeNombre, jdtNombre,
   puedeCrear, bloqueado = false, onUpdateLocal, onSaveRegistro, onDeleteRegistro,
   filtroTexto, filtroTipo, filtroFecha, filtroTurno, onLimpiarFiltros,
@@ -1388,30 +1390,40 @@ function GrillaRegistros({
               <div className="col-span-1">Estado</div>
               <div className="col-span-2 text-right">Acciones</div>
             </div>
-            {regs.map((reg, idx) => (
-              <RegistroRow
-                key={reg.registro_id || reg._localId}
-                numero={idx + 1}
-                registro={reg}
-                tiposEvento={tiposEvento}
-                jefeNombre={jefeNombre}
-                jdtNombre={jdtNombre}
-                camposExtraDef={camposExtraDef}
-                isEditing={!bloqueado && (editingId === (reg.registro_id || reg._localId) || (reg._dirty && !reg.registro_id))}
-                onStartEdit={() => { if (!bloqueado) setEditingId(reg.registro_id || reg._localId); }}
-                onCancelEdit={() => setEditingId(null)}
-                onUpdate={(campo, valor) => onUpdateLocal(reg.registro_id || reg._localId, campo, valor)}
-                onSave={async () => {
-                  const ok = await onSaveRegistro(reg);
-                  if (ok) setEditingId(null);
-                }}
-                onDelete={() => onDeleteRegistro(reg)}
-                puedeEditar={!bloqueado && (reg.estado === "borrador" || !reg.registro_id)}
-                bloqueado={bloqueado}
-                bitacoraCodigo={bitacora?.codigo}
-                showToast={showToast}
-              />
-            ))}
+            {regs.map((reg, idx) => {
+              const rowId = reg.registro_id || reg._localId;
+              // D-049 (solo el autor): un registro guardado solo es editable por su autor con
+              // permiso de creación vigente. Eso lo computa el backend por fila (`puede_editar`,
+              // espejo de canEditarRegistro) — acá solo se renderiza, nunca se decide. Un borrador
+              // local (sin registro_id) siempre es editable: es del propio usuario y aún no existe
+              // en el servidor.
+              const editable = !bloqueado
+                && (!reg.registro_id || (reg.estado === "borrador" && !!reg.puede_editar));
+              return (
+                <RegistroRow
+                  key={rowId}
+                  numero={idx + 1}
+                  registro={reg}
+                  tiposEvento={tiposEvento}
+                  jefeNombre={jefeNombre}
+                  jdtNombre={jdtNombre}
+                  camposExtraDef={camposExtraDef}
+                  isEditing={editable && (editingId === rowId || (reg._dirty && !reg.registro_id))}
+                  onStartEdit={() => { if (editable) setEditingId(rowId); }}
+                  onCancelEdit={() => setEditingId(null)}
+                  onUpdate={(campo, valor) => onUpdateLocal(rowId, campo, valor)}
+                  onSave={async () => {
+                    const ok = await onSaveRegistro(reg);
+                    if (ok) setEditingId(null);
+                  }}
+                  onDelete={() => onDeleteRegistro(reg)}
+                  puedeEditar={editable}
+                  bloqueado={bloqueado}
+                  bitacoraCodigo={bitacora?.codigo}
+                  showToast={showToast}
+                />
+              );
+            })}
           </div>
         )}
       </div>
@@ -1446,6 +1458,11 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
   const { mejorar, mejorando } = useMejorarTexto();
   const [textoPrevio, setTextoPrevio] = useState(null);
   useEffect(() => { if (!isEditing) setTextoPrevio(null); }, [isEditing]);
+
+  // D-049: "Ver detalle" en filas NO editables (registro ajeno o cargo solo-lectura) expande la
+  // descripción completa en modo LECTURA — ya no entra en modo edición (antes abría los inputs y el
+  // Guardar moría con 403; affordance engañoso).
+  const [expandido, setExpandido] = useState(false);
 
   const handleMejorar = async () => {
     const original = (reg.detalle || "").trim();
@@ -1630,7 +1647,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
               </div>
             </>
           ) : (
-            <p className="text-sm text-gray-700 leading-relaxed line-clamp-2">
+            <p className={`text-sm text-gray-700 leading-relaxed ${expandido ? "" : "line-clamp-2"}`}>
               {reg.detalle || <span className="text-gray-400 italic">Sin descripción</span>}
             </p>
           )}
@@ -1704,7 +1721,12 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
                   <Edit3 size={16} />
                 </button>
               ) : (
-                <button onClick={onStartEdit} className="p-2 rounded-lg text-gray-500 bg-gray-50 hover:bg-gray-100 transition-colors" title="Ver detalle">
+                /* D-049: solo lectura — expande/contrae la descripción, no entra en edición. */
+                <button
+                  onClick={() => setExpandido((v) => !v)}
+                  className={`p-2 rounded-lg transition-colors ${expandido ? "text-blue-700 bg-blue-50 hover:bg-blue-100" : "text-gray-500 bg-gray-50 hover:bg-gray-100"}`}
+                  title={expandido ? "Contraer detalle" : "Ver detalle completo"}
+                >
                   <Eye size={16} />
                 </button>
               )}
@@ -1881,8 +1903,10 @@ export default function App() {
 
   const cargoNombre = catalogos.cargos.find((c) => c.cargo_id === sesion?.cargo_id)?.nombre || "";
   const plantaNombre = catalogos.plantas.find((p) => p.planta_id === sesion?.planta_id)?.nombre || sesion?.planta_id || "";
-  // Puede cerrar turno y editar cualquier registro — hoy: Ingeniero Jefe de Turno e Ingeniero de Operación.
-  // El flag lo trae loadSession() desde lov_bit.cargo.puede_cerrar_turno (desacoplado del nombre del cargo).
+  // Puede cerrar/extender/reabrir el turno — hoy: Ingeniero Jefe de Turno e Ingeniero de Operación.
+  // El flag lo trae loadSession() desde lov_bit.cargo.puede_cerrar_turno (desacoplado del nombre del
+  // cargo). D-049: ya NO implica editar/borrar registros ajenos — eso lo decide el backend por fila
+  // (`registro.puede_editar`: solo el autor con puede_crear vigente).
   const esJefeTurno = !!sesion?.puede_cerrar_turno;
 
   const permisoActivo = catalogos.permisos.find((p) => p.bitacora_id === activeBitacora);

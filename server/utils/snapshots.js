@@ -12,11 +12,12 @@ const toJSON = (rows) =>
 
 // snapshotJDTs captura qué Ingenieros Jefes de Turno estaban en sesión activa cuando se creó
 // el registro. NOTA: `es_jdt_default` es sólo un fallback de identidad (hoy Omar Fedullo) para
-// poblar el snapshot cuando ningún JdT tiene sesión activa — NO es un flag de permiso. Los
-// permisos operativos (cerrar turno, editar cualquier registro) viven en
-// `lov_bit.cargo.puede_cerrar_turno`, que está en 1 tanto para 'Ingeniero Jefe de Turno' como
-// 'Ingeniero de Operación'. No expandir `es_jdt_default` a más usuarios sin evaluar impacto en
-// trazabilidad: un fallback con 20 nombres ensucia el audit trail más de lo que lo aclara.
+// poblar el snapshot cuando ningún JdT tiene sesión activa — NO es un flag de permiso. El permiso
+// operativo de cerrar/extender/reabrir turno vive en `lov_bit.cargo.puede_cerrar_turno`, que está
+// en 1 tanto para 'Ingeniero Jefe de Turno' como 'Ingeniero de Operación' (D-049: ese flag ya no
+// otorga edición de registros ajenos — la edición es solo del autor, ver canEditarRegistro).
+// No expandir `es_jdt_default` a más usuarios sin evaluar impacto en trazabilidad: un fallback
+// con 20 nombres ensucia el audit trail más de lo que lo aclara.
 export async function snapshotJDTs(reqFactory, { planta_id }) {
   const r = await reqFactory()
     .input('planta_id', sql.VarChar(10), planta_id)
