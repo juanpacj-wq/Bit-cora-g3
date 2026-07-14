@@ -1,6 +1,11 @@
 // D-047: contexto de rol por bitácora para el system prompt de "Mejorar con IA".
 // El codigo viene del catálogo lov_bit.bitacora (seed en db.js). El cliente NUNCA manda
 // el nombre/rol (solo el codigo): un nombre arbitrario sería inyección en el system prompt.
+//
+// D-052: `nombre` es un ESPEJO literal de lov_bit.bitacora.nombre (seed en db.js). Se duplica a
+// propósito: buildSystemPrompt debe ser puro (sin BD ni async) y el nombre jamás puede venir del
+// cliente. Si renombras una bitácora en el seed, actualiza también acá — el guard
+// `tests/catalogo_bitacoras.test.js` fija este espejo contra el catálogo y falla ante el drift.
 
 export const ROL_POR_BITACORA = {
   CALDERA: {
@@ -8,7 +13,7 @@ export const ROL_POR_BITACORA = {
     rol: 'un operador de planta con amplia experiencia en la operación de calderas de centrales de generación termoeléctrica a carbón (combustión, nivel de domo, sopladores de hollín, ventiladores de tiro, atemperación de vapor)',
   },
   ANAL: {
-    nombre: 'Análisis',
+    nombre: 'Analista',
     rol: 'un analista de laboratorio de una central termoeléctrica, experto en análisis fisicoquímicos de aguas, vapor, carbón y caliza',
   },
   SALA: {

@@ -885,6 +885,42 @@ el backend es la fuente de verdad). Prod auditada 2026-07-09: 2 filas DISP, amba
 
 ---
 
+## D-052 — La bitácora ANAL se llama "Analista" (la etiqueta vive solo en el seed)
+
+**Fecha:** 2026-07-14
+
+**Contexto:** la bitácora `codigo='ANAL'` se sembraba con `nombre='Análisis'`, pero el resto del
+sistema ya la nombraba por el **puesto** y no por la actividad: el cargo `Operador de Planta -
+Analista` (el único con `puede_ver`/`puede_crear` sobre ANAL), su App Role de Entra
+`OPERADOR_PLANTA_ANALISTA` (D-031) y el rol IA ("un analista de laboratorio…", D-047). El sidebar
+mostraba "Análisis" mientras la persona que registra allí es el Analista — la etiqueta era la
+inconsistente. (Ortografía: "analista" es palabra llana terminada en vocal → sin tilde.)
+
+**Decisión:** renombrar **solo la etiqueta visible** — `lov_bit.bitacora.nombre = 'Analista'` en el
+seed MERGE de `db.js`. El `codigo='ANAL'` queda **intacto**: es la identidad estable de la bitácora
+(la matriz de permisos matchea por `b.codigo`, y los registros la referencian por `bitacora_id`).
+El rename aterriza por el `WHEN MATCHED … SET nombre` del MERGE, que corre en **cada arranque** →
+idempotente, sin migración one-shot ni `UPDATE` manual en prod. Fuente única: el seed. El front no
+cambia (es data-driven: `/api/catalogos/bitacoras` → `b.nombre`) y históricos/cierre/turno tampoco
+(resuelven la etiqueta por `JOIN … b.nombre`). La **única** copia literal del nombre es
+`utils/ia/prompts.js`, espejo deliberado (D-047: `buildSystemPrompt` debe ser puro y el nombre
+jamás puede venir del cliente) — se sincroniza y queda fijada por guard.
+
+**Consecuencias:** (a) el rename es **retroactivo en el histórico y eso es lo correcto**: un
+registro de marzo se muestra bajo "Analista" porque `registro_historico` referencia `bitacora_id`,
+no el texto. No se reescribe ningún dato ni se pierde trazabilidad — el identificador auditable
+sigue siendo `ANAL`. (b) **Permisos intactos por construcción**: la matriz de §2.6 nunca matchea la
+bitácora por nombre, así que renombrar no puede dejar un cargo sin su bitácora. (c) Nuevo guard
+`server/tests/catalogo_bitacoras.test.js`, **cableado a `npm test`** (`server/package.json`): fija
+ANAL='Analista', la ausencia del nombre anterior, el espejo `prompts.js` ↔ catálogo (ante drift
+falla nombrando el código y ambos valores) y la neutralidad de permisos. Verificado **en negativo**
+(drift inyectado a propósito → rojo; revertido). (d) Observación de auditoría, no tocada: el
+`INSERT` de bitácoras de `BIT-MODBD-2026-001.md` §2 es la draft original (códigos `CAL`, `SINC`,
+`TURB`, inexistentes en el catálogo real) — ya estaba superado por el seed de `db.js` y ni siquiera
+lista ANAL, así que el rename no lo afecta. Cross-ref: [[D-047]] (IA), [[D-031]] (App Roles).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

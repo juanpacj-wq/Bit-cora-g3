@@ -791,7 +791,11 @@ export async function initDB() {
     MERGE lov_bit.bitacora AS t
     USING (VALUES
       ('Caldera',                       'CALDERA',  'Flame',        0, NULL,  1, 1),
-      ('Análisis',                      'ANAL',     'TestTube',     0, NULL,  2, 1),
+      -- D-052: "Analista" (antes "Análisis"). Solo cambia la etiqueta visible: la identidad estable
+      -- es el codigo ANAL (la matriz de permisos matchea por él; los registros referencian
+      -- bitacora_id), por eso el rename es neutro para permisos. Este MERGE lo reaplica en cada
+      -- arranque (WHEN MATCHED ... SET nombre) — sin migración aparte. Espejo en utils/ia/prompts.js.
+      ('Analista',                      'ANAL',     'TestTube',     0, NULL,  2, 1),
       ('Sala de Mando Operativa',       'SALA',     'Monitor',      0, NULL,  3, 1),
       ('Planta de Agua',                'AGUA',     'Droplets',     0, NULL,  4, 1),
       ('Turbogrupo',                    'TURBO',    'Gauge',        0, NULL,  5, 1),
