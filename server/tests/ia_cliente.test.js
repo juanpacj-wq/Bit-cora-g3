@@ -72,8 +72,13 @@ describe('mejorarTexto — camino feliz', () => {
     }
   });
 
-  test('buildSystemPrompt cubre las 8 bitácoras genéricas del catálogo', () => {
-    for (const codigo of ['CALDERA', 'ANAL', 'SALA', 'AGUA', 'TURBO', 'MAQU', 'CYC', 'QUIM']) {
+  // D-053: eran 8 hasta que SALA se partió por rol (SALAJDT/SALAING/SALAOP). El espejo contra el
+  // catálogo real de BD lo fija catalogo_bitacoras.test.js (D-052); acá basta con que cada código
+  // genérico tenga rol y que su nombre llegue al prompt.
+  test('buildSystemPrompt cubre las 10 bitácoras genéricas del catálogo', () => {
+    for (const codigo of [
+      'CALDERA', 'ANAL', 'SALAJDT', 'SALAING', 'SALAOP', 'AGUA', 'TURBO', 'MAQU', 'CYC', 'QUIM',
+    ]) {
       assert.ok(ROL_POR_BITACORA[codigo], `falta rol para ${codigo}`);
       assert.match(buildSystemPrompt(codigo), new RegExp(ROL_POR_BITACORA[codigo].nombre));
     }

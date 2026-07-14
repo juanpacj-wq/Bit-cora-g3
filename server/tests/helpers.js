@@ -58,11 +58,23 @@ export async function call(method, path, { body, sesion_id } = {}) {
   return { status: res.status, data };
 }
 
+// D-030/D-044: el prefijo `test_` NO es cosmético — el seed de db.js (F-blindaje) marca
+// `es_sintetico=1` a todo username LIKE 'test\_%' en cada arranque, y ese flag es el chokepoint que
+// (a) excluye al usuario del builder de conformacion_turno (no contamina el histórico inmutable de
+// GEC3/GEC32) y (b) permite que deactivateSyntheticSessions() lo barra sin depender de una whitelist
+// de nombres. Un fixture nuevo SIEMPRE va con ese prefijo.
 const TEST_USERS = [
   { key: 'jdt',     nombre: 'Test JdT',      username: 'test_jdt',     jefe: 0, jdtd: 1 },
   { key: 'ingOp',   nombre: 'Test Ing Op',   username: 'test_ingop',   jefe: 0, jdtd: 0 },
   { key: 'gerente', nombre: 'Test Gerente',  username: 'test_gerente', jefe: 1, jdtd: 0 },
   { key: 'ingQuim', nombre: 'Test Ing Quim', username: 'test_ingquim', jefe: 0, jdtd: 0 },
+  // D-053: el split de Sala de Mando necesita dos cargos más como fixture de primera clase.
+  // - opSala: único cargo con puede_crear en SALAOP.
+  // - admin: el ÚNICO cargo con puede_crear en TODAS las bitácoras (D-039). Es lo que vuelve a hacer
+  //   posible el caso "no-autor CON permiso de creación" de registros_solo_autor, que antes dependía
+  //   de que SALA tuviera puede_crear compartido.
+  { key: 'opSala',  nombre: 'Test Op Sala',  username: 'test_opsala',  jefe: 0, jdtd: 0 },
+  { key: 'admin',   nombre: 'Test Admin',    username: 'test_admin',   jefe: 0, jdtd: 0 },
 ];
 
 const USER_CARGO = {
@@ -70,6 +82,8 @@ const USER_CARGO = {
   ingOp:   'Ingeniero de Operación',
   gerente: 'Gerente de Producción',
   ingQuim: 'Ingeniero Químico',
+  opSala:  'Operador de Planta - Sala de Mando',
+  admin:   'Administrador y Debugging',
 };
 
 export async function setupSessions({ planta = PLANTA_ID } = {}) {

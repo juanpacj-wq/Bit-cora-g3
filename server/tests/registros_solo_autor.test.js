@@ -15,7 +15,7 @@ import { periodoFromFechaBogota, turnoFromPeriodo } from '../utils/turno.js';
 
 const turnoAhora = () => turnoFromPeriodo(periodoFromFechaBogota(new Date()));
 
-let ctx, BIT_SALA, TIPO_SALA, BIT_QUIM, TIPO_QUIM;
+let ctx, BIT_SALAING, TIPO_SALAING, BIT_QUIM, TIPO_QUIM;
 
 // Igual que registros_turno_id: limpiar registros de los usuarios test en TST y desmontar las
 // cabeceras turno_unidad que el POST genérico abre en el borde (abrirTurnoSiFalta) — rompiendo
@@ -38,13 +38,23 @@ async function limpiar() {
 
 before(async () => {
   ctx = await setupSessions({ planta: TEST_PLANTA });
-  // SALA: bitácora genérica donde JdT e IngOp AMBOS tienen puede_crear → prueba que ni siquiera un
-  // par con permiso de creación puede tocar lo ajeno. QUIM: solo IngQuímico crea; JdT solo la ve →
-  // reproduce EXACTO el hallazgo (JdT editando/borrando en bitácora de un operador).
-  BIT_SALA = ctx.bitByCodigo.SALA;
+  // SALAING: bitácora genérica donde el IngOp (su dueño) y el ADMIN tienen AMBOS puede_crear → prueba
+  // que ni siquiera un cargo con permiso de creación puede tocar lo ajeno.
+  //
+  // Por qué el ADMIN y no el JdT (D-053): hasta D-053 el fixture era SALA, la ÚNICA bitácora del
+  // catálogo donde dos cargos operativos compartían puede_crear (JdT + IngOp). El split le dio a cada
+  // rol la suya, así que ese fixture DEJÓ DE EXISTIR: con el JdT, el test pasaría por la rama "sin
+  // permiso" y colapsaría en un duplicado del test 3 — verde, pero sin probar lo que dice probar.
+  // El ADMIN es hoy el único cargo con puede_crear en TODAS las bitácoras (D-039), así que restituye
+  // el caso y además fija la afirmación más fuerte de D-049: NADIE tiene excepción, tampoco el admin.
+  // NO cambies el ADMIN por un cargo sin puede_crear en esta bitácora: reintroducirías el falso verde.
+  //
+  // QUIM: solo IngQuímico crea; JdT solo la ve → reproduce EXACTO el hallazgo original de D-049
+  // (JdT editando/borrando en la bitácora de un operador).
+  BIT_SALAING = ctx.bitByCodigo.SALAING;
   BIT_QUIM = ctx.bitByCodigo.QUIM;
-  assert.ok(BIT_SALA && BIT_QUIM, 'bitácoras SALA y QUIM deben existir');
-  TIPO_SALA = await firstTipoEvento(BIT_SALA);
+  assert.ok(BIT_SALAING && BIT_QUIM, 'bitácoras SALAING y QUIM deben existir');
+  TIPO_SALAING = await firstTipoEvento(BIT_SALAING);
   TIPO_QUIM = await firstTipoEvento(BIT_QUIM);
   await limpiar();
 });
@@ -73,8 +83,8 @@ async function detalleActual(registro_id) {
   return r.recordset[0]?.detalle ?? null;
 }
 
-test('1. El autor edita y elimina su propio borrador (IngOp en SALA) → 200', async () => {
-  const id = await crearRegistro(ctx.sesiones.ingOp, BIT_SALA, TIPO_SALA);
+test('1. El autor edita y elimina su propio borrador (IngOp en SALAING) → 200', async () => {
+  const id = await crearRegistro(ctx.sesiones.ingOp, BIT_SALAING, TIPO_SALAING);
 
   const put = await call('PUT', `/api/registros/${id}`, {
     sesion_id: ctx.sesiones.ingOp,
@@ -87,17 +97,31 @@ test('1. El autor edita y elimina su propio borrador (IngOp en SALA) → 200', a
   assert.equal(await detalleActual(id), null, 'el registro debe haberse borrado');
 });
 
-test('2. No-autor CON puede_crear en la misma bitácora (JdT sobre registro de IngOp en SALA) → 403 solo_autor', async () => {
-  const id = await crearRegistro(ctx.sesiones.ingOp, BIT_SALA, TIPO_SALA);
+test('2. No-autor CON puede_crear en la misma bitácora (ADMIN sobre registro de IngOp en SALAING) → 403 solo_autor', async () => {
+  const id = await crearRegistro(ctx.sesiones.ingOp, BIT_SALAING, TIPO_SALAING);
+
+  // Precondición del fixture: si el ADMIN NO tuviera puede_crear acá, este test se degradaría a un
+  // duplicado del test 3 sin ponerse rojo. Se asserta explícitamente para que el falso verde sea
+  // imposible: el 403 de abajo tiene que venir de la autoría, no de la falta de permiso.
+  const db = await getDB();
+  const perm = await db.request()
+    .input('b', sql.Int, BIT_SALAING)
+    .query(`
+      SELECT p.puede_crear FROM lov_bit.cargo_bitacora_permiso p
+      JOIN lov_bit.cargo c ON c.cargo_id = p.cargo_id
+      WHERE c.nombre = 'Administrador y Debugging' AND p.bitacora_id = @b
+    `);
+  assert.equal(perm.recordset[0]?.puede_crear, true,
+    'PRECONDICIÓN: el ADMIN debe tener puede_crear en SALAING, si no este test no prueba nada');
 
   const put = await call('PUT', `/api/registros/${id}`, {
-    sesion_id: ctx.sesiones.jdt,
+    sesion_id: ctx.sesiones.admin,
     body: { detalle: `${TEST_TAG} intento ilegítimo` },
   });
   assert.equal(put.status, 403, `PUT esperaba 403, fue ${put.status} ${JSON.stringify(put.data)}`);
   assert.equal(put.data.codigo, 'solo_autor');
 
-  const del = await call('DELETE', `/api/registros/${id}`, { sesion_id: ctx.sesiones.jdt });
+  const del = await call('DELETE', `/api/registros/${id}`, { sesion_id: ctx.sesiones.admin });
   assert.equal(del.status, 403, `DELETE esperaba 403, fue ${del.status} ${JSON.stringify(del.data)}`);
   assert.equal(del.data.codigo, 'solo_autor');
 
@@ -123,7 +147,7 @@ test('3. Regresión del bypass puede_cerrar_turno: JdT con SOLO puede_ver (QUIM,
 });
 
 test('4. Cargo sin puede_crear ni cierre (Gerente) sobre registro ajeno → 403', async () => {
-  const id = await crearRegistro(ctx.sesiones.ingOp, BIT_SALA, TIPO_SALA);
+  const id = await crearRegistro(ctx.sesiones.ingOp, BIT_SALAING, TIPO_SALAING);
 
   const put = await call('PUT', `/api/registros/${id}`, {
     sesion_id: ctx.sesiones.gerente,
@@ -136,10 +160,10 @@ test('4. Cargo sin puede_crear ni cierre (Gerente) sobre registro ajeno → 403'
 });
 
 test('5. GET /activos espeja la política por fila (`puede_editar`): true para el autor, false para el resto', async () => {
-  const id = await crearRegistro(ctx.sesiones.ingOp, BIT_SALA, TIPO_SALA);
+  const id = await crearRegistro(ctx.sesiones.ingOp, BIT_SALAING, TIPO_SALAING);
 
   const comoAutor = await call('GET',
-    `/api/registros/activos?planta_id=${TEST_PLANTA}&bitacora_id=${BIT_SALA}`,
+    `/api/registros/activos?planta_id=${TEST_PLANTA}&bitacora_id=${BIT_SALAING}`,
     { sesion_id: ctx.sesiones.ingOp });
   assert.equal(comoAutor.status, 200, JSON.stringify(comoAutor.data));
   const filaAutor = comoAutor.data.registros.find((r) => r.registro_id === id);
@@ -147,7 +171,7 @@ test('5. GET /activos espeja la política por fila (`puede_editar`): true para e
   assert.equal(filaAutor.puede_editar, true, 'autor → puede_editar=true');
 
   const comoJdt = await call('GET',
-    `/api/registros/activos?planta_id=${TEST_PLANTA}&bitacora_id=${BIT_SALA}`,
+    `/api/registros/activos?planta_id=${TEST_PLANTA}&bitacora_id=${BIT_SALAING}`,
     { sesion_id: ctx.sesiones.jdt });
   assert.equal(comoJdt.status, 200, JSON.stringify(comoJdt.data));
   const filaJdt = comoJdt.data.registros.find((r) => r.registro_id === id);
