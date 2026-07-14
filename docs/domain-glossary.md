@@ -49,10 +49,15 @@ Roles operativos. Los IDs son convención del seed:
 
 | `cargo_id` | Nombre canónico | Permisos típicos |
 |---|---|---|
-| 1 | Ingeniero Jefe de Turno (JdT) | Ve todas las bitácoras; crea en SALA/DISP/MAND/COMB. Cierra/extiende/reabre el turno de la unidad. Es el coordinador del turno. Solo edita/borra sus propios registros (D-049). |
-| 2 | Ingeniero de Operación (IngOp) | Mismos permisos que el JdT (filas idénticas en la matriz): ve todo, crea en SALA/DISP/MAND/COMB, cierra turno. Solo edita/borra sus propios registros (D-049). |
+| 1 | Ingeniero Jefe de Turno (JdT) | Ve todas las bitácoras; crea en **SALAJDT**/DISP/MAND/COMB. Cierra/extiende/reabre el turno de la unidad. Es el coordinador del turno. Solo edita/borra sus propios registros (D-049). |
+| 2 | Ingeniero de Operación (IngOp) | Ve todo, cierra turno, crea en DISP/MAND/COMB — igual que el JdT **salvo en Sala de Mando**: desde D-053 cada uno escribe en la suya (IngOp → **SALAING**, JdT → SALAJDT) y en la del otro queda en solo-lectura. Ya **no** tienen filas idénticas en la matriz. Solo edita/borra sus propios registros (D-049). |
 | 3 | Ingeniero Químico | Visualizador. Crea en su bitácora de laboratorio. |
 | 4+ | Jefes de Planta, Gerencia, Otros | Visualizadores universales, audit access. |
+
+> El catálogo real tiene **13 cargos**, no 4 (esta tabla lista solo los transversales). La fuente
+> autoritativa es el `MERGE lov_bit.cargo` de `server/db.js` + el mapeo App Role → cargo de
+> `server/utils/entra-roles.js` (D-031). Los `cargo_id` son convención del seed, **no** son estables
+> entre BDs: la matriz de permisos matchea por `cargo.nombre`, nunca por id.
 
 Permisos efectivos viven en `lov_bit.cargo_bitacora_permiso (cargo_id, bitacora_id, puede_ver, puede_crear)`. La función `puedeCrear(sesion, bitacora_id)` en `server/middleware/permissions.js` resuelve a partir de ahí.
 

@@ -921,6 +921,67 @@ lista ANAL, así que el rename no lo afecta. Cross-ref: [[D-047]] (IA), [[D-031]
 
 ---
 
+## D-053 — La bitácora SALA se parte por rol: SALAJDT / SALAING / SALAOP
+
+**Fecha:** 2026-07-14
+
+**Contexto:** `SALA` ("Sala de Mando Operativa") era la **única bitácora del catálogo donde varios
+cargos compartían `puede_crear`**: Ingeniero Jefe de Turno, Ingeniero de Operación y Operador de
+Planta - Sala de Mando escribían todos en la misma grilla. Eso mezclaba tres responsabilidades
+operativas distintas en un solo hilo e impedía leer el histórico por rol.
+
+**Decisión:** una bitácora por rol — `SALAJDT` (crea solo el JdT), `SALAING` (solo el IngOp), `SALAOP`
+(solo el Op de Sala). Los demás cargos las ven en solo-lectura; `Administrador y Debugging` crea en las
+tres por la MISMA matriz data-driven (D-039, cero bypass). El Op de Sala **no ve** SALAJDT ni SALAING.
+`SALA` se **renombra** a `SALAJDT` conservando `bitacora_id=14`, `orden=3` y su `tipo_evento`: es la
+misma fila, así que su histórico no se mueve ni se reescribe. `SALAING`/`SALAOP` nacen nuevas y el seed
+de `tipo_evento` les siembra su `'Evento General'` propio. El rename va como **`UPDATE` previo al
+`MERGE`** (patrón `CAL`→`CALDERA`, "Paso 1" de `db.js`), NO dentro del `MERGE`: este matchea
+`ON t.codigo = s.codigo`, así que poner el código nuevo en el `VALUES` habría insertado una fila y
+dejado `SALA` huérfana con sus registros colgando.
+
+**Consecuencias:**
+(a) **Invariante roto a propósito:** JdT e IngOp **dejan de tener filas idénticas** en la matriz — se
+parte el `IN` compartido de `puede_crear`, preservando DISP para ambos. `db.js` y
+`docs/domain-glossary.md` afirmaban esa simetría ("mismo poder operativo"); corregidos. Se retira
+`'AUTH'` de esa cláusula: era código muerto (se siembra `activa=0` y la matriz filtra `activa=1`).
+(b) **Migración `F30.A1`** (one-shot, gateada por `migracion_aplicada`): reparte los registros por el
+cargo del autor. **El cargo NO se persiste** — `creado_por` es un `usuario_id` y el cargo se resuelve
+del App Role de Entra en cada login (`lov_bit.usuario` no tiene `cargo_id`; la auditoría de roles del
+login es un `console.log`). Se reconstruye **por evidencia**, en escalera: `turno_participante` →
+`conformacion_turno` (ambas por `turno_id`, exactas) → `sesion_activa` solo si el autor usó un único
+cargo. Política: **move-out por atribución positiva** — solo se mueve lo atribuible a IngOp/Op de Sala;
+lo demás (JdT, Admin, irresoluble) **no se toca** y se reporta en el log. **Sin `THROW` por
+ambigüedad**: tumbaría el arranque en prod. Se descartó la clave natural `(autor, planta, turno, fecha)`
+porque el turno 2 cruza medianoche y `fecha_operativa` es el día en que **arrancó** el turno.
+(c) **Gotcha permanente:** no existe FK ni CHECK que ate `registro.bitacora_id` ↔
+`tipo_evento.bitacora_id`, y **ninguna lectura lo verifica** (`registros.js` y `v_historico_busqueda`
+joinean `te` por `tipo_evento_id` a secas). Mover `bitacora_id` sin remapear `tipo_evento_id` produce
+filas que **se ven perfectas** y solo explotan al editarlas — con el dato corrupto ya en el histórico.
+Toda migración que mueva `bitacora_id` **debe remapear el tipo en el mismo statement**. Fijado por
+`guard_tipo_evento_coherente.test.js` (verificado en negativo).
+(d) **Excepción explícita a RF-032:** `F30.A1` hace `UPDATE` sobre `registro_historico` (append-only por
+convención organizativa, sin trigger). Las filas afectadas se respaldan en
+`bitacora.registro_historico_backup_D053` dentro de la misma transacción. **Esa tabla es residente: no
+se borra** — es el rastro de auditoría y habilita el rollback.
+(e) **Falso verde cerrado:** `registros_solo_autor` test 2 ("no-autor **CON** `puede_crear` → 403
+`solo_autor`") usaba SALA por ser el único fixture con `puede_crear` compartido. El split lo borraba
+del catálogo: el test habría seguido **verde** pasando por la rama "sin permiso". Reescrito con el rol
+**ADMIN** como no-autor (único cargo con `puede_crear` en todas), lo que además fija la afirmación más
+fuerte de [[D-049]]: nadie tiene excepción, tampoco el admin. Fixtures nuevos `test_opsala`/`test_admin`
+con `es_sintetico=1` (D-044/D-030).
+(f) **Front sin cambios**: es data-driven y el literal `'SALA'` no existía en `src/` (`SALA_DE_MANDOS`
+es la categoría "Despachos" = DISP+MAND, sin relación). Único añadido: alias `#/b/SALA` → `SALAJDT` en
+`appRoute.js`, porque un deep-link retirado no falla ni avisa — cae al fallback mudo
+`bitacorasPermitidas[0]` y `replaceState` borra la URL original.
+(g) **Prod:** `sql/snippets/reporte-split-sala-D053.sql` (solo lectura, guardrail de no-auto-ejecución)
+se corre **antes** del deploy y expone cuántos registros quedarían **sin atribuir**; ese número es la
+puerta de decisión. Luego el deploy + reinicio aplica todo en un arranque.
+Cross-ref: [[D-039]] (rol ADMIN), [[D-049]] (solo el autor), [[D-052]] (espejo `prompts.js` ↔ catálogo),
+[[D-031]] (cargo desde App Role), [[D-045]] (`turno_id`, fuente de la atribución).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

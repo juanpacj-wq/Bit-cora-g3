@@ -385,6 +385,21 @@ SELECT 4, bitacora_id, 1, 0 FROM lov_bit.bitacora;
 
 > **Nota D-039 (rol ADMIN):** se sembró el cargo `Administrador y Debugging` (App Role `ADMINISTRADOR_DEBUGGING`) con `solo_lectura=0`, `puede_cerrar_turno=1`. En la matriz canónica se agregó `WHEN c.nombre = 'Administrador y Debugging' THEN 1` como **primer WHEN** de `puede_ver` y `puede_crear` → ve+crea en TODAS las bitácoras activas. Acceso total data-driven, sin superusuario por código (toda acción atribuida). **Gotcha:** el override defensivo DISP (`db.js` F12.A6) recomputa `puede_crear` de toda fila DISP con un `CASE ... IN (...)`; el admin también se agregó a ese `IN` o quedaría en `puede_crear=0` en DISP. NO se añadió capacidad de hard-delete de registros cerrados/históricos (el modelo sigue append-only). Ver D-039.
 
+> **Nota D-053 (split de Sala de Mando) — rompe una simetría histórica:** hasta D-053, `Ingeniero Jefe de Turno` e `Ingeniero de Operación` tenían **filas idénticas** en esta matriz (mismo poder operativo; la distinción solo vivía en `cargo.nombre` para UI y snapshots). **Ya no.** `SALA` era la única bitácora con `puede_crear` compartido por varios cargos y se partió en una por rol:
+>
+> | Cargo | SALAJDT | SALAING | SALAOP |
+> |---|---|---|---|
+> | Administrador y Debugging | ver+crear | ver+crear | ver+crear |
+> | Ingeniero Jefe de Turno | **ver+crear** | ver | ver |
+> | Ingeniero de Operación | ver | **ver+crear** | ver |
+> | Ingeniero Químico / Gerente de Producción | ver | ver | ver |
+> | Operador de Planta - Sala de Mando | — | — | **ver+crear** |
+> | Resto de operadores + Coordinador CyM | — | — | — |
+>
+> El `IN ('DISP','AUTH','SALA')` de `puede_crear` se partió en dos cláusulas (`JdT → IN ('DISP','SALAJDT')`, `IngOp → IN ('DISP','SALAING')`), **preservando DISP para ambos** — hay test de regresión, porque el override F12.A6 recomputa toda fila DISP y un cargo fuera de su `IN` la perdería en silencio. Se retiró `'AUTH'`: era código muerto (se siembra `activa=0` y la matriz filtra `WHERE b.activa = 1`).
+>
+> **La bitácora `SALA` no se borró: se renombró a `SALAJDT`** conservando `bitacora_id=14`, `orden=3` y su `tipo_evento` — es la misma fila, así que su histórico no se movió. El rename va en el `UPDATE` del "Paso 1" de `db.js` (junto a `CAL`→`CALDERA`), **NUNCA dentro del `MERGE`**: este matchea `ON t.codigo = s.codigo` y habría insertado una fila nueva dejando `SALA` huérfana con sus registros colgando. Ver D-053 y §4.11.
+
 ---
 
 ### 2.7 `combustible` — catálogo por planta de Consumos (D-027)
@@ -1115,6 +1130,28 @@ CREATE OR ALTER VIEW bitacora.v_turno_seguimiento AS ...  -- turno_unidad + cerr
 
 ---
 
+### 4.11 `registro_historico_backup_D053` — respaldo del split de Sala de Mando (D-053)
+
+Tabla **residente**, creada por la migración one-shot `F30.A1` (`db.js`) con
+`SELECT * INTO … FROM bitacora.registro_historico WHERE bitacora_id = <SALAJDT>`, **dentro de la misma
+transacción** y antes del primer `UPDATE`. Copia exacta del esquema de §4.2 al momento del split.
+
+**Por qué existe.** `registro_historico` es append-only por **convención organizativa**, no por trigger
+(RF-032 lo dice explícito: *"el DDL no impone triggers de bloqueo de UPDATE/DELETE en esta versión"*).
+D-053 lo modifica para repartir los registros de Sala por el cargo de su autor — una **excepción
+deliberada**, no un permiso general. El respaldo es el rastro que la vuelve auditable y reversible.
+
+**Reglas:**
+- **NO se borra.** Es evidencia de auditoría y el único camino de rollback del reparto.
+- No la lee ninguna capa de la app: existe solo para inspección manual.
+- Su contraparte de verificación es `guard_tipo_evento_coherente.test.js`: tras cualquier movimiento
+  entre bitácoras, ningún registro puede quedar con un `tipo_evento_id` de otra bitácora.
+
+**Cross-ref:** ADR [[D-053]], §2.6 (matriz del split), RF-032. Pre-flight de prod (solo lectura):
+`sql/snippets/reporte-split-sala-D053.sql`.
+
+---
+
 ## 5. Integración con el Dashboard (esquema `bitacora`)
 
 El esquema expone dos tablas-puente independientes hacia el Dashboard de Generación:
@@ -1438,6 +1475,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 | 1.6 | 2026-05-19 | Conformación de turno (D-025). **Nueva §4.7** con DDL de `bitacora.conformacion_turno` (PK compuesta, FKs a usuario/planta/cargo, índice de lookup, columnas `*_bogota` calculadas vía F22.D2). Trigger híbrido: `turno-sweeper.js` extendido + catchup en `initDB()` para los últimos 7 días Bogotá. Endpoints `GET /api/conformacion-turno` y `POST /api/conformacion-turno/trigger`. **Fix retro:** `POST /api/auth/logout` ahora pobla `sesion_activa.cerrada_en = SYSUTCDATETIME()` (era deuda F2 nunca cerrada). **Filtro semántico del builder:** una sesión cuenta para el turno X si arrancó dentro de la ventana de X (derivación de D-003). Cobertura backend: 14 tests dirigidos en `conformacion_turno.test.js`. |
 | 1.7 | 2026-05-20 | Migración ER DISP (D-026). **Nueva §4.8** con DDL de `bitacora.disponibilidad_estado` (PK `disponibilidad_id`, columnas tipadas `estado`/`codigo`/`fecha_inicio_estado`/`fecha_fin_estado`, snapshot adicional `gerentes_produccion_snapshot`, filtered unique index `UQ_disp_estado_vigente_por_planta`, columnas Bogotá) + vista `v_disponibilidad_estado` (acumulados via window functions). §5.2 actualizada — `disponibilidad_dashboard` ahora es VIEW del vigente sobre la nueva tabla (preserva shape: `disponibilidad_id → registro_activo_id`, `jefes_planta_snapshot → jefes_snapshot`). §7.8 marcada como histórica. Vista `v_disp_intervalos` dropeada (las métricas suman `DATEDIFF_BIG` directo sobre la nueva tabla). Migración idempotente F26.A1 hace backfill + DELETE de rows DISP en `registro_activo`/`registro_historico`. Contratos HTTP y shape de response preservados (los tests existentes que validan via HTTP siguen verdes). |
 | 1.8 | 2026-05-21 | Consumos de Combustibles (D-027). **Nueva §2.7** `lov_bit.combustible` (catálogo por planta, 18 seeds: 8 GEC3 + 10 GEC32 con tipos `ALIMENTADOR/CALIZA/ACPM`). **Nueva §4.9** `bitacora.consumo_combustible` (long-format transaccional, `cantidad DECIMAL(12,3)`, UQ compuesto, columnas Bogotá) + vista `v_consumo_periodo` (pivot con `total_carbon_ton = SUM(tipo='ALIMENTADOR')`, `caliza_ton`, `acpm_gal`). §2.4 gana fila `COMB` (formulario_especial=1, icono Flame). §2.6 matriz extendida con CASE para COMB. Permisos: `Operador de Planta - Carbón y Caliza` + JdT crean; resto ven. Migración idempotente F26.B1 (ortogonal a F26.A1). Endpoints `GET /api/combustibles/catalogo`, `GET /api/combustibles/consumos`, `POST /api/combustibles/consumos` (batch atómico, regla D-019 paridad `modificado_por` solo si cantidad cambió). Frontend bajo `src/components/Combustibles/` integrado a categoría jerárquica nueva "Combustibles". 12 tests en `consumos_combustible.test.js`. |
+| 2.0 | 2026-07-14 | **Split de Sala de Mando por rol (D-053).** §2.4: la fila `SALA` ("Sala de Mando Operativa") se vuelve tres — `SALAJDT` (Sala de Mando - Jefe de Turno), `SALAING` (- Ing. de Operación), `SALAOP` (- Operador). **`SALA` NO se borró: se renombró a `SALAJDT`** conservando `bitacora_id=14`, `orden=3` y su `tipo_evento` (misma fila → su histórico no se movió); el rename va en el `UPDATE` del "Paso 1" de `db.js`, nunca dentro del `MERGE` (matchea por `codigo` → habría dejado la vieja huérfana). `orden` renumerado (AGUA 4→6 … MAND 12→14) para dejar las tres contiguas; el orden relativo se preserva. §2.6: **se rompe la simetría JdT/IngOp** (ya no tienen filas idénticas) — el `IN ('DISP','AUTH','SALA')` de `puede_crear` se parte en `JdT → IN ('DISP','SALAJDT')` e `IngOp → IN ('DISP','SALAING')`, preservando DISP para ambos; el `Operador de Planta - Sala de Mando` pasa a `SALAOP` y **no ve** las otras dos; `'AUTH'` retirado (código muerto: `activa=0` + la matriz filtra `activa=1`). **Nueva §4.11** `bitacora.registro_historico_backup_D053` (respaldo residente, excepción explícita a RF-032). Migración **F30.A1**: reparte `registro_activo`/`registro_historico` por el cargo del autor reconstruido por evidencia (`turno_participante`/`conformacion_turno` por `turno_id` → `sesion_activa` con cargo único), move-out por atribución positiva (lo no atribuible no se toca y se loguea), con remapeo **acoplado** de `tipo_evento_id` y validación `THROW` de integridad. Pre-flight de prod: `sql/snippets/reporte-split-sala-D053.sql` (solo lectura + guardrail). Tests: `split_sala_permisos.test.js` (matriz + regresión DISP), `guard_tipo_evento_coherente.test.js` (drift `tipo_evento_id` ↔ `bitacora_id`, el riesgo que ninguna FK ni lectura cubre), `registros_solo_autor` reescrito con ADMIN como no-autor. |
 | 1.9 | 2026-07-03 | Rol ADMIN (D-039). Cargo 13 `Administrador y Debugging` (App Role `ADMINISTRADOR_DEBUGGING`), `solo_lectura=0`, `puede_cerrar_turno=1`. §2.6 matriz extendida: cláusula `WHEN c.nombre='Administrador y Debugging' THEN 1` como primer WHEN de `puede_ver` y `puede_crear` → acceso total data-driven (ve+crea en toda bitácora activa), sin superusuario por código. Override defensivo DISP (F12.A6) incluye al admin en su `CASE ... IN (...)`. Sin hard-delete de históricos (append-only intacto). `entra-roles.js` mapea el App Role→cargo (1:1, 13 roles) y lo pone primero en `PRECEDENCE`. Tests: `entra_roles.test.js` (13 roles + precedencia) y `rol_admin_debugging.test.js` (matriz completa + regresión override DISP + idempotencia). |
 
 ---
