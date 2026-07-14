@@ -17,6 +17,14 @@ import { getTodayBogota } from '../utils/fecha';
 export const SLUG_BY_CODIGO = { MAND: 'op24h', DISP: 'disp', COMB: 'comb' };
 export const CODIGO_BY_SLUG = { op24h: 'MAND', disp: 'DISP', comb: 'COMB' };
 
+// D-053: códigos retirados → su sucesor. `parseHash` los traduce, `buildHash` nunca los emite (la
+// URL se reescribe al canónico). Sin esto un deep-link viejo no falla ni avisa: el `.find()` del
+// dashboard no matchea, cae al fallback mudo `bitacorasPermitidas[0]` y `replaceState` borra la URL
+// original — el usuario aterriza en otra bitácora sin entender por qué.
+// SALA se partió por rol (SALAJDT/SALAING/SALAOP); SALAJDT es la MISMA fila (bitacora_id=14
+// renombrada), así que es el sucesor correcto de un `#/b/SALA` guardado en favoritos.
+export const CODIGO_ALIAS = { SALA: 'SALAJDT' };
+
 // Dominio Gecelca: solo dos plantas físicas térmicas. Hardcode deliberado para no acoplar el
 // routing a un módulo de componentes (los tabs de DISP exponen ambas, independientes del login).
 const PLANTAS_VALIDAS = ['GEC3', 'GEC32'];
@@ -49,11 +57,12 @@ export function parseHash(hashString) {
 
   if (head === 'historicos') return { vista: 'historicos', codigo: null, params: {} };
 
-  // Genérica: #/b/<codigo>. El código se normaliza a mayúsculas (los códigos de bitácora lo son).
+  // Genérica: #/b/<codigo>. El código se normaliza a mayúsculas (los códigos de bitácora lo son) y
+  // se traduce si es un código retirado (D-053).
   if (head === 'b') {
-    const codigo = segments[1] ? segments[1].toUpperCase() : null;
-    if (!codigo) return fallback;
-    return { vista: 'bitacoras', codigo, params: {} };
+    const crudo = segments[1] ? segments[1].toUpperCase() : null;
+    if (!crudo) return fallback;
+    return { vista: 'bitacoras', codigo: CODIGO_ALIAS[crudo] || crudo, params: {} };
   }
 
   const codigo = CODIGO_BY_SLUG[head];

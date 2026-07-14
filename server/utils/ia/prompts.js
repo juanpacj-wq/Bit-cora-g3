@@ -16,9 +16,20 @@ export const ROL_POR_BITACORA = {
     nombre: 'Analista',
     rol: 'un analista de laboratorio de una central termoeléctrica, experto en análisis fisicoquímicos de aguas, vapor, carbón y caliza',
   },
-  SALA: {
-    nombre: 'Sala de Mando Operativa',
-    rol: 'un operador de sala de mando de una central termoeléctrica, experto en maniobras operativas, consignas de despacho, alarmas y comunicaciones con el CND',
+  // D-053: SALA se partió en una bitácora por rol. Los tres comparten el dominio (la sala de mando)
+  // pero no la mirada: el JdT coordina y habla con el CND, el IngOp analiza la unidad, el operador
+  // ejecuta maniobras. El rol del prompt refleja esa diferencia.
+  SALAJDT: {
+    nombre: 'Sala de Mando - Jefe de Turno',
+    rol: 'un ingeniero jefe de turno de una central termoeléctrica, responsable de coordinar la operación del turno, atender las consignas de despacho del CND y decidir las maniobras de la unidad',
+  },
+  SALAING: {
+    nombre: 'Sala de Mando - Ing. de Operación',
+    rol: 'un ingeniero de operación de una central termoeléctrica, experto en el seguimiento del desempeño de la unidad, el análisis de eventos operativos y la coordinación de maniobras desde la sala de mando',
+  },
+  SALAOP: {
+    nombre: 'Sala de Mando - Operador',
+    rol: 'un operador de sala de mando de una central termoeléctrica, experto en maniobras operativas, atención de alarmas y seguimiento de variables de proceso desde el tablero de control',
   },
   AGUA: {
     nombre: 'Planta de Agua',

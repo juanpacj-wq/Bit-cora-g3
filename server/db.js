@@ -755,10 +755,17 @@ export async function initDB() {
     END
   `);
 
-  // Paso 1: Renombrar códigos preservados (CAL→CALDERA, TURB→TURBO).
+  // Paso 1: Renombrar códigos preservados (CAL→CALDERA, TURB→TURBO, SALA→SALAJDT).
+  //
+  // OJO (D-053): estos renames van ACÁ y NUNCA dentro del MERGE de abajo. El MERGE matchea
+  // `ON t.codigo = s.codigo`: si el código nuevo se pusiera directo en el VALUES, no matchearía la
+  // fila vieja → INSERT de una fila nueva + la vieja huérfana con sus registros colgando. El UPDATE
+  // previo migra la identidad y deja al MERGE encontrarla por el código ya nuevo.
+  // Idempotentes: tras el primer arranque el WHERE no matchea nada.
   await db.request().batch(`
     UPDATE lov_bit.bitacora SET codigo='CALDERA' WHERE codigo='CAL';
     UPDATE lov_bit.bitacora SET codigo='TURBO'   WHERE codigo='TURB';
+    UPDATE lov_bit.bitacora SET codigo='SALAJDT' WHERE codigo='SALA';
   `);
 
   // Paso 2: Eliminar bitácoras obsoletas (SINC, ELEC, IC, MA) y sus dependencias.
@@ -796,16 +803,25 @@ export async function initDB() {
       -- bitacora_id), por eso el rename es neutro para permisos. Este MERGE lo reaplica en cada
       -- arranque (WHEN MATCHED ... SET nombre) — sin migración aparte. Espejo en utils/ia/prompts.js.
       ('Analista',                      'ANAL',     'TestTube',     0, NULL,  2, 1),
-      ('Sala de Mando Operativa',       'SALA',     'Monitor',      0, NULL,  3, 1),
-      ('Planta de Agua',                'AGUA',     'Droplets',     0, NULL,  4, 1),
-      ('Turbogrupo',                    'TURBO',    'Gauge',        0, NULL,  5, 1),
-      ('Maquinaria',                    'MAQU',     'Truck',        0, NULL,  6, 1),
-      ('Carbón y Caliza',               'CYC',      'Mountain',     0, NULL,  7, 1),
-      ('Disponibilidad',                'DISP',     'Activity',     1, @disp, 8, 1),
-      ('Autorizaciones',                'AUTH',     'FileCheck',    1, @auth, 9, 0),
-      ('Química',                       'QUIM',     'FlaskConical', 0, NULL, 10, 1),
-      ('Cierres y Finalizaciones',      'CIET',     'LogOut',       0, NULL, 11, 1),
-      ('Operación 24h',                 'MAND',     'LayoutGrid',   1, @mand,12, 1)
+      -- D-053: SALA ("Sala de Mando Operativa") era la ÚNICA bitácora del catálogo donde varios
+      -- cargos compartían puede_crear (JdT + IngOp + Op de Sala escribían en la misma grilla), lo que
+      -- mezclaba tres responsabilidades operativas e impedía leer el histórico por rol. Se parte en
+      -- una por rol. SALAJDT conserva bitacora_id=14 y orden=3: es la MISMA fila, renombrada por el
+      -- UPDATE del "Paso 1" de arriba (el MERGE matchea por codigo → el rename no puede ir acá).
+      -- Los iconos deben existir en ICON_MAP (src/BitacorasGecelca3.jsx): el 'Monitor' anterior no
+      -- estaba y caía al fallback genérico.
+      ('Sala de Mando - Jefe de Turno',    'SALAJDT', 'MonitorCog',   0, NULL,  3, 1),
+      ('Sala de Mando - Ing. de Operación','SALAING', 'Cpu',          0, NULL,  4, 1),
+      ('Sala de Mando - Operador',         'SALAOP',  'Settings',     0, NULL,  5, 1),
+      ('Planta de Agua',                'AGUA',     'Droplets',     0, NULL,  6, 1),
+      ('Turbogrupo',                    'TURBO',    'Gauge',        0, NULL,  7, 1),
+      ('Maquinaria',                    'MAQU',     'Truck',        0, NULL,  8, 1),
+      ('Carbón y Caliza',               'CYC',      'Mountain',     0, NULL,  9, 1),
+      ('Disponibilidad',                'DISP',     'Activity',     1, @disp,10, 1),
+      ('Autorizaciones',                'AUTH',     'FileCheck',    1, @auth,11, 0),
+      ('Química',                       'QUIM',     'FlaskConical', 0, NULL, 12, 1),
+      ('Cierres y Finalizaciones',      'CIET',     'LogOut',       0, NULL, 13, 1),
+      ('Operación 24h',                 'MAND',     'LayoutGrid',   1, @mand,14, 1)
     ) AS s(nombre, codigo, icono, formulario_especial, definicion_campos, orden, activa)
       ON t.codigo = s.codigo
     WHEN MATCHED THEN UPDATE SET
@@ -905,8 +921,10 @@ export async function initDB() {
   `);
 
   // Matriz de permisos (cargo × bitácora) derivada del Excel 2026.
-  // Nota clave: Ingeniero Jefe de Turno e Ingeniero de Operación tienen filas idénticas (mismo
-  // poder operativo). La distinción de rol se preserva por cargo.nombre en UI y snapshots.
+  // Nota clave (D-053): Ingeniero Jefe de Turno e Ingeniero de Operación YA NO tienen filas
+  // idénticas. Hasta D-053 compartían todo (mismo poder operativo) y la distinción de rol solo vivía
+  // en cargo.nombre para UI y snapshots; ahora cada uno escribe en su propia bitácora de Sala de
+  // Mando (SALAJDT vs SALAING). Siguen compartiendo el resto, incluido puede_crear en DISP.
   // Se reconstruye desde cero con DELETE + INSERT para limpiar combinaciones muertas.
   //
   // 2026-05-22: el bloque va envuelto en transacción explícita con `TABLOCKX, HOLDLOCK` sobre
@@ -943,7 +961,8 @@ export async function initDB() {
           -- Operadores sólo ven su propia bitácora
           WHEN c.nombre = 'Operador de Planta - Caldera'         THEN CASE WHEN b.codigo='CALDERA' THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador de Planta - Analista'        THEN CASE WHEN b.codigo='ANAL'    THEN 1 ELSE 0 END
-          WHEN c.nombre = 'Operador de Planta - Sala de Mando'   THEN CASE WHEN b.codigo='SALA'    THEN 1 ELSE 0 END
+          -- D-053: el Operador de Sala de Mando ve SOLO su bitácora (SALAOP), no las de JdT/IngOp.
+          WHEN c.nombre = 'Operador de Planta - Sala de Mando'   THEN CASE WHEN b.codigo='SALAOP'  THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador de Planta - Planta de Agua'  THEN CASE WHEN b.codigo='AGUA'    THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador de Planta - Turbogrupo'      THEN CASE WHEN b.codigo='TURBO'   THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador Maquinaria Pesada'           THEN CASE WHEN b.codigo='MAQU'    THEN 1 ELSE 0 END
@@ -970,14 +989,19 @@ export async function initDB() {
             CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN 1 ELSE 0 END
           -- Gerente no crea en nada
           WHEN c.nombre = 'Gerente de Producción'                THEN 0
-          -- JdT e IngOp crean en DISP, AUTH y SALA (Sala de Mando Operativa).
-          WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN CASE WHEN b.codigo IN ('DISP','AUTH','SALA') THEN 1 ELSE 0 END
+          -- D-053: JdT e IngOp dejan de compartir cláusula. Cada uno crea en DISP + SU bitácora de
+          -- Sala de Mando; en la del otro queda en solo-lectura (puede_ver=1 por su WHEN global).
+          -- Se retiró 'AUTH' del IN: es código muerto — AUTH se siembra activa=0 y esta matriz filtra
+          -- WHERE b.activa=1, así que nunca generaba fila.
+          WHEN c.nombre = 'Ingeniero Jefe de Turno'              THEN CASE WHEN b.codigo IN ('DISP','SALAJDT') THEN 1 ELSE 0 END
+          WHEN c.nombre = 'Ingeniero de Operación'               THEN CASE WHEN b.codigo IN ('DISP','SALAING') THEN 1 ELSE 0 END
           -- IngQuímico sólo crea en QUIM
           WHEN c.nombre = 'Ingeniero Químico'                    THEN CASE WHEN b.codigo='QUIM'    THEN 1 ELSE 0 END
           -- Operadores crean sólo en su propia bitácora (igual que puede_ver)
           WHEN c.nombre = 'Operador de Planta - Caldera'         THEN CASE WHEN b.codigo='CALDERA' THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador de Planta - Analista'        THEN CASE WHEN b.codigo='ANAL'    THEN 1 ELSE 0 END
-          WHEN c.nombre = 'Operador de Planta - Sala de Mando'   THEN CASE WHEN b.codigo='SALA'    THEN 1 ELSE 0 END
+          -- D-053: el Operador de Sala de Mando crea SOLO en su bitácora (SALAOP).
+          WHEN c.nombre = 'Operador de Planta - Sala de Mando'   THEN CASE WHEN b.codigo='SALAOP'  THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador de Planta - Planta de Agua'  THEN CASE WHEN b.codigo='AGUA'    THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador de Planta - Turbogrupo'      THEN CASE WHEN b.codigo='TURBO'   THEN 1 ELSE 0 END
           WHEN c.nombre = 'Operador Maquinaria Pesada'           THEN CASE WHEN b.codigo='MAQU'    THEN 1 ELSE 0 END
