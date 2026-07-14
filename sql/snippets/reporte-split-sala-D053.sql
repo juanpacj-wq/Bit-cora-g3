@@ -15,8 +15,14 @@
    desplegar, no durante.
 
    CÓMO SE CORRE
-   A mano, en SSMS, contra la BD de producción, ANTES del deploy. Nunca lo invoca initDB ni el CI
+   A mano, contra la BD de producción, ANTES del deploy. Nunca lo invoca initDB ni el CI
    (guard: server/tests/guard_reporte_split_sala_no_auto_ejecutable.test.js).
+
+   Portable entre SSMS, DBeaver y Azure Data Studio: NO usa `GO` (es un separador de lotes de
+   sqlcmd/SSMS, no T-SQL — DBeaver lo manda al servidor y da "Incorrect syntax near 'GO'") NI variables
+   `@sala` (son de ámbito de LOTE, y DBeaver manda cada sentencia por separado → "Must declare the
+   scalar variable"). Cada bloque es UNA sentencia autónoma que resuelve la bitácora en línea, así que
+   podés correr el archivo entero o seleccionar un bloque suelto y ejecutarlo.
 
    CÓMO LEERLO
    - Bloque 4: el desglose por destino = lo que hará F30.A1.
@@ -44,32 +50,38 @@ SELECT '1. Flag F30.A1' AS bloque,
             ELSE 'PENDIENTE — el reporte es válido' END AS estado;
 
 /* ---------------------------------------------------------------------------------------------
-   Origen: la bitácora de Sala. Resuelve tanto el nombre viejo (pre-deploy) como el nuevo
-   (post-deploy) para que el snippet sirva en los dos momentos.
+   El CTE `sala` (repetido en cada bloque) es el origen: la bitácora de Sala. Resuelve tanto el código
+   viejo (pre-deploy) como el nuevo (post-deploy) para que el snippet sirva en los dos momentos.
+   Se repite a propósito en vez de usar una variable: ver la nota de portabilidad en la cabecera.
    --------------------------------------------------------------------------------------------- */
-DECLARE @sala INT = (
-  SELECT TOP 1 bitacora_id FROM lov_bit.bitacora WHERE codigo IN ('SALA','SALAJDT') ORDER BY codigo
-);
 
 /* -- 2. Volumen ------------------------------------------------------------------------------- */
+WITH sala AS (
+  SELECT TOP 1 bitacora_id FROM lov_bit.bitacora WHERE codigo IN ('SALA','SALAJDT') ORDER BY codigo
+)
 SELECT '2. Volumen' AS bloque, 'registro_activo' AS tabla,
-       COUNT(*) AS registros, COUNT(DISTINCT creado_por) AS autores
-FROM bitacora.registro_activo WHERE bitacora_id = @sala
+       COUNT(*) AS registros, COUNT(DISTINCT r.creado_por) AS autores
+FROM bitacora.registro_activo r JOIN sala s ON s.bitacora_id = r.bitacora_id
 UNION ALL
 SELECT '2. Volumen', 'registro_historico',
-       COUNT(*), COUNT(DISTINCT creado_por)
-FROM bitacora.registro_historico WHERE bitacora_id = @sala;
+       COUNT(*), COUNT(DISTINCT r.creado_por)
+FROM bitacora.registro_historico r JOIN sala s ON s.bitacora_id = r.bitacora_id;
 
 /* ---------------------------------------------------------------------------------------------
    La escalera de atribución, idéntica a la de F30.A1 (db.js). Si cambiás una, cambiá la otra:
    este reporte solo vale si predice lo que la migración realmente hace.
    --------------------------------------------------------------------------------------------- */
-WITH universo AS (
-  SELECT registro_id, creado_por, turno_id, planta_id, turno, fecha_evento, 'activo' AS tabla
-  FROM bitacora.registro_activo WHERE bitacora_id = @sala
+
+/* -- 3. Qué escalón resuelve cada registro ---------------------------------------------------- */
+WITH sala AS (
+  SELECT TOP 1 bitacora_id FROM lov_bit.bitacora WHERE codigo IN ('SALA','SALAJDT') ORDER BY codigo
+),
+universo AS (
+  SELECT r.registro_id, r.creado_por, r.turno_id, r.planta_id, r.turno, r.fecha_evento, 'activo' AS tabla
+  FROM bitacora.registro_activo r JOIN sala s ON s.bitacora_id = r.bitacora_id
   UNION ALL
-  SELECT registro_id, creado_por, turno_id, planta_id, turno, fecha_evento, 'historico'
-  FROM bitacora.registro_historico WHERE bitacora_id = @sala
+  SELECT r.registro_id, r.creado_por, r.turno_id, r.planta_id, r.turno, r.fecha_evento, 'historico'
+  FROM bitacora.registro_historico r JOIN sala s ON s.bitacora_id = r.bitacora_id
 ),
 escalones AS (
   SELECT u.*,
@@ -81,14 +93,7 @@ escalones AS (
       WHERE sa.usuario_id = u.creado_por
       HAVING COUNT(DISTINCT sa.cargo_id) = 1)                          AS e3_cargo_unico
   FROM universo u
-),
-resuelto AS (
-  SELECT e.*,
-         COALESCE(e.e1_participante, e.e2_conformacion, e.e3_cargo_unico) AS cargo_id
-  FROM escalones e
 )
-
-/* -- 3. Qué escalón resuelve cada registro ---------------------------------------------------- */
 SELECT '3. Escalón que resuelve' AS bloque,
        CASE
          WHEN e1_participante IS NOT NULL THEN '1 - turno_participante (evidencia exacta)'
@@ -97,29 +102,25 @@ SELECT '3. Escalón que resuelve' AS bloque,
          ELSE                                  '4 - SIN ATRIBUIR (se queda en SALAJDT)'
        END AS escalon,
        COUNT(*) AS registros
-FROM resuelto
+FROM escalones
 GROUP BY CASE
          WHEN e1_participante IS NOT NULL THEN '1 - turno_participante (evidencia exacta)'
          WHEN e2_conformacion IS NOT NULL THEN '2 - conformacion_turno (evidencia exacta)'
          WHEN e3_cargo_unico  IS NOT NULL THEN '3 - sesion_activa (cargo único del autor)'
          ELSE                                  '4 - SIN ATRIBUIR (se queda en SALAJDT)'
        END;
-GO
 
-/* ---------------------------------------------------------------------------------------------
-   Bloques 4-6: hay que re-declarar (el GO cierra el batch). Mismo CTE.
-   --------------------------------------------------------------------------------------------- */
-SET NOCOUNT ON;
-DECLARE @sala INT = (
+/* -- 4. DESGLOSE POR DESTINO = lo que hará F30.A1 ---------------------------------------------
+   Regla: solo IngOp y Op de Sala se MUEVEN. Todo lo demás (JdT, Admin, sin atribuir) se queda.  */
+WITH sala AS (
   SELECT TOP 1 bitacora_id FROM lov_bit.bitacora WHERE codigo IN ('SALA','SALAJDT') ORDER BY codigo
-);
-
-WITH universo AS (
-  SELECT registro_id, creado_por, turno_id, planta_id, turno, fecha_evento, 'activo' AS tabla
-  FROM bitacora.registro_activo WHERE bitacora_id = @sala
+),
+universo AS (
+  SELECT r.registro_id, r.creado_por, r.turno_id, r.planta_id, r.turno, r.fecha_evento, 'activo' AS tabla
+  FROM bitacora.registro_activo r JOIN sala s ON s.bitacora_id = r.bitacora_id
   UNION ALL
-  SELECT registro_id, creado_por, turno_id, planta_id, turno, fecha_evento, 'historico'
-  FROM bitacora.registro_historico WHERE bitacora_id = @sala
+  SELECT r.registro_id, r.creado_por, r.turno_id, r.planta_id, r.turno, r.fecha_evento, 'historico'
+  FROM bitacora.registro_historico r JOIN sala s ON s.bitacora_id = r.bitacora_id
 ),
 resuelto AS (
   SELECT u.*,
@@ -134,9 +135,6 @@ resuelto AS (
          ) AS cargo_id
   FROM universo u
 )
-
-/* -- 4. DESGLOSE POR DESTINO = lo que hará F30.A1 ---------------------------------------------
-   Regla: solo IngOp y Op de Sala se MUEVEN. Todo lo demás (JdT, Admin, sin atribuir) se queda.  */
 SELECT '4. Destino' AS bloque,
        r.tabla,
        ISNULL(c.nombre, '(cargo no resuelto)') AS cargo_autor,
@@ -150,19 +148,19 @@ FROM resuelto r
 LEFT JOIN lov_bit.cargo c ON c.cargo_id = r.cargo_id
 GROUP BY r.tabla, c.nombre
 ORDER BY r.tabla, cargo_autor;
-GO
 
-SET NOCOUNT ON;
-DECLARE @sala INT = (
+/* -- 5. EL NÚMERO QUE DECIDE ------------------------------------------------------------------
+   Si `sin_atribuir` = 0 → la migración es 100% automática, desplegá tranquilo.
+   Si > 0 → esos registros se quedarán en SALAJDT. Decidí ANTES del deploy si es aceptable.      */
+WITH sala AS (
   SELECT TOP 1 bitacora_id FROM lov_bit.bitacora WHERE codigo IN ('SALA','SALAJDT') ORDER BY codigo
-);
-
-WITH universo AS (
-  SELECT registro_id, creado_por, turno_id, planta_id, turno, fecha_evento, 'activo' AS tabla
-  FROM bitacora.registro_activo WHERE bitacora_id = @sala
+),
+universo AS (
+  SELECT r.registro_id, r.creado_por, r.turno_id, 'activo' AS tabla
+  FROM bitacora.registro_activo r JOIN sala s ON s.bitacora_id = r.bitacora_id
   UNION ALL
-  SELECT registro_id, creado_por, turno_id, planta_id, turno, fecha_evento, 'historico'
-  FROM bitacora.registro_historico WHERE bitacora_id = @sala
+  SELECT r.registro_id, r.creado_por, r.turno_id, 'historico'
+  FROM bitacora.registro_historico r JOIN sala s ON s.bitacora_id = r.bitacora_id
 ),
 resuelto AS (
   SELECT u.*,
@@ -177,32 +175,25 @@ resuelto AS (
          ) AS cargo_id
   FROM universo u
 )
-
-/* -- 5. EL NÚMERO QUE DECIDE ------------------------------------------------------------------
-   Si `sin_atribuir` = 0 → la migración es 100% automática, desplegá tranquilo.
-   Si > 0 → esos registros se quedarán en SALAJDT. Decidí ANTES del deploy si es aceptable.      */
 SELECT '5. PUERTA DE DECISIÓN' AS bloque,
        COUNT(*)                                                    AS total,
        SUM(CASE WHEN cargo_id IS NULL THEN 1 ELSE 0 END)           AS sin_atribuir,
        SUM(CASE WHEN cargo_id IS NOT NULL THEN 1 ELSE 0 END)       AS atribuidos
 FROM resuelto;
-GO
-
-SET NOCOUNT ON;
-DECLARE @sala INT = (
-  SELECT TOP 1 bitacora_id FROM lov_bit.bitacora WHERE codigo IN ('SALA','SALAJDT') ORDER BY codigo
-);
 
 /* -- 6. Detalle de los NO ATRIBUIBLES (para triage manual) ------------------------------------
    Por qué un registro cae acá: (a) turno_id NULL (creado antes de D-045) y (b) su autor usó varios
    cargos distintos, así que sesion_activa no desambigua. Revisalos uno a uno si el bloque 5 no dio 0.
    `cargos_del_autor` te dice entre cuántos cargos hay que elegir.                                */
-WITH universo AS (
-  SELECT registro_id, creado_por, turno_id, planta_id, turno, fecha_evento, 'activo' AS tabla
-  FROM bitacora.registro_activo WHERE bitacora_id = @sala
+WITH sala AS (
+  SELECT TOP 1 bitacora_id FROM lov_bit.bitacora WHERE codigo IN ('SALA','SALAJDT') ORDER BY codigo
+),
+universo AS (
+  SELECT r.registro_id, r.creado_por, r.turno_id, r.planta_id, r.turno, r.fecha_evento, 'activo' AS tabla
+  FROM bitacora.registro_activo r JOIN sala s ON s.bitacora_id = r.bitacora_id
   UNION ALL
-  SELECT registro_id, creado_por, turno_id, planta_id, turno, fecha_evento, 'historico'
-  FROM bitacora.registro_historico WHERE bitacora_id = @sala
+  SELECT r.registro_id, r.creado_por, r.turno_id, r.planta_id, r.turno, r.fecha_evento, 'historico'
+  FROM bitacora.registro_historico r JOIN sala s ON s.bitacora_id = r.bitacora_id
 ),
 resuelto AS (
   SELECT u.*,
