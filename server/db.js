@@ -2377,6 +2377,147 @@ export async function initDB() {
   // automática al arranque; el trigger manual `POST /api/conformacion-turno/trigger` sigue disponible
   // como recálculo explícito (recibe `fecha_operativa` del request → no reintroduce H1).
 
+  // ---------- F30.A1 — D-053: reparto de los registros de Sala de Mando por cargo del autor ---------
+  //
+  // Contexto: SALA se renombró a SALAJDT (misma fila, bitacora_id=14) en el "Paso 1" de arriba, así que
+  // AL LLEGAR ACÁ **todos** los registros de Sala viven en SALAJDT. Esta migración los reparte a
+  // SALAING/SALAOP según el cargo de quien los creó.
+  //
+  // El problema de fondo: el cargo NO está en el registro. `creado_por` es un usuario_id y el cargo se
+  // resuelve desde el App Role de Entra en cada login, sin persistirse (la auditoría de roles de
+  // auth/app.js es un console.log). lov_bit.usuario no tiene cargo_id. Hay que reconstruirlo por
+  // evidencia, en escalera (COALESCE, gana la primera que resuelve):
+  //   1. turno_participante por (turno_id, usuario_id) → cargo con el que operó ESE turno. Exacto.
+  //   2. conformacion_turno   por (turno_id, usuario_id) → idem, ya congelado. Exacto.
+  //   3. sesion_activa: solo si el autor usó UN ÚNICO cargo en toda su historia (HAVING COUNT
+  //      DISTINCT = 1). Sus filas no se borran (activa=0), pero inicio_sesion es last-write → no
+  //      permite fechar nada, por eso solo sirve cuando no hay ambigüedad posible.
+  // Se DESCARTA a propósito la clave natural (creado_por, planta, turno, fecha) → conformacion_turno:
+  // el turno 2 cruza medianoche y fecha_operativa es el día en que ARRANCÓ el turno, así que derivarla
+  // de fecha_evento es una trampa. Los pasos 1-2 cubren todo lo posterior a D-045.
+  //
+  // Política: MOVE-OUT POR ATRIBUCIÓN POSITIVA. Solo se mueve lo que se puede atribuir a IngOp o a Op
+  // de Sala. Todo lo demás (JdT, Admin, o cargo irresoluble) NO matchea el JOIN y se queda quieto en
+  // SALAJDT — la identidad es el default. Por eso NO hay THROW por datos ambiguos: eso tumbaría el
+  // arranque del backend en prod. El THROW se reserva para violaciones de integridad (paso 5).
+  //
+  // REGLA DURA: todo UPDATE de bitacora_id remapea tipo_evento_id en el MISMO statement. No existe FK
+  // ni CHECK que ate registro.bitacora_id ↔ tipo_evento.bitacora_id y ninguna lectura lo verifica
+  // (registros.js y v_historico_busqueda joinean te por tipo_evento_id a secas) → el drift sería
+  // INVISIBLE hasta que alguien editara el registro, con el dato corrupto ya en el histórico.
+  //
+  // Los cargos se resuelven por NOMBRE, nunca por id hardcodeado: los ids no son estables entre BDs
+  // (la matriz de permisos matchea por nombre justamente por eso).
+  // Ver docs/decisions.md D-053 y sql/snippets/reporte-split-sala-D053.sql (pre-flight de prod).
+  const f30A1Aplicada = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F30.A1'`
+  );
+  if (!f30A1Aplicada.recordset[0]) {
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    try {
+      // 1. Ids destino. Si faltan, el seed de arriba no corrió → abortar (rollback + reintento).
+      const dest = await new sql.Request(tx).query(`
+        SELECT
+          (SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='SALAJDT') AS jdt,
+          (SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='SALAING') AS ing,
+          (SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='SALAOP')  AS op
+      `);
+      const { jdt, ing, op } = dest.recordset[0] || {};
+      if (!jdt || !ing || !op) {
+        throw new Error('F30.A1: faltan bitácoras SALAJDT/SALAING/SALAOP en el catálogo');
+      }
+
+      // 2. Respaldo RF-032. registro_historico es append-only por convención organizativa (sin
+      //    trigger; BIT-RF §RF-032), así que tocarlo es una excepción deliberada y exige rastro.
+      //    La tabla queda RESIDENTE como evidencia de auditoría y habilita el rollback manual.
+      await new sql.Request(tx).batch(`
+        IF OBJECT_ID('bitacora.registro_historico_backup_D053','U') IS NULL
+          SELECT * INTO bitacora.registro_historico_backup_D053
+          FROM bitacora.registro_historico WHERE bitacora_id = ${jdt};
+      `);
+
+      // 3-4. Move-out. Mismo CTE para las dos tablas. El JOIN a `destino` es el que decide: un cargo
+      //      que no sea IngOp/Op de Sala (o un cargo_id NULL = irresoluble) no matchea → no se mueve.
+      const moveSQL = (tabla) => `
+        ;WITH cargo_autor AS (
+          SELECT r.registro_id,
+                 COALESCE(
+                   (SELECT TOP 1 tp.cargo_id FROM bitacora.turno_participante tp
+                     WHERE tp.turno_id = r.turno_id AND tp.usuario_id = r.creado_por),
+                   (SELECT TOP 1 ct.cargo_id FROM bitacora.conformacion_turno ct
+                     WHERE ct.turno_id = r.turno_id AND ct.usuario_id = r.creado_por),
+                   (SELECT MIN(sa.cargo_id) FROM bitacora.sesion_activa sa
+                     WHERE sa.usuario_id = r.creado_por
+                     HAVING COUNT(DISTINCT sa.cargo_id) = 1)
+                 ) AS cargo_id
+          FROM ${tabla} r
+          WHERE r.bitacora_id = ${jdt}
+        ),
+        destino AS (
+          SELECT c.cargo_id, b.bitacora_id, te.tipo_evento_id
+          FROM lov_bit.cargo c
+          JOIN lov_bit.bitacora b
+            ON b.codigo = CASE c.nombre
+                            WHEN 'Ingeniero de Operación'             THEN 'SALAING'
+                            WHEN 'Operador de Planta - Sala de Mando' THEN 'SALAOP'
+                          END
+          JOIN lov_bit.tipo_evento te
+            ON te.bitacora_id = b.bitacora_id AND te.nombre = 'Evento General'
+        )
+        UPDATE r
+           SET r.bitacora_id    = d.bitacora_id,
+               r.tipo_evento_id = d.tipo_evento_id
+        FROM ${tabla} r
+        JOIN cargo_autor ca ON ca.registro_id = r.registro_id
+        JOIN destino     d  ON d.cargo_id     = ca.cargo_id
+        WHERE r.bitacora_id = ${jdt};
+      `;
+      const movA = await new sql.Request(tx).query(moveSQL('bitacora.registro_activo'));
+      const movH = await new sql.Request(tx).query(moveSQL('bitacora.registro_historico'));
+
+      // 5. Validación de integridad. Esto SÍ va con THROW: es una violación, no una ambigüedad.
+      await new sql.Request(tx).batch(`
+        IF EXISTS (
+          SELECT 1 FROM bitacora.registro_activo r
+          JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = r.tipo_evento_id
+          WHERE te.bitacora_id <> r.bitacora_id
+        ) THROW 50053, 'F30.A1: drift tipo_evento_id <> bitacora_id en registro_activo', 1;
+
+        IF EXISTS (
+          SELECT 1 FROM bitacora.registro_historico r
+          JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = r.tipo_evento_id
+          WHERE te.bitacora_id <> r.bitacora_id
+        ) THROW 50053, 'F30.A1: drift tipo_evento_id <> bitacora_id en registro_historico', 1;
+      `);
+
+      // Cuántos quedaron sin atribuir (siguen en SALAJDT sin ser de JdT/Admin). Es el número que la
+      // auditoría va a querer: se loguea, no se corrige a ciegas.
+      const rest = await new sql.Request(tx).query(`
+        SELECT
+          (SELECT COUNT(*) FROM bitacora.registro_activo    WHERE bitacora_id = ${jdt}) AS activo_en_jdt,
+          (SELECT COUNT(*) FROM bitacora.registro_historico WHERE bitacora_id = ${jdt}) AS hist_en_jdt
+      `);
+
+      // 6. Flag (último statement antes del COMMIT).
+      await new sql.Request(tx).batch(`
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F30.A1');
+      `);
+
+      await tx.commit();
+      const { activo_en_jdt, hist_en_jdt } = rest.recordset[0];
+      console.log(
+        `[F30.A1] Sala repartida por cargo del autor — movidos a SALAING/SALAOP: ` +
+        `${movA.rowsAffected[0] ?? 0} activos, ${movH.rowsAffected[0] ?? 0} históricos. ` +
+        `Permanecen en SALAJDT (JdT/Admin o cargo no atribuible): ` +
+        `${activo_en_jdt} activos, ${hist_en_jdt} históricos.`
+      );
+    } catch (err) {
+      try { await tx.rollback(); } catch {}
+      throw err;
+    }
+  }
+
   console.log('[DB] Conexión OK');
 }
 
