@@ -383,11 +383,23 @@ export async function initDB() {
   await db.request().batch(`
     IF OBJECT_ID('lov_bit.cargo', 'U') IS NULL
     CREATE TABLE lov_bit.cargo (
-      cargo_id           INT          IDENTITY(1,1) PRIMARY KEY,
-      nombre             VARCHAR(100) NOT NULL,
-      solo_lectura       BIT          NOT NULL DEFAULT 0,
-      puede_cerrar_turno BIT          NOT NULL DEFAULT 0
+      cargo_id            INT          IDENTITY(1,1) PRIMARY KEY,
+      nombre              VARCHAR(100) NOT NULL,
+      solo_lectura        BIT          NOT NULL DEFAULT 0,
+      puede_cerrar_turno  BIT          NOT NULL DEFAULT 0,
+      puede_cambiar_unidad BIT         NOT NULL DEFAULT 0
     );
+  `);
+
+  // D-054: cargo.puede_cambiar_unidad — habilita el cambio de unidad EN CALIENTE (POST
+  // /api/auth/cambiar-unidad + botón del navbar) para los cargos que operan las dos plantas de
+  // forma rutinaria. Migración idempotente para BDs ya existentes (la BD fresca ya lo trae en el
+  // CREATE TABLE de arriba). El VALOR lo fija el MERGE de cargos en CADA arranque — este ALTER
+  // solo garantiza que la columna exista; nunca asume qué cargos la tienen en 1.
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.cargo','puede_cambiar_unidad') IS NULL
+      ALTER TABLE lov_bit.cargo ADD puede_cambiar_unidad BIT NOT NULL
+        CONSTRAINT DF_cargo_puede_cambiar_unidad DEFAULT 0;
   `);
 
   await db.request().batch(`
@@ -718,29 +730,39 @@ export async function initDB() {
   // D-039: 'Administrador y Debugging' (rol ADMIN, App Role ADMINISTRADOR_DEBUGGING) con
   // puede_cerrar_turno=1 y solo_lectura=0; sus permisos de bitácora los da la matriz de abajo
   // (puede_ver=1 y puede_crear=1 en todas). No es un superusuario por código.
+  //
+  // D-054: puede_cambiar_unidad=1 SOLO para 'Ingeniero Jefe de Turno' y 'Operador de Planta -
+  // Analista' — los dos cargos que operan GEC3 y GEC32 de forma rutinaria y necesitan saltar entre
+  // unidades sin pasar por el login. Este MERGE es la FUENTE AUTORITATIVA: corre en cada arranque y
+  // matchea por `nombre`, así que un UPDATE manual en la BD se revierte al siguiente restart (mismo
+  // contrato que solo_lectura/puede_cerrar_turno). Para habilitar/quitar el permiso a un cargo se
+  // edita ESTA tabla de valores y se redespliega — nunca se hardcodea el cargo_id en un endpoint ni
+  // en el front (convención 12 de CLAUDE.md). La rama WHEN MATCHED lo baja a 0 en los demás cargos
+  // aunque una corrida previa los hubiera dejado en 1 (auto-correctora).
   await db.request().batch(`
     MERGE lov_bit.cargo AS t
     USING (VALUES
-      ('Administrador y Debugging',            0, 1),
-      ('Gerente de Producción',                1, 0),
-      ('Ingeniero Jefe de Turno',              0, 1),
-      ('Ingeniero de Operación',               0, 1),
-      ('Ingeniero Químico',                    0, 0),
-      ('Operador de Planta - Caldera',         0, 0),
-      ('Operador de Planta - Analista',        0, 0),
-      ('Operador de Planta - Sala de Mando',   0, 0),
-      ('Operador de Planta - Planta de Agua',  0, 0),
-      ('Operador de Planta - Turbogrupo',      0, 0),
-      ('Operador Maquinaria Pesada',           0, 0),
-      ('Operador de Planta - Carbón y Caliza', 0, 0),
-      ('Coordinador de carbón y maquinaria',   0, 0)
-    ) AS s(nombre, solo_lectura, puede_cerrar_turno)
+      ('Administrador y Debugging',            0, 1, 0),
+      ('Gerente de Producción',                1, 0, 0),
+      ('Ingeniero Jefe de Turno',              0, 1, 1),
+      ('Ingeniero de Operación',               0, 1, 0),
+      ('Ingeniero Químico',                    0, 0, 0),
+      ('Operador de Planta - Caldera',         0, 0, 0),
+      ('Operador de Planta - Analista',        0, 0, 1),
+      ('Operador de Planta - Sala de Mando',   0, 0, 0),
+      ('Operador de Planta - Planta de Agua',  0, 0, 0),
+      ('Operador de Planta - Turbogrupo',      0, 0, 0),
+      ('Operador Maquinaria Pesada',           0, 0, 0),
+      ('Operador de Planta - Carbón y Caliza', 0, 0, 0),
+      ('Coordinador de carbón y maquinaria',   0, 0, 0)
+    ) AS s(nombre, solo_lectura, puede_cerrar_turno, puede_cambiar_unidad)
       ON t.nombre = s.nombre
     WHEN MATCHED THEN UPDATE SET
-      solo_lectura       = s.solo_lectura,
-      puede_cerrar_turno = s.puede_cerrar_turno
-    WHEN NOT MATCHED THEN INSERT (nombre, solo_lectura, puede_cerrar_turno)
-      VALUES (s.nombre, s.solo_lectura, s.puede_cerrar_turno);
+      solo_lectura         = s.solo_lectura,
+      puede_cerrar_turno   = s.puede_cerrar_turno,
+      puede_cambiar_unidad = s.puede_cambiar_unidad
+    WHEN NOT MATCHED THEN INSERT (nombre, solo_lectura, puede_cerrar_turno, puede_cambiar_unidad)
+      VALUES (s.nombre, s.solo_lectura, s.puede_cerrar_turno, s.puede_cambiar_unidad);
   `);
 
   // Eliminar cargo obsoleto 'Ingeniero de Planta de Agua' (no existe en el Excel 2026).
@@ -2511,6 +2533,80 @@ export async function initDB() {
         `${movA.rowsAffected[0] ?? 0} activos, ${movH.rowsAffected[0] ?? 0} históricos. ` +
         `Permanecen en SALAJDT (JdT/Admin o cargo no atribuible): ` +
         `${activo_en_jdt} activos, ${hist_en_jdt} históricos.`
+      );
+    } catch (err) {
+      try { await tx.rollback(); } catch {}
+      throw err;
+    }
+  }
+
+  // ---------- F31.A1 — D-055: backfill de turno_id en MAND + purga de evento_dashboard huérfano ----
+  //
+  // Dos reparaciones de datos, ambas sobre el diagnóstico de la auditoría D-055:
+  //
+  // 1) turno_id NULL en MAND. `routes/mand.js` insertaba sin turno_id y `cerrarDiaMand` no lo
+  //    copiaba → bitácora MAND era la ÚNICA con 100% NULL en `registro_historico` (10/10 en prod).
+  //    Se reconstruye por (planta, fecha_operativa, turno) — donde `fecha_operativa` sale del
+  //    PERIODO, no del día del evento: los periodos 1..6 pertenecen al T2 que arrancó a las 18:00
+  //    del día ANTERIOR (espejo SQL de `fechaOperativaDePeriodo`, utils/turno.js). Resolver por el
+  //    día del evento manda la madrugada al turno equivocado — en prod eso afecta al registro 4722.
+  //    Lo no resoluble se deja NULL: la columna es nullable y NUNCA se adivina (criterio F30.A1).
+  //
+  // 2) evento_dashboard huérfano. Borrar una celda de la grilla hacía `activa=0` + DELETE del
+  //    borrador, dejando `registro_origen_id` apuntando a un registro inexistente: 35 filas en prod
+  //    (día 2026-07-06), que son EXACTAMENTE la diferencia entre las 45 filas de evento_dashboard y
+  //    las 10 de registro_historico que motivó la auditoría. Se purgan solo las que están
+  //    `activa=0` Y sin origen: una fila activa jamás se toca (el dashboard la lee).
+  //
+  // Toca `registro_historico` (excepción a RF-032, como F30.A1): es un backfill de trazabilidad que
+  // no altera ningún dato de operación — no cambia valores, autores ni fechas.
+  const f31A1Aplicada = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F31.A1'`
+  );
+  if (!f31A1Aplicada.recordset[0]) {
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    try {
+      // fecha_operativa del periodo = día del evento (Bogotá), menos 1 si el periodo es 1..6 (T2
+      // de madrugada). Espejo exacto de fechaOperativaDePeriodo(); fijado por test de paridad.
+      const backfill = (tabla) => `
+        UPDATE r
+        SET turno_id = tu.turno_unidad_id
+        FROM bitacora.${tabla} r
+        CROSS APPLY (SELECT TRY_CAST(JSON_VALUE(r.campos_extra, '$.periodo') AS INT) AS periodo) p
+        CROSS APPLY (SELECT
+            CASE WHEN p.periodo BETWEEN 7 AND 18 THEN 1 ELSE 2 END AS turno,
+            DATEADD(DAY,
+              CASE WHEN p.periodo BETWEEN 1 AND 6 THEN -1 ELSE 0 END,
+              CAST(DATEADD(HOUR, -5, r.fecha_evento) AS DATE)) AS fecha_operativa
+          ) w
+        INNER JOIN bitacora.turno_unidad tu
+          ON tu.planta_id = r.planta_id
+         AND tu.fecha_operativa = w.fecha_operativa
+         AND tu.turno = w.turno
+        INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
+        WHERE b.codigo = 'MAND' AND r.turno_id IS NULL AND p.periodo IS NOT NULL;
+      `;
+      const bfHist = await new sql.Request(tx).batch(backfill('registro_historico'));
+      const bfAct = await new sql.Request(tx).batch(backfill('registro_activo'));
+
+      // Purga de huérfanos INACTIVOS. `activa=1` se preserva siempre (contrato cross-repo vivo).
+      const huerf = await new sql.Request(tx).batch(`
+        DELETE ed
+        FROM bitacora.evento_dashboard ed
+        WHERE ed.activa = 0
+          AND NOT EXISTS (SELECT 1 FROM bitacora.registro_activo ra WHERE ra.registro_id = ed.registro_origen_id)
+          AND NOT EXISTS (SELECT 1 FROM bitacora.registro_historico rh WHERE rh.registro_id = ed.registro_origen_id);
+      `);
+
+      await new sql.Request(tx).batch(`
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F31.A1');
+      `);
+      await tx.commit();
+      console.log(
+        `[F31.A1] turno_id backfilleado en MAND: ${bfHist.rowsAffected[0] ?? 0} históricos, ` +
+        `${bfAct.rowsAffected[0] ?? 0} activos. evento_dashboard huérfano purgado: ` +
+        `${huerf.rowsAffected[0] ?? 0} filas.`
       );
     } catch (err) {
       try { await tx.rollback(); } catch {}

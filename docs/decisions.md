@@ -982,6 +982,181 @@ Cross-ref: [[D-039]] (rol ADMIN), [[D-049]] (solo el autor), [[D-052]] (espejo `
 
 ---
 
+## D-054 — Cambio de unidad en caliente para los cargos que operan ambas plantas
+
+**Fecha:** 2026-07-15
+
+**Contexto:** cambiar de unidad (GEC3 ↔ GEC32) costaba tres pasos: menú → "Cambiar de unidad" →
+`clearSesion` (mata la sesión de app) → caer en `LoginScreen` → volver a elegir planta ([[D-035]]).
+Es razonable como camino universal, pero el **Ingeniero Jefe de Turno** y el **Operador de Planta -
+Analista** alternan entre las dos unidades muchas veces por turno, y para ellos ese rodeo —pasar por
+una pantalla de login sin re-loguearse— es fricción pura. Además, el camino largo tiene un costo
+oculto: al pasar por `LoginScreen` la sesión de app queda muerta unos segundos, y en esa ventana
+`cargo_id` es `undefined` → `catalogos.permisos` cae a `[]` → `bitacorasPermitidas` degrada a **todas**
+las bitácoras (fail-open transitorio de la UI).
+
+**Decisión:** (1) **El permiso es DATO, no código**: columna `lov_bit.cargo.puede_cambiar_unidad`
+(BIT, default 0), fijada por el **MERGE de cargos de `db.js` que corre en CADA arranque** y matchea
+por `nombre` — mismo contrato que `solo_lectura`/`puede_cerrar_turno`. Hoy en 1 para JdT y Operador
+Analista; el `WHEN MATCHED` la baja a 0 en el resto (auto-correctora). **Nunca** se hardcodea el
+`cargo_id` ni el nombre del cargo en un endpoint ni en el front (convención 12). Cambiar la política
+= editar el seed + redesplegar. (2) **Endpoint propio**: `POST /api/auth/cambiar-unidad`, con
+`loadAppSession` (exige sesión de app **ya existente**: no es un camino de ingreso, es un cambio de
+contexto de quien ya opera), gate `puedeCambiarUnidad(req.sesion)`, rate limit 30/min, y respuesta
+200 idempotente si ya estás en esa unidad (double-click safe, no rota `inicio_sesion`). (3) **Toda la
+mecánica se extrae a `server/utils/sesion-contexto.js`** (`establecerContextoSesion`), compartida con
+`select-context`: el barrido de sesión única ([[D-035]]), el `CASE` de ventana ([[D-040]]) y el
+turno/presencia/participación ([[D-045]]) existen **una sola vez**. Antes vivían inline en el router;
+duplicarlos habría dejado dos copias que driftean en silencio. (4) **El cargo NO se re-deriva del
+token** en `cambiar-unidad` (sí en `select-context`): esta operación cambia la **unidad**, no la
+identidad — re-derivarlo aplicaría un cambio de App Role como efecto colateral de un botón de
+navegación. La divergencia de cargo contra Entra la sigue resolviendo `revalidate` (AUD-10), igual
+que para cualquier otro endpoint. (5) **Front**: botón en el navbar visible solo si
+`sesion.puede_cambiar_unidad` (el mismo objeto que gatea el server → UI y enforcement no pueden
+divergir), con la unidad destino **derivada del catálogo** (no de una lista hardcodeada): si hubiera
+más de dos unidades, "la otra" deja de estar definida y el botón se oculta solo. Esa regla vive en
+`src/utils/unidades.js` (`resolverOtraUnidad`), módulo **puro** con tests — mismo patrón que
+`routing/appRoute.js`: lo que decide si el atajo existe debe poder probarse sin montar el dashboard.
+
+**Alcance del permiso (leerlo bien):** NO restringe la capacidad de operar ambas unidades —
+cualquier cargo puede cambiar de unidad por el camino largo, y así debe seguir (todos eligen planta
+al entrar). Gobierna el **atajo**. El gate del server existe para que el botón no sea una promesa que
+el backend no cumple, no como frontera de datos.
+
+**Consecuencias:** (a) El cambio en caliente **no desmonta el componente** (`LoginScreen` es un early
+return del mismo componente), así que el estado obsoleto no se limpia solo: `handleIrAUnidad`
+invalida `draftLocal` y `dispPlanta`, y **reescribe el hash** cuando la sección activa es DISP —
+sin eso el efecto ruta→estado revierte `dispPlanta` a la unidad vieja en el mismo render
+(`route.params.planta || dispPlantaRef.current || sesion.planta_id`), dejando el header en GEC32 y
+DISP en GEC3. Los filtros **no** se resetean a propósito: ver la misma bitácora con el mismo filtro
+en la otra unidad es justo el flujo que esto habilita. (b) **Bug corregido de paso**: `useTurno` no
+limpiaba `turno` al cambiar `plantaId`. Con el cambio en caliente eso dejaba los write-gates globales
+(`turnoUnidadCerrado`/`turnoEnTransicion`), los badges y el modal de transición de la unidad **nueva**
+gobernados por el turno de la **vieja**, hasta que resolviera el refetch — e indefinidamente si
+fallaba. La invalidación se hace por **identidad** (cambió `plantaId`), en el efecto, y **no** en el
+`catch` del refetch: `refetch` también corre en cada mensaje del WS, así que limpiar ahí haría que un
+blip de red borrara un estado válido y el header dijera "Turno cerrado" bloqueando escrituras sin que
+nada haya cerrado. Ante un fallo se conserva lo último conocido de ESA unidad. El guard
+`plantaCargadaRef.current !== null` es load-bearing: preserva el `initialTurno` sembrado por
+`/api/me` ([[D-045]] E8), que es lo que hace reaparecer el modal al recargar en pleno bloqueo. (c) **Bug corregido de paso**: `useBitacoraSesion` dependía solo de
+`[bitacora_id]`; la presencia es de la pareja (sesión, bitácora) — `sesion_bitacora` tiene UNIQUE
+`(sesion_id, bitacora_id)` — así que cambiar de unidad sin cambiar de pestaña no re-disparaba
+`/api/bitacora/abrir` y el usuario quedaba sin registrar en la unidad nueva. Antes lo tapaba el
+`setActiveBitacora(null)` del camino por `LoginScreen`, un acoplamiento implícito del que la
+correctitud ya no depende. (d) **Endurecimiento de paso**: la validación de planta (ahora única,
+`validarPlantaOperable`) **excluye `TEST_PLANTA_ID`**. Es residente con `activa=1` por necesidad de
+[[D-030]], así que filtrar solo por `activa=1` la dejaba pasar; el selector del login la escondía,
+pero eso era una barrera de UI. Aplica también a `select-context`. (e) `cambiar-unidad` **sí** es
+testeable end-to-end por el backdoor `X-Sesion-Id` — consecuencia directa de no depender de
+`req.session.user`. Contrasta con `select-context`, cuyo único test replica su SQL a mano.
+**21 tests nuevos**: 12 de backend (`server/tests/cambiar_unidad.test.js`) que ejercitan el gate y el
+cambio real ida-y-vuelta, incluidos dos que fijan el permiso como dato — que lo tengan **exactamente**
+esos dos cargos, y que un `UPDATE` manual en la BD **no sobreviva** al arranque — y 9 de front
+(`src/utils/unidades.test.js`) sobre el gate de UI. (f) ADMIN (`Administrador y Debugging`) queda **fuera** del permiso pese a su acceso total
+por matriz ([[D-039]]) — se pidió explícitamente para dos cargos. Es la única asimetría con D-039;
+si molesta, es una línea del seed. Cross-ref: [[D-035]] (sesión única, routing), [[D-040]]
+(finalización por ventana), [[D-045]] (turno/presencia), [[D-030]] (planta de test), [[D-031]]
+(cargo desde App Role).
+
+---
+
+## D-055 — Integridad de MAND: la suite deja de destruir histórico real, y el `detalle` deja de perderse en silencio
+
+**Fecha:** 2026-07-15
+
+**Contexto:** se reportó que `registro_historico` (bitácora 16 = MAND) y `evento_dashboard` guardan
+información parecida pero con conteos distintos en prod (10 vs 45 filas), que el histórico "solo
+guarda autorizaciones y no todas", que REDESP/PRUEBA pierden el comentario, y que MAND tiene
+`turno_id` NULL. La auditoría confirmó tres defectos, refutó uno, y destapó tres más que nadie había
+pedido mirar.
+
+**Lo que NO era un bug:** `cerrarDiaMand` archiva por día **sin filtrar por tipo** — archiva AUTH,
+PRUEBA y REDESP, y preserva su `detalle`. El histórico solo tenía AUTH porque en los días que
+llegaron a archivarse (07-12/13/14) solo se capturaron autorizaciones. Fijado por test para que
+quede **probado** y no argumentado. La diferencia 45 vs 10 eran, exactamente, 35 filas huérfanas.
+
+**Decisión (seis hallazgos, seis correcciones):**
+
+**(1) CRÍTICO — la suite destruía `registro_historico` real.** `sala_de_mando_batch` hacía
+`DELETE FROM registro_historico WHERE bitacora_id=@mand AND planta_id=@p` con `@p = PLANTA_ID =
+'GEC3'` (planta REAL), sin fecha ni tag, ~7 veces por corrida; `fechas_bogota` (T4/C5) lo mismo para
+CALDERA (176 filas reales en riesgo). Con la suite corriendo contra la BD productiva ([[D-030]]),
+cada `npm test` aniquilaba el libro inmutable (RF-032). **La raíz no era el test: era `mand.js`
+hardcodeando `['GEC3','GEC32']`**, lo que hacía *imposible* usar la planta-fixture `'TST'` como sí
+hace DISP. Se retira la allowlist (la rama genérica de `registros.js` ya confía solo en
+`plantaMatch`; `sesion_activa.planta_id` tiene FK a `lov_bit.planta`) y ambas suites migran a `TST`.
+Nota de coherencia con [[D-054]](d): `validarPlantaOperable` **excluye** `TST` del login/select-context
+— TST no es operable por un humano; los tests insertan `sesion_activa` directamente. Las dos reglas
+conviven: el borde de **identidad** rechaza TST, el de **datos** no la necesita hardcodeada.
+
+**(2) El `detalle` no tiene storage propio y se perdía en silencio.** `detalle`/`funcionariocnd` son
+atributos de la FILA (tipo × día × planta) pero el modelo los replica en cada celda con valor. Se
+escribían solo dentro del loop de `periodos`, así que una fila con `periodos: []` no guardaba nada y
+respondía **200** — el front decía "Guardado" y el refetch revertía el texto. Dos caminos reales:
+(a) fila sin ningún valor; (b) **REDESP con todos sus valores en periodos bloqueados**, que el front
+omitía para no rebotar contra `periodo_bloqueado` — el caso exacto del reporte. Ahora la metadata se
+aplica **a nivel de fila**, una vez, sobre todas sus celdas: **el lock de REDESP protege el VALOR,
+nunca el comentario**. Sin celdas donde anclarlo → `400 detalle_sin_celdas` explícito, nunca un 200
+mentiroso. `modificado_por` sigue intacto ([[D-019]]: solo un cambio de `valor_mw` marca modificación).
+
+**(3) `turno_id` NULL — y el join ingenuo estaba mal.** MAND era la única bitácora que insertaba sin
+`turno_id` (`registros.js` sí lo estampa) y `cerrarDiaMand` no lo copiaba → 10/10 NULL. Se resuelve
+por `(planta, fecha_operativa, turno)` con `fechaOperativaDePeriodo` (`utils/turno.js`, pura), que
+sabe que **los periodos 1..6 de la grilla del día F pertenecen al T2 que arrancó a las 18:00 de
+F-1**: T2 cruza medianoche. Resolver por el día de la grilla manda la madrugada al turno equivocado
+(12h después) — **no es teórico: el registro 4722 de prod (GEC3, P3, grilla del 07-14) pertenece al
+turno del 07-13**, y el join ingenuo lo mandaba al del 07-14. **NO** se resuelve contra
+`inicio_nominal`/`fin_nominal` guardados: `extenderTurno` ([[D-046]]) los MUTA, así que las ventanas
+almacenadas se solapan y dejan de particionar; la definición del dominio sí es estable.
+
+**(4) `evento_dashboard` huérfano — y por qué no hay FK.** Vaciar una celda hacía `activa=0` + DELETE
+del borrador, dejando `registro_origen_id` colgando: 35 filas en prod (07-06) = **exactamente** la
+discrepancia reportada. Borrar el borrador es correcto por diseño (`DELETE /api/registros/:id`
+tampoco archiva: el borrador es mutable, solo lo *cerrado* es inmutable). Lo incorrecto era el
+puntero. Ahora se **borra** la fila (para el dashboard, que filtra `activa=1`, borrar y desactivar
+son indistinguibles); el soft-delete sigue siendo correcto en `cerrarDiaMand`, donde el origen no
+desaparece sino que migra al histórico. **No puede haber FK**: el origen vive en `registro_activo` y
+migra a `registro_historico` — dos padres posibles. La integridad se sostiene en código + test.
+
+**(5) El guardrail de [[D-041]] llevaba tiempo inerte, por dos motivos independientes.** (a) Su
+`stripComments` partía con `.split('\n')`, dejando un `\r` (el repo es CRLF); en JS el `.` de una
+regex **no matchea `\r`**, así que en `//.*$` el `.*` frenaba antes del `\r` y `$` —sin flag `m`—
+solo ancla al final del string: nunca había match y **el strip no borraba nada**. No producía falsos
+negativos (no strippear lo hace más estricto), pero bastaba documentar un patrón prohibido en un
+comentario para romperlo. (b) **Nunca estaba enganchado**: `guard_no_prod_disp_destruction` no
+figuraba en el script `test` — el guard escrito para blindar prod jamás corría. Ambos corregidos, con
+meta-tests que fijan que el strip funciona y que el detector dispara.
+
+**(6) Guardrail nuevo `guard_no_prod_historico_destruction`.** Regla única: todo DELETE/UPDATE sobre
+tabla operativa (`registro_historico`/`registro_activo`/`evento_dashboard`/`mand_cierre_log`) debe
+llevar un acotador de fixture (`TEST_PLANTA`, `TEST_TAG`, `es_sintetico`, o PK-equality) **léxicamente
+visible** en la ventana del statement — mira hacia atrás además de adelante porque en `mssql` el
+binding vive en los `.input(...)` que preceden al `.query(...)`. Acepta alias verificables
+(`const P = TEST_PLANTA_ID`) pero **no** alias a planta real: ese es justo el patrón que causó todo.
+
+**Reparación de datos (`F31.A1`, idempotente):** backfill de `turno_id` en MAND (espejo SQL de
+`fechaOperativaDePeriodo`; lo no resoluble se deja NULL — nunca se adivina, criterio [[D-053]]) +
+purga de `evento_dashboard` huérfano **solo si `activa=0`** (una fila activa jamás se toca). Toca
+`registro_historico` como excepción a RF-032, igual que F30.A1: es trazabilidad, no altera valores,
+autores ni fechas. **Verificado en prod:** 10/10 `turno_id` backfilleados —con el 4722 resuelto al
+turno correcto del 07-13, no al ingenuo del 07-14—, 35 huérfanas purgadas (45 → 10 filas), 0 filas
+activas perdidas.
+
+**Consecuencias:** (a) La suite de MAND ya corre contra prod sin destruir nada — verificado
+ejecutándola repetidamente y comprobando que el histórico queda idéntico al baseline (176/2/137/49/9/
+10/16/24). (b) **Los tests de MAND viven todos en `sala_de_mando_batch.test.js`, no en un archivo
+aparte**: `setupSessions()` desactiva las otras sesiones del mismo usuario-fixture (sesión única,
+[[D-035]]), así que dos archivos que compartan la fixture se invalidan la sesión mutuamente
+(401 "Sesión no válida") apenas se solapan. Un archivo = un dueño de la fixture. (c) El front dejó de
+propagar metadata por `periodos`, y `periodoActual` salió del diff (menos re-renders). (d) Sigue
+**pendiente** el mismo patrón peligroso en `consumo_combustible` (3 suites escriben en GEC3/GEC32 con
+fechas fijas): su raíz es idéntica —`combustibles.js` hardcodea `['GEC3','GEC32']`— y su fix es el
+mismo, pero exige sembrar el catálogo de combustibles para TST. Cross-ref: [[D-030]] (planta de test),
+[[D-041]] (guardrail DISP), [[D-045]] (entidad turno), [[D-046]] (extensión muta `fin_nominal`),
+[[D-019]] (`modificado_por` solo por valor).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

@@ -15,7 +15,15 @@ export function useTurno(ready, sesionId, plantaId, initialTurno = null) {
   const retryRef = useRef(0);
   const retryTimerRef = useRef(null);
   const unmountedRef = useRef(false);
+  // D-054: planta cuyo estado de turno tenemos cargado. `null` = aún ninguna (primer pase), lo que
+  // preserva el `initialTurno` sembrado por /api/me. Ver el efecto de abajo.
+  const plantaCargadaRef = useRef(null);
 
+  // D-054: el catch NO limpia el estado a propósito. `refetch` también lo dispara cada mensaje del
+  // WS, así que un blip de red borraría un estado válido y el header pasaría a "Turno cerrado"
+  // bloqueando escrituras sin que nada haya cerrado. La invalidación correcta es por IDENTIDAD (la
+  // planta cambió), y esa vive en el efecto de abajo: determinista y sin castigar fallos
+  // transitorios. Ante un fallo, conservar lo último conocido de ESTA unidad es lo correcto.
   const refetch = useCallback(async () => {
     try {
       const t = await api.get('/api/turno/actual');
@@ -30,6 +38,19 @@ export function useTurno(ready, sesionId, plantaId, initialTurno = null) {
     if (!ready || !sesionId || !plantaId) return;
     unmountedRef.current = false;
     retryRef.current = 0;
+    // D-054: invalidar ANTES de pedir, pero SOLO si el estado que tenemos es de OTRA unidad.
+    // `plantaId` es parte de la identidad de este estado: con el cambio en caliente el hook no se
+    // desmonta, así que mientras viaja el refetch de la unidad nueva, `null` ("sin dato") es la
+    // única respuesta honesta — mostrar el turno de la unidad anterior es peor que no mostrar nada,
+    // porque se ve consistente. Los consumidores tratan `null` como "sin turno abierto" (seguro).
+    //
+    // El guard `!== null` es load-bearing: en el PRIMER pase no se limpia, para no pisar el
+    // `initialTurno` sembrado desde /api/me (D-045 E8) — esa siembra es justo lo que hace reaparecer
+    // el modal de transición al recargar en pleno bloqueo, sin esperar al fetch.
+    if (plantaCargadaRef.current !== null && plantaCargadaRef.current !== plantaId) {
+      setTurno(null);
+    }
+    plantaCargadaRef.current = plantaId;
     refetch();
 
     const connect = () => {

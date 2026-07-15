@@ -18,6 +18,9 @@ const MOTIVO_MSG = {
   valor_mw_invalido: 'Valor numérico inválido',
   periodo_bloqueado: 'Periodo anterior al actual — solo se pueden registrar redespachos del periodo actual en adelante',
   funcionariocnd_requerido: 'Funcionario CND es requerido para Autorización',
+  // D-055: el comentario se guarda pegado a las celdas con valor de su fila — sin ninguna, no hay
+  // dónde guardarlo. Antes esto se respondía 200 y el texto se perdía en silencio.
+  detalle_sin_celdas: 'Escribe al menos un valor en la fila para poder guardar su comentario',
 };
 
 // El server devuelve `valores` como Array(24) indexado 0..23 (P1=valores[0]). Lo paso a un
@@ -50,24 +53,24 @@ function cloneBuffer(buf) {
   return out;
 }
 
-function diffBuffer(snap, buf, periodoActual) {
+// D-055: `periodos` lleva SOLO celdas cuyo valor cambió de verdad. Antes, un cambio de
+// detalle/funcionariocnd se "propagaba" reenviando celdas intactas para forzar su UPDATE — un
+// rodeo, porque la metadata es de la FILA y el modelo la replica por celda. Ese rodeo perdía datos:
+// las celdas REDESP con `p < periodoActual` había que omitirlas (el backend las rebota con
+// `periodo_bloqueado`), así que una fila con todos sus valores en periodos pasados viajaba con
+// `periodos: []` y el comentario se descartaba en silencio — igual que una fila con comentario y
+// sin ningún valor. Hoy el backend aplica la metadata a nivel de fila (una vez, sobre todas sus
+// celdas), así que acá no hay nada que propagar y `periodoActual` deja de intervenir en el diff.
+function diffBuffer(snap, buf) {
   const filas = [];
   for (const tipo of TIPO_KEYS) {
     const detalleCambio = (snap[tipo].detalle || '') !== (buf[tipo].detalle || '');
     const funcCambio = (snap[tipo].funcionariocnd || '') !== (buf[tipo].funcionariocnd || '');
-    const propagarMetadata = detalleCambio || funcCambio;
 
     const periodosCambiados = [];
     for (let p = 1; p <= 24; p++) {
-      const a = snap[tipo].valores[p];
-      const b = buf[tipo].valores[p];
-      if (a !== b) {
-        periodosCambiados.push({ periodo: p, valor_mw: b });
-      } else if (propagarMetadata && b != null) {
-        // REDESP en periodo < periodoActual está bloqueado por el backend; omitirlo
-        // evita que un cambio de detalle haga rebotar el batch con 'periodo_bloqueado'.
-        if (tipo === 'REDESP' && p < periodoActual) continue;
-        periodosCambiados.push({ periodo: p, valor_mw: b });
+      if (snap[tipo].valores[p] !== buf[tipo].valores[p]) {
+        periodosCambiados.push({ periodo: p, valor_mw: buf[tipo].valores[p] });
       }
     }
     if (periodosCambiados.length > 0 || detalleCambio || funcCambio) {
@@ -146,8 +149,8 @@ export default function SalaDeMandoGrid({
 
   const filasDiff = useMemo(() => {
     if (!snapshot || !buffer) return [];
-    return diffBuffer(snapshot, buffer, periodoActual);
-  }, [snapshot, buffer, periodoActual]);
+    return diffBuffer(snapshot, buffer);
+  }, [snapshot, buffer]);
   const dirty = filasDiff.length > 0;
 
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
@@ -164,7 +167,7 @@ export default function SalaDeMandoGrid({
 
   const guardar = useCallback(async () => {
     if (!buffer || !snapshot) return;
-    const filas = diffBuffer(snapshot, buffer, periodoActual);
+    const filas = diffBuffer(snapshot, buffer);
     if (filas.length === 0) return;
     setGuardando(true);
     try {
@@ -183,7 +186,7 @@ export default function SalaDeMandoGrid({
     } finally {
       setGuardando(false);
     }
-  }, [buffer, snapshot, guardarBatch, plantaId, refresh, periodoActual]);
+  }, [buffer, snapshot, guardarBatch, plantaId, refresh]);
 
   useEffect(() => { guardarRef.current = guardar; }, [guardar]);
   useEffect(() => {

@@ -22,12 +22,16 @@ if (process.env.AUTH_TEST_BYPASS === '1' && process.env.NODE_ENV === 'production
 // EXACTAMENTE el mismo shape que la versión por header, así permissions.js y los endpoints del
 // if-chain quedan intactos. Sin sesión de app vigente → null → el endpoint responde 401 y el
 // front pide selección de planta (que reactiva sesion_activa).
+// D-054: `puede_cambiar_unidad` viaja en la sesión (no en un endpoint aparte) por la misma razón
+// que `puede_cerrar_turno`: así el gate del server (routes/sesion.js) y la affordance del front
+// (el botón del navbar, vía /api/me) leen EL MISMO objeto y no pueden divergir.
 const SELECT_SESION = `
   s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
   s.turno_finalizado_en,
   u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
   c.nombre AS cargo_nombre, c.solo_lectura,
-  CAST(c.puede_cerrar_turno AS BIT) AS puede_cerrar_turno
+  CAST(c.puede_cerrar_turno   AS BIT) AS puede_cerrar_turno,
+  CAST(c.puede_cambiar_unidad AS BIT) AS puede_cambiar_unidad
   FROM bitacora.sesion_activa s
   INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
   INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id`;

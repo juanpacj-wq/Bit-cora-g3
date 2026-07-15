@@ -30,10 +30,17 @@ const VISTAS_RO = ['disponibilidad_dashboard', 'autorizacion_dashboard', 'v_disp
 
 // Elimina comentarios (bloque, línea JS `//`, línea SQL `--`) para no falsear con texto explicativo
 // —este mismo repo documenta el bug citando los nombres prohibidos—.
+//
+// D-055 (bug corregido): partía con `.split('\n')`, dejando un `\r` al final de cada línea (el repo
+// es CRLF). En JS el `.` de una regex NO matchea `\r` (es un line terminator), así que en `//.*$`
+// el `.*` frenaba ANTES del `\r` y `$` —sin flag `m`— solo ancla al final del string: NUNCA había
+// match y el strip era INERTE en todo el repo. El guard llevaba tiempo escaneando los comentarios
+// como si fueran código: no producía falsos negativos (no strippear lo hace más estricto, no más
+// laxo), pero bastaba documentar el patrón prohibido en un comentario para romperlo. `\r?\n` lo cierra.
 function stripComments(src) {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .split('\n')
+    .split(/\r?\n/)
     .map((line) => line.replace(/--.*$/, '').replace(/\/\/.*$/, ''))
     .join('\n');
 }
@@ -80,4 +87,13 @@ test('Regla B: ningún DELETE/UPDATE sobre disponibilidad_estado usa un literal 
 test('meta: el guard efectivamente encuentra archivos que auditar', () => {
   // Defensa contra un guard "vacío" que pasa por no escanear nada (path roto, glob vacío).
   assert.ok(archivosAuditar().length >= 5, 'debe auditar varios archivos de tests');
+});
+
+// D-055: fija la corrección del strip. Sin CRLF en el fixture el bug no se reproduce — el `\r` ES
+// el caso, porque es como viven TODOS los archivos del repo.
+test('meta: stripComments elimina comentarios en archivos CRLF (no queda inerte)', () => {
+  const crlf = `const a = 1;\r\n  // DELETE FROM disponibilidad_estado WHERE planta_id='GEC3'\r\n  -- idem SQL 'GEC32'\r\n`;
+  const limpio = stripComments(crlf);
+  assert.ok(!limpio.includes('GEC3'), `el strip debe borrar el comentario CRLF, quedó: ${JSON.stringify(limpio)}`);
+  assert.ok(limpio.includes('const a = 1;'), 'el strip no debe comerse el código');
 });

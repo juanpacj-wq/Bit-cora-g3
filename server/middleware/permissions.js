@@ -34,6 +34,22 @@ export function plantaMatch(sesion, planta_id) {
   return !!sesion && sesion.planta_id === planta_id;
 }
 
+// D-054: ¿el cargo puede cambiar de unidad EN CALIENTE (botón del navbar → POST
+// /api/auth/cambiar-unidad)? Hoy: Ingeniero Jefe de Turno y Operador de Planta - Analista, los dos
+// cargos que operan GEC3 y GEC32 de forma rutinaria. El flag vive en
+// lov_bit.cargo.puede_cambiar_unidad (reconstruido en CADA arranque por el MERGE de cargos de
+// db.js, matcheando por nombre) y loadSession() lo trae en la sesión — NUNCA se hardcodea el
+// cargo_id ni el nombre del cargo acá ni en el front (convención 12 de CLAUDE.md): agregar o quitar
+// un cargo es editar el seed y redesplegar.
+//
+// Este predicado NO otorga acceso a datos de la otra unidad: gobierna el ATAJO, no la capacidad.
+// Cualquier cargo puede cambiar de unidad por el camino largo (cerrar-app → select-context), que es
+// el flujo normal de elegir planta al entrar. Es el mismo objeto-sesión el que se evalúa acá y el
+// que el front usa para pintar el botón, así que UI y enforcement no pueden divergir.
+export function puedeCambiarUnidad(sesion) {
+  return !!sesion && sesion.puede_cambiar_unidad === true;
+}
+
 // D-040: ¿la sesión de app tiene el turno finalizado y VIGENTE? Fuente única =
 // sesion_activa.turno_finalizado_en (NULL = turno vivo), pero acotada a la ventana del turno actual
 // (persistencia por ventana): una finalización de un turno pasado ya no bloquea — expira sola al

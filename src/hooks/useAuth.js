@@ -151,6 +151,27 @@ export function useAuth() {
     } finally { setLoading(false); }
   }, []);
 
+  // D-054 "Cambiar de unidad en caliente": rota la sesión de app a la otra planta en UNA operación,
+  // conservando el login Entra y sin pasar por LoginScreen. Solo lo ofrece el navbar a los cargos con
+  // `sesion.puede_cambiar_unidad`; el permiso lo vuelve a exigir el backend (el flag del cliente es
+  // affordance, no autorización).
+  //
+  // A diferencia de `clearSesion`, acá SÍ se espera la respuesta: el estado nuevo ES la sesión que
+  // devuelve el server, así que no hay nada que pintar hasta tenerla. Si falla, la sesión anterior
+  // queda intacta en cliente y en BD (el endpoint es atómico) y el llamador muestra el error.
+  const cambiarUnidad = useCallback(async (planta_id) => {
+    setLoading(true); setError(null);
+    try {
+      const { sesion: s } = await api.post('/api/auth/cambiar-unidad', { planta_id });
+      sesionRef.current = s;
+      persistAuth(userRef.current, s);
+      setSesion(s);
+      return s;
+    } catch (e) {
+      setError(e.message); throw e;
+    } finally { setLoading(false); }
+  }, []);
+
   // D-040: parche puntual de la sesión de app en cliente (sin refetch). Lo usa finalizar/revertir
   // turno para reflejar `turno_finalizado_en` de inmediato. Reusa sesionRef/persistAuth para que el
   // siguiente request no lea storage viejo; F5 rehidrata igual vía /api/me (fuente de verdad).
@@ -166,5 +187,6 @@ export function useAuth() {
   return {
     user, sesion, loading, error, ready, ultimaPlanta, turno,
     loginWithMicrosoft, selectContext, logout, logoutLocal, clearSesion, patchSesion,
+    cambiarUnidad,
   };
 }

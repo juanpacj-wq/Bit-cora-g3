@@ -12,10 +12,18 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import sql from 'mssql';
 import { getDB } from '../db.js';
-import { setupSessions, cleanupTestRegistros, PLANTA_ID, TEST_TAG } from './helpers.js';
+import { setupSessions, cleanupTestRegistros, TEST_PLANTA, TEST_TAG } from './helpers.js';
+
+// D-055: T4/C5 operaba sobre PLANTA_ID ('GEC3', planta REAL) y su setup/cleanup borraba
+// `registro_historico` de CALDERA en GEC3 sin acotar por fecha ni por tag — con la suite corriendo
+// contra la BD productiva (D-030) eso destruía histórico inmutable real (RF-032). C5 valida un
+// tiebreaker de ORDER BY con INSERTs directos: no necesita una planta real para nada. Se usa
+// TEST_PLANTA en cada `.input()` en vez de un alias local para que el guardrail estático
+// (guard_no_prod_historico_destruction) VEA el acotador de fixture en la ventana del statement.
 import {
   getTurnoColombia,
   turnoFromPeriodo,
+  fechaOperativaDePeriodo,
   ventanaTurno,
   periodoFromFechaBogota,
   fechaBogotaStr,
@@ -88,6 +96,49 @@ describe('F21.A — helpers Bogotá (turno.js)', () => {
     });
     test('P19..P24 → turno 2 (18:00..23:59 Bogotá, nocturno)', () => {
       for (let p = 19; p <= 24; p++) assert.equal(turnoFromPeriodo(p), 2, `P${p}`);
+    });
+  });
+
+  // D-055: la grilla MAND de un día F cubre las horas 00..23 de F, pero T2 cruza medianoche, así que
+  // los periodos 1..6 pertenecen al T2 que arrancó a las 18:00 de F-1. Resolver el turno por el día
+  // de la grilla manda la madrugada al turno equivocado (12h después). Esto NO es teórico: en prod,
+  // el registro 4722 (GEC3, periodo 3, grilla del 2026-07-14) pertenece al turno del 07-13, y el
+  // join ingenuo lo resolvía al del 07-14.
+  describe('fechaOperativaDePeriodo (D-055 — turno_id de MAND)', () => {
+    test('P7..P18 (diurno, T1) → la fecha_operativa es el propio día de la grilla', () => {
+      for (let p = 7; p <= 18; p++) {
+        assert.equal(fechaOperativaDePeriodo('2026-07-14', p), '2026-07-14', `P${p}`);
+      }
+    });
+
+    test('P19..P24 (nocturno, T2 que arranca 18:00) → el propio día de la grilla', () => {
+      for (let p = 19; p <= 24; p++) {
+        assert.equal(fechaOperativaDePeriodo('2026-07-14', p), '2026-07-14', `P${p}`);
+      }
+    });
+
+    test('P1..P6 (madrugada, T2 que arrancó AYER 18:00) → el día ANTERIOR', () => {
+      for (let p = 1; p <= 6; p++) {
+        assert.equal(fechaOperativaDePeriodo('2026-07-14', p), '2026-07-13', `P${p}`);
+      }
+    });
+
+    test('caso real de prod: registro 4722 (GEC3, P3, grilla 2026-07-14) → turno del 07-13', () => {
+      assert.equal(fechaOperativaDePeriodo('2026-07-14', 3), '2026-07-13');
+      assert.equal(turnoFromPeriodo(3), 2);
+    });
+
+    test('cruza bordes de mes y de año sin romperse', () => {
+      assert.equal(fechaOperativaDePeriodo('2026-08-01', 1), '2026-07-31');
+      assert.equal(fechaOperativaDePeriodo('2026-01-01', 1), '2025-12-31');
+      assert.equal(fechaOperativaDePeriodo('2026-03-01', 6), '2026-02-28');
+    });
+
+    test('es TZ-agnóstica: no depende del reloj ni del huso del host', () => {
+      // El bug clásico sería construir la fecha con new Date('YYYY-MM-DD') y leerla con getDate()
+      // local: en un host al oeste de UTC eso retrocede un día de más.
+      assert.equal(fechaOperativaDePeriodo('2026-07-14', 12), '2026-07-14');
+      assert.equal(fechaOperativaDePeriodo('2026-07-14T00:00:00.000Z', 12), '2026-07-14');
     });
   });
 
@@ -181,7 +232,7 @@ describe('F21.A — helpers TZ-agnósticos en sub-proceso (UTC, Bogotá, Tokyo, 
 // mismo predicado del endpoint retorna determinísticamente el de menor registro_id.
 describe('T4 — tiebreaker registro_id ASC en cierre cronológico', () => {
   test('C5: SELECT TOP 1 con fecha_evento idéntica retorna el menor registro_id', async () => {
-    const ctx = await setupSessions();
+    const ctx = await setupSessions({ planta: TEST_PLANTA });
     const CALDERA = ctx.bitByCodigo.CALDERA;
     assert.ok(CALDERA, 'CALDERA bitacora_id debe existir');
 
@@ -194,7 +245,7 @@ describe('T4 — tiebreaker registro_id ASC en cierre cronológico', () => {
     // Setup: clean CALDERA tagged.
     await db.request()
       .input('b', sql.Int, CALDERA)
-      .input('p', sql.VarChar(10), PLANTA_ID)
+      .input('p', sql.VarChar(10), TEST_PLANTA)
       .query(`
         DELETE FROM bitacora.registro_activo WHERE bitacora_id=@b AND planta_id=@p;
         DELETE FROM bitacora.registro_historico WHERE bitacora_id=@b AND planta_id=@p;
@@ -204,7 +255,7 @@ describe('T4 — tiebreaker registro_id ASC en cierre cronológico', () => {
     async function insertCaldera(suffix) {
       const r = await db.request()
         .input('b', sql.Int, CALDERA)
-        .input('p', sql.VarChar(10), PLANTA_ID)
+        .input('p', sql.VarChar(10), TEST_PLANTA)
         .input('fe', sql.DateTime2, fechaEvento)
         .input('t', sql.TinyInt, 1)
         .input('d', sql.NVarChar(sql.MAX), `${TEST_TAG} C5-${suffix}`)
@@ -227,7 +278,7 @@ describe('T4 — tiebreaker registro_id ASC en cierre cronológico', () => {
     // Predicado idéntico al de server.js:1741 / :1840 (post-tiebreaker).
     const r = await db.request()
       .input('b', sql.Int, CALDERA)
-      .input('p', sql.VarChar(10), PLANTA_ID)
+      .input('p', sql.VarChar(10), TEST_PLANTA)
       .query(`
         SELECT TOP 1 registro_id, fecha_evento, turno
         FROM bitacora.registro_activo
@@ -245,7 +296,7 @@ describe('T4 — tiebreaker registro_id ASC en cierre cronológico', () => {
     await cleanupTestRegistros();
     await db.request()
       .input('b', sql.Int, CALDERA)
-      .input('p', sql.VarChar(10), PLANTA_ID)
+      .input('p', sql.VarChar(10), TEST_PLANTA)
       .query(`
         DELETE FROM bitacora.registro_activo WHERE bitacora_id=@b AND planta_id=@p;
         DELETE FROM bitacora.registro_historico WHERE bitacora_id=@b AND planta_id=@p;

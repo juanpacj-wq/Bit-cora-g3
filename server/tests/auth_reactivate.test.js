@@ -2,7 +2,6 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
-import { periodoFromFechaBogota } from '../utils/turno.js';
 import { setupSessions, cleanupTestRegistros, call, makeRegistroPayload, firstTipoEvento, PLANTA_ID, TEST_TAG } from './helpers.js';
 
 // D4 (resuelto 2026-05-13): post F18 los endpoints /api/autorizaciones* quedaron deprecados.
@@ -15,9 +14,17 @@ import { setupSessions, cleanupTestRegistros, call, makeRegistroPayload, firstTi
 // vía UPDATE directo (porque el reactivar como POST está cubierto por sala_de_mando_batch.test.js).
 
 let ctx;
-const FECHA_EVENTO = new Date();
-const PERIODO = periodoFromFechaBogota(FECHA_EVENTO);
-const today = FECHA_EVENTO.toISOString().slice(0, 10);
+// D-055: este test NO puede migrar a la planta-fixture — GET /api/eventos-dashboard devuelve
+// { eventos: [] } para 'TST' a propósito (corte del leak cross-repo, D-030), así que validar el
+// contrato exige una planta real. Lo que sí se corrige es la FECHA: antes usaba HOY + el periodo
+// del reloj, y como UQ_evento_planta_fecha_periodo_tipo hace único (planta,fecha,periodo,tipo),
+// cleanAuthEventoSlot borraba la fila de ese slot — es decir, una AUTORIZACIÓN REAL de GEC3 del día
+// en curso si un operador ya había registrado ese periodo. Con una fecha centinela del pasado el
+// slot es exclusivo del test y no colisiona con dato operativo. Los asserts filtran por evento_id,
+// así que la fecha es indiferente para lo que el test prueba.
+const FECHA_SLOT_TEST = '2020-01-01';
+const PERIODO = 1;
+const today = FECHA_SLOT_TEST;
 
 async function cleanAuthEventoSlot() {
   const db = await getDB();

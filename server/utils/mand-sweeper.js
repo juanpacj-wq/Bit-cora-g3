@@ -87,10 +87,12 @@ export async function cerrarDiaMand(pool, { fecha, planta_id, usuarioCierre = US
         INSERT INTO bitacora.registro_historico
           (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
            estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-           modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
+           modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo, turno_id)
+        -- D-055: turno_id se ARRASTRA del activo. Antes no se copiaba (ni se estampaba en el INSERT
+        -- de mand.js), y MAND era la única bitácora con 10/10 NULL en el histórico de prod.
         SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
                'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, creado_en,
-               modificado_por, modificado_en, @cerrado_por, SYSUTCDATETIME(), @fecha
+               modificado_por, modificado_en, @cerrado_por, SYSUTCDATETIME(), @fecha, turno_id
         FROM bitacora.registro_activo
         WHERE bitacora_id = @mand AND planta_id = @planta_id
           AND CAST(DATEADD(HOUR, -5, fecha_evento) AS DATE) = @fecha

@@ -34,6 +34,7 @@ import { useAppRoute } from "./hooks/useAppRoute";
 import { useMejorarTexto, MAX_TEXTO_IA } from "./hooks/useMejorarTexto";
 import { buildHash } from "./routing/appRoute";
 import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
+import { resolverOtraUnidad } from "./utils/unidades";
 import { FILTROS_VACIOS } from "./utils/filtros";
 import { asset } from "./config/paths";
 
@@ -552,7 +553,7 @@ function HeaderMenu({ vista, onDashboard, onToggleVista, onCambiarUnidad, onLogo
   );
 }
 
-function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista, onDashboard, onCambiarUnidad, turnoEstado, turnoBloqueo, turnoExtendido }) {
+function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista, onDashboard, onCambiarUnidad, otraUnidad, onIrAUnidad, cambiandoUnidad, turnoEstado, turnoBloqueo, turnoExtendido }) {
   const tema = temaUnidad(sesion?.planta_id);
   const [reloj, setReloj] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
@@ -654,6 +655,26 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
       </div>
 
       <div className="flex items-center gap-3">
+        {/* D-054: atajo "Ir a la otra unidad", solo para cargos con puede_cambiar_unidad (JdT /
+            Operador Analista). El color usa `tema.badgeBg`, que es el acento invertido del header:
+            sobre GEC3 (azul) sale verde y sobre GEC32 (verde) sale azul — es decir, el botón se
+            pinta con el color de la unidad DESTINO. `aria-label` lleva el nombre completo de la
+            planta porque el texto visible se colapsa a solo icono en pantallas chicas. */}
+        {otraUnidad && (
+          <button
+            onClick={onIrAUnidad}
+            disabled={cambiandoUnidad}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors hover:brightness-110 disabled:opacity-60 disabled:cursor-not-allowed"
+            style={{ backgroundColor: tema.badgeBg }}
+            title={`Cambiar a ${otraUnidad.nombre} sin cerrar sesión`}
+            aria-label={`Ir a ${otraUnidad.nombre}`}
+          >
+            <ArrowLeftRight size={15} />
+            <span className="hidden sm:inline">
+              {cambiandoUnidad ? 'Cambiando…' : `Ir a ${otraUnidad.planta_id}`}
+            </span>
+          </button>
+        )}
         <div className="relative">
           <button
             ref={buttonRef}
@@ -1822,7 +1843,9 @@ export default function App() {
 
   // F2: marca participación cuando el usuario abre una bitácora. Idempotente — reabrir tras
   // finalizar el turno crea una nueva ventana de participación sin requerir re-login.
-  useBitacoraSesion(auth.sesion?.sesion_id ? activeBitacora : null);
+  // D-054: la sesión entra como parte de la clave — al cambiar de unidad en caliente sin cambiar de
+  // pestaña hay que re-marcar la participación en la fila `sesion_activa` de la unidad nueva.
+  useBitacoraSesion(activeBitacora, auth.sesion?.sesion_id);
 
   // F4/D-040: hooks para "Finalizar Turno" / "Revertir finalización" del header.
   const { finalizar: finalizarTurno, loading: finalizandoTurno } = useFinalizarTurno();
@@ -2306,6 +2329,57 @@ export default function App() {
     auth.clearSesion();
   }, [auth]);
 
+  // D-054 — "Ir a GEC3/GEC32": cambio de unidad EN CALIENTE desde el navbar, en un clic y sin pasar
+  // por LoginScreen. Convive con "Cambiar de unidad" del menú (el camino universal, para todos los
+  // cargos); esto es el ATAJO para quienes operan las dos plantas de forma rutinaria.
+  //
+  // La regla vive en `utils/unidades.js` (módulo puro, con tests): deriva del catálogo —que ya
+  // excluye la planta de test— y del permiso que sirve el backend, sin listas hardcodeadas.
+  const otraUnidad = useMemo(
+    () => resolverOtraUnidad(sesion, catalogos.plantas),
+    [catalogos.plantas, sesion]
+  );
+
+  const handleIrAUnidad = useCallback(async () => {
+    if (!otraUnidad) return;
+    const destino = otraUnidad.planta_id;
+
+    // Mismo criterio que finalizar turno: un borrador o una edición en curso pertenecen a la unidad
+    // ACTUAL. Al rotar la sesión se perderían en silencio — o peor, se guardarían contra la unidad
+    // nueva. `mandDirty` cubre el diff de Sala de Mando, que vive fuera de `registrosDeBitacora`.
+    const hayCambiosSinGuardar = registrosDeBitacora.some((r) => r._dirty) || mandDirty;
+    if (hayCambiosSinGuardar) {
+      setModal({
+        title: 'Cambios sin guardar',
+        message: `Hay cambios sin guardar en esta unidad. Guárdalos o descártalos antes de ir a ${otraUnidad.nombre}.`,
+        confirmLabel: 'Entendido', confirmColor: 'blue', icon: AlertTriangle,
+        onConfirm: () => setModal(null),
+      });
+      return;
+    }
+
+    try {
+      await auth.cambiarUnidad(destino);
+      // Estado de cliente que pertenece a la unidad vieja. En el cambio en caliente el componente NO
+      // se desmonta (LoginScreen es un early return del MISMO componente), así que nada se limpia
+      // solo: hay que invalidarlo a mano. Los filtros NO se tocan a propósito — seguir viendo la
+      // misma bitácora con el mismo filtro en la otra unidad es justo el flujo que esto habilita, y
+      // es coherente con la regla existente de resetearlos solo al cambiar de bitácora.
+      setDraftLocal(null);
+      setDispPlanta(destino);
+      // La planta de DISP vive TAMBIÉN en el hash, y el efecto ruta→estado le da prioridad sobre la
+      // planta de sesión (`route.params.planta || dispPlantaRef.current || sesion.planta_id`). Sin
+      // reescribir el hash, ese efecto revertiría `dispPlanta` a la unidad vieja en el mismo render
+      // y DISP quedaría mostrando GEC3 con el header diciendo GEC32.
+      if (codigoActivo === 'DISP') {
+        navigate({ vista: 'bitacoras', codigo: 'DISP', params: { planta: destino } }, { replace: true });
+      }
+      showToast(`Ahora operas ${otraUnidad.nombre}.`);
+    } catch (e) {
+      showToast(e.message || 'No se pudo cambiar de unidad', 'error');
+    }
+  }, [otraUnidad, registrosDeBitacora, mandDirty, auth, codigoActivo, navigate, showToast]);
+
   // Abre el modal rediseñado (LogoutModal): ilustración hero + 2 acciones (Cancelar | Sí,
   // finalizar y salir). "Cambiar de unidad" ya no vive acá — se movió al HeaderMenu.
   const handleLogout = useCallback(() => setLogoutOpen(true), []);
@@ -2359,6 +2433,9 @@ export default function App() {
         plantaNombre={plantaNombre}
         usuariosActivos={usuariosActivos.usuarios}
         sesionActualId={sesion?.sesion_id}
+        otraUnidad={otraUnidad}
+        onIrAUnidad={handleIrAUnidad}
+        cambiandoUnidad={auth.loading}
         turnoEstado={turnoHook.estado}
         turnoBloqueo={turnoHook.bloqueo}
         turnoExtendido={turnoHook.extendido}

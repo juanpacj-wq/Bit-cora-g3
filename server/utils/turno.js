@@ -30,6 +30,32 @@ export function turnoFromPeriodo(periodo) {
   return periodo >= 7 && periodo <= 18 ? 1 : 2;
 }
 
+// D-055: `fecha_operativa` del turno al que pertenece un periodo de la grilla MAND del día `fecha`.
+// Función PURA (sin BD, sin reloj) → testeable y determinista.
+//
+// Por qué existe: la grilla de un día F cubre las horas 00..23 de F, pero T2 CRUZA MEDIANOCHE
+// (T2 = [18:00, 06:00) → `fecha_operativa` = el día en que ARRANCÓ, a las 18:00). Entonces los
+// periodos 1..6 de la grilla de F (00:00–05:59) pertenecen al T2 que arrancó a las 18:00 de F-1,
+// NO al T2 de F (que arranca a las 18:00 de F, doce horas después).
+//
+// Resolver ingenuamente por (planta, fecha_de_la_grilla, turno) manda esos periodos al turno
+// EQUIVOCADO. No es teórico: el registro 4722 de prod (GEC3, periodo 3, grilla del 2026-07-14)
+// resuelve al turno del 07-13 — el join ingenuo lo mandaba al del 07-14.
+//
+// NO se resuelve contra las ventanas guardadas (`inicio_nominal`/`fin_nominal`) a propósito:
+// `extenderTurno` (D-046) MUTA `fin_nominal`, así que las ventanas almacenadas se solapan entre sí
+// y dejan de ser un particionamiento. La definición del dominio (T1=[06,18), T2=[18,06)) sí es
+// estable, y es la que se usa acá.
+export function fechaOperativaDePeriodo(fecha, periodo) {
+  const [y, m, d] = String(fecha).slice(0, 10).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  // Solo los periodos 1..6 (madrugada) pertenecen al turno que arrancó el día anterior.
+  if (turnoFromPeriodo(periodo) === 2 && periodo <= 6) {
+    dt.setUTCDate(dt.getUTCDate() - 1);
+  }
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+}
+
 export function ventanaTurno(turno, fechaRef) {
   const { year, month, day, hour } = colombiaParts(fechaRef);
 

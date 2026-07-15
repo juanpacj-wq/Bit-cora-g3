@@ -8,7 +8,7 @@ import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { responderError } from '../utils/errores.js';
 import { hasPermisoBitacora, plantaMatch, puedeCerrarTurno } from '../middleware/permissions.js';
-import { turnoFromPeriodo } from '../utils/turno.js';
+import { turnoFromPeriodo, fechaOperativaDePeriodo } from '../utils/turno.js';
 import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from '../utils/snapshots.js';
 import { upsertEventoDashboard } from '../utils/notificador.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
@@ -18,6 +18,22 @@ import { asyncH, loadAppSession } from './_middleware.js';
 
 const router = express.Router();
 router.use(loadAppSession);
+
+// D-055: turno_unidad_id de la cabecera que gobierna (planta, fecha_operativa, turno), o null si no
+// existe. Lectura pura, dentro de la transacción del batch. NO abre turnos: MAND se archiva por día
+// (cerrarDiaMand), no por turno, así que acá el turno es trazabilidad — no ciclo de vida.
+async function resolverTurnoUnidadId(transaction, { planta_id, fecha_operativa, turno }) {
+  const r = await new sql.Request(transaction)
+    .input('p', sql.VarChar(10), planta_id)
+    .input('f', sql.Date, fecha_operativa)
+    .input('t', sql.TinyInt, turno)
+    .query(`
+      SELECT TOP 1 turno_unidad_id
+      FROM bitacora.turno_unidad
+      WHERE planta_id = @p AND fecha_operativa = @f AND turno = @t
+    `);
+  return r.recordset[0]?.turno_unidad_id ?? null;
+}
 
 // GET /api/sala-de-mando?planta_id=&fecha=
 // Grilla 3×24 (AUTH|PRUEBA|REDESP) del día para el frontend de Sala de Mando.
@@ -79,9 +95,13 @@ router.post('/guardar', asyncH(async (req, res) => {
   const sesion = req.sesion;
   const { planta_id, fecha, filas } = req.body || {};
 
-  if (!planta_id || !['GEC3', 'GEC32'].includes(planta_id)) {
-    return sendJSON(res, 400, { error: 'planta_id inválido (debe ser GEC3 o GEC32)' });
+  if (!planta_id) {
+    return sendJSON(res, 400, { error: 'planta_id es requerido' });
   }
+  // D-055: la allowlist de plantas NO se hardcodea. `plantaMatch` ya acota a la unidad de la
+  // sesión, y `sesion_activa.planta_id` tiene FK a `lov_bit.planta` — una planta inexistente no
+  // puede llegar hasta acá. Hardcodear ['GEC3','GEC32'] forzaba a la suite (que corre contra la
+  // BD productiva, D-030) a escribir en una planta REAL, y su limpieza destruía histórico real.
   if (!plantaMatch(sesion, planta_id)) {
     return sendJSON(res, 403, { error: 'No puede guardar en otra planta' });
   }
@@ -207,11 +227,13 @@ router.post('/guardar', asyncH(async (req, res) => {
     }
 
     let creados = 0, actualizados = 0, eliminados = 0;
+    const erroresFila = [];
 
     for (const fila of filasNorm) {
       const teInfo = tipoMap[fila.tipo];
       const tipoEventoId = teInfo.tipo_evento_id;
       const dashboardTipo = fila.tipo;
+      const eliminadosAntes = eliminados;
 
       for (const { periodo, valor_mw } of fila.periodos) {
         const existRes = await new sql.Request(transaction)
@@ -237,12 +259,23 @@ router.post('/guardar', asyncH(async (req, res) => {
         const turno = turnoFromPeriodo(periodo);
 
         if (existing && valor_mw === null) {
-          // Caso B: existe + valor null → DELETE + soft-delete evento_dashboard.
+          // Caso B: existe + valor null (el operador vació la celda) → se destruye el borrador.
+          //
+          // D-055: antes hacía `activa=0` y dejaba la fila de evento_dashboard con
+          // `registro_origen_id` apuntando a un registro que este mismo statement borraba → HUÉRFANA
+          // para siempre. Así nacieron las 35 filas colgadas del 2026-07-06 en prod. No hay FK que
+          // lo impida y no puede haberla: el origen VIVE en registro_activo y MIGRA a
+          // registro_historico al cerrar el día — dos padres posibles, ninguna FK los cubre. La
+          // integridad se sostiene acá y la fija `mand_integridad.test.js`.
+          //
+          // Se BORRA la fila en vez de desactivarla: su origen deja de existir, y para el dashboard
+          // (que filtra activa=1) borrar y desactivar son indistinguibles. El soft-delete sigue
+          // siendo correcto en `cerrarDiaMand`, donde el origen NO desaparece — migra al histórico y
+          // el puntero sigue resolviendo.
           await new sql.Request(transaction)
             .input('rid', sql.Int, existing.registro_id)
             .query(`
-              UPDATE bitacora.evento_dashboard SET activa = 0
-              WHERE registro_origen_id = @rid;
+              DELETE FROM bitacora.evento_dashboard WHERE registro_origen_id = @rid;
               DELETE FROM bitacora.registro_activo WHERE registro_id = @rid;
             `);
           eliminados++;
@@ -315,10 +348,20 @@ router.post('/guardar', asyncH(async (req, res) => {
           valor_mw,
           ...(fila.funcionariocnd != null ? { funcionariocnd: fila.funcionariocnd } : { funcionariocnd: null }),
         });
+        // D-055: estampar turno_id. MAND era la ÚNICA bitácora que insertaba con turno_id=NULL
+        // (la rama genérica de registros.js sí lo estampa) → sus 10 filas de histórico en prod
+        // tenían 10/10 NULL, rompiendo todo JOIN por turno. Se resuelve por (planta,
+        // fecha_operativa, turno) con `fechaOperativaDePeriodo`, que sabe que los periodos 1..6
+        // pertenecen al T2 del día ANTERIOR. Degrada a NULL si la cabecera no existe: la columna es
+        // nullable y un registro nunca debe perderse por no poder atarlo a un turno.
+        const turnoIdCelda = await resolverTurnoUnidadId(transaction, {
+          planta_id, fecha_operativa: fechaOperativaDePeriodo(fecha, periodo), turno,
+        });
         const ins = await new sql.Request(transaction)
           .input('mand', sql.Int, MAND_ID)
           .input('planta', sql.VarChar(10), planta_id)
           .input('turno', sql.TinyInt, turno)
+          .input('turno_id', sql.Int, turnoIdCelda)
           .input('detalle', sql.NVarChar(sql.MAX), fila.detalle ?? null)
           .input('campos_extra', sql.NVarChar(sql.MAX), camposExtra)
           .input('te', sql.Int, tipoEventoId)
@@ -329,10 +372,11 @@ router.post('/guardar', asyncH(async (req, res) => {
           .query(`
             INSERT INTO bitacora.registro_activo
               (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
-               estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
+               estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, turno_id)
             OUTPUT INSERTED.registro_id
             VALUES (@mand, @planta, SYSUTCDATETIME(), @turno, @detalle, @campos_extra, @te,
-                    'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por)
+                    'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por,
+                    @turno_id)
           `);
         const newId = ins.recordset[0].registro_id;
         await upsertEventoDashboard(transaction, {
@@ -347,6 +391,73 @@ router.post('/guardar', asyncH(async (req, res) => {
         });
         creados++;
       }
+
+      // ── D-055: metadata (detalle / funcionariocnd) a nivel de FILA ────────────────────────
+      // `detalle` y `funcionariocnd` son atributos de la fila (tipo × día × planta), pero el modelo
+      // los persiste REPLICADOS en cada celda con valor — no tienen storage propio. Antes solo se
+      // escribían de refilón, dentro del loop de `periodos`, así que una fila cuyo `periodos` venía
+      // vacío no guardaba NADA y el endpoint respondía 200 {creados:0,...}: el front mostraba
+      // "Guardado" y el refetch revertía el texto. Se perdía de dos formas reales:
+      //   (a) fila sin ningún valor (PRUEBA/REDESP con solo un comentario) → el front no tenía
+      //       ninguna celda que propagar;
+      //   (b) REDESP con todos sus valores en periodos ya bloqueados (p < periodoActual) → el front
+      //       los omitía para no rebotar contra el guard `periodo_bloqueado`.
+      // Ahora la metadata se aplica UNA vez sobre TODAS las celdas vivas de la fila, sin pasar por
+      // `periodos`: el lock de REDESP protege el VALOR (dato operativo), nunca el comentario.
+      // `modificado_por` NO se toca — D-019: solo un cambio de valor_mw marca modificación.
+      const metaRes = await new sql.Request(transaction)
+        .input('mand', sql.Int, MAND_ID)
+        .input('planta', sql.VarChar(10), planta_id)
+        .input('fecha', sql.Date, fecha)
+        .input('te', sql.Int, tipoEventoId)
+        .input('detalle', sql.NVarChar(sql.MAX), fila.detalle ?? null)
+        .input('func', sql.NVarChar(sql.MAX), fila.funcionariocnd ?? null)
+        .query(`
+          UPDATE bitacora.registro_activo
+          SET detalle = @detalle,
+              campos_extra = JSON_MODIFY(campos_extra, '$.funcionariocnd', @func)
+          WHERE bitacora_id = @mand
+            AND planta_id = @planta
+            AND CAST(DATEADD(HOUR, -5, fecha_evento) AS DATE) = @fecha
+            AND tipo_evento_id = @te
+            AND estado = 'borrador'
+            AND (
+              ISNULL(detalle, '') <> ISNULL(@detalle, '')
+              OR ISNULL(JSON_VALUE(campos_extra, '$.funcionariocnd'), '') <> ISNULL(@func, '')
+            )
+        `);
+      const celdasConMetadata = metaRes.rowsAffected[0] || 0;
+
+      // Si la fila no tiene NINGUNA celda donde anclar el comentario, decirlo en vez de tragárselo.
+      // Excepción: si esta fila acaba de borrar celdas, se está vaciando y su comentario queda moot
+      // — bloquear ahí impediría el flujo legítimo "limpiar la fila".
+      if (celdasConMetadata === 0 && eliminados === eliminadosAntes) {
+        const pideMetadata = (fila.detalle != null && String(fila.detalle).trim() !== '')
+          || (fila.funcionariocnd != null && String(fila.funcionariocnd).trim() !== '');
+        if (pideMetadata) {
+          const hayCeldas = await new sql.Request(transaction)
+            .input('mand', sql.Int, MAND_ID)
+            .input('planta', sql.VarChar(10), planta_id)
+            .input('fecha', sql.Date, fecha)
+            .input('te', sql.Int, tipoEventoId)
+            .query(`
+              SELECT COUNT(*) AS n FROM bitacora.registro_activo
+              WHERE bitacora_id = @mand AND planta_id = @planta
+                AND CAST(DATEADD(HOUR, -5, fecha_evento) AS DATE) = @fecha
+                AND tipo_evento_id = @te AND estado = 'borrador'
+            `);
+          if ((hayCeldas.recordset[0]?.n || 0) === 0) {
+            erroresFila.push({ tipo: fila.tipo, motivo: 'detalle_sin_celdas' });
+          }
+        }
+      }
+      actualizados += celdasConMetadata;
+    }
+
+    // Rechazo atómico: si alguna fila quiso guardar un comentario sin celdas, no se commitea nada.
+    if (erroresFila.length > 0) {
+      await transaction.rollback();
+      return sendJSON(res, 400, { errores: erroresFila });
     }
 
     await transaction.commit();
@@ -374,8 +485,9 @@ router.post('/cierre-diario', asyncH(async (req, res) => {
   if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
     return sendJSON(res, 400, { error: 'fecha es requerida en formato YYYY-MM-DD' });
   }
-  if (!planta_id || !['GEC3', 'GEC32'].includes(planta_id)) {
-    return sendJSON(res, 400, { error: 'planta_id inválido (debe ser GEC3 o GEC32)' });
+  // D-055: sin allowlist hardcodeada — ver el comentario de POST /guardar. `plantaMatch` acota.
+  if (!planta_id) {
+    return sendJSON(res, 400, { error: 'planta_id es requerido' });
   }
   if (!plantaMatch(sesion, planta_id)) {
     return sendJSON(res, 403, { error: 'No puede cerrar el día de otra planta' });

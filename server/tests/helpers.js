@@ -197,31 +197,23 @@ export async function cleanupTestRegistros() {
       DELETE FROM bitacora.registro_activo WHERE detalle LIKE @tag;
       DELETE FROM bitacora.registro_historico WHERE detalle LIKE @tag;
     `);
-  // AUD-33 (seguridad): estos dos borrados NO están tagueados y, sobre la BD PRODUCTIVA, destruyen
-  // el cierre MAND real y los eventos-dashboard reales de GEC3 (la suite corre contra prod, D-030).
-  // Sólo deben ejecutarse contra una BD de test DEDICADA. Se gatean tras `TEST_DB_DEDICATED=1`:
-  // sin el flag (default, incl. cualquier corrida accidental contra prod) se OMITEN → cero
-  // destrucción de datos reales. Para la suite plena, crear `PortalG3_test` (runbook AUD-33 en
-  // BIT-AUDSEG) y correr con `TEST_DB_DEDICATED=1`. Ver también AUD-40 (usuarios test).
-  if (process.env.TEST_DB_DEDICATED === '1') {
-    // F16 + D5: limpia mand_cierre_log para la planta de test. El log no tiene "tag"; borrar por
-    // (planta_id, fecha_cerrada >= 2026-05-01) cubre fechas determinísticas de cierre_y_fechas (D5).
-    await db.request()
-      .input('planta', sql.VarChar(10), PLANTA_ID)
-      .query(`
-        DELETE FROM bitacora.mand_cierre_log
-        WHERE planta_id = @planta AND fecha_cerrada >= '2026-05-01';
-      `);
-    // F16: limpia evento_dashboard MAND remanente dejado por un test fallido.
-    await db.request()
-      .input('planta', sql.VarChar(10), PLANTA_ID)
-      .query(`
-        DELETE FROM bitacora.evento_dashboard
-        WHERE planta_id = @planta
-          AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_activo)
-          AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_historico);
-      `);
-  }
+  // AUD-33 / D-055: estos dos borrados apuntaban a PLANTA_ID ('GEC3', planta REAL) sin tag, así que
+  // sobre la BD productiva (D-030) destruían el cierre MAND real y eventos-dashboard reales; por eso
+  // vivían gateados tras TEST_DB_DEDICATED=1 — un gate que los volvía inertes (nunca limpiaban nada
+  // en la práctica) y que seguía siendo una bomba si alguien exportaba el flag contra prod.
+  // D-055 los reapunta a la planta-fixture: MAND ya corre en 'TST' (el endpoint dejó de hardcodear
+  // ['GEC3','GEC32']), así que la limpieza correcta es sobre TST — y entonces es segura SIEMPRE y el
+  // gate deja de hacer falta. Nota: el borrado de evento_dashboard acá es de HUÉRFANOS (origen
+  // inexistente), el residuo que deja el borrado de una celda de la grilla.
+  await db.request()
+    .input('planta', sql.VarChar(10), TEST_PLANTA_ID)
+    .query(`
+      DELETE FROM bitacora.mand_cierre_log WHERE planta_id = @planta;
+      DELETE FROM bitacora.evento_dashboard
+      WHERE planta_id = @planta
+        AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_activo)
+        AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_historico);
+    `);
   // D-030/D-044: desactivar TODA sesión sintética (es_sintetico=1), no solo los 4 TEST_USERS. La
   // whitelist vieja dejaba test_opcarbon/test_coord_cym ACTIVAS en GEC3 → panel CONECTADOS de prod
   // sucio tras cada corrida. Ver deactivateSyntheticSessions.
