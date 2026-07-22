@@ -4,6 +4,7 @@ import sql from 'mssql';
 import { getDB } from '../db.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
 import { fechaOperativaDePeriodo, turnoFromPeriodo } from '../utils/turno.js';
+import { recalcularEventoDashboard } from '../utils/notificador.js';
 import { setupSessions, cleanupTestRegistros, call, TEST_PLANTA, TEST_TAG } from './helpers.js';
 
 // D-055: esta suite operaba sobre PLANTA_ID ('GEC3', planta REAL) y su cleanMand() borraba
@@ -730,4 +731,199 @@ test('D-056 E1.5 — idempotencia: un segundo run reasignaría 0 filas y el lote
       `lote_id debe ser un GUID de 36 chars, got ${lote}`,
     );
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D-056 · E2 — recalcularEventoDashboard: resolución de lo publicado POR CELDA.
+//
+// Se ejercita la función DIRECTAMENTE (sin pasar por HTTP): en esta rama ningún caller la invoca
+// todavía (E3 conecta el guardar append-only; la rama de "retroceder al anterior al borrar" no tiene
+// caller real hasta D-057). Una rama sin test que la ejercite es código muerto que diverge, así que
+// los criterios 11 y 12 del REQ-03 se validan acá con transacción propia sobre TEST_PLANTA.
+//
+// Fixtures: se siembran registros MAND directo en registro_activo (INSERT no destructivo, sobre la
+// planta-fixture) con hora_llamada compuesta como ISO UTC (toISOString), igual que hará el server en
+// E3. Los borrados de fixture van por `registro_id = @id` (acotador de PK,
+// guard_no_prod_historico_destruction) y la limpieza final es el cleanMand() del archivo.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// tipo_evento_id MAND para un notificar_dashboard_tipo (AUTH/PRUEBA/REDESP).
+async function tipoEventoIdMand(tipo) {
+  const db = await getDB();
+  const r = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID)
+    .input('t', sql.VarChar(10), tipo)
+    .query(`SELECT tipo_evento_id FROM lov_bit.tipo_evento WHERE bitacora_id=@m AND notificar_dashboard_tipo=@t`);
+  return r.recordset[0].tipo_evento_id;
+}
+
+// Siembra un registro MAND vivo (borrador) en TEST_PLANTA y devuelve su registro_id. `hora` es
+// 'HH:mm' Bogotá → se compone hora_llamada como ISO UTC; si es null/undefined la CLAVE queda AUSENTE
+// (no null), como los registros migrados por F32.A1. `fecha_evento` se fija a mediodía Bogotá de HOY
+// para que el día Bogotá sea determinista a cualquier hora del run.
+async function seedRegistroMand({ tipo, periodo, hora, valor, jdts = '[]', jefes = '[]' }) {
+  const db = await getDB();
+  const teId = await tipoEventoIdMand(tipo);
+  const campos = { periodo, valor_mw: valor };
+  if (hora) campos.hora_llamada = new Date(`${HOY}T${hora}:00-05:00`).toISOString();
+  const ins = await db.request()
+    .input('mand', sql.Int, MAND_BITACORA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
+    .input('fe', sql.DateTime2, new Date(`${HOY}T12:00:00-05:00`))
+    .input('turno', sql.TinyInt, turnoFromPeriodo(periodo))
+    .input('detalle', sql.NVarChar(sql.MAX), `${TEST_TAG} e2`)
+    .input('ce', sql.NVarChar(sql.MAX), JSON.stringify(campos))
+    .input('te', sql.Int, teId)
+    .input('ing', sql.NVarChar(sql.MAX), '[]')
+    .input('jdts', sql.NVarChar(sql.MAX), jdts)
+    .input('jefes', sql.NVarChar(sql.MAX), jefes)
+    .input('cp', sql.Int, ctx.usuarios.jdt.usuario_id)
+    .query(`
+      INSERT INTO bitacora.registro_activo
+        (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+         estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
+      OUTPUT INSERTED.registro_id
+      VALUES (@mand, @p, @fe, @turno, @detalle, @ce, @te,
+              'borrador', @ing, @jdts, @jefes, @cp)
+    `);
+  return ins.recordset[0].registro_id;
+}
+
+// Borra un fixture puntual por su PK (acotador de fixture: WHERE registro_id = @id). Simula lo que
+// hará D-057 al borrar un registro; acá sirve para ejercer la rama de retroceso/eliminación.
+async function borrarRegistro(registro_id) {
+  const db = await getDB();
+  await db.request()
+    .input('id', sql.Int, registro_id)
+    .query(`DELETE FROM bitacora.registro_activo WHERE registro_id = @id`);
+}
+
+// Corre recalcularEventoDashboard en su propia transacción (patrón canónico del subrepo).
+async function recalc({ periodo, tipo, planta_id = PLANTA_ID, fecha = HOY }) {
+  const db = await getDB();
+  const t = new sql.Transaction(db);
+  await t.begin();
+  try {
+    const r = await recalcularEventoDashboard(t, { planta_id, fecha, periodo, tipo });
+    await t.commit();
+    return r;
+  } catch (e) {
+    try { await t.rollback(); } catch {}
+    throw e;
+  }
+}
+
+// Lee la fila publicada de una celda (o null).
+async function getEvento({ periodo, tipo }) {
+  const db = await getDB();
+  const r = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA)
+    .input('f', sql.Date, HOY)
+    .input('per', sql.TinyInt, periodo)
+    .input('t', sql.VarChar(10), tipo)
+    .query(`
+      SELECT registro_origen_id, valor_mw, activa, jdts_snapshot, jefes_snapshot
+      FROM bitacora.evento_dashboard
+      WHERE planta_id=@p AND fecha=@f AND periodo=@per AND tipo=@t
+    `);
+  return r.recordset[0] || null;
+}
+
+test('D-056 E2.1 — un registro AUTH → recalc INSERTA la fila y publica su valor y snapshots', async () => {
+  await cleanMand();
+  const rid = await seedRegistroMand({
+    tipo: 'AUTH', periodo: 14, hora: '09:12', valor: 150,
+    jdts: '[{"usuario_id":1}]', jefes: '[{"usuario_id":2}]',
+  });
+  const r = await recalc({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(r.accion, 'insertado', JSON.stringify(r));
+  assert.equal(r.registro_origen_id, rid);
+
+  const ev = await getEvento({ periodo: 14, tipo: 'AUTH' });
+  assert.ok(ev, 'debe existir la fila publicada');
+  assert.equal(ev.registro_origen_id, rid);
+  assert.equal(ev.valor_mw, 150);
+  assert.equal(ev.activa, true);
+  // Snapshots tomados del PROPIO registro ganador (columnas de registro_activo).
+  assert.equal(ev.jdts_snapshot, '[{"usuario_id":1}]');
+  assert.equal(ev.jefes_snapshot, '[{"usuario_id":2}]');
+});
+
+test('D-056 E2.2 — dos registros mismo periodo: gana la mayor hora_llamada (09:40 > 09:12) [criterio 11]', async () => {
+  await cleanMand();
+  const early = await seedRegistroMand({ tipo: 'AUTH', periodo: 14, hora: '09:12', valor: 100 });
+  const late = await seedRegistroMand({ tipo: 'AUTH', periodo: 14, hora: '09:40', valor: 200 });
+  assert.ok(late > early, 'el segundo insertado tiene registro_id mayor');
+
+  const r = await recalc({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(r.registro_origen_id, late, 'debe publicar el de 09:40');
+
+  const ev = await getEvento({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(ev.registro_origen_id, late);
+  assert.equal(ev.valor_mw, 200);
+});
+
+test('D-056 E2.3 — al borrar el ganador recalc RETROCEDE al anterior; sin registros BORRA la fila [criterio 12]', async () => {
+  await cleanMand();
+  const early = await seedRegistroMand({ tipo: 'AUTH', periodo: 14, hora: '09:12', valor: 100 });
+  const late = await seedRegistroMand({ tipo: 'AUTH', periodo: 14, hora: '09:40', valor: 200 });
+  await recalc({ periodo: 14, tipo: 'AUTH' }); // publica late
+
+  // Borro el ganador (lo que hará D-057). Recalc → retrocede a early.
+  await borrarRegistro(late);
+  const r2 = await recalc({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(r2.accion, 'actualizado', JSON.stringify(r2));
+  assert.equal(r2.registro_origen_id, early);
+  const ev2 = await getEvento({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(ev2.registro_origen_id, early);
+  assert.equal(ev2.valor_mw, 100);
+
+  // Borro el último. Recalc → la fila de evento_dashboard DESAPARECE (RQ-03.23), no queda activa=0.
+  await borrarRegistro(early);
+  const r3 = await recalc({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(r3.accion, 'eliminado', JSON.stringify(r3));
+  const ev3 = await getEvento({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(ev3, null, 'sin registros vivos la celda no debe seguir publicada');
+});
+
+test('D-056 E2.4 — solape PARCIAL de lotes: la decisión es por celda, no por lote', async () => {
+  await cleanMand();
+  // Lote A (09:12) cubre P14 y P15. Lote B (09:40) cubre P15 y P16. El periodo compartido es P15.
+  const a14 = await seedRegistroMand({ tipo: 'AUTH', periodo: 14, hora: '09:12', valor: 114 });
+  await seedRegistroMand({ tipo: 'AUTH', periodo: 15, hora: '09:12', valor: 115 }); // a15 (perdedor en P15)
+  const b15 = await seedRegistroMand({ tipo: 'AUTH', periodo: 15, hora: '09:40', valor: 215 });
+  const b16 = await seedRegistroMand({ tipo: 'AUTH', periodo: 16, hora: '09:40', valor: 216 });
+
+  await recalc({ periodo: 14, tipo: 'AUTH' });
+  await recalc({ periodo: 15, tipo: 'AUTH' });
+  await recalc({ periodo: 16, tipo: 'AUTH' });
+
+  assert.equal((await getEvento({ periodo: 14, tipo: 'AUTH' })).registro_origen_id, a14, 'P14 solo lo cubre A');
+  assert.equal((await getEvento({ periodo: 15, tipo: 'AUTH' })).registro_origen_id, b15, 'P15 (compartido) lo publica B, 09:40 > 09:12');
+  assert.equal((await getEvento({ periodo: 16, tipo: 'AUTH' })).registro_origen_id, b16, 'P16 solo lo cubre B');
+});
+
+test('D-056 E2.5 — registro SIN hora_llamada nunca gana por hora, aunque se cree después', async () => {
+  await cleanMand();
+  const conHora = await seedRegistroMand({ tipo: 'AUTH', periodo: 14, hora: '09:12', valor: 100 });
+  // El SIN hora se inserta DESPUÉS (registro_id mayor): si el NULL no fuera al final ganaría por
+  // creado_en/registro_id. Debe perder igual.
+  const sinHora = await seedRegistroMand({ tipo: 'AUTH', periodo: 14, hora: null, valor: 999 });
+  assert.ok(sinHora > conHora, 'el sin-hora es el más nuevo');
+
+  const r = await recalc({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(r.registro_origen_id, conHora, 'gana el que tiene hora aunque sea el más viejo');
+  const ev = await getEvento({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(ev.valor_mw, 100);
+});
+
+test('D-056 E2.6 — con la misma hora_llamada desempata el registro_id mayor (más nuevo)', async () => {
+  await cleanMand();
+  await seedRegistroMand({ tipo: 'AUTH', periodo: 14, hora: '09:30', valor: 100 }); // primero
+  const segundo = await seedRegistroMand({ tipo: 'AUTH', periodo: 14, hora: '09:30', valor: 200 });
+
+  const r = await recalc({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(r.registro_origen_id, segundo, 'con hora empatada gana el más nuevo');
+  const ev = await getEvento({ periodo: 14, tipo: 'AUTH' });
+  assert.equal(ev.valor_mw, 200);
 });
