@@ -2614,6 +2614,92 @@ export async function initDB() {
     }
   }
 
+  // ---------- F32.A1 — D-056: lote_id en los registros MAND previos + respaldos residentes ----------
+  //
+  // Prepara el modelo append-only de D-056. La grilla 3×24 de Operación 24h deja de ser un espejo
+  // editable y pasa a ser un formulario de captura append-only, donde cada Guardar crea un LOTE de
+  // registros nuevos e inmutables. El lote se modela como campos_extra.lote_id (un GUID de 36 chars).
+  // Esta migración retro-etiqueta lo ya existente: cada registro MAND previo se convierte en un lote
+  // de UN SOLO periodo — NEWID() se evalúa POR FILA, así que cada uno recibe su propio GUID,
+  // conservando su detalle y funcionariocnd intactos.
+  //
+  // hora_llamada NO se agrega acá: la clave queda AUSENTE en todo lo migrado (ni null ni ""). Esa
+  // ausencia es la forma de distinguir "no existe" de "vacío" (§5.4 del diseño: nunca se adivina) —
+  // el dato de la hora de la llamada al CND no existía antes del rediseño y no se puede inferir.
+  //
+  // Toca registro_historico: excepción DELIBERADA a RF-032, con las mismas garantías que F30.A1
+  // (D-053) y F31.A1 (D-055) — respaldos residentes creados ANTES de tocar nada, no altera valores,
+  // autores ni fechas, idempotente vía migracion_aplicada. Los respaldos quedan RESIDENTES como
+  // evidencia de auditoría y habilitan el rollback manual; NO se borran nunca (precedente
+  // registro_historico_backup_D053, D-053). Ver docs/decisions.md D-056 y §7 del _CONTEXTO-BASE.
+  const f32A1Aplicada = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F32.A1'`
+  );
+  if (!f32A1Aplicada.recordset[0]) {
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    try {
+      // 1. Id de MAND. Si falta, el seed del catálogo no corrió → abortar (rollback + reintento).
+      //    Se resuelve por `codigo`, la identidad estable (D-052) — nunca por id hardcodeado.
+      const mandRes = await new sql.Request(tx).query(
+        `SELECT bitacora_id AS mand FROM lov_bit.bitacora WHERE codigo = 'MAND'`
+      );
+      const mand = mandRes.recordset[0]?.mand;
+      if (!mand) throw new Error('F32.A1: no existe la bitácora MAND en el catálogo');
+
+      // 2. Respaldos residentes RF-032, acotados a MAND, creados ANTES de cualquier UPDATE y solo si
+      //    no existen. NUNCA se borran (evidencia de auditoría + rollback manual, como D-053).
+      await new sql.Request(tx).batch(`
+        IF OBJECT_ID('bitacora.registro_historico_backup_D056','U') IS NULL
+          SELECT * INTO bitacora.registro_historico_backup_D056
+          FROM bitacora.registro_historico WHERE bitacora_id = ${mand};
+      `);
+      await new sql.Request(tx).batch(`
+        IF OBJECT_ID('bitacora.registro_activo_backup_D056','U') IS NULL
+          SELECT * INTO bitacora.registro_activo_backup_D056
+          FROM bitacora.registro_activo WHERE bitacora_id = ${mand};
+      `);
+
+      // 3. Conteo previo de filas MAND con campos_extra NULL o no-JSON: NO se tocan (nunca se
+      //    adivina, criterio F30.A1/F31.A1) — se loguean explícitamente para la auditoría.
+      const sinJson = await new sql.Request(tx).query(`
+        SELECT
+          (SELECT COUNT(*) FROM bitacora.registro_historico
+            WHERE bitacora_id = ${mand} AND (campos_extra IS NULL OR ISJSON(campos_extra) = 0)) AS hist,
+          (SELECT COUNT(*) FROM bitacora.registro_activo
+            WHERE bitacora_id = ${mand} AND (campos_extra IS NULL OR ISJSON(campos_extra) = 0)) AS activo
+      `);
+
+      // 4. Asignación de lote_id. NEWID() se evalúa POR FILA → cada registro previo queda como un
+      //    lote de un solo periodo. Idempotente: solo toca filas con JSON válido y SIN lote_id, así
+      //    que un segundo arranque (o un segundo run del bloque) reasigna 0 filas. hora_llamada NO
+      //    se agrega — queda ausente a propósito (ver cabecera).
+      const asignarLote = (tabla) => `
+        UPDATE bitacora.${tabla}
+        SET campos_extra = JSON_MODIFY(campos_extra, '$.lote_id', CONVERT(varchar(36), NEWID()))
+        WHERE bitacora_id = ${mand}
+          AND ISJSON(campos_extra) = 1
+          AND JSON_VALUE(campos_extra, '$.lote_id') IS NULL;
+      `;
+      const lotH = await new sql.Request(tx).query(asignarLote('registro_historico'));
+      const lotA = await new sql.Request(tx).query(asignarLote('registro_activo'));
+
+      await new sql.Request(tx).batch(`
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F32.A1');
+      `);
+      await tx.commit();
+      const { hist, activo } = sinJson.recordset[0];
+      console.log(
+        `[F32.A1] lote_id asignado: ${lotH.rowsAffected[0] ?? 0} históricos, ` +
+        `${lotA.rowsAffected[0] ?? 0} activos; ` +
+        `${hist + activo} filas sin campos_extra JSON (no tocadas).`
+      );
+    } catch (err) {
+      try { await tx.rollback(); } catch {}
+      throw err;
+    }
+  }
+
   console.log('[DB] Conexión OK');
 }
 

@@ -620,3 +620,114 @@ test('D-055 4. cerrarDiaMand archiva AUTH, PRUEBA y REDESP (no solo autorizacion
   }
   await cleanMand();
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D-056 · E1 — Migración F32.A1: respaldos residentes + lote_id en los registros MAND previos.
+//
+// La migración corre en initDB (disparada por getDB() en el before() de esta suite). Estos tests
+// son SOLO LECTURA: NO hacen DML sobre registro_activo/registro_historico. Se acotan a plantas
+// REALES (planta_id <> TEST_PLANTA) porque en esta rama /guardar todavía es el endpoint VIEJO (no
+// escribe lote_id): durante la corrida siembra filas MAND en la fixture 'TST' SIN lote_id, que no
+// pertenecen a la población migrada por F32.A1. El universo que E1 valida es lo que ya existía al
+// arrancar el backend, es decir, los registros de plantas reales.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+test('D-056 E1.1 — migracion_aplicada tiene la fila F32.A1 tras initDB', async () => {
+  const db = await getDB();
+  const r = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F32.A1'`
+  );
+  assert.equal(r.recordset.length, 1, 'F32.A1 debe estar marcada como aplicada');
+});
+
+test('D-056 E1.2 — existen los respaldos residentes registro_{historico,activo}_backup_D056', async () => {
+  const db = await getDB();
+  const r = await db.request().query(`
+    SELECT
+      OBJECT_ID('bitacora.registro_historico_backup_D056','U') AS hist,
+      OBJECT_ID('bitacora.registro_activo_backup_D056','U')   AS activo
+  `);
+  assert.ok(r.recordset[0].hist,   'registro_historico_backup_D056 debe existir');
+  assert.ok(r.recordset[0].activo, 'registro_activo_backup_D056 debe existir');
+});
+
+test('D-056 E1.3 — ningún registro MAND (planta real) con campos_extra JSON quedó sin lote_id', async () => {
+  const db = await getDB();
+  const r = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID)
+    .input('tst', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT
+        (SELECT COUNT(*) FROM bitacora.registro_historico
+          WHERE bitacora_id=@m AND planta_id<>@tst
+            AND ISJSON(campos_extra)=1 AND JSON_VALUE(campos_extra,'$.lote_id') IS NULL) AS hist,
+        (SELECT COUNT(*) FROM bitacora.registro_activo
+          WHERE bitacora_id=@m AND planta_id<>@tst
+            AND ISJSON(campos_extra)=1 AND JSON_VALUE(campos_extra,'$.lote_id') IS NULL) AS activo
+    `);
+  assert.equal(r.recordset[0].hist, 0, 'histórico MAND real sin lote_id debe ser 0');
+  assert.equal(r.recordset[0].activo, 0, 'activo MAND real sin lote_id debe ser 0');
+});
+
+test('D-056 E1.4 — los lote_id asignados son distintos entre sí (un NEWID por fila)', async () => {
+  // A la altura de E1 cada registro MAND previo es un lote de UN SOLO periodo: NEWID() se evalúa por
+  // fila ⇒ count(*) == count(distinct lote_id). (E3 introduce lotes multi-celda que comparten
+  // lote_id y reescribe este archivo, así que esta invariante es la correcta para el estado E1.)
+  const db = await getDB();
+  const r = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID)
+    .input('tst', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT COUNT(*) AS total, COUNT(DISTINCT JSON_VALUE(campos_extra,'$.lote_id')) AS distintos
+      FROM (
+        SELECT campos_extra FROM bitacora.registro_historico
+          WHERE bitacora_id=@m AND planta_id<>@tst AND JSON_VALUE(campos_extra,'$.lote_id') IS NOT NULL
+        UNION ALL
+        SELECT campos_extra FROM bitacora.registro_activo
+          WHERE bitacora_id=@m AND planta_id<>@tst AND JSON_VALUE(campos_extra,'$.lote_id') IS NOT NULL
+      ) x
+    `);
+  const { total, distintos } = r.recordset[0];
+  assert.equal(distintos, total, `esperado ${total} lote_id distintos, got ${distintos}`);
+});
+
+test('D-056 E1.5 — idempotencia: un segundo run reasignaría 0 filas y el lote_id conocido sobrevive', async () => {
+  const db = await getDB();
+  // (a) El predicado del UPDATE de la migración (JSON válido AND lote_id IS NULL) no matchea nada ⇒
+  //     un re-run es un no-op y ningún GUID se reasigna. Prueba de idempotencia sin re-ejecutar
+  //     initDB ni hacer DML (los tests de E1 no escriben las tablas protegidas).
+  const pend = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID)
+    .input('tst', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT registro_id FROM bitacora.registro_historico
+          WHERE bitacora_id=@m AND planta_id<>@tst AND ISJSON(campos_extra)=1
+            AND JSON_VALUE(campos_extra,'$.lote_id') IS NULL
+        UNION ALL
+        SELECT registro_id FROM bitacora.registro_activo
+          WHERE bitacora_id=@m AND planta_id<>@tst AND ISJSON(campos_extra)=1
+            AND JSON_VALUE(campos_extra,'$.lote_id') IS NULL
+      ) x
+    `);
+  assert.equal(pend.recordset[0].n, 0, 'un segundo run del UPDATE reasignaría 0 filas');
+
+  // (b) Un lote_id conocido (si hay data real) es un GUID de 36 chars — sanity del CONVERT(NEWID()).
+  const uno = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID)
+    .input('tst', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT TOP 1 JSON_VALUE(campos_extra,'$.lote_id') AS lote_id
+      FROM bitacora.registro_historico
+      WHERE bitacora_id=@m AND planta_id<>@tst AND JSON_VALUE(campos_extra,'$.lote_id') IS NOT NULL
+      ORDER BY registro_id
+    `);
+  const lote = uno.recordset[0]?.lote_id;
+  if (lote) {
+    assert.match(
+      lote,
+      /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/,
+      `lote_id debe ser un GUID de 36 chars, got ${lote}`,
+    );
+  }
+});
