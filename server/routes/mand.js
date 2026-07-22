@@ -1,16 +1,18 @@
-// Router de Sala de Mando / MAND (E9, AUD-34/35). Grilla 3×24 (AUTH|PRUEBA|REDESP) + batch save
-// atómico + cierre diario manual. Montado bajo /api/sala-de-mando tras requireEntra.
+// Router de Sala de Mando / MAND (E9, AUD-34/35). Grilla 3×24 (AUTH|PRUEBA|REDESP) + captura
+// append-only por lotes (D-056) + cierre diario manual. Montado bajo /api/sala-de-mando tras
+// requireEntra.
 
 import express from 'express';
 import sql from 'mssql';
+import { randomUUID } from 'node:crypto';
 import * as dbBindings from '../db.js';
 import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { responderError } from '../utils/errores.js';
 import { hasPermisoBitacora, plantaMatch, puedeCerrarTurno } from '../middleware/permissions.js';
-import { turnoFromPeriodo, fechaOperativaDePeriodo } from '../utils/turno.js';
+import { turnoFromPeriodo, fechaOperativaDePeriodo, fechaBogotaStr } from '../utils/turno.js';
 import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from '../utils/snapshots.js';
-import { upsertEventoDashboard } from '../utils/notificador.js';
+import { recalcularEventoDashboard } from '../utils/notificador.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { notifyDashboard } from '../utils/notify-dashboard.js';
@@ -89,8 +91,22 @@ router.get('/', asyncH(async (req, res) => {
   return sendJSON(res, 200, out);
 }));
 
-// POST /api/sala-de-mando/guardar — batch save atómico para la grilla MAND.
-// Body: { planta_id, fecha, filas: [{ tipo, detalle, funcionariocnd, periodos: [{periodo, valor_mw}] }] }
+// Formato de la hora de la llamada tal como la manda el front (`<input type="time">`): HH:mm en
+// wallclock Bogotá. El instante se compone en el SERVIDOR (nunca se confía en el reloj del cliente).
+const RE_HORA = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+// Tolerancia hacia el futuro para `hora_llamada`. Absorbe el desfase entre el reloj del navegador
+// (que precarga el campo) y el del servidor; no habilita registrar llamadas futuras.
+const TOLERANCIA_HORA_MS = 5 * 60 * 1000;
+
+// POST /api/sala-de-mando/guardar — captura APPEND-ONLY de Operación 24h (D-056).
+// Body: { planta_id, fecha, filas: [{ tipo, hora, detalle, funcionariocnd, periodos: [{periodo, valor_mw}] }] }
+//
+// Cada fila/tipo de un mismo Guardar produce UN lote (`campos_extra.lote_id`, GUID generado acá) y
+// un registro NUEVO e inmutable por celda con valor. Nunca UPDATE, nunca DELETE: varios lotes
+// coexisten para el mismo (tipo, periodo, día, planta) — un periodo recibe varias llamadas del CND
+// en el día y hasta D-056 la segunda pisaba a la primera. Lo publicado al dashboard lo decide
+// `recalcularEventoDashboard` por CELDA (mayor hora_llamada), no el orden de guardado.
 router.post('/guardar', asyncH(async (req, res) => {
   const sesion = req.sesion;
   const { planta_id, fecha, filas } = req.body || {};
@@ -112,10 +128,10 @@ router.post('/guardar', asyncH(async (req, res) => {
     return sendJSON(res, 400, { error: 'filas debe ser un array' });
   }
 
-  // Validación: fecha = hoy en TZ Bogotá. Calculamos hoy con offset -5h.
+  // Validación: fecha = hoy en TZ Bogotá. Offset puro -5h (mismo cómputo que fechaBogotaStr).
   const nowMs = Date.now();
   const nowBogota = new Date(nowMs - 5 * 3600 * 1000);
-  const hoyStr = `${nowBogota.getUTCFullYear()}-${String(nowBogota.getUTCMonth() + 1).padStart(2, '0')}-${String(nowBogota.getUTCDate()).padStart(2, '0')}`;
+  const hoyStr = fechaBogotaStr(nowMs);
   if (fecha !== hoyStr) {
     return sendJSON(res, 400, {
       errores: [{ motivo: 'fecha_no_es_hoy', mensaje: `fecha debe ser hoy (${hoyStr} en zona Bogotá)` }],
@@ -157,11 +173,14 @@ router.post('/guardar', asyncH(async (req, res) => {
     return sendJSON(res, 403, { error: 'Sin permiso para crear/editar en MAND' });
   }
 
-  // Validaciones de negocio (acumulan errores, NO escriben si hay alguno).
+  // ── Validaciones de negocio (acumulan errores, NO escriben si hay alguno; RN-03.b) ────────────
+  // La unidad de captura es el LOTE (una fila/tipo dentro de un Guardar). Los errores de CELDA
+  // llevan `periodo`; los de la FILA entera (hora, funcionario, lote sin celdas) viajan SIN
+  // `periodo` — el front los pinta en la cabecera de la fila, no sobre una celda.
   const errores = [];
   const filasNorm = [];
   for (const fila of filas) {
-    const { tipo, detalle, funcionariocnd, periodos } = fila || {};
+    const { tipo, hora, detalle, funcionariocnd, periodos } = fila || {};
     if (!['AUTH', 'PRUEBA', 'REDESP'].includes(tipo)) {
       errores.push({ tipo: tipo ?? null, motivo: 'tipo_invalido' });
       continue;
@@ -170,6 +189,8 @@ router.post('/guardar', asyncH(async (req, res) => {
       errores.push({ tipo, motivo: 'periodos_invalido' });
       continue;
     }
+
+    const erroresAntesDeLaFila = errores.length;
     const periodosNorm = [];
     for (const item of periodos) {
       const p = parseInt(item?.periodo, 10);
@@ -184,28 +205,68 @@ router.post('/guardar', asyncH(async (req, res) => {
         errores.push({ tipo, periodo: p, motivo: 'valor_mw_invalido' });
         continue;
       }
-      // Validación REDESP: rechaza periodo bloqueado solo si valor_mw != null.
+      // Lock REDESP (RQ-03.17 / RN-03.c): protege el VALOR, jamás la hora ni el comentario.
       if (tipo === 'REDESP' && v !== null && p < periodoActual) {
         errores.push({ tipo, periodo: p, motivo: 'periodo_bloqueado' });
         continue;
       }
-      periodosNorm.push({ periodo: p, valor_mw: v });
+      if (v !== null) periodosNorm.push({ periodo: p, valor_mw: v });
+    }
+    const huboErrorDeCelda = errores.length > erroresAntesDeLaFila;
+
+    const detalleEff = (detalle != null && String(detalle).trim() !== '') ? detalle : null;
+    const pideMetadata = detalleEff != null
+      || (funcionariocnd != null && String(funcionariocnd).trim() !== '');
+
+    // Fila intacta (sin valores y sin metadata): no hay lote que registrar ni nada que perder. La
+    // hora viene PRECARGADA por el front (RQ-03.13), así que por sí sola no ensucia la fila.
+    if (periodosNorm.length === 0 && !pideMetadata && !huboErrorDeCelda) continue;
+    // Ya hay un motivo explícito para esta fila; no lo sepultamos bajo errores derivados.
+    if (huboErrorDeCelda) continue;
+
+    // RN-03.a: metadata sin ninguna celda con valor → rechazo explícito, NUNCA un 200 mentiroso.
+    // Es la regla que D-055 introdujo como `detalle_sin_celdas`: cambia el punto de validación
+    // (antes: no había dónde anclar el comentario), no la regla.
+    if (periodosNorm.length === 0) {
+      errores.push({ tipo, motivo: 'lote_sin_celdas' });
+      continue;
     }
 
-    // funcionariocnd: AUTH lo requiere si hay al menos un valor != null. PRUEBA/REDESP → null.
-    let funcEff = funcionariocnd;
+    // Hora de la llamada al CND (RQ-03.11..14): atributo del LOTE, obligatorio, validado contra el
+    // reloj del SERVIDOR. `fecha` ya está fijada a hoy Bogotá, así que el instante compuesto cae
+    // dentro del día de la grilla por construcción — igual se verifica antes de persistirlo.
+    const horaTxt = hora == null ? '' : String(hora).trim();
+    if (horaTxt === '') {
+      errores.push({ tipo, motivo: 'hora_requerida' });
+      continue;
+    }
+    const horaLlamada = RE_HORA.test(horaTxt) ? new Date(`${fecha}T${horaTxt}:00.000-05:00`) : null;
+    if (!horaLlamada || Number.isNaN(horaLlamada.getTime()) || fechaBogotaStr(horaLlamada) !== fecha) {
+      errores.push({ tipo, motivo: 'hora_invalida' });
+      continue;
+    }
+    if (horaLlamada.getTime() > nowMs + TOLERANCIA_HORA_MS) {
+      errores.push({ tipo, motivo: 'hora_futura' });
+      continue;
+    }
+
+    // funcionariocnd (RQ-03.16, sin cambios): AUTH lo exige — acá el lote ya tiene ≥1 celda con
+    // valor —; PRUEBA y REDESP lo fuerzan a NULL en silencio.
+    let funcEff = null;
     if (tipo === 'AUTH') {
-      const hayValor = periodosNorm.some((x) => x.valor_mw !== null);
-      if (hayValor && (!funcEff || String(funcEff).trim() === '')) {
+      funcEff = (funcionariocnd != null && String(funcionariocnd).trim() !== '') ? funcionariocnd : null;
+      if (funcEff == null) {
         errores.push({ tipo, motivo: 'funcionariocnd_requerido' });
+        continue;
       }
-      if (funcEff != null && String(funcEff).trim() === '') funcEff = null;
-    } else {
-      funcEff = null;
     }
 
     filasNorm.push({
-      tipo, detalle: detalle ?? null, funcionariocnd: funcEff, periodos: periodosNorm,
+      tipo,
+      detalle: detalleEff,
+      funcionariocnd: funcEff,
+      hora_llamada: horaLlamada.toISOString(),
+      periodos: periodosNorm,
     });
   }
 
@@ -226,143 +287,44 @@ router.post('/guardar', asyncH(async (req, res) => {
       return sendJSON(res, 409, { error: 'No hay un Jefe de Planta activo en el sistema. No se puede registrar hasta que se asigne uno.', codigo: 'sin_jefe_planta' });
     }
 
-    let creados = 0, actualizados = 0, eliminados = 0;
-    const erroresFila = [];
+    // ── Escritura APPEND-ONLY: un lote por fila, un registro NUEVO por celda con valor ──────────
+    // Desapareció la máquina de 4 casos por celda (INSERT/UPDATE/DELETE/no-op) y con ella el
+    // `modificado_por` selectivo de D-019 y el UPDATE de metadata a nivel de fila de D-055 (2):
+    // acá nada se modifica ni se borra, la metadata NACE con el lote. Las celdas vacías se omiten
+    // (ya no borran nada) y las correcciones viven en el histórico del apartado (D-057 / REQ-04).
+    let registrosCreados = 0;
+    const celdasTocadas = new Map(); // `${tipo}|${periodo}` → { tipo, periodo } (dedupe para el recálculo)
 
     for (const fila of filasNorm) {
-      const teInfo = tipoMap[fila.tipo];
-      const tipoEventoId = teInfo.tipo_evento_id;
-      const dashboardTipo = fila.tipo;
-      const eliminadosAntes = eliminados;
+      const tipoEventoId = tipoMap[fila.tipo].tipo_evento_id;
+      // El lote_id lo genera el SERVIDOR (uno por fila y por Guardar): el cliente no participa en
+      // la identidad del lote. Sin DDL — viaja dentro de campos_extra y por eso llega solo al
+      // histórico en el cierre diario (mand-sweeper copia campos_extra tal cual).
+      const lote_id = randomUUID();
 
       for (const { periodo, valor_mw } of fila.periodos) {
-        const existRes = await new sql.Request(transaction)
-          .input('mand', sql.Int, MAND_ID)
-          .input('planta', sql.VarChar(10), planta_id)
-          .input('fecha', sql.Date, fecha)
-          .input('periodo', sql.Int, periodo)
-          .input('te', sql.Int, tipoEventoId)
-          .query(`
-            SELECT TOP 1 ra.registro_id, ra.detalle,
-                   TRY_CAST(JSON_VALUE(ra.campos_extra, '$.valor_mw') AS FLOAT) AS valor_mw_old,
-                   JSON_VALUE(ra.campos_extra, '$.funcionariocnd') AS funcionariocnd_old
-            FROM bitacora.registro_activo ra
-            WHERE ra.bitacora_id = @mand
-              AND ra.planta_id = @planta
-              AND CAST(DATEADD(HOUR, -5, ra.fecha_evento) AS DATE) = @fecha
-              AND ra.tipo_evento_id = @te
-              AND TRY_CAST(JSON_VALUE(ra.campos_extra, '$.periodo') AS INT) = @periodo
-              AND ra.estado = 'borrador'
-            ORDER BY ra.creado_en DESC
-          `);
-        const existing = existRes.recordset[0];
         const turno = turnoFromPeriodo(periodo);
-
-        if (existing && valor_mw === null) {
-          // Caso B: existe + valor null (el operador vació la celda) → se destruye el borrador.
-          //
-          // D-055: antes hacía `activa=0` y dejaba la fila de evento_dashboard con
-          // `registro_origen_id` apuntando a un registro que este mismo statement borraba → HUÉRFANA
-          // para siempre. Así nacieron las 35 filas colgadas del 2026-07-06 en prod. No hay FK que
-          // lo impida y no puede haberla: el origen VIVE en registro_activo y MIGRA a
-          // registro_historico al cerrar el día — dos padres posibles, ninguna FK los cubre. La
-          // integridad se sostiene acá y la fija `mand_integridad.test.js`.
-          //
-          // Se BORRA la fila en vez de desactivarla: su origen deja de existir, y para el dashboard
-          // (que filtra activa=1) borrar y desactivar son indistinguibles. El soft-delete sigue
-          // siendo correcto en `cerrarDiaMand`, donde el origen NO desaparece — migra al histórico y
-          // el puntero sigue resolviendo.
-          await new sql.Request(transaction)
-            .input('rid', sql.Int, existing.registro_id)
-            .query(`
-              DELETE FROM bitacora.evento_dashboard WHERE registro_origen_id = @rid;
-              DELETE FROM bitacora.registro_activo WHERE registro_id = @rid;
-            `);
-          eliminados++;
-          continue;
-        }
-
-        if (existing && valor_mw !== null) {
-          // Caso A: existe + valor != null. modificado_por SOLO si valor_mw cambió (regla 2b).
-          const valorCambio = (existing.valor_mw_old !== valor_mw);
-          const detalleCambio = (existing.detalle ?? null) !== (fila.detalle ?? null);
-          const funcCambio = (existing.funcionariocnd_old ?? null) !== (fila.funcionariocnd ?? null);
-          if (!valorCambio && !detalleCambio && !funcCambio) continue; // no-op
-
-          const camposExtra = JSON.stringify({
-            periodo,
-            valor_mw,
-            ...(fila.funcionariocnd != null ? { funcionariocnd: fila.funcionariocnd } : { funcionariocnd: null }),
-          });
-          if (valorCambio) {
-            await new sql.Request(transaction)
-              .input('rid', sql.Int, existing.registro_id)
-              .input('detalle', sql.NVarChar(sql.MAX), fila.detalle ?? null)
-              .input('campos_extra', sql.NVarChar(sql.MAX), camposExtra)
-              .input('mod_por', sql.Int, sesion.usuario_id)
-              .query(`
-                UPDATE bitacora.registro_activo
-                SET detalle = @detalle,
-                    campos_extra = @campos_extra,
-                    modificado_por = @mod_por,
-                    modificado_en = SYSUTCDATETIME()
-                WHERE registro_id = @rid
-              `);
-          } else {
-            // Solo cambió detalle/funcionariocnd — actualizamos sin tocar modificado_por.
-            await new sql.Request(transaction)
-              .input('rid', sql.Int, existing.registro_id)
-              .input('detalle', sql.NVarChar(sql.MAX), fila.detalle ?? null)
-              .input('campos_extra', sql.NVarChar(sql.MAX), camposExtra)
-              .query(`
-                UPDATE bitacora.registro_activo
-                SET detalle = @detalle,
-                    campos_extra = @campos_extra
-                WHERE registro_id = @rid
-              `);
-          }
-
-          // UPSERT evento_dashboard. Reusa fila si existía (preserva evento_id).
-          await upsertEventoDashboard(transaction, {
-            planta_id,
-            fecha,
-            periodo,
-            valor: valor_mw,
-            jdts_snapshot,
-            jefes_snapshot,
-            registro_origen_id: existing.registro_id,
-            tipo: dashboardTipo,
-          });
-          actualizados++;
-          continue;
-        }
-
-        if (!existing && valor_mw === null) {
-          // Caso D: no existe + valor null → no-op.
-          continue;
-        }
-
-        // Caso C: no existe + valor != null → INSERT registro_activo + UPSERT evento_dashboard.
         const camposExtra = JSON.stringify({
           periodo,
           valor_mw,
-          ...(fila.funcionariocnd != null ? { funcionariocnd: fila.funcionariocnd } : { funcionariocnd: null }),
+          funcionariocnd: fila.funcionariocnd,
+          lote_id,
+          hora_llamada: fila.hora_llamada,
         });
-        // D-055: estampar turno_id. MAND era la ÚNICA bitácora que insertaba con turno_id=NULL
-        // (la rama genérica de registros.js sí lo estampa) → sus 10 filas de histórico en prod
-        // tenían 10/10 NULL, rompiendo todo JOIN por turno. Se resuelve por (planta,
-        // fecha_operativa, turno) con `fechaOperativaDePeriodo`, que sabe que los periodos 1..6
-        // pertenecen al T2 del día ANTERIOR. Degrada a NULL si la cabecera no existe: la columna es
-        // nullable y un registro nunca debe perderse por no poder atarlo a un turno.
+        // D-055 (3) / RN-03.e: turno_id se resuelve por (planta, fecha_operativa, turno) con
+        // `fechaOperativaDePeriodo` — los periodos 1..6 de la grilla del día F pertenecen al T2 que
+        // arrancó a las 18:00 de F-1. JAMÁS por `hora_llamada` (dato declarado por el operador) ni
+        // por `inicio_nominal`/`fin_nominal` (los muta extenderTurno, D-046, y dejan de particionar).
+        // Degrada a NULL si la cabecera no existe: un registro nunca se pierde por no poder atarlo.
         const turnoIdCelda = await resolverTurnoUnidadId(transaction, {
           planta_id, fecha_operativa: fechaOperativaDePeriodo(fecha, periodo), turno,
         });
-        const ins = await new sql.Request(transaction)
+        await new sql.Request(transaction)
           .input('mand', sql.Int, MAND_ID)
           .input('planta', sql.VarChar(10), planta_id)
           .input('turno', sql.TinyInt, turno)
           .input('turno_id', sql.Int, turnoIdCelda)
-          .input('detalle', sql.NVarChar(sql.MAX), fila.detalle ?? null)
+          .input('detalle', sql.NVarChar(sql.MAX), fila.detalle)
           .input('campos_extra', sql.NVarChar(sql.MAX), camposExtra)
           .input('te', sql.Int, tipoEventoId)
           .input('ingenieros_snapshot', sql.NVarChar(sql.MAX), ingenieros_snapshot)
@@ -373,101 +335,32 @@ router.post('/guardar', asyncH(async (req, res) => {
             INSERT INTO bitacora.registro_activo
               (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
                estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, turno_id)
-            OUTPUT INSERTED.registro_id
             VALUES (@mand, @planta, SYSUTCDATETIME(), @turno, @detalle, @campos_extra, @te,
                     'borrador', @ingenieros_snapshot, @jdts_snapshot, @jefes_snapshot, @creado_por,
                     @turno_id)
           `);
-        const newId = ins.recordset[0].registro_id;
-        await upsertEventoDashboard(transaction, {
-          planta_id,
-          fecha,
-          periodo,
-          valor: valor_mw,
-          jdts_snapshot,
-          jefes_snapshot,
-          registro_origen_id: newId,
-          tipo: dashboardTipo,
-        });
-        creados++;
+        registrosCreados++;
+        celdasTocadas.set(`${fila.tipo}|${periodo}`, { tipo: fila.tipo, periodo });
       }
-
-      // ── D-055: metadata (detalle / funcionariocnd) a nivel de FILA ────────────────────────
-      // `detalle` y `funcionariocnd` son atributos de la fila (tipo × día × planta), pero el modelo
-      // los persiste REPLICADOS en cada celda con valor — no tienen storage propio. Antes solo se
-      // escribían de refilón, dentro del loop de `periodos`, así que una fila cuyo `periodos` venía
-      // vacío no guardaba NADA y el endpoint respondía 200 {creados:0,...}: el front mostraba
-      // "Guardado" y el refetch revertía el texto. Se perdía de dos formas reales:
-      //   (a) fila sin ningún valor (PRUEBA/REDESP con solo un comentario) → el front no tenía
-      //       ninguna celda que propagar;
-      //   (b) REDESP con todos sus valores en periodos ya bloqueados (p < periodoActual) → el front
-      //       los omitía para no rebotar contra el guard `periodo_bloqueado`.
-      // Ahora la metadata se aplica UNA vez sobre TODAS las celdas vivas de la fila, sin pasar por
-      // `periodos`: el lock de REDESP protege el VALOR (dato operativo), nunca el comentario.
-      // `modificado_por` NO se toca — D-019: solo un cambio de valor_mw marca modificación.
-      const metaRes = await new sql.Request(transaction)
-        .input('mand', sql.Int, MAND_ID)
-        .input('planta', sql.VarChar(10), planta_id)
-        .input('fecha', sql.Date, fecha)
-        .input('te', sql.Int, tipoEventoId)
-        .input('detalle', sql.NVarChar(sql.MAX), fila.detalle ?? null)
-        .input('func', sql.NVarChar(sql.MAX), fila.funcionariocnd ?? null)
-        .query(`
-          UPDATE bitacora.registro_activo
-          SET detalle = @detalle,
-              campos_extra = JSON_MODIFY(campos_extra, '$.funcionariocnd', @func)
-          WHERE bitacora_id = @mand
-            AND planta_id = @planta
-            AND CAST(DATEADD(HOUR, -5, fecha_evento) AS DATE) = @fecha
-            AND tipo_evento_id = @te
-            AND estado = 'borrador'
-            AND (
-              ISNULL(detalle, '') <> ISNULL(@detalle, '')
-              OR ISNULL(JSON_VALUE(campos_extra, '$.funcionariocnd'), '') <> ISNULL(@func, '')
-            )
-        `);
-      const celdasConMetadata = metaRes.rowsAffected[0] || 0;
-
-      // Si la fila no tiene NINGUNA celda donde anclar el comentario, decirlo en vez de tragárselo.
-      // Excepción: si esta fila acaba de borrar celdas, se está vaciando y su comentario queda moot
-      // — bloquear ahí impediría el flujo legítimo "limpiar la fila".
-      if (celdasConMetadata === 0 && eliminados === eliminadosAntes) {
-        const pideMetadata = (fila.detalle != null && String(fila.detalle).trim() !== '')
-          || (fila.funcionariocnd != null && String(fila.funcionariocnd).trim() !== '');
-        if (pideMetadata) {
-          const hayCeldas = await new sql.Request(transaction)
-            .input('mand', sql.Int, MAND_ID)
-            .input('planta', sql.VarChar(10), planta_id)
-            .input('fecha', sql.Date, fecha)
-            .input('te', sql.Int, tipoEventoId)
-            .query(`
-              SELECT COUNT(*) AS n FROM bitacora.registro_activo
-              WHERE bitacora_id = @mand AND planta_id = @planta
-                AND CAST(DATEADD(HOUR, -5, fecha_evento) AS DATE) = @fecha
-                AND tipo_evento_id = @te AND estado = 'borrador'
-            `);
-          if ((hayCeldas.recordset[0]?.n || 0) === 0) {
-            erroresFila.push({ tipo: fila.tipo, motivo: 'detalle_sin_celdas' });
-          }
-        }
-      }
-      actualizados += celdasConMetadata;
     }
 
-    // Rechazo atómico: si alguna fila quiso guardar un comentario sin celdas, no se commitea nada.
-    if (erroresFila.length > 0) {
-      await transaction.rollback();
-      return sendJSON(res, 400, { errores: erroresFila });
+    // Publicación al dashboard: el vigente de cada celda tocada se resuelve DESDE CERO (D-056 E2),
+    // dentro de esta misma transacción. Por CELDA y no por lote: dos lotes pueden solaparse
+    // parcialmente y cada periodo compartido lo gana el de mayor `hora_llamada`. Reemplaza a
+    // `upsertEventoDashboard`, que devolvía `conflict` ante una fila ya activa y por lo tanto nunca
+    // habría dejado que un lote posterior desplazara al publicado.
+    for (const { tipo, periodo } of celdasTocadas.values()) {
+      await recalcularEventoDashboard(transaction, { planta_id, fecha, periodo, tipo });
     }
 
     await transaction.commit();
     broadcastConteoBitacoras(planta_id).catch(() => {});
-    // Push cross-repo al dashboard (fire-and-forget) SOLO si algo cambió: evita ruido cuando el
-    // guardar fue no-op. Nunca bloquea la respuesta al operador (ver notify-dashboard.js).
-    if (creados + actualizados + eliminados > 0) {
+    // Push cross-repo al dashboard (fire-and-forget) SOLO si se escribió algo. Nunca bloquea la
+    // respuesta al operador (ver notify-dashboard.js).
+    if (registrosCreados > 0) {
       notifyDashboard({ plantas: [planta_id], fecha }).catch(() => {});
     }
-    return sendJSON(res, 200, { resumen: { creados, actualizados, eliminados } });
+    return sendJSON(res, 200, { resumen: { lotes: filasNorm.length, registros: registrosCreados } });
   } catch (err) {
     try { await transaction.rollback(); } catch {}
     throw err;

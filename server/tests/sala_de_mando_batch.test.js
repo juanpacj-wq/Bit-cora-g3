@@ -32,6 +32,19 @@ function periodoActual() {
 const HOY = hoyBogota();
 const P_ACTUAL = periodoActual();
 
+// D-056: 'HH:mm' Bogotá desplazado `deltaMin` minutos respecto de ahora. Devuelve null si el
+// desplazamiento se sale del día de la grilla (solo ocurre en los bordes 00:00 / 23:59) — el
+// servidor rechazaría esa hora con `hora_invalida` y el test perdería su intención.
+function horaBogotaMin(deltaMin) {
+  const d = new Date(Date.now() - 5 * 3600 * 1000);
+  const minutos = d.getUTCHours() * 60 + d.getUTCMinutes() + deltaMin;
+  if (minutos < 0 || minutos > 1439) return null;
+  return `${String(Math.floor(minutos / 60)).padStart(2, '0')}:${String(minutos % 60).padStart(2, '0')}`;
+}
+
+// Hora de llamada válida por defecto: 2 minutos atrás (nunca futura, siempre dentro del día).
+const HORA_OK = horaBogotaMin(-2) ?? '00:00';
+
 // D-055: hard-codeada a TEST_PLANTA y SIN parámetro de planta — imposible apuntarla a GEC3/GEC32
 // por error (mismo patrón que cleanDispTestPlanta, D-041). El assert es la última línea de defensa
 // si alguien reapunta la constante: preferimos reventar la suite antes que borrar histórico real.
@@ -70,7 +83,8 @@ after(async () => {
   await cleanupTestRegistros();
 });
 
-test('1. POST guardar — 3 filas, 8 celdas total → 200 con resumen creados=8', async () => {
+test('1. POST guardar — 3 filas con hora → 200 { lotes: 3, registros: N }', async () => {
+  await cleanMand();
   // Elegimos un periodo REDESP >= P_ACTUAL para evitar el lock (variable según hora del run).
   const pRedesp1 = Math.min(P_ACTUAL, 24);
   const pRedesp2 = Math.min(P_ACTUAL + 1, 24);
@@ -81,6 +95,7 @@ test('1. POST guardar — 3 filas, 8 celdas total → 200 con resumen creados=8'
     filas: [
       {
         tipo: 'AUTH',
+        hora: HORA_OK,
         detalle: `${TEST_TAG} auth`,
         funcionariocnd: 'Pérez',
         periodos: [
@@ -91,12 +106,14 @@ test('1. POST guardar — 3 filas, 8 celdas total → 200 con resumen creados=8'
       },
       {
         tipo: 'PRUEBA',
+        hora: HORA_OK,
         detalle: `${TEST_TAG} prueba`,
         funcionariocnd: null,
         periodos: [{ periodo: 1, valor_mw: 50 }],
       },
       {
         tipo: 'REDESP',
+        hora: HORA_OK,
         detalle: `${TEST_TAG} redesp`,
         funcionariocnd: null,
         periodos: pRedesp1 === pRedesp2
@@ -110,9 +127,8 @@ test('1. POST guardar — 3 filas, 8 celdas total → 200 con resumen creados=8'
   assert.equal(status, 200, JSON.stringify(data));
   // 5 AUTH + 1 PRUEBA + (1 ó 2 REDESP) = 7 ó 8
   const totalCeldas = 5 + 1 + body.filas[2].periodos.length;
-  assert.equal(data.resumen?.creados, totalCeldas);
-  assert.equal(data.resumen?.actualizados, 0);
-  assert.equal(data.resumen?.eliminados, 0);
+  assert.equal(data.resumen?.lotes, 3, 'una fila con celdas = un lote');
+  assert.equal(data.resumen?.registros, totalCeldas);
 
   // Verificar evento_dashboard ahora tiene filas activas para los 3 tipos.
   const db = await getDB();
@@ -136,7 +152,7 @@ test('2. AUTH sin funcionariocnd con valor → 400 con errores', async () => {
     body: {
       planta_id: PLANTA_ID, fecha: HOY,
       filas: [{
-        tipo: 'AUTH', detalle: `${TEST_TAG} sinfunc`, funcionariocnd: null,
+        tipo: 'AUTH', hora: HORA_OK, detalle: `${TEST_TAG} sinfunc`, funcionariocnd: null,
         periodos: [{ periodo: 6, valor_mw: 70 }],
       }],
     },
@@ -155,7 +171,7 @@ test('3. REDESP en periodo bloqueado (P1 si la hora actual > 0) → 400 con erro
     body: {
       planta_id: PLANTA_ID, fecha: HOY,
       filas: [{
-        tipo: 'REDESP', detalle: `${TEST_TAG} bloq`, funcionariocnd: null,
+        tipo: 'REDESP', hora: HORA_OK, detalle: `${TEST_TAG} bloq`, funcionariocnd: null,
         periodos: [{ periodo: pBloqueado, valor_mw: 50 }],
       }],
     },
@@ -171,7 +187,7 @@ test('4. fecha != hoy → 400 fecha_no_es_hoy', async () => {
     body: {
       planta_id: PLANTA_ID, fecha: '2020-01-01',
       filas: [{
-        tipo: 'AUTH', detalle: `${TEST_TAG}`, funcionariocnd: 'X',
+        tipo: 'AUTH', hora: HORA_OK, detalle: `${TEST_TAG}`, funcionariocnd: 'X',
         periodos: [{ periodo: 1, valor_mw: 1 }],
       }],
     },
@@ -187,7 +203,7 @@ test('5. PRUEBA con funcionariocnd != null → server lo fuerza a NULL silencios
     body: {
       planta_id: PLANTA_ID, fecha: HOY,
       filas: [{
-        tipo: 'PRUEBA', detalle: `${TEST_TAG} pforced`, funcionariocnd: 'IGNORADO',
+        tipo: 'PRUEBA', hora: HORA_OK, detalle: `${TEST_TAG} pforced`, funcionariocnd: 'IGNORADO',
         periodos: [{ periodo: 8, valor_mw: 33 }],
       }],
     },
@@ -206,41 +222,75 @@ test('5. PRUEBA con funcionariocnd != null → server lo fuerza a NULL silencios
   assert.equal(r.recordset[0]?.func, null);
 });
 
-test('6. Re-save: cambio en P3, vaciar P5, sumar P6 → 1 actualizado, 1 eliminado, 1 creado', async () => {
+test('6. D-056: un segundo Guardar sobre el mismo periodo AGREGA, no pisa [criterio 3]', async () => {
+  // Reemplaza al viejo test de "re-save" (cambio + vaciado + alta): la máquina de 4 casos por celda
+  // desapareció con el modelo append-only. Acá se fija la regla nueva: registrar nunca destruye lo
+  // registrado antes, ni siquiera para la misma celda.
   await cleanMand();
-  // Setup inicial: AUTH P3=90, P5=100.
-  const setup = await postGuardar({
+  const horaTemprana = horaBogotaMin(-30) ?? '00:00';
+
+  const primero = await postGuardar({
     sesion_id: ctx.sesiones.jdt,
     body: {
       planta_id: PLANTA_ID, fecha: HOY,
       filas: [{
-        tipo: 'AUTH', detalle: `${TEST_TAG} resave`, funcionariocnd: 'Pérez',
+        tipo: 'AUTH', hora: horaTemprana, detalle: `${TEST_TAG} llamada 1`, funcionariocnd: 'Pérez',
         periodos: [{ periodo: 3, valor_mw: 90 }, { periodo: 5, valor_mw: 100 }],
       }],
     },
   });
-  assert.equal(setup.status, 200, JSON.stringify(setup.data));
-  assert.equal(setup.data.resumen.creados, 2);
+  assert.equal(primero.status, 200, JSON.stringify(primero.data));
+  assert.equal(primero.data.resumen.registros, 2);
 
-  // Re-save: P3=92 (update), P5=null (delete), P6=105 (insert).
-  const { status, data } = await postGuardar({
+  // Segunda llamada del CND para el MISMO periodo 3, más tarde y con otro valor y funcionario.
+  const segundo = await postGuardar({
     sesion_id: ctx.sesiones.jdt,
     body: {
       planta_id: PLANTA_ID, fecha: HOY,
       filas: [{
-        tipo: 'AUTH', detalle: `${TEST_TAG} resave`, funcionariocnd: 'Pérez',
-        periodos: [
-          { periodo: 3, valor_mw: 92 },
-          { periodo: 5, valor_mw: null },
-          { periodo: 6, valor_mw: 105 },
-        ],
+        tipo: 'AUTH', hora: HORA_OK, detalle: `${TEST_TAG} llamada 2`, funcionariocnd: 'Gómez',
+        periodos: [{ periodo: 3, valor_mw: 92 }],
       }],
     },
   });
-  assert.equal(status, 200, JSON.stringify(data));
-  assert.equal(data.resumen.creados, 1);
-  assert.equal(data.resumen.actualizados, 1);
-  assert.equal(data.resumen.eliminados, 1);
+  assert.equal(segundo.status, 200, JSON.stringify(segundo.data));
+  assert.equal(segundo.data.resumen.registros, 1);
+
+  const db = await getDB();
+  const p3 = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID).input('p', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT registro_id,
+             TRY_CAST(JSON_VALUE(campos_extra,'$.valor_mw') AS FLOAT) AS valor,
+             JSON_VALUE(campos_extra,'$.lote_id') AS lote_id,
+             JSON_VALUE(campos_extra,'$.hora_llamada') AS hora
+      FROM bitacora.registro_activo
+      WHERE bitacora_id=@m AND planta_id=@p AND estado='borrador'
+        AND TRY_CAST(JSON_VALUE(campos_extra,'$.periodo') AS INT) = 3
+    `);
+  assert.equal(p3.recordset.length, 2, 'los dos registros del periodo 3 coexisten');
+  assert.deepEqual(p3.recordset.map((r) => r.valor).sort((a, b) => a - b), [90, 92]);
+  assert.notEqual(p3.recordset[0].lote_id, p3.recordset[1].lote_id, 'cada Guardar es un lote distinto');
+
+  // Y el dashboard publica UNA sola fila por celda: la del lote de mayor hora_llamada [criterio 11].
+  const ev = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, HOY)
+    .query(`
+      SELECT periodo, valor_mw, activa, registro_origen_id FROM bitacora.evento_dashboard
+      WHERE planta_id=@p AND fecha=@f AND tipo='AUTH'
+      ORDER BY periodo
+    `);
+  assert.deepEqual(ev.recordset.map((r) => r.periodo), [3, 5], 'una fila publicada por celda, sin duplicar');
+  assert.equal(ev.recordset[0].valor_mw, 92, 'P3 publica el valor de la llamada más reciente por hora');
+  assert.equal(ev.recordset[1].valor_mw, 100);
+  // El puntero apunta al registro de MAYOR hora_llamada, no al último insertado por casualidad.
+  // Mismo orden que resuelve el servidor: hora DESC y, si empatan, registro_id DESC (el empate solo
+  // ocurre corriendo la suite en el primer minuto del día Bogotá, donde ambas horas caen en 00:00).
+  const ganador = [...p3.recordset].sort((a, b) => (
+    a.hora === b.hora ? b.registro_id - a.registro_id : (a.hora < b.hora ? 1 : -1)
+  ))[0];
+  assert.equal(ev.recordset[0].registro_origen_id, ganador.registro_id,
+    'registro_origen_id debe apuntar al registro de hora mayor');
 });
 
 // D-042: se eliminó el test del rechazo de cierre individual MAND — el cierre individual por
@@ -305,7 +355,7 @@ test('8. /cierre-diario manual → 200 closed:true; segundo intento → 200 skip
     body: {
       planta_id: PLANTA_ID, fecha: HOY,
       filas: [{
-        tipo: 'AUTH', detalle: `${TEST_TAG} cierre`, funcionariocnd: 'X',
+        tipo: 'AUTH', hora: HORA_OK, detalle: `${TEST_TAG} cierre`, funcionariocnd: 'X',
         periodos: [{ periodo: 12, valor_mw: 60 }],
       }],
     },
@@ -355,7 +405,7 @@ test('10. F21.C — CIET emitido por cierre-diario tiene campos_extra.fecha_cerr
     body: {
       planta_id: PLANTA_ID, fecha: HOY,
       filas: [{
-        tipo: 'AUTH', detalle: `${TEST_TAG} ciet-fecha`, funcionariocnd: 'Y',
+        tipo: 'AUTH', hora: HORA_OK, detalle: `${TEST_TAG} ciet-fecha`, funcionariocnd: 'Y',
         periodos: [{ periodo: 14, valor_mw: 70 }],
       }],
     },
@@ -406,105 +456,69 @@ test('10. F21.C — CIET emitido por cierre-diario tiene campos_extra.fecha_cerr
 // la fixture, y node:test corre sus tests en orden.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-test('D-055 1a. comentario en una fila SIN celdas → 400 detalle_sin_celdas (antes: 200 y se perdía)', async () => {
+test('D-055 1a. metadata en una fila SIN celdas → 400 lote_sin_celdas (nunca un 200 mentiroso) [criterio 9]', async () => {
+  // D-056: la regla de D-055 se conserva, cambia el punto de validación — antes el motivo era
+  // `detalle_sin_celdas` (no había ninguna celda donde anclar el comentario), ahora es
+  // `lote_sin_celdas` (un lote sin ninguna celda con valor no existe como evento).
   await cleanMand();
   const { status, data } = await postGuardar({
-    sesion_id: ctx.sesiones.jdt,
-    body: {
-      planta_id: PLANTA_ID,
-      fecha: HOY,
-      filas: [{ tipo: 'PRUEBA', detalle: `${TEST_TAG} comentario sin valores`, funcionariocnd: null, periodos: [] }],
-    },
-  });
-  assert.equal(status, 400, `esperado rechazo explícito, got ${status} ${JSON.stringify(data)}`);
-  assert.ok(
-    data.errores?.some((e) => e.tipo === 'PRUEBA' && e.motivo === 'detalle_sin_celdas'),
-    `esperado motivo detalle_sin_celdas, got ${JSON.stringify(data.errores)}`,
-  );
-});
-
-test('D-055 1b. cambiar SOLO el comentario de una fila con celdas lo persiste en todas', async () => {
-  await cleanMand();
-  const seed = await postGuardar({
     sesion_id: ctx.sesiones.jdt,
     body: {
       planta_id: PLANTA_ID,
       fecha: HOY,
       filas: [{
-        tipo: 'PRUEBA', detalle: `${TEST_TAG} inicial`, funcionariocnd: null,
-        periodos: [{ periodo: 8, valor_mw: 40 }, { periodo: 9, valor_mw: 41 }],
+        tipo: 'PRUEBA', hora: HORA_OK, detalle: `${TEST_TAG} comentario sin valores`,
+        funcionariocnd: null, periodos: [],
       }],
     },
   });
-  assert.equal(seed.status, 200, JSON.stringify(seed.data));
-
-  // Solo cambia el detalle: `periodos: []`, exactamente lo que manda el front tras D-055.
-  const { status, data } = await postGuardar({
-    sesion_id: ctx.sesiones.jdt,
-    body: {
-      planta_id: PLANTA_ID,
-      fecha: HOY,
-      filas: [{ tipo: 'PRUEBA', detalle: `${TEST_TAG} corregido`, funcionariocnd: null, periodos: [] }],
-    },
-  });
-  assert.equal(status, 200, JSON.stringify(data));
-  assert.equal(data.resumen.actualizados, 2, 'debe tocar las 2 celdas de la fila');
+  assert.equal(status, 400, `esperado rechazo explícito, got ${status} ${JSON.stringify(data)}`);
+  assert.ok(
+    data.errores?.some((e) => e.tipo === 'PRUEBA' && e.motivo === 'lote_sin_celdas'),
+    `esperado motivo lote_sin_celdas, got ${JSON.stringify(data.errores)}`,
+  );
 
   const db = await getDB();
-  const r = await db.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
-    .input('m', sql.Int, MAND_BITACORA_ID)
-    .query(`
-      SELECT DISTINCT detalle FROM bitacora.registro_activo
-      WHERE bitacora_id=@m AND planta_id=@p AND estado='borrador'
-    `);
-  assert.equal(r.recordset.length, 1, 'todas las celdas de la fila comparten un único detalle');
-  assert.equal(r.recordset[0].detalle, `${TEST_TAG} corregido`);
+  const n = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID).input('p', sql.VarChar(10), TEST_PLANTA)
+    .query(`SELECT COUNT(*) AS n FROM bitacora.registro_activo WHERE bitacora_id=@m AND planta_id=@p`);
+  assert.equal(n.recordset[0].n, 0, 'un lote rechazado no deja rastro');
 });
 
-test('D-055 1c. REDESP: el lock protege el VALOR, no el comentario (periodos pasados incluidos)', async () => {
-  if (P_ACTUAL <= 1) return; // sin periodo bloqueable a esta hora
+test('D-055 1c. REDESP: el lock protege el VALOR, nunca la hora ni el comentario', async () => {
+  // RN-03.c. La llamada del CND pudo ocurrir hace media hora (hora PASADA) y el lote se registra
+  // igual mientras su VALOR caiga en el periodo actual o posterior. El lock nunca mira la hora.
   await cleanMand();
-  const db = await getDB();
-  const teRedesp = (await db.request().input('m', sql.Int, MAND_BITACORA_ID).query(
-    `SELECT tipo_evento_id FROM lov_bit.tipo_evento WHERE bitacora_id=@m AND notificar_dashboard_tipo='REDESP'`
-  )).recordset[0].tipo_evento_id;
-
-  // Celda REDESP en un periodo YA BLOQUEADO, sembrada directo en BD: el endpoint no permite crearla
-  // ahora, y es justo el caso cuyo comentario se perdía.
-  const pBloqueado = P_ACTUAL - 1;
-  await db.request()
-    .input('m', sql.Int, MAND_BITACORA_ID).input('p', sql.VarChar(10), PLANTA_ID)
-    .input('te', sql.Int, teRedesp).input('cp', sql.Int, ctx.usuarios.jdt.usuario_id)
-    .input('ce', sql.NVarChar(sql.MAX), JSON.stringify({ periodo: pBloqueado, valor_mw: 99, funcionariocnd: null }))
-    .input('d', sql.NVarChar(sql.MAX), `${TEST_TAG} viejo`)
-    .input('t', sql.TinyInt, turnoFromPeriodo(pBloqueado))
-    .query(`
-      INSERT INTO bitacora.registro_activo
-        (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id, estado,
-         ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
-      VALUES (@m, @p, SYSUTCDATETIME(), @t, @d, @ce, @te, 'borrador', '[]', '[]', '[]', @cp);
-    `);
+  const horaPasada = horaBogotaMin(-45) ?? '00:00';
+  const pLibre = Math.min(P_ACTUAL, 24);
 
   const { status, data } = await postGuardar({
     sesion_id: ctx.sesiones.jdt,
     body: {
       planta_id: PLANTA_ID,
       fecha: HOY,
-      filas: [{ tipo: 'REDESP', detalle: `${TEST_TAG} nuevo comentario`, funcionariocnd: null, periodos: [] }],
+      filas: [{
+        tipo: 'REDESP', hora: horaPasada, detalle: `${TEST_TAG} llamada de hace rato`,
+        funcionariocnd: null, periodos: [{ periodo: pLibre, valor_mw: 99 }],
+      }],
     },
   });
-  assert.equal(status, 200, `el comentario de REDESP no debe rebotar por periodo_bloqueado: ${JSON.stringify(data)}`);
+  assert.equal(status, 200, `una hora pasada no debe rebotar: ${JSON.stringify(data)}`);
 
+  const db = await getDB();
   const r = await db.request()
-    .input('m', sql.Int, MAND_BITACORA_ID).input('p', sql.VarChar(10), PLANTA_ID).input('te', sql.Int, teRedesp)
+    .input('m', sql.Int, MAND_BITACORA_ID).input('p', sql.VarChar(10), TEST_PLANTA)
     .query(`
-      SELECT detalle, TRY_CAST(JSON_VALUE(campos_extra,'$.valor_mw') AS FLOAT) AS valor
+      SELECT detalle,
+             TRY_CAST(JSON_VALUE(campos_extra,'$.valor_mw') AS FLOAT) AS valor,
+             JSON_VALUE(campos_extra,'$.hora_llamada') AS hora
       FROM bitacora.registro_activo
-      WHERE bitacora_id=@m AND planta_id=@p AND tipo_evento_id=@te AND estado='borrador'
+      WHERE bitacora_id=@m AND planta_id=@p AND estado='borrador'
     `);
-  assert.equal(r.recordset[0].detalle, `${TEST_TAG} nuevo comentario`, 'el comentario debe actualizarse');
-  assert.equal(r.recordset[0].valor, 99, 'el valor bloqueado NO debe cambiar');
+  assert.equal(r.recordset.length, 1);
+  assert.equal(r.recordset[0].detalle, `${TEST_TAG} llamada de hace rato`);
+  assert.equal(r.recordset[0].valor, 99);
+  assert.equal(r.recordset[0].hora, new Date(`${HOY}T${horaPasada}:00.000-05:00`).toISOString());
 });
 
 test('D-055 2. el INSERT de MAND estampa turno_id resolviendo por (planta, fecha_operativa, turno)', async () => {
@@ -534,7 +548,10 @@ test('D-055 2. el INSERT de MAND estampa turno_id resolviendo por (planta, fecha
     body: {
       planta_id: PLANTA_ID,
       fecha: HOY,
-      filas: [{ tipo: 'AUTH', detalle: `${TEST_TAG} t`, funcionariocnd: 'Pérez', periodos: [{ periodo, valor_mw: 70 }] }],
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, detalle: `${TEST_TAG} t`, funcionariocnd: 'Pérez',
+        periodos: [{ periodo, valor_mw: 70 }],
+      }],
     },
   });
   assert.equal(status, 200);
@@ -545,28 +562,37 @@ test('D-055 2. el INSERT de MAND estampa turno_id resolviendo por (planta, fecha
   assert.equal(r.recordset[0].turno_id, esperado, 'turno_id debe apuntar a la cabecera del periodo');
 });
 
-test('D-055 3. vaciar una celda no deja evento_dashboard huérfano (causa de las 35 filas de prod)', async () => {
+test('D-055 3. la captura append-only no deja evento_dashboard huérfano (causa de las 35 filas de prod)', async () => {
+  // D-056: vaciar una celda ya no borra nada (el envío del front omite las celdas sin valor), así
+  // que el vector original desapareció. La INVARIANTE sigue siendo la misma y se mantiene fijada:
+  // ninguna fila de evento_dashboard puede apuntar a un registro inexistente. Acá se ejerce con
+  // dos lotes sobre la misma celda, que es lo que ahora mueve `registro_origen_id`.
   await cleanMand();
   const alta = await postGuardar({
     sesion_id: ctx.sesiones.jdt,
     body: {
       planta_id: PLANTA_ID,
       fecha: HOY,
-      filas: [{ tipo: 'AUTH', detalle: `${TEST_TAG} h`, funcionariocnd: 'Pérez', periodos: [{ periodo: 10, valor_mw: 55 }] }],
+      filas: [{
+        tipo: 'AUTH', hora: horaBogotaMin(-30) ?? '00:00', detalle: `${TEST_TAG} h`,
+        funcionariocnd: 'Pérez', periodos: [{ periodo: 10, valor_mw: 55 }],
+      }],
     },
   });
   assert.equal(alta.status, 200, JSON.stringify(alta.data));
 
-  const baja = await postGuardar({
+  const relevo = await postGuardar({
     sesion_id: ctx.sesiones.jdt,
     body: {
       planta_id: PLANTA_ID,
       fecha: HOY,
-      filas: [{ tipo: 'AUTH', detalle: null, funcionariocnd: null, periodos: [{ periodo: 10, valor_mw: null }] }],
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, detalle: `${TEST_TAG} h2`, funcionariocnd: 'Pérez',
+        periodos: [{ periodo: 10, valor_mw: 66 }],
+      }],
     },
   });
-  assert.equal(baja.status, 200, JSON.stringify(baja.data));
-  assert.equal(baja.data.resumen.eliminados, 1);
+  assert.equal(relevo.status, 200, JSON.stringify(relevo.data));
 
   const db = await getDB();
   const h = await db.request()
@@ -594,9 +620,9 @@ test('D-055 4. cerrarDiaMand archiva AUTH, PRUEBA y REDESP (no solo autorizacion
       planta_id: PLANTA_ID,
       fecha: HOY,
       filas: [
-        { tipo: 'AUTH', detalle: `${TEST_TAG} a`, funcionariocnd: 'Pérez', periodos: [{ periodo: 11, valor_mw: 60 }] },
-        { tipo: 'PRUEBA', detalle: `${TEST_TAG} p`, funcionariocnd: null, periodos: [{ periodo: 11, valor_mw: 61 }] },
-        { tipo: 'REDESP', detalle: `${TEST_TAG} r`, funcionariocnd: null, periodos: [{ periodo: pRedesp, valor_mw: 62 }] },
+        { tipo: 'AUTH', hora: HORA_OK, detalle: `${TEST_TAG} a`, funcionariocnd: 'Pérez', periodos: [{ periodo: 11, valor_mw: 60 }] },
+        { tipo: 'PRUEBA', hora: HORA_OK, detalle: `${TEST_TAG} p`, funcionariocnd: null, periodos: [{ periodo: 11, valor_mw: 61 }] },
+        { tipo: 'REDESP', hora: HORA_OK, detalle: `${TEST_TAG} r`, funcionariocnd: null, periodos: [{ periodo: pRedesp, valor_mw: 62 }] },
       ],
     },
   });
@@ -627,10 +653,11 @@ test('D-055 4. cerrarDiaMand archiva AUTH, PRUEBA y REDESP (no solo autorizacion
 //
 // La migración corre en initDB (disparada por getDB() en el before() de esta suite). Estos tests
 // son SOLO LECTURA: NO hacen DML sobre registro_activo/registro_historico. Se acotan a plantas
-// REALES (planta_id <> TEST_PLANTA) porque en esta rama /guardar todavía es el endpoint VIEJO (no
-// escribe lote_id): durante la corrida siembra filas MAND en la fixture 'TST' SIN lote_id, que no
-// pertenecen a la población migrada por F32.A1. El universo que E1 valida es lo que ya existía al
-// arrancar el backend, es decir, los registros de plantas reales.
+// REALES (planta_id <> TEST_PLANTA) porque la población que F32.A1 migró es la que ya existía al
+// arrancar el backend, no la que la propia corrida siembra en la fixture 'TST'. El scoping importa
+// especialmente para E1.4: tras E3 un lote multi-celda comparte un solo `lote_id` entre varios
+// registros, así que "un lote_id por registro" solo vale para los migrados, que son lotes de un
+// único periodo por construcción (NEWID() por fila).
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 test('D-056 E1.1 — migracion_aplicada tiene la fila F32.A1 tras initDB', async () => {
@@ -926,4 +953,454 @@ test('D-056 E2.6 — con la misma hora_llamada desempata el registro_id mayor (m
   assert.equal(r.registro_origen_id, segundo, 'con hora empatada gana el más nuevo');
   const ev = await getEvento({ periodo: 14, tipo: 'AUTH' });
   assert.equal(ev.valor_mw, 200);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D-056 · E3 — POST /guardar append-only: lotes, hora de la llamada, sin edición.
+//
+// Los tests del modelo viejo que asumían "un registro por celda, el segundo Guardar lo pisa" se
+// reescribieron arriba (1, 6, D-055 1a/1c/3): la máquina de 4 casos por celda desapareció. Acá van
+// los criterios de aceptación del REQ-03 que solo existen con el modelo nuevo.
+//
+// Todo corre sobre TEST_PLANTA con TEST_TAG; el `hora` de cada lote se calcula relativo al reloj
+// del run (horaBogotaMin) porque el servidor valida contra SU propio reloj, no contra el del test.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Lee los registros MAND vivos de la fixture con su metadata de lote desempaquetada.
+async function registrosMand() {
+  const db = await getDB();
+  const r = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT ra.registro_id, ra.detalle, ra.turno_id,
+             te.notificar_dashboard_tipo AS tipo,
+             TRY_CAST(JSON_VALUE(ra.campos_extra,'$.periodo') AS INT)   AS periodo,
+             TRY_CAST(JSON_VALUE(ra.campos_extra,'$.valor_mw') AS FLOAT) AS valor_mw,
+             JSON_VALUE(ra.campos_extra,'$.funcionariocnd') AS funcionariocnd,
+             JSON_VALUE(ra.campos_extra,'$.lote_id')        AS lote_id,
+             JSON_VALUE(ra.campos_extra,'$.hora_llamada')   AS hora_llamada
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = ra.tipo_evento_id
+      WHERE ra.bitacora_id=@m AND ra.planta_id=@p AND ra.estado='borrador'
+      ORDER BY ra.registro_id
+    `);
+  return r.recordset;
+}
+
+test('D-056 E3.1 — un lote de P14..P18 crea 5 registros con el MISMO lote_id y la misma metadata [criterio 2]', async () => {
+  await cleanMand();
+  const { status, data } = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} rango`,
+        periodos: [14, 15, 16, 17, 18].map((periodo) => ({ periodo, valor_mw: 150 })),
+      }],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.deepEqual(data.resumen, { lotes: 1, registros: 5 });
+
+  const filas = await registrosMand();
+  assert.equal(filas.length, 5);
+  assert.deepEqual(filas.map((f) => f.periodo), [14, 15, 16, 17, 18]);
+  assert.equal(new Set(filas.map((f) => f.lote_id)).size, 1, 'las 5 celdas comparten un solo lote_id');
+  assert.match(
+    filas[0].lote_id,
+    /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/,
+    'lote_id debe ser un GUID',
+  );
+  const horaEsperada = new Date(`${HOY}T${HORA_OK}:00.000-05:00`).toISOString();
+  for (const f of filas) {
+    assert.equal(f.hora_llamada, horaEsperada);
+    assert.equal(f.funcionariocnd, 'J. Pérez');
+    assert.equal(f.detalle, `${TEST_TAG} rango`);
+    assert.equal(f.valor_mw, 150);
+  }
+});
+
+test('D-056 E3.2 — lote sin hora → 400 hora_requerida, y el error NO lleva periodo [criterio 6]', async () => {
+  await cleanMand();
+  const { status, data } = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} sin hora`,
+        periodos: [{ periodo: 14, valor_mw: 150 }],
+      }],
+    },
+  });
+  assert.equal(status, 400, JSON.stringify(data));
+  const err = data.errores?.find((e) => e.motivo === 'hora_requerida');
+  assert.ok(err, `esperado hora_requerida, got ${JSON.stringify(data.errores)}`);
+  assert.equal(err.tipo, 'AUTH');
+  assert.equal(err.periodo, undefined, 'la hora es del LOTE: el error viaja sin periodo');
+
+  const filas = await registrosMand();
+  assert.equal(filas.length, 0, 'nada se escribió');
+});
+
+test('D-056 E3.3 — hora con formato inválido → hora_invalida; hora futura más allá de la tolerancia → hora_futura', async () => {
+  await cleanMand();
+  const invalida = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [{
+        tipo: 'PRUEBA', hora: '25:99', detalle: `${TEST_TAG} mala hora`, funcionariocnd: null,
+        periodos: [{ periodo: 14, valor_mw: 10 }],
+      }],
+    },
+  });
+  assert.equal(invalida.status, 400, JSON.stringify(invalida.data));
+  assert.ok(invalida.data.errores?.some((e) => e.motivo === 'hora_invalida'), JSON.stringify(invalida.data.errores));
+
+  // +30 min supera holgadamente la tolerancia de 5 min contra el reloj del SERVIDOR.
+  const futura = horaBogotaMin(30);
+  if (futura == null) return; // últimos 30 min del día Bogotá: el desplazamiento saldría de la grilla
+  const res = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [{
+        tipo: 'PRUEBA', hora: futura, detalle: `${TEST_TAG} hora futura`, funcionariocnd: null,
+        periodos: [{ periodo: 14, valor_mw: 10 }],
+      }],
+    },
+  });
+  assert.equal(res.status, 400, JSON.stringify(res.data));
+  assert.ok(res.data.errores?.some((e) => e.motivo === 'hora_futura'), JSON.stringify(res.data.errores));
+
+  const filas = await registrosMand();
+  assert.equal(filas.length, 0, 'ningún lote con hora inválida se escribió');
+});
+
+test('D-056 E3.4 — REDESP con valor en periodo pasado → periodo_bloqueado y nada se escribe [criterio 7]', async () => {
+  if (P_ACTUAL <= 1) return; // sin periodo bloqueable a esta hora
+  await cleanMand();
+  const { status, data } = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [{
+        tipo: 'REDESP', hora: HORA_OK, detalle: `${TEST_TAG} redesp tarde`, funcionariocnd: null,
+        periodos: [{ periodo: P_ACTUAL - 1, valor_mw: 120 }, { periodo: Math.min(P_ACTUAL, 24), valor_mw: 130 }],
+      }],
+    },
+  });
+  assert.equal(status, 400, JSON.stringify(data));
+  const err = data.errores?.find((e) => e.motivo === 'periodo_bloqueado');
+  assert.ok(err, JSON.stringify(data.errores));
+  assert.equal(err.periodo, P_ACTUAL - 1, 'el error de celda SÍ lleva periodo');
+
+  const filas = await registrosMand();
+  assert.equal(filas.length, 0, 'el lote entero se rechaza, incluida la celda válida (RN-03.b)');
+});
+
+test('D-056 E3.5 — REDESP guarda funcionariocnd = null aunque el cliente lo mande [criterio 8]', async () => {
+  await cleanMand();
+  const { status, data } = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [{
+        tipo: 'REDESP', hora: HORA_OK, detalle: `${TEST_TAG} redesp func`, funcionariocnd: 'IGNORADO',
+        periodos: [{ periodo: Math.min(P_ACTUAL, 24), valor_mw: 140 }],
+      }],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+  const filas = await registrosMand();
+  assert.equal(filas.length, 1);
+  assert.equal(filas[0].funcionariocnd, null, 'REDESP fuerza funcionariocnd a NULL (RQ-03.16)');
+});
+
+test('D-056 E3.6 — un error en UNA fila impide escribir las demás [criterio 10]', async () => {
+  await cleanMand();
+  const { status, data } = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [
+        // Fila válida…
+        {
+          tipo: 'PRUEBA', hora: HORA_OK, detalle: `${TEST_TAG} valida`, funcionariocnd: null,
+          periodos: [{ periodo: 20, valor_mw: 70 }],
+        },
+        // …y fila inválida (AUTH sin funcionario): el Guardar completo se rechaza.
+        {
+          tipo: 'AUTH', hora: HORA_OK, detalle: `${TEST_TAG} invalida`, funcionariocnd: null,
+          periodos: [{ periodo: 21, valor_mw: 80 }],
+        },
+      ],
+    },
+  });
+  assert.equal(status, 400, JSON.stringify(data));
+  assert.ok(data.errores?.some((e) => e.tipo === 'AUTH' && e.motivo === 'funcionariocnd_requerido'));
+
+  const filas = await registrosMand();
+  assert.equal(filas.length, 0, 'la fila válida tampoco se escribió (atomicidad, RN-03.b)');
+});
+
+test('D-056 E3.7 — el periodo 3 de la grilla del día F queda atado al T2 iniciado en F-1 [criterio 13]', async () => {
+  await cleanMand();
+  const db = await getDB();
+  const periodo = 3;
+  const fop = fechaOperativaDePeriodo(HOY, periodo); // = HOY - 1 día
+  const turno = turnoFromPeriodo(periodo);           // = 2
+  assert.notEqual(fop, HOY, 'la madrugada pertenece al turno que arrancó el día anterior');
+
+  // La cabecera de un turno PASADO no existe necesariamente en la fixture. Si la sembramos nosotros,
+  // la retiramos al final: una fila PROGRAMADO residente en 'TST' es sucesora candidata de cualquier
+  // `cerrarTurno` posterior (activarSucesor toma el PROGRAMADO más antiguo) y contaminaría a las
+  // suites que corren después.
+  const yaExistia = (await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+    .query(`SELECT turno_unidad_id FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`)
+  ).recordset[0] || null;
+
+  if (!yaExistia) {
+    await db.request()
+      .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+      .input('cp', sql.Int, ctx.usuarios.jdt.usuario_id)
+      .query(`
+        INSERT INTO bitacora.turno_unidad
+          (fecha_operativa, planta_id, turno, estado, inicio_nominal, fin_nominal, creado_por)
+        VALUES (@f, @p, @t, 'PROGRAMADO',
+                DATEADD(HOUR, 23, CAST(@f AS DATETIME2)), DATEADD(HOUR, 35, CAST(@f AS DATETIME2)), @cp);
+      `);
+  }
+  const esperado = (await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+    .query(`SELECT turno_unidad_id FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`)
+  ).recordset[0].turno_unidad_id;
+
+  try {
+    const { status, data } = await postGuardar({
+      sesion_id: ctx.sesiones.jdt,
+      body: {
+        planta_id: PLANTA_ID,
+        fecha: HOY,
+        filas: [{
+          tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} madrugada`,
+          periodos: [{ periodo, valor_mw: 75 }],
+        }],
+      },
+    });
+    assert.equal(status, 200, JSON.stringify(data));
+
+    const filas = await registrosMand();
+    assert.equal(filas.length, 1);
+    assert.equal(filas[0].turno_id, esperado, 'turno_id debe apuntar al T2 del día anterior, no al del día de la grilla');
+  } finally {
+    if (!yaExistia) {
+      // Primero los registros que la referencian por `turno_id` (FK), con el borrado acotado a la
+      // fixture que ya hace cleanMand(); después la cabecera sembrada, por su PK.
+      await cleanMand();
+      await db.request()
+        .input('id', sql.Int, esperado)
+        .query(`DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
+    }
+  }
+});
+
+test('D-056 E3.8 — con el turno finalizado y la cabecera CERRADA se registra igual [criterio 14]', async () => {
+  await cleanMand();
+  const db = await getDB();
+  // Periodo del turno que NO está corriendo ahora: así la cabecera que cerramos no es la vigente y
+  // no contamina a las suites posteriores que escriben en TEST_PLANTA por la rama genérica.
+  const periodo = (P_ACTUAL >= 7 && P_ACTUAL <= 18) ? 3 : 12;
+  const fop = fechaOperativaDePeriodo(HOY, periodo);
+  const turno = turnoFromPeriodo(periodo);
+
+  const previo = (await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+    .query(`SELECT turno_unidad_id, estado FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`)
+  ).recordset[0] || null;
+
+  await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+    .input('cp', sql.Int, ctx.usuarios.jdt.usuario_id)
+    .query(`
+      IF EXISTS (SELECT 1 FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t)
+        UPDATE bitacora.turno_unidad
+          SET estado='CERRADO', motivo_cierre='MANUAL', cerrado_por=@cp, cerrado_en=SYSUTCDATETIME()
+          WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t;
+      ELSE
+        INSERT INTO bitacora.turno_unidad
+          (fecha_operativa, planta_id, turno, estado, inicio_nominal, fin_nominal,
+           motivo_cierre, cerrado_por, cerrado_en, creado_por)
+        VALUES (@f, @p, @t, 'CERRADO',
+                DATEADD(HOUR, 11, CAST(@f AS DATETIME2)), DATEADD(HOUR, 23, CAST(@f AS DATETIME2)),
+                'MANUAL', @cp, SYSUTCDATETIME(), @cp);
+    `);
+  // Finalización de turno VIGENTE en la sesión que va a escribir (D-040).
+  await db.request()
+    .input('sid', sql.Int, ctx.sesiones.jdt)
+    .query(`UPDATE bitacora.sesion_activa SET turno_finalizado_en = SYSUTCDATETIME() WHERE sesion_id = @sid`);
+
+  try {
+    const { status, data } = await postGuardar({
+      sesion_id: ctx.sesiones.jdt,
+      body: {
+        planta_id: PLANTA_ID,
+        fecha: HOY,
+        filas: [{
+          tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} exencion`,
+          periodos: [{ periodo, valor_mw: 88 }],
+        }],
+      },
+    });
+    assert.equal(status, 200, `MAND está exenta del turno (RQ-03.18): ${JSON.stringify(data)}`);
+    assert.notEqual(data.codigo, 'turno_finalizado');
+    assert.notEqual(data.codigo, 'turno_cerrado');
+    assert.equal(data.resumen.registros, 1);
+  } finally {
+    await db.request()
+      .input('sid', sql.Int, ctx.sesiones.jdt)
+      .query(`UPDATE bitacora.sesion_activa SET turno_finalizado_en = NULL WHERE sesion_id = @sid`);
+    // Restaurar la cabecera al estado en que estaba (o retirarla si la creamos nosotros).
+    if (previo) {
+      await db.request()
+        .input('id', sql.Int, previo.turno_unidad_id).input('e', sql.VarChar(12), previo.estado)
+        .query(`
+          UPDATE bitacora.turno_unidad
+            SET estado=@e, motivo_cierre=NULL, cerrado_por=NULL, cerrado_en=NULL
+            WHERE turno_unidad_id=@id
+        `);
+    } else {
+      // La cabecera la creamos nosotros: primero se van los registros que la referencian por FK
+      // (cleanMand, acotado a la fixture) y después ella.
+      await cleanMand();
+      await db.request()
+        .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+        .query(`DELETE FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`);
+    }
+  }
+});
+
+test('D-056 E3.9 — guard de coherencia: todo lote_id escrito tiene UNA sola hora, funcionario y descripción', async () => {
+  // La metadata del lote se REPLICA en cada celda (patrón vigente de MAND) y ningún constraint la
+  // mantiene coherente. Este guard es la red que va a hacer falta cuando D-057 introduzca la
+  // edición por lote: si una corrección toca unas celdas y no otras, acá se nota.
+  await cleanMand();
+  const pRedesp = Math.min(P_ACTUAL, 24);
+  const { status, data } = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [
+        {
+          tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} coh-auth`,
+          periodos: [{ periodo: 20, valor_mw: 10 }, { periodo: 21, valor_mw: 11 }, { periodo: 22, valor_mw: 12 }],
+        },
+        {
+          tipo: 'PRUEBA', hora: horaBogotaMin(-10) ?? '00:00', funcionariocnd: null,
+          detalle: `${TEST_TAG} coh-prueba`,
+          periodos: [{ periodo: 20, valor_mw: 20 }, { periodo: 21, valor_mw: 21 }],
+        },
+        {
+          tipo: 'REDESP', hora: horaBogotaMin(-5) ?? '00:00', funcionariocnd: null, detalle: null,
+          periodos: [{ periodo: pRedesp, valor_mw: 30 }],
+        },
+      ],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.resumen.lotes, 3);
+
+  const filas = await registrosMand();
+  const porLote = new Map();
+  for (const f of filas) {
+    if (!porLote.has(f.lote_id)) porLote.set(f.lote_id, []);
+    porLote.get(f.lote_id).push(f);
+  }
+  assert.equal(porLote.size, 3, 'tres filas del mismo Guardar = tres lotes distintos');
+  for (const [lote_id, celdas] of porLote) {
+    for (const campo of ['hora_llamada', 'funcionariocnd', 'detalle']) {
+      const distintos = new Set(celdas.map((c) => c[campo]));
+      assert.equal(distintos.size, 1, `lote ${lote_id}: ${campo} debe ser idéntico en sus ${celdas.length} celdas`);
+    }
+    // Un lote nunca mezcla tipos ni repite periodo.
+    assert.equal(new Set(celdas.map((c) => c.tipo)).size, 1);
+    assert.equal(new Set(celdas.map((c) => c.periodo)).size, celdas.length);
+  }
+});
+
+test('D-056 E3.10 — cerrarDiaMand arrastra lote_id y hora_llamada al histórico y sigue soft-deleteando el publicado', async () => {
+  await cleanMand();
+  const db = await getDB();
+  const sistema = (await db.request()
+    .query(`SELECT usuario_id FROM lov_bit.usuario WHERE username='SISTEMA'`)).recordset[0]?.usuario_id;
+  assert.ok(sistema, 'usuario SISTEMA debe existir');
+
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} cierre-lote`,
+        periodos: [{ periodo: 13, valor_mw: 65 }, { periodo: 14, valor_mw: 66 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const loteEsperado = (await registrosMand())[0].lote_id;
+  const horaEsperada = new Date(`${HOY}T${HORA_OK}:00.000-05:00`).toISOString();
+
+  const res = await cerrarDiaMand(db, { fecha: HOY, planta_id: PLANTA_ID, usuarioCierre: sistema });
+  assert.equal(res.closed, true, JSON.stringify(res));
+
+  const hist = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID).input('p', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT JSON_VALUE(campos_extra,'$.lote_id') AS lote_id,
+             JSON_VALUE(campos_extra,'$.hora_llamada') AS hora_llamada
+      FROM bitacora.registro_historico
+      WHERE bitacora_id=@m AND planta_id=@p
+    `);
+  assert.equal(hist.recordset.length, 2, 'las 2 celdas del lote llegaron al histórico');
+  for (const row of hist.recordset) {
+    assert.equal(row.lote_id, loteEsperado, 'lote_id viaja dentro de campos_extra');
+    assert.equal(row.hora_llamada, horaEsperada, 'hora_llamada viaja dentro de campos_extra');
+  }
+
+  // El cierre diario conserva su SOFT-delete (activa=0): el origen no desapareció, migró al
+  // histórico y el puntero sigue resolviendo. El DELETE de D-056 es solo para el otro caso.
+  const ev = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, HOY)
+    .query(`SELECT periodo, activa FROM bitacora.evento_dashboard WHERE planta_id=@p AND fecha=@f AND tipo='AUTH'`);
+  assert.equal(ev.recordset.length, 2, 'las filas publicadas siguen existiendo tras el cierre');
+  for (const row of ev.recordset) assert.equal(row.activa, false, 'quedan desactivadas, no borradas');
+
+  // El CIET del cierre no lleva TEST_TAG en detalle (registrarCierreMand lo deja NULL): se borra
+  // por PK para no acumular leftover entre corridas.
+  const ciet = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT TOP 1 ra.registro_id
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+      WHERE b.codigo='CIET' AND ra.planta_id=@p
+        AND JSON_VALUE(ra.campos_extra,'$.motivo')='mand-sweeper-diario'
+      ORDER BY ra.registro_id DESC
+    `);
+  if (ciet.recordset[0]) {
+    await db.request()
+      .input('rid', sql.Int, ciet.recordset[0].registro_id)
+      .query(`DELETE FROM bitacora.registro_activo WHERE registro_id = @rid`);
+  }
+  await cleanMand();
 });
