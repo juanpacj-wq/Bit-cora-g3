@@ -5,14 +5,20 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 2.1 |
-| Fecha | 2026-07-05 |
+| Versión | 2.2 |
+| Fecha | 2026-07-22 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
 
 > **Convenciones:** las tablas de catálogos viven en `lov_bit`; las tablas operativas en `bitacora`. Los campos JSON usan `NVARCHAR(MAX)` y se validan en la capa de aplicación.
 
+> **Cambios v2.2 (2026-07-22) — Operación 24h append-only (D-056):**
+> - **§7.9 actualizada** con el modelo de captura append-only de MAND: `POST /api/sala-de-mando/guardar` **solo INSERTA** (murió la máquina de 4 casos), varios registros pueden coexistir por `(tipo, periodo, día, planta)`, body y motivos de error nuevos (`hora_requerida`/`hora_invalida`/`hora_futura`/`lote_sin_celdas`; retirado `detalle_sin_celdas`). El pivote `GET /api/sala-de-mando` **se dio de baja** (404); lo reemplaza `GET /api/sala-de-mando/lotes` (listado del día, solo lectura, agrupado por `lote_id`).
+> - **`campos_extra` de MAND gana `lote_id` y `hora_llamada`** (sin DDL — viajan tal cual al histórico). `lote_id`: GUID del servidor por fila/tipo en cada Guardar, agrupa el lote y sostiene su metadata **replicada por celda sin constraint** (solo la cubre un guard de test). `hora_llamada`: ISO UTC compuesta server-side desde `HH:mm` Bogotá; **`fecha_evento` no cambia**; en los migrados la clave está **AUSENTE**, y ese NULL va último en todo `ORDER BY`.
+> - **§5.1: resolución del vigente por CELDA** vía `recalcularEventoDashboard` (desde cero, no upsert) — `upsertEventoDashboard` queda para la rama genérica de `registros.js`. Sin ganador se **BORRA** la fila de `evento_dashboard`; el soft-delete (`activa=0`) sigue intacto en `cerrarDiaMand`. `UQ_evento_planta_fecha_periodo_tipo` y el shape del contrato cross-repo **no cambian**.
+> - **Migración `F32.A1`** (excepción a RF-032, mismas garantías que F30.A1/F31.A1): respaldos **residentes** `bitacora.registro_historico_backup_D056` y `bitacora.registro_activo_backup_D056` (**no se borran**) + `JSON_MODIFY('$.lote_id', NEWID())` por fila sobre MAND. No altera valores, autores ni fechas. Verificada en prod: 0 históricos / 7 activos convertidos, 0 filas sin JSON.
+>
 > **Cambios v2.1 (2026-07-05) — Entidad explícita de turno (D-045):**
 > - **Nueva §4.10:** DDL de `bitacora.turno_unidad` (cabecera, ciclo `PROGRAMADO→ABIERTO→CERRADO`, `motivo_cierre`, extensión) + `bitacora.turno_participante` (participación viva) + FK `turno_id` NULLABLE en `sesion_activa`/`registro_activo`/`registro_historico`/`conformacion_turno` + vista `v_turno_seguimiento` (migración `F29.A1/A2/A3`).
 > - **§4.7 `conformacion_turno`:** cambia la **fuente de poblado** — ahora se congela desde `turno_participante` como producto atómico de `cerrarTurno` (D-045). **Retirados** el disparo por sweeper y el catchup de `initDB()` (cerraban H1/H2 de la auditoría 2026-07-04: la `fecha_operativa` ya no se deriva del login post-medianoche). El builder sobrevive solo para el trigger manual.
@@ -1201,8 +1207,17 @@ CREATE INDEX IX_evento_lookup
 
 1. El JdT (vía MAND batch save o AUTH manual) crea un registro cuyo `tipo_evento.notificar_dashboard_tipo` != NULL.
 2. El backend genera los snapshots y resuelve el `tipo` desde la fila del `tipo_evento` (no del JSON de la bitácora — F6).
-3. Se ejecuta `upsertEventoDashboard` (`server/utils/notificador.js`): INSERT nuevo o, si existe una fila con `activa=0` para `(planta_id, fecha, periodo, tipo)`, UPDATE reactivándola con el nuevo valor.
+3. Se ejecuta `upsertEventoDashboard` (`server/utils/notificador.js`): INSERT nuevo o, si existe una fila con `activa=0` para `(planta_id, fecha, periodo, tipo)`, UPDATE reactivándola con el nuevo valor. **Desde D-056 esto vale solo para la rama genérica de `registros.js`**; MAND usa `recalcularEventoDashboard` (siguiente párrafo).
 4. El Dashboard consulta `/api/eventos-dashboard` y suprime la alerta de desviación para ese periodo.
+
+**Resolución del vigente para MAND (D-056) — por CELDA, desde cero.** Con la captura append-only pueden existir **varios** registros MAND para el mismo `(planta, fecha, periodo, tipo)`, así que la fila publicada no se decide por upsert sino recalculando el ganador: `recalcularEventoDashboard(transaction, { planta_id, fecha, periodo, tipo })` busca entre los `registro_activo` MAND (`estado='borrador'`, día Bogotá por `fecha_evento`) con
+
+```sql
+ORDER BY CASE WHEN hora IS NULL THEN 1 ELSE 0 END,  -- los sin hora, ÚLTIMOS: nunca ganan por hora
+         hora DESC, creado_en DESC, registro_id DESC   -- hora = TRY_CAST(JSON_VALUE(campos_extra,'$.hora_llamada') AS datetime2)
+```
+
+y luego: **con ganador** → INSERT (si no existía) o UPDATE con `valor_mw`, `registro_origen_id`, `activa=1` y `jdts_snapshot`/`jefes_snapshot` **del propio ganador**; **sin ninguno** → **DELETE** de la fila (no `activa=0`: el origen dejó de existir y el puntero quedaría huérfano — ver D-055 (4)). Todo el DML va acotado por las 4 claves del UNIQUE, nunca por planta sola. La decisión es **por celda y no por lote** porque los lotes se solapan parcialmente (A cubre P14–P18 a las 09:12, B cubre P16–P20 a las 09:40 → P14–P15 publican A, P16–P20 publican B). El `UNIQUE` de 4 columnas y el shape de la tabla **no cambian**: el dashboard sigue viendo un solo valor por periodo y tipo.
 
 El Dashboard debe **parsear `jdts_snapshot` y `jefes_snapshot` como JSON**: ya no son `INT` como en versiones previas del modelo.
 
@@ -1414,14 +1429,50 @@ La bitácora DISP rompe deliberadamente varias invariantes del modelo general po
 
 ### 7.9 Operación 24h con batch save y cierre automático (F16+F17)
 
+> ⚠️ **Actualizada por D-056 (2026-07-22) — captura append-only.** Lo que sigue describe el modelo
+> vigente salvo donde se marca lo contrario. Los tres cambios que invalidan la redacción original:
+>
+> 1. **Ya no hay "un registro por celda" ni máquina de 4 casos.** `POST /api/sala-de-mando/guardar`
+>    **siempre INSERTA**; nunca hace UPDATE ni DELETE. Body nuevo:
+>    `{ planta_id, fecha, filas: [{ tipo, hora, funcionariocnd, detalle, periodos: [{periodo, valor_mw}] }] }`;
+>    respuesta `200 { resumen: { lotes, registros } }`. **Motivos nuevos:** `hora_requerida`,
+>    `hora_invalida`, `hora_futura`, `lote_sin_celdas`; **retirado:** `detalle_sin_celdas`. Varios
+>    registros pueden coexistir para el mismo `(tipo, periodo, día, planta)`.
+> 2. **`campos_extra` de MAND gana dos claves** (§4.1 — sin DDL, viajan tal cual al histórico):
+>    `{ "periodo", "valor_mw", "funcionariocnd", "lote_id", "hora_llamada" }`.
+>    - **`lote_id`** — GUID de 36 chars que genera el **servidor**, uno por fila/tipo en cada
+>      Guardar. Agrupa los registros nacidos del mismo Guardar (unidad de presentación y, desde
+>      D-057, de corrección). `detalle`/`funcionariocnd`/`hora_llamada` son metadata **del lote**,
+>      replicada en cada celda; **ningún constraint la mantiene coherente** (la sostiene un guard de
+>      test). Sin columna computada ni índice: las consultas ya filtran por bitácora + planta + día.
+>    - **`hora_llamada`** — hora de la llamada al CND, **ISO UTC** (`toISOString()`), compuesta
+>      server-side desde `HH:mm` Bogotá + la fecha de la grilla. **`fecha_evento` NO cambia**: sigue
+>      siendo el instante de guardado, que es lo que acota el día en la grilla, el cierre diario y el
+>      archivo. En los registros migrados por `F32.A1` la clave está **AUSENTE** (ni `null` ni `""`);
+>      se lee con `TRY_CAST(JSON_VALUE(campos_extra,'$.hora_llamada') AS datetime2)` → NULL, que va
+>      **último** en todo `ORDER BY` y **nunca gana por hora**.
+> 3. **Resolución de `evento_dashboard`: por CELDA, desde cero** — `recalcularEventoDashboard`
+>    (`utils/notificador.js`), no un upsert ciego. Ganador de `(planta, fecha, periodo, tipo)`:
+>    `ORDER BY CASE WHEN hora IS NULL THEN 1 ELSE 0 END, hora DESC, creado_en DESC, registro_id DESC`;
+>    con ganador → INSERT/UPDATE con `valor_mw` y snapshots **del propio ganador**; **sin ninguno →
+>    DELETE de la fila** (el puntero quedaría huérfano). Los lotes se solapan **parcialmente**, así
+>    que decidir "por lote" publica mal los periodos compartidos. El **soft-delete (`activa=0`) sigue
+>    intacto en `cerrarDiaMand`**, donde el origen migra al histórico en vez de desaparecer.
+>
+> **Respaldos residentes de la migración `F32.A1`** (excepción a RF-032, precedente §4.11):
+> `bitacora.registro_historico_backup_D056` y `bitacora.registro_activo_backup_D056` — copia de las
+> filas MAND previas a la conversión. **No se borran nunca.** La migración solo agrega `lote_id`
+> (`NEWID()` por fila → cada registro previo es un lote de un periodo); no altera valores, autores ni
+> fechas, y lo que tenga `campos_extra` NULL/no-JSON no se toca y se loguea. Ver D-056.
+
 La bitácora MAND también rompe varias invariantes del modelo general — distintas a las de DISP:
 
 - **No usa cierre individual ni masivo:** `POST /api/cierre/bitacora` con `bitacora.codigo='MAND'` retorna `400 mand_cierre_individual_no_permitido`. La exclusión del cierre masivo (vigente desde F10) se mantiene. El cierre se ejecuta automáticamente al final del día Bogotá vía sweeper diario (`server/utils/mand-sweeper.js`) que cada 60s detecta cambio de día y mueve los registros activos del día anterior a `registro_historico` con `estado='cerrado'`. Resiliente a reinicios: el primer tick post-arranque intenta cerrar AYER por si el server estaba caído al cruzar medianoche.
-- **No acepta save por celda:** `POST /api/registros` y `PUT /api/registros/:id` siguen aceptando registros MAND (compatibilidad con flujos automáticos legacy), pero la UI usa exclusivamente `POST /api/sala-de-mando/guardar` con shape de batch atómico `{ planta_id, fecha, filas: [{ tipo, detalle, funcionariocnd, periodos: [{ periodo, valor_mw }] }] }`. Toda la batch corre en una transacción única. Validaciones de negocio devuelven 400 con `{ errores: [{ tipo, periodo?, motivo }] }` y NO escriben. Motivos: `fecha_no_es_hoy`, `tipo_invalido`, `periodos_invalido`, `periodo_fuera_rango`, `valor_mw_invalido`, `periodo_bloqueado`, `funcionariocnd_requerido`.
+- **No acepta save por celda:** `POST /api/registros` y `PUT /api/registros/:id` siguen aceptando registros MAND (compatibilidad con flujos automáticos legacy), pero la UI usa exclusivamente `POST /api/sala-de-mando/guardar` con shape de batch atómico `{ planta_id, fecha, filas: [{ tipo, detalle, funcionariocnd, periodos: [{ periodo, valor_mw }] }] }`. Toda la batch corre en una transacción única. Validaciones de negocio devuelven 400 con `{ errores: [{ tipo, periodo?, motivo }] }` y NO escriben. Motivos: `fecha_no_es_hoy`, `tipo_invalido`, `periodos_invalido`, `periodo_fuera_rango`, `valor_mw_invalido`, `periodo_bloqueado`, `funcionariocnd_requerido`. _(D-056: el shape del body y los motivos cambiaron — ver el aviso al inicio de §7.9. La atomicidad y el `400 { errores: [...] }` que NO escribe siguen igual.)_
 - **`fecha` debe ser hoy en Bogotá:** el server fuerza `fecha == hoyStr` (Bogotá calculado como `new Date(now - 5h)`). Sino 400 `fecha_no_es_hoy`. La grilla solo opera sobre HOY tras F17 — la paginación entre días F10 (`/api/sala-de-mando/dias-pendientes`) fue eliminada en F16.
 - **REDESP locked en periodos pasados:** server rechaza `tipo='REDESP' && valor_mw!=null && periodo < periodoActual` (`= floor(horaBogota)+1`) con 400 `periodo_bloqueado`. AUTH y PRUEBA no tienen lock — pueden registrarse a-posteriori dentro del día.
 - **`funcionariocnd` por tipo:** AUTH lo requiere si hay al menos un `valor_mw != null` en la fila (`funcionariocnd_requerido` si vacío). PRUEBA y REDESP fuerzan `funcionariocnd = NULL` en persistencia (silencioso, sin error). Esto vale tanto para el INSERT como para el UPDATE.
-- **`modificado_por` selectivo:** se actualiza únicamente cuando `valor_mw` cambió. Cambios de `detalle`/`funcionariocnd` no tocan `modificado_por`/`modificado_en`. Trade-off explícito de F16 (regla 2b de `preguntas_mand2.md`): `modificado_por` audita cambios numéricos al despacho, no edición de metadatos.
+- **`modificado_por` selectivo:** se actualiza únicamente cuando `valor_mw` cambió. Cambios de `detalle`/`funcionariocnd` no tocan `modificado_por`/`modificado_en`. Trade-off explícito de F16 (regla 2b de `preguntas_mand2.md`): `modificado_por` audita cambios numéricos al despacho, no edición de metadatos. _(D-056: **sin efecto en la grilla**, que ya no modifica nada — todo es INSERT. La regla queda reservada para la corrección por lote de D-057.)_
 - **CIET de cierre con autor SISTEMA:** distinto del CIET regular (autor=usuario que cierra, snapshot del momento). El sweeper diario emite CIET con `creado_por=USUARIO_SISTEMA_ID` y snapshots agregados con todo el personal que rotó por la guardia ese día (`snapshotJDTsDelDia`, `snapshotJefesDelDia`, `snapshotIngenierosDelDia`). `campos_extra = { rol: 'SISTEMA', bitacora_origen, forzado: true, motivo: 'mand-sweeper-diario', fecha_cerrada, registros_cerrados }`. Idempotencia vía `bitacora.mand_cierre_log` (4.4.2).
 - **`evento_dashboard` soft-delete en cierre:** al cerrar el día, las filas en `evento_dashboard` cuyo `registro_origen_id` apunta a registros que se mueven al histórico se marcan `activa=0`. El dashboard productivo deja de verlas inmediatamente.
 - **Permisos:** `puede_ver=1` y `puede_crear=1` solo para cargos 1 (JdT) y 2 (IngOp). Otros cargos no ven la bitácora en el sidebar.
@@ -1476,6 +1527,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 | 1.7 | 2026-05-20 | Migración ER DISP (D-026). **Nueva §4.8** con DDL de `bitacora.disponibilidad_estado` (PK `disponibilidad_id`, columnas tipadas `estado`/`codigo`/`fecha_inicio_estado`/`fecha_fin_estado`, snapshot adicional `gerentes_produccion_snapshot`, filtered unique index `UQ_disp_estado_vigente_por_planta`, columnas Bogotá) + vista `v_disponibilidad_estado` (acumulados via window functions). §5.2 actualizada — `disponibilidad_dashboard` ahora es VIEW del vigente sobre la nueva tabla (preserva shape: `disponibilidad_id → registro_activo_id`, `jefes_planta_snapshot → jefes_snapshot`). §7.8 marcada como histórica. Vista `v_disp_intervalos` dropeada (las métricas suman `DATEDIFF_BIG` directo sobre la nueva tabla). Migración idempotente F26.A1 hace backfill + DELETE de rows DISP en `registro_activo`/`registro_historico`. Contratos HTTP y shape de response preservados (los tests existentes que validan via HTTP siguen verdes). |
 | 1.8 | 2026-05-21 | Consumos de Combustibles (D-027). **Nueva §2.7** `lov_bit.combustible` (catálogo por planta, 18 seeds: 8 GEC3 + 10 GEC32 con tipos `ALIMENTADOR/CALIZA/ACPM`). **Nueva §4.9** `bitacora.consumo_combustible` (long-format transaccional, `cantidad DECIMAL(12,3)`, UQ compuesto, columnas Bogotá) + vista `v_consumo_periodo` (pivot con `total_carbon_ton = SUM(tipo='ALIMENTADOR')`, `caliza_ton`, `acpm_gal`). §2.4 gana fila `COMB` (formulario_especial=1, icono Flame). §2.6 matriz extendida con CASE para COMB. Permisos: `Operador de Planta - Carbón y Caliza` + JdT crean; resto ven. Migración idempotente F26.B1 (ortogonal a F26.A1). Endpoints `GET /api/combustibles/catalogo`, `GET /api/combustibles/consumos`, `POST /api/combustibles/consumos` (batch atómico, regla D-019 paridad `modificado_por` solo si cantidad cambió). Frontend bajo `src/components/Combustibles/` integrado a categoría jerárquica nueva "Combustibles". 12 tests en `consumos_combustible.test.js`. |
 | 2.0 | 2026-07-14 | **Split de Sala de Mando por rol (D-053).** §2.4: la fila `SALA` ("Sala de Mando Operativa") se vuelve tres — `SALAJDT` (Sala de Mando - Jefe de Turno), `SALAING` (- Ing. de Operación), `SALAOP` (- Operador). **`SALA` NO se borró: se renombró a `SALAJDT`** conservando `bitacora_id=14`, `orden=3` y su `tipo_evento` (misma fila → su histórico no se movió); el rename va en el `UPDATE` del "Paso 1" de `db.js`, nunca dentro del `MERGE` (matchea por `codigo` → habría dejado la vieja huérfana). `orden` renumerado (AGUA 4→6 … MAND 12→14) para dejar las tres contiguas; el orden relativo se preserva. §2.6: **se rompe la simetría JdT/IngOp** (ya no tienen filas idénticas) — el `IN ('DISP','AUTH','SALA')` de `puede_crear` se parte en `JdT → IN ('DISP','SALAJDT')` e `IngOp → IN ('DISP','SALAING')`, preservando DISP para ambos; el `Operador de Planta - Sala de Mando` pasa a `SALAOP` y **no ve** las otras dos; `'AUTH'` retirado (código muerto: `activa=0` + la matriz filtra `activa=1`). **Nueva §4.11** `bitacora.registro_historico_backup_D053` (respaldo residente, excepción explícita a RF-032). Migración **F30.A1**: reparte `registro_activo`/`registro_historico` por el cargo del autor reconstruido por evidencia (`turno_participante`/`conformacion_turno` por `turno_id` → `sesion_activa` con cargo único), move-out por atribución positiva (lo no atribuible no se toca y se loguea), con remapeo **acoplado** de `tipo_evento_id` y validación `THROW` de integridad. Pre-flight de prod: `sql/snippets/reporte-split-sala-D053.sql` (solo lectura + guardrail). Tests: `split_sala_permisos.test.js` (matriz + regresión DISP), `guard_tipo_evento_coherente.test.js` (drift `tipo_evento_id` ↔ `bitacora_id`, el riesgo que ninguna FK ni lectura cubre), `registros_solo_autor` reescrito con ADMIN como no-autor. |
+| 2.2 | 2026-07-22 | **Operación 24h append-only (D-056).** §7.9 reescrita en su encabezado: la grilla MAND pasa de espejo persistente editable a **formulario de captura** — `POST /api/sala-de-mando/guardar` **siempre INSERTA** (se retiran la máquina de 4 casos, el UPDATE de metadata a nivel de fila y el motivo `detalle_sin_celdas`), varios registros coexisten por `(tipo, periodo, día, planta)`, y aparecen los motivos `hora_requerida`/`hora_invalida`/`hora_futura`/`lote_sin_celdas`. **`campos_extra` de MAND gana `lote_id`** (GUID del servidor por fila/tipo; agrupa el lote; su metadata queda **replicada por celda sin constraint**, sostenida solo por un guard de test) **y `hora_llamada`** (ISO UTC compuesta server-side desde `HH:mm` Bogotá, validada contra el reloj del server con 5 min de tolerancia; **`fecha_evento` no cambia**; **AUSENTE** en lo migrado, y ese NULL va último en todo `ORDER BY` y nunca gana por hora). §5.1: el vigente publicado se resuelve **por CELDA y desde cero** con `recalcularEventoDashboard` (`upsertEventoDashboard` queda para la rama genérica de `registros.js`) — los lotes se solapan parcialmente, así que decidir por lote publica mal los periodos compartidos; **sin ganador se BORRA** la fila (el soft-delete `activa=0` sigue intacto en `cerrarDiaMand`). El pivote `GET /api/sala-de-mando` se dio de baja (404); lo reemplaza `GET /api/sala-de-mando/lotes` (listado del día, solo lectura, `publicado` por celda como indicador derivado, gated por `puede_ver`). Migración **F32.A1** (excepción a RF-032): respaldos **residentes** `registro_historico_backup_D056` / `registro_activo_backup_D056` (**no se borran**) + `JSON_MODIFY('$.lote_id', NEWID())` por fila, idempotente por `ISJSON=1 AND JSON_VALUE('$.lote_id') IS NULL`, sin alterar valores/autores/fechas y logueando lo no-JSON. Verificada en prod: 0 históricos / 7 activos convertidos. Corrección y borrado por lote quedan para D-057. |
 | 1.9 | 2026-07-03 | Rol ADMIN (D-039). Cargo 13 `Administrador y Debugging` (App Role `ADMINISTRADOR_DEBUGGING`), `solo_lectura=0`, `puede_cerrar_turno=1`. §2.6 matriz extendida: cláusula `WHEN c.nombre='Administrador y Debugging' THEN 1` como primer WHEN de `puede_ver` y `puede_crear` → acceso total data-driven (ve+crea en toda bitácora activa), sin superusuario por código. Override defensivo DISP (F12.A6) incluye al admin en su `CASE ... IN (...)`. Sin hard-delete de históricos (append-only intacto). `entra-roles.js` mapea el App Role→cargo (1:1, 13 roles) y lo pone primero en `PRECEDENCE`. Tests: `entra_roles.test.js` (13 roles + precedencia) y `rol_admin_debugging.test.js` (matriz completa + regresión override DISP + idempotencia). |
 
 ---

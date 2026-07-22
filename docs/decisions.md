@@ -1157,6 +1157,103 @@ mismo, pero exige sembrar el catálogo de combustibles para TST. Cross-ref: [[D-
 
 ---
 
+## D-056 — Operación 24h append-only: la grilla registra, no edita
+
+**Fecha:** 2026-07-22
+
+**Contexto:** la grilla de MAND era una **hoja de cálculo persistente**: un registro por
+`(tipo, periodo, día, planta)`, editable volviendo a entrar, con `detalle`/`funcionariocnd`
+compartidos por toda la fila. Eso no representa la operación real: un mismo periodo recibe **varias
+llamadas del CND en el mismo día** (140 MW a las 09:12, 155 MW a las 09:40, con funcionarios y
+motivos distintos) y la segunda **pisaba** a la primera. Además no existía el dato más pedido: **a
+qué hora se hizo la llamada** — `fecha_evento` es el momento de guardado, no el del evento. REQ-03
+(16 criterios de aceptación) fijó el rediseño; se ejecutó en seis etapas sobre
+`feat/mand-append-only-2026-07`.
+
+**Decisión:**
+
+**(1) La grilla es un formulario de captura.** Nace vacía, cada Guardar **inserta siempre** (nunca
+UPDATE ni DELETE), y se vacía tras la confirmación — pero **NO se vacía ante un 400**: el operador no
+puede perder lo escrito por un error de validación (RN-03.b). Con el modelo viejo se fueron la
+máquina de 4 casos por celda, el `SELECT` de "¿ya existe esta celda?", el par `snapshot`/`diffBuffer`
+del front y el pivote `GET /api/sala-de-mando` (ahora 404). El `modificado_por` selectivo de
+[[D-019]] pierde sentido acá —nada se modifica al registrar— y vuelve a tenerlo en la corrección por
+lote de D-057.
+
+**(2) Revierte deliberadamente [[D-055]] (2): la metadata pasa de la FILA al LOTE.** Un **lote** es
+el conjunto de registros nacidos de una fila/tipo en un mismo Guardar, identificado por
+`campos_extra.lote_id` (GUID que genera el **servidor**, sin DDL: `campos_extra` viaja tal cual al
+histórico). D-055 (2) no estaba equivocado: **era correcto para el modelo de entonces**, donde la
+fila era la unidad de captura y el `detalle` se perdía en silencio si no había celdas donde anclarlo.
+Lo que cambia no es la regla sino el modelo — la unidad de captura ya no es la fila del día sino el
+lote. Lo que **sobrevive intacto** de aquella corrección es su principio: el lock de REDESP protege
+el **valor**, nunca el comentario ni la hora, y **nunca un 200 mentiroso** (metadata sin celdas →
+`400 lote_sin_celdas`, heredero directo de `detalle_sin_celdas`). La metadata sigue **replicada en
+cada celda** y ningún constraint la mantiene coherente: la sostiene un **guard de coherencia de
+lote** (test), que es la red que va a hacer falta cuando D-057 introduzca la edición por lote.
+
+**(3) Hora de la llamada: `campos_extra.hora_llamada`, ISO UTC, compuesta server-side.** El front
+manda `HH:mm` Bogotá y el servidor la compone contra la fecha de la grilla y la valida **con su
+propio reloj** (tolerancia de 5 min; `hora_requerida`/`hora_invalida`/`hora_futura`, errores de
+**fila**, sin `periodo`). `fecha_evento` **no cambia** — sigue siendo el instante de guardado, que es
+lo que acota el día en el cierre diario y el archivo. En los registros migrados la clave queda
+**AUSENTE**, ni `null` ni `""`: hay que poder distinguir "no existe" de "vacío" (nunca se adivina).
+
+**(4) Lo publicado al dashboard se resuelve por CELDA, no por lote** — corrección explícita a la
+redacción de RQ-03.22. Los lotes se solapan **parcialmente**: si A cubre P14–P18 a las 09:12 y B
+cubre P16–P20 a las 09:40, **P14–P15 publican A y P16–P20 publican B**; leído "por lote", el
+implementador publica mal los periodos solapados. `recalcularEventoDashboard(t, {planta_id, fecha,
+periodo, tipo})` (`utils/notificador.js`) resuelve **desde cero**, no es un upsert ciego:
+`ORDER BY CASE WHEN hora IS NULL THEN 1 ELSE 0 END, hora DESC, creado_en DESC, registro_id DESC`.
+Los **sin hora van últimos y jamás ganan por hora** — no es teórico: los registros del día en curso
+al momento del despliegue compiten sin tenerla. `upsertEventoDashboard` queda intacto sirviendo a
+`registros.js`.
+
+**(5) `turno_id` se sigue resolviendo con `fechaOperativaDePeriodo`, JAMÁS por `hora_llamada`.** Los
+periodos 1..6 de la grilla del día F son del **T2 que arrancó a las 18:00 de F-1** ([[D-055]] (3),
+caso real: registro 4722). Tampoco por `inicio_nominal`/`fin_nominal`: `extenderTurno` ([[D-046]])
+los muta y las ventanas se solapan. Que nadie lo "mejore" ahora que hay una hora a mano.
+
+**(6) `evento_dashboard` se BORRA cuando no queda ningún registro para la celda** (RQ-03.23), no
+`activa=0`: el origen dejó de existir y el puntero quedaría huérfano ([[D-055]] (4) — 35 filas reales
+en prod). El **soft-delete sigue siendo lo correcto en `cerrarDiaMand`**, donde el origen no
+desaparece sino que migra al histórico. Las dos reglas conviven y ninguna sustituye a la otra.
+
+**(7) Listado del día, solo lectura.** `GET /api/sala-de-mando/lotes?planta_id=&fecha=` agrupa por
+`lote_id` sobre **solo `registro_activo`** (el día en curso), deriva la metadata **asumiendo
+coherencia** —prohibido el desempate ad-hoc "el primero gana" del pivote viejo: si diverge, que se
+note— y expone `publicado` **por celda** como **indicador derivado, no un control**. Lo ve cualquier
+cargo con `puede_ver` (no exige `puede_crear`, RN-04.f). Debajo de la grilla, `LotesDelDia.jsx` lo
+pinta sin acciones y se refresca **en el mismo tick de 60s que ya existía** — no hay segundo
+temporizador.
+
+**Migración `F32.A1` (excepción a RF-032, mismas garantías que [[D-053]]/[[D-055]]):** respaldos
+**residentes** `registro_{historico,activo}_backup_D056` (**no se borran nunca**) +
+`JSON_MODIFY('$.lote_id', CONVERT(varchar(36), NEWID()))` sobre MAND, con `NEWID()` evaluado por fila
+→ cada registro previo queda como **un lote de un solo periodo** conservando su `detalle` y
+`funcionariocnd`. Gated por `ISJSON=1 AND JSON_VALUE('$.lote_id') IS NULL` (idempotente por partida
+doble); lo que tenga `campos_extra` NULL o no-JSON **no se toca y se loguea**. `hora_llamada` **no se
+agrega**. **Verificado en prod:** `0 históricos, 7 activos` con `lote_id`, 0 filas sin JSON, 0
+diferencias de valores/autores/fechas contra el respaldo, y el segundo arranque no reimprime la línea.
+
+**Consecuencias:** (a) El dashboard sigue viendo **un solo valor** por `(planta, fecha, periodo,
+tipo)`: `UQ_evento_planta_fecha_periodo_tipo` intacto, contrato cross-repo sin cambios de shape — lo
+que cambió es **cómo se decide** ese valor. (b) **Corregir y borrar lo registrado NO existe todavía**:
+el listado es solo lectura y la grilla ya no edita, así que hasta D-057 (REQ-04) un error de
+digitación solo se puede tapar registrando encima con hora posterior. Es el precio consciente de
+partir el trabajo; D-057 trae `PUT`/`DELETE` por lote, el formato de mensaje y la excepción a
+[[D-049]]. (c) Quedó documentado como **landmine de fixture, ajeno a este flujo**: tres etapas
+seguidas vieron `finalizar_turno` fallar con `409 turno_cerrado` en la primera corrida y pasar en la
+segunda sin tocar código — el disparador es el estado de `turno_unidad` para `'TST'` con el que
+arranca la suite (una suite que cierra el turno de la fixture sin dejar sucesor `PROGRAMADO`), no
+MAND. (d) Las tres preguntas abiertas de REQ-03 §8 quedaron resueltas: lote en `campos_extra`,
+empate → el creado más reciente (**decidido por celda**), y **sin tope** de superposición.
+Cross-ref: [[D-055]] (metadata de fila, `turno_id`, huérfanos), [[D-019]], [[D-020]] (TZ),
+[[D-030]] (planta de test), [[D-040]]/[[D-045]]/[[D-046]] (exención de turno de MAND, intacta),
+[[D-049]] (no se toca acá).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
