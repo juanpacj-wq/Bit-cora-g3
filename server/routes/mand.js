@@ -91,6 +91,120 @@ router.get('/', asyncH(async (req, res) => {
   return sendJSON(res, 200, out);
 }));
 
+// GET /api/sala-de-mando/lotes?planta_id=&fecha=
+// Listado del día agrupado por LOTE (D-056 §5). Solo lectura: con la grilla convertida en formulario
+// de captura (nace vacía y no refleja lo guardado), este endpoint es el único lugar donde el operador
+// ve lo que ya registró. Fuente: SOLO `registro_activo` — el día en curso; el histórico del día
+// anterior vive en el apartado de REQ-04, no acá (RQ-04.4 / RN-04.e).
+//
+// Lo ve cualquier cargo con `puede_ver` en MAND: consultar lo registrado no es escribirlo, así que
+// NO se exige `puede_crear` (RN-04.f). El permiso sale de la matriz data-driven, nunca del cargo.
+router.get('/lotes', asyncH(async (req, res) => {
+  const sesion = req.sesion;
+  const planta_id = req.query.planta_id;
+  if (!planta_id) return sendJSON(res, 400, { error: 'planta_id es requerido' });
+  // D-055: sin allowlist de plantas. `plantaMatch` acota a la unidad de la sesión.
+  if (!plantaMatch(sesion, planta_id)) {
+    return sendJSON(res, 403, { error: 'No puede consultar otra planta' });
+  }
+  // `fecha` es opcional: por defecto, el día Bogotá en curso (D-020).
+  const fecha = (req.query.fecha == null || req.query.fecha === '')
+    ? fechaBogotaStr(Date.now())
+    : String(req.query.fecha);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+    return sendJSON(res, 400, { error: 'fecha debe venir en formato YYYY-MM-DD' });
+  }
+
+  const db = await getDB();
+  const bit = await db.request().query(`SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo = 'MAND'`);
+  const MAND_ID = bit.recordset[0]?.bitacora_id;
+  if (!MAND_ID) {
+    console.error('[ERROR] config: bitácora MAND no encontrada en lov_bit.bitacora');
+    return sendJSON(res, 500, { error: 'Hay un problema de configuración del sistema. Contacta a soporte.', codigo: 'config_sistema' });
+  }
+  if (!(await hasPermisoBitacora(sesion, MAND_ID, 'puede_ver'))) {
+    return sendJSON(res, 403, { error: 'Sin permiso para consultar MAND' });
+  }
+
+  // `publicado` sale de un LEFT JOIN a evento_dashboard por `registro_origen_id`. Es un INDICADOR
+  // DERIVADO, no un control: no se convierte en filtro, ni en parámetro, ni en acción. Existe para
+  // poder detectar en producción —sin abrir la BD ni el dashboard— una implementación "por lote" de
+  // la regla de publicación, que es por CELDA (D-056 §3): con dos lotes solapados parcialmente, el
+  // flag tiene que caer en unas celdas de un lote y en otras del otro.
+  const r = await db.request()
+    .input('mand', sql.Int, MAND_ID)
+    .input('planta_id', sql.VarChar(10), planta_id)
+    .input('fecha', sql.Date, fecha)
+    .query(`
+      SELECT ra.registro_id, ra.detalle, ra.creado_en, ra.creado_por,
+             te.notificar_dashboard_tipo AS tipo,
+             te.nombre AS tipo_nombre,
+             u.nombre_completo AS creado_por_nombre,
+             TRY_CAST(JSON_VALUE(ra.campos_extra, '$.periodo') AS INT)    AS periodo,
+             TRY_CAST(JSON_VALUE(ra.campos_extra, '$.valor_mw') AS FLOAT) AS valor_mw,
+             JSON_VALUE(ra.campos_extra, '$.funcionariocnd') AS funcionariocnd,
+             JSON_VALUE(ra.campos_extra, '$.lote_id')        AS lote_id,
+             JSON_VALUE(ra.campos_extra, '$.hora_llamada')   AS hora_llamada,
+             CASE WHEN ed.evento_id IS NULL THEN 0 ELSE 1 END AS publicado
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = ra.tipo_evento_id
+      LEFT JOIN lov_bit.usuario u ON u.usuario_id = ra.creado_por
+      LEFT JOIN bitacora.evento_dashboard ed
+             ON ed.registro_origen_id = ra.registro_id AND ed.activa = 1
+      WHERE ra.bitacora_id = @mand
+        AND ra.planta_id = @planta_id
+        AND ra.estado = 'borrador'
+        AND CAST(DATEADD(HOUR, -5, ra.fecha_evento) AS DATE) = @fecha
+      ORDER BY ra.registro_id
+    `);
+
+  // Agrupación por lote_id. La metadata (hora, funcionario, descripción, autor) se deriva ASUMIENDO
+  // COHERENCIA del lote: se toma de la primera celda del grupo, sin el desempate ad-hoc "el primero
+  // no-nulo gana" que hacía el pivote viejo. Si la metadata divergiera dentro de un lote, acá se
+  // nota — para eso está el guard de coherencia de E3, no para taparlo con un fallback.
+  // Los registros que migró F32.A1 tienen su propio lote_id (uno por fila) y `hora_llamada` ausente:
+  // aparecen como lotes de un solo periodo con `hora_llamada: null`.
+  const porLote = new Map();
+  for (const row of r.recordset) {
+    if (!row.lote_id) continue; // sin lote_id no hay agrupación posible (no debería quedar ninguno)
+    let lote = porLote.get(row.lote_id);
+    if (!lote) {
+      lote = {
+        lote_id: row.lote_id,
+        tipo: row.tipo,
+        tipo_nombre: row.tipo_nombre,
+        hora_llamada: row.hora_llamada ?? null,
+        funcionariocnd: row.funcionariocnd ?? null,
+        detalle: row.detalle ?? null,
+        creado_en: row.creado_en,
+        creado_por: { usuario_id: row.creado_por, nombre_completo: row.creado_por_nombre ?? null },
+        periodos: [],
+      };
+      porLote.set(row.lote_id, lote);
+    }
+    lote.periodos.push({
+      periodo: row.periodo,
+      valor_mw: row.valor_mw,
+      registro_id: row.registro_id,
+      publicado: row.publicado === 1,
+    });
+  }
+
+  // Orden: lo recién registrado arriba (hora_llamada DESC, los sin hora al final, desempate por
+  // creado_en DESC). El orden definitivo de la presentación lo fija D-057 (RN-04.a).
+  const lotes = [...porLote.values()];
+  for (const lote of lotes) lote.periodos.sort((a, b) => a.periodo - b.periodo);
+  lotes.sort((a, b) => {
+    if ((a.hora_llamada == null) !== (b.hora_llamada == null)) return a.hora_llamada == null ? 1 : -1;
+    if (a.hora_llamada != null && a.hora_llamada !== b.hora_llamada) {
+      return a.hora_llamada < b.hora_llamada ? 1 : -1;
+    }
+    return new Date(b.creado_en).getTime() - new Date(a.creado_en).getTime();
+  });
+
+  return sendJSON(res, 200, { planta_id, fecha, lotes });
+}));
+
 // Formato de la hora de la llamada tal como la manda el front (`<input type="time">`): HH:mm en
 // wallclock Bogotá. El instante se compone en el SERVIDOR (nunca se confía en el reloj del cliente).
 const RE_HORA = /^([01]\d|2[0-3]):([0-5]\d)$/;

@@ -788,11 +788,14 @@ async function tipoEventoIdMand(tipo) {
 // 'HH:mm' Bogotá → se compone hora_llamada como ISO UTC; si es null/undefined la CLAVE queda AUSENTE
 // (no null), como los registros migrados por F32.A1. `fecha_evento` se fija a mediodía Bogotá de HOY
 // para que el día Bogotá sea determinista a cualquier hora del run.
-async function seedRegistroMand({ tipo, periodo, hora, valor, jdts = '[]', jefes = '[]' }) {
+async function seedRegistroMand({ tipo, periodo, hora, valor, lote_id, jdts = '[]', jefes = '[]' }) {
   const db = await getDB();
   const teId = await tipoEventoIdMand(tipo);
   const campos = { periodo, valor_mw: valor };
   if (hora) campos.hora_llamada = new Date(`${HOY}T${hora}:00-05:00`).toISOString();
+  // `lote_id` es opcional: los tests de E2 no lo necesitan (la resolución del publicado es por celda
+  // y lo ignora), pero el listado de E4 agrupa por él y necesita simular un registro migrado.
+  if (lote_id) campos.lote_id = lote_id;
   const ins = await db.request()
     .input('mand', sql.Int, MAND_BITACORA_ID)
     .input('p', sql.VarChar(10), TEST_PLANTA)
@@ -1403,4 +1406,194 @@ test('D-056 E3.10 — cerrarDiaMand arrastra lote_id y hora_llamada al históric
       .query(`DELETE FROM bitacora.registro_activo WHERE registro_id = @rid`);
   }
   await cleanMand();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D-056 · E4 — GET /api/sala-de-mando/lotes: el listado del día agrupado por lote.
+//
+// Solo lectura y solo `registro_activo` (el día en curso). Los lotes se arman por `lote_id` y la
+// metadata se deriva asumiendo coherencia, sin desempate ad-hoc. `publicado` es un indicador
+// derivado del JOIN a evento_dashboard: acá se fija que cae por CELDA, no por lote.
+//
+// El pivote GET /api/sala-de-mando sigue vivo (lo consume SalaDeMandoGrid hasta E5): el test 9 lo
+// cubre y esta etapa no lo toca.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+async function getLotes({ sesion_id, planta_id = PLANTA_ID, fecha } = {}) {
+  const qs = new URLSearchParams({ planta_id });
+  if (fecha) qs.set('fecha', fecha);
+  return call('GET', `/api/sala-de-mando/lotes?${qs}`, { sesion_id });
+}
+
+test('D-056 E4.1 — dos lotes del día → dos entradas, cada una con sus periodos y su metadata', async () => {
+  await cleanMand();
+  const horaAuth = horaBogotaMin(-12) ?? '00:00';
+  const horaPrueba = horaBogotaMin(-4) ?? '00:01';
+
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [
+        {
+          tipo: 'AUTH', hora: horaAuth, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e4-auth`,
+          periodos: [{ periodo: 10, valor_mw: 110 }, { periodo: 11, valor_mw: 111 }],
+        },
+        {
+          tipo: 'PRUEBA', hora: horaPrueba, funcionariocnd: null, detalle: `${TEST_TAG} e4-prueba`,
+          periodos: [{ periodo: 12, valor_mw: 50 }],
+        },
+      ],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const { status, data } = await getLotes({ sesion_id: ctx.sesiones.jdt });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.planta_id, PLANTA_ID);
+  assert.equal(data.fecha, HOY, 'sin ?fecha el default es hoy Bogotá');
+  assert.equal(data.lotes.length, 2, 'dos filas guardadas = dos lotes');
+
+  // Orden: hora_llamada DESC → PRUEBA (la más reciente) arriba.
+  const [primero, segundo] = data.lotes;
+  assert.equal(primero.tipo, 'PRUEBA');
+  assert.equal(segundo.tipo, 'AUTH');
+
+  assert.equal(segundo.funcionariocnd, 'J. Pérez');
+  assert.equal(segundo.detalle, `${TEST_TAG} e4-auth`);
+  assert.equal(segundo.hora_llamada, new Date(`${HOY}T${horaAuth}:00.000-05:00`).toISOString());
+  assert.deepEqual(segundo.periodos.map((p) => p.periodo), [10, 11]);
+  assert.deepEqual(segundo.periodos.map((p) => p.valor_mw), [110, 111]);
+  assert.ok(segundo.tipo_nombre, 'el nombre del tipo de evento viaja para la UI');
+  assert.equal(segundo.creado_por.usuario_id, ctx.usuarios.jdt.usuario_id);
+  assert.equal(segundo.creado_por.nombre_completo, ctx.usuarios.jdt.nombre_completo);
+  assert.ok(segundo.lote_id && segundo.lote_id !== primero.lote_id, 'dos lotes distintos');
+
+  assert.equal(primero.funcionariocnd, null, 'PRUEBA fuerza funcionariocnd a null');
+  assert.deepEqual(primero.periodos.map((p) => p.periodo), [12]);
+});
+
+test('D-056 E4.2 — un lote de P14..P18 es UNA fila con 5 periodos, no cinco filas', async () => {
+  await cleanMand();
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID,
+      fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e4-rango`,
+        // Se mandan desordenados a propósito: el listado los devuelve ascendentes.
+        periodos: [18, 15, 14, 17, 16].map((periodo) => ({ periodo, valor_mw: 100 + periodo })),
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const { status, data } = await getLotes({ sesion_id: ctx.sesiones.jdt, fecha: HOY });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.lotes.length, 1, 'un lote = una fila del listado');
+  assert.deepEqual(data.lotes[0].periodos.map((p) => p.periodo), [14, 15, 16, 17, 18]);
+  assert.deepEqual(data.lotes[0].periodos.map((p) => p.valor_mw), [114, 115, 116, 117, 118]);
+});
+
+test('D-056 E4.3 — publicado cae por CELDA: con dos lotes solapados el flag distingue celda por celda', async () => {
+  await cleanMand();
+  const horaA = horaBogotaMin(-20) ?? '00:00';
+  const horaB = horaBogotaMin(-3) ?? '00:01';
+
+  // Lote A (más viejo) cubre P14 y P15; lote B (más nuevo) cubre P15 y P16. El compartido es P15.
+  for (const [hora, periodos] of [[horaA, [14, 15]], [horaB, [15, 16]]]) {
+    const r = await postGuardar({
+      sesion_id: ctx.sesiones.jdt,
+      body: {
+        planta_id: PLANTA_ID, fecha: HOY,
+        filas: [{
+          tipo: 'AUTH', hora, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e4-solape-${hora}`,
+          periodos: periodos.map((periodo) => ({ periodo, valor_mw: periodo })),
+        }],
+      },
+    });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+  }
+
+  const { status, data } = await getLotes({ sesion_id: ctx.sesiones.jdt });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.lotes.length, 2);
+
+  const [loteB, loteA] = data.lotes; // hora DESC → B primero
+  assert.equal(loteB.hora_llamada, new Date(`${HOY}T${horaB}:00.000-05:00`).toISOString());
+
+  const flags = (lote) => Object.fromEntries(lote.periodos.map((p) => [p.periodo, p.publicado]));
+  // A conserva P14 (nadie se lo disputa) y PIERDE P15 contra B: un flag "por lote" habría marcado
+  // las dos celdas de A igual.
+  assert.deepEqual(flags(loteA), { 14: true, 15: false });
+  assert.deepEqual(flags(loteB), { 15: true, 16: true });
+});
+
+test('D-056 E4.4 — un registro migrado (sin hora_llamada) sale con hora_llamada null y va ÚLTIMO', async () => {
+  await cleanMand();
+  // Simula lo que dejó F32.A1: lote_id propio (un solo periodo) y la clave hora_llamada AUSENTE.
+  const loteMigrado = '00000000-0000-4000-8000-0000000000e4';
+  const ridMigrado = await seedRegistroMand({
+    tipo: 'AUTH', periodo: 9, hora: null, valor: 77, lote_id: loteMigrado,
+  });
+
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e4-nuevo`,
+        periodos: [{ periodo: 8, valor_mw: 88 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const { status, data } = await getLotes({ sesion_id: ctx.sesiones.jdt });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.lotes.length, 2);
+  assert.equal(data.lotes[1].lote_id, loteMigrado, 'el sin-hora va al final del listado');
+  assert.equal(data.lotes[1].hora_llamada, null, 'clave ausente → null explícito, nunca inventado');
+  assert.deepEqual(data.lotes[1].periodos.map((p) => p.registro_id), [ridMigrado]);
+  assert.ok(data.lotes[0].hora_llamada, 'el lote con hora queda arriba');
+});
+
+test('D-056 E4.5 — un cargo con puede_ver pero SIN puede_crear en MAND obtiene 200 [RN-04.f]', async () => {
+  await cleanMand();
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e4-lectura`,
+        periodos: [{ periodo: 7, valor_mw: 70 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  // Ingeniero Químico: puede_ver=1 en MAND (la ve todo el mundo) y puede_crear=0. Consultar lo
+  // registrado no es escribirlo — el listado no puede exigir permiso de escritura.
+  const escribir = await postGuardar({
+    sesion_id: ctx.sesiones.ingQuim,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'X', detalle: `${TEST_TAG} e4-no`,
+        periodos: [{ periodo: 7, valor_mw: 1 }],
+      }],
+    },
+  });
+  assert.equal(escribir.status, 403, 'el fixture debe ser un cargo SIN puede_crear en MAND');
+
+  const { status, data } = await getLotes({ sesion_id: ctx.sesiones.ingQuim });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.lotes.length, 1);
+});
+
+test('D-056 E4.6 — planta distinta a la de la sesión → 403 (plantaMatch)', async () => {
+  const { status } = await getLotes({ sesion_id: ctx.sesiones.jdt, planta_id: 'GEC3' });
+  assert.equal(status, 403);
 });
