@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { LayoutGrid, AlertTriangle } from 'lucide-react';
 import { useSalaDeMando } from '../../hooks/useSalaDeMando';
-import { getTodayBogota, horaBogota } from '../../utils/fecha';
+import { getTodayBogota, horaBogota, horaBogotaHHMM } from '../../utils/fecha';
+import LotesDelDia from './LotesDelDia';
 
 const TIPOS = [
   { key: 'AUTH',   label: 'Autorización', color: '#1e40af' },
@@ -18,83 +19,69 @@ const MOTIVO_MSG = {
   valor_mw_invalido: 'Valor numérico inválido',
   periodo_bloqueado: 'Periodo anterior al actual — solo se pueden registrar redespachos del periodo actual en adelante',
   funcionariocnd_requerido: 'Funcionario CND es requerido para Autorización',
-  // D-055: el comentario se guarda pegado a las celdas con valor de su fila — sin ninguna, no hay
-  // dónde guardarlo. Antes esto se respondía 200 y el texto se perdía en silencio.
-  detalle_sin_celdas: 'Escribe al menos un valor en la fila para poder guardar su comentario',
+  // D-056: la hora de la llamada al CND es atributo del LOTE (la fila entera), así que su error
+  // viaja sin `periodo` y se pinta en la fila, no sobre una celda.
+  hora_requerida: 'Indica la hora de la llamada al CND',
+  hora_invalida: 'Hora inválida — usa el formato HH:mm dentro del día de hoy',
+  hora_futura: 'La hora de la llamada no puede ser futura',
+  // Reemplaza a `detalle_sin_celdas` (D-055): la metadata (hora, funcionario, comentario) nace
+  // pegada a las celdas con valor de su lote. Sin ninguna celda no hay lote que registrar.
+  lote_sin_celdas: 'Escribe al menos un valor en la fila para poder registrarla',
 };
 
-// El server devuelve `valores` como Array(24) indexado 0..23 (P1=valores[0]). Lo paso a un
-// objeto {1..24: number|null} para que diff y multi-select trabajen con periodos directos.
-function buildBuffer(g) {
+// D-056: la grilla es un FORMULARIO DE CAPTURA, no un espejo del servidor. Arranca vacía (RQ-03.1),
+// se vacía tras cada guardado confirmado (RQ-03.2) y nunca carga lo ya guardado (RQ-03.3/4) — eso
+// se consulta en el listado de abajo. Por eso desapareció el par snapshot/diffBuffer: no hay estado
+// del servidor contra el que diferenciar. Con él se fue el rodeo que omitía celdas REDESP
+// bloqueadas para "no rebotar", raíz del comentario perdido en D-055 (2).
+function emptyBuffer() {
+  const horaActual = horaBogotaHHMM() ?? '';
   const buf = {};
   for (const t of TIPO_KEYS) {
-    const f = g?.[t] || {};
-    const arr = Array.isArray(f.valores) ? f.valores : Array(24).fill(null);
     const valores = {};
-    for (let p = 1; p <= 24; p++) valores[p] = arr[p - 1] ?? null;
-    buf[t] = {
-      valores,
-      detalle: f.detalle || '',
-      funcionariocnd: f.funcionariocnd || '',
-    };
+    for (let p = 1; p <= 24; p++) valores[p] = null;
+    // La hora se PRECARGA con la hora Bogotá actual y es editable (RQ-03.13): la llamada suele
+    // registrarse minutos después de recibida.
+    buf[t] = { valores, hora: horaActual, detalle: '', funcionariocnd: '' };
   }
   return buf;
 }
 
-function cloneBuffer(buf) {
-  const out = {};
-  for (const t of TIPO_KEYS) {
-    out[t] = {
-      valores: { ...buf[t].valores },
-      detalle: buf[t].detalle,
-      funcionariocnd: buf[t].funcionariocnd,
-    };
-  }
-  return out;
-}
-
-// D-055: `periodos` lleva SOLO celdas cuyo valor cambió de verdad. Antes, un cambio de
-// detalle/funcionariocnd se "propagaba" reenviando celdas intactas para forzar su UPDATE — un
-// rodeo, porque la metadata es de la FILA y el modelo la replica por celda. Ese rodeo perdía datos:
-// las celdas REDESP con `p < periodoActual` había que omitirlas (el backend las rebota con
-// `periodo_bloqueado`), así que una fila con todos sus valores en periodos pasados viajaba con
-// `periodos: []` y el comentario se descartaba en silencio — igual que una fila con comentario y
-// sin ningún valor. Hoy el backend aplica la metadata a nivel de fila (una vez, sobre todas sus
-// celdas), así que acá no hay nada que propagar y `periodoActual` deja de intervenir en el diff.
-function diffBuffer(snap, buf) {
+// Una fila viaja al servidor si tiene ≥1 celda con valor O metadata no vacía. El caso "metadata sin
+// celdas" se manda a propósito para que el backend lo rechace con `lote_sin_celdas` (RN-03.a), en
+// vez de tragárselo en el front. Las celdas REDESP bloqueadas NO se filtran acá: si el operador
+// escribió en una, tiene que enterarse.
+function filasDeBuffer(buf) {
   const filas = [];
   for (const tipo of TIPO_KEYS) {
-    const detalleCambio = (snap[tipo].detalle || '') !== (buf[tipo].detalle || '');
-    const funcCambio = (snap[tipo].funcionariocnd || '') !== (buf[tipo].funcionariocnd || '');
-
-    const periodosCambiados = [];
+    const fila = buf[tipo];
+    const periodos = [];
     for (let p = 1; p <= 24; p++) {
-      if (snap[tipo].valores[p] !== buf[tipo].valores[p]) {
-        periodosCambiados.push({ periodo: p, valor_mw: buf[tipo].valores[p] });
-      }
+      if (fila.valores[p] != null) periodos.push({ periodo: p, valor_mw: fila.valores[p] });
     }
-    if (periodosCambiados.length > 0 || detalleCambio || funcCambio) {
-      filas.push({
-        tipo,
-        detalle: buf[tipo].detalle ? buf[tipo].detalle : null,
-        funcionariocnd: tipo === 'AUTH' ? (buf[tipo].funcionariocnd || null) : null,
-        periodos: periodosCambiados,
-      });
-    }
+    const detalle = (fila.detalle || '').trim();
+    const funcionariocnd = (fila.funcionariocnd || '').trim();
+    if (periodos.length === 0 && detalle === '' && funcionariocnd === '') continue;
+    filas.push({
+      tipo,
+      hora: fila.hora || null,
+      detalle: detalle || null,
+      funcionariocnd: tipo === 'AUTH' ? (funcionariocnd || null) : null,
+      periodos,
+    });
   }
   return filas;
 }
 
-// F17: grilla 3×24 de Operación 24h (MAND) con buffer en memoria + batch save. F10 (paginación
-// entre días) eliminada — la grilla solo muestra HOY y el cierre es automático vía
-// sweeper diario (F16). Multi-select estilo Excel + lock REDESP por periodo actual.
+// F17: grilla 3×24 de Operación 24h (MAND). F10 (paginación entre días) eliminada — la grilla solo
+// captura para HOY y el cierre es automático vía sweeper diario (F16). Multi-select estilo Excel +
+// lock REDESP por periodo actual. D-056: captura append-only por lotes + listado del día debajo.
 export default function SalaDeMandoGrid({
   bitacora, plantaId, puedeCrear, showToast, onError,
   onDirtyChange, onGuardandoChange, registerSaveHandler,
 }) {
-  const { getGrilla, guardarBatch } = useSalaDeMando();
-  const [snapshot, setSnapshot] = useState(null);
-  const [buffer, setBuffer] = useState(null);
+  const { getLotes, guardarBatch } = useSalaDeMando();
+  const [buffer, setBuffer] = useState(() => emptyBuffer());
   const [seleccion, setSeleccion] = useState({ tipo: null, periodos: new Set() });
   const [anchorPeriodo, setAnchorPeriodo] = useState(null);
   const [dragging, setDragging] = useState(false);
@@ -104,54 +91,73 @@ export default function SalaDeMandoGrid({
   // Strings parciales mientras el input tiene foco — preserva "10." y otros estados intermedios
   // hasta que el blur parsea y commitea al buffer.
   const [editing, setEditing] = useState({});
-  const [fechaCargada, setFechaCargada] = useState(null);
+  const [fechaCargada, setFechaCargada] = useState(() => getTodayBogota());
+  // Listado del día (solo lectura). Se refresca al montar, tras cada guardado exitoso y en el mismo
+  // tick de 60s de la grilla — sin un segundo temporizador.
+  const [lotes, setLotes] = useState([]);
+  const [cargandoLotes, setCargandoLotes] = useState(true);
+  const [errorLotes, setErrorLotes] = useState(null);
   const tableRef = useRef(null);
   const guardarRef = useRef(null);
   // F18-fix: refs latentes para callbacks externos. El padre puede pasarlos como arrows
   // inline (recreadas en cada render), y si los pusiéramos en deps de useCallback, cada
-  // render del padre invalidaría refresh/guardar → el useEffect del initial-load
-  // re-ejecutaría refresh() → setBuffer/setEditing limpian lo tipeado por el usuario.
+  // render del padre invalidaría los callbacks del child → los efectos re-ejecutarían y
+  // limpiarían lo tipeado por el usuario.
   const onErrorRef = useRef(onError);
   const showToastRef = useRef(showToast);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
   useEffect(() => { showToastRef.current = showToast; }, [showToast]);
 
-  const refresh = useCallback(async () => {
+  // Único fetch de la pantalla: el listado del día. La grilla NO se puebla desde el servidor.
+  const refrescarLotes = useCallback(async (fecha) => {
     if (!plantaId) return;
-    const fecha = getTodayBogota();
+    setCargandoLotes(true);
     try {
-      const g = await getGrilla(plantaId, fecha);
-      const buf = buildBuffer(g);
-      setSnapshot(buf);
-      setBuffer(cloneBuffer(buf));
-      setFechaCargada(fecha);
-      setEditing({});
-      setErrores([]);
+      const r = await getLotes(plantaId, fecha || getTodayBogota());
+      setLotes(Array.isArray(r?.lotes) ? r.lotes : []);
+      setErrorLotes(null);
     } catch (e) {
-      onErrorRef.current?.(e.message);
+      setErrorLotes(e.message);
+    } finally {
+      setCargandoLotes(false);
     }
-  }, [getGrilla, plantaId]);
+  }, [getLotes, plantaId]);
 
-  // F18-fix: dep [plantaId] (no [refresh]) — el initial-load conceptualmente depende de
-  // la planta, no de la identidad de la función. getGrilla es estable (useCallback []).
-  useEffect(() => { refresh(); }, [plantaId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Cambio de planta (D-054, cambio de unidad en caliente): la captura pendiente es de la unidad
+  // vieja y no puede arrastrarse. Se vacía el buffer y se trae el listado de la unidad nueva.
+  useEffect(() => {
+    const hoy = getTodayBogota();
+    setBuffer(emptyBuffer());
+    setEditing({});
+    setErrores([]);
+    setFechaCargada(hoy);
+    refrescarLotes(hoy);
+  }, [plantaId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Watcher cada 60s: actualiza periodo actual (lock REDESP) + detecta cambio de día
-  // Bogotá. Si cruzó medianoche, refetch (vendrá vacía porque el sweeper habrá cerrado).
+  // Watcher cada 60s: actualiza el periodo actual (lock REDESP), detecta el cambio de día Bogotá y
+  // refresca el listado. El polling importa porque en append-only ya no hay unicidad por periodo:
+  // si el JdT no ve lo que acaba de registrar el Ing. de Operación desde otro equipo, nada impide
+  // el duplicado.
   useEffect(() => {
     const i = setInterval(() => {
       setPeriodoActual(Math.floor(horaBogota()) + 1);
       const t = getTodayBogota();
-      if (fechaCargada && t !== fechaCargada) refresh();
+      if (t !== fechaCargada) setFechaCargada(t); // al cruzar medianoche el listado se vacía solo
+      refrescarLotes(t);
     }, 60_000);
     return () => clearInterval(i);
-  }, [fechaCargada, refresh]);
+  }, [fechaCargada, refrescarLotes]);
 
-  const filasDiff = useMemo(() => {
-    if (!snapshot || !buffer) return [];
-    return diffBuffer(snapshot, buffer);
-  }, [snapshot, buffer]);
-  const dirty = filasDiff.length > 0;
+  // `dirty` = hay captura que se puede perder. La hora precargada por sí sola NO ensucia.
+  const dirty = useMemo(() => {
+    for (const tipo of TIPO_KEYS) {
+      const fila = buffer[tipo];
+      if ((fila.detalle || '').trim() !== '') return true;
+      if ((fila.funcionariocnd || '').trim() !== '') return true;
+      for (let p = 1; p <= 24; p++) if (fila.valores[p] != null) return true;
+    }
+    return false;
+  }, [buffer]);
 
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
   useEffect(() => { onGuardandoChange?.(guardando); }, [guardando, onGuardandoChange]);
@@ -166,27 +172,37 @@ export default function SalaDeMandoGrid({
   }, [dirty, bitacora]);
 
   const guardar = useCallback(async () => {
-    if (!buffer || !snapshot) return;
-    const filas = diffBuffer(snapshot, buffer);
+    if (!buffer) return;
+    const filas = filasDeBuffer(buffer);
     if (filas.length === 0) return;
     setGuardando(true);
     try {
-      const r = await guardarBatch({ planta_id: plantaId, fecha: getTodayBogota(), filas });
-      const res = r?.resumen || { creados: 0, actualizados: 0, eliminados: 0 };
-      showToastRef.current?.(`Guardado: ${res.creados} nuevos, ${res.actualizados} actualizados, ${res.eliminados} eliminados`);
+      const fecha = getTodayBogota();
+      const r = await guardarBatch({ planta_id: plantaId, fecha, filas });
+      const res = r?.resumen || { lotes: 0, registros: 0 };
+      showToastRef.current?.(
+        `Registrado: ${res.registros} ${res.registros === 1 ? 'periodo' : 'periodos'} en ${res.lotes} ${res.lotes === 1 ? 'evento' : 'eventos'}`
+      );
+      // RQ-03.2: tras un guardado CONFIRMADO la grilla se vacía completa y la hora se re-precarga.
+      setBuffer(emptyBuffer());
+      setEditing({});
       setErrores([]);
-      await refresh();
+      setSeleccion({ tipo: null, periodos: new Set() });
+      setFechaCargada(fecha);
+      await refrescarLotes(fecha);
     } catch (e) {
+      // RN-03.b: tras un guardado FALLIDO no se vacía nada ni se refetchea. El operador no puede
+      // perder lo que escribió por un error de validación.
       if (Array.isArray(e?.errores)) {
         setErrores(e.errores);
-        onErrorRef.current?.('Hay errores en el formulario. Corrige las celdas resaltadas.');
+        onErrorRef.current?.('Hay errores en el formulario. Corrige lo resaltado.');
       } else {
         onErrorRef.current?.(e.message);
       }
     } finally {
       setGuardando(false);
     }
-  }, [buffer, snapshot, guardarBatch, plantaId, refresh]);
+  }, [buffer, guardarBatch, plantaId, refrescarLotes]);
 
   useEffect(() => { guardarRef.current = guardar; }, [guardar]);
   useEffect(() => {
@@ -327,10 +343,6 @@ export default function SalaDeMandoGrid({
     [errores]
   );
 
-  if (!buffer || !snapshot) {
-    return <div className="flex-1 flex items-center justify-center text-gray-400">Cargando Operación 24h…</div>;
-  }
-
   return (
     <div className="flex-1 overflow-auto px-6 py-4">
       {errorGlobal?.motivo === 'fecha_no_es_hoy' && (
@@ -353,6 +365,9 @@ export default function SalaDeMandoGrid({
               </li>
             ))}
           </ul>
+          <div className="mt-2 text-xs text-red-700">
+            No se registró nada: lo que escribiste sigue acá para que lo corrijas.
+          </div>
         </div>
       )}
 
@@ -361,6 +376,7 @@ export default function SalaDeMandoGrid({
           <thead className="bg-gray-50 border-b border-gray-200">
             <tr>
               <th className="sticky left-0 bg-gray-50 px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider min-w-32">Evento</th>
+              <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider min-w-32">Hora llamada</th>
               <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider min-w-48">Detalle / Comentario</th>
               <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider min-w-40">Funcionario CND</th>
               {Array.from({ length: 24 }, (_, i) => {
@@ -380,6 +396,9 @@ export default function SalaDeMandoGrid({
               const requireFuncionario = t.key === 'AUTH';
               const errFila = erroresFila.get(t.key);
               const funcMissing = errFila?.motivo === 'funcionariocnd_requerido';
+              const horaMala = errFila?.motivo === 'hora_requerida'
+                || errFila?.motivo === 'hora_invalida'
+                || errFila?.motivo === 'hora_futura';
               return (
                 <tr key={t.key} className="border-b border-gray-100">
                   <td className="sticky left-0 bg-white px-3 py-2 font-semibold" style={{ color: t.color }}>
@@ -387,6 +406,18 @@ export default function SalaDeMandoGrid({
                       <span className="w-2 h-2 rounded-full" style={{ backgroundColor: t.color }} />
                       {t.label}
                     </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <input
+                      type="time"
+                      value={fila.hora ?? ''}
+                      onChange={(e) => setBuffer((b) => ({ ...b, [t.key]: { ...b[t.key], hora: e.target.value } }))}
+                      disabled={!puedeCrear}
+                      title={horaMala ? (errFila.mensaje || MOTIVO_MSG[errFila.motivo]) : 'Hora en que el CND hizo la llamada (Bogotá)'}
+                      className={`w-32 px-2 py-1 rounded border text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-gray-50 ${
+                        horaMala ? 'border-red-500' : 'border-gray-200'
+                      }`}
+                    />
                   </td>
                   <td className="px-3 py-2">
                     <input
@@ -463,7 +494,7 @@ export default function SalaDeMandoGrid({
       {!puedeCrear && (
         <div className="mt-3 flex items-center gap-2 text-xs text-gray-500">
           <AlertTriangle size={14} />
-          <span>Solo Jefe de Turno e Ingeniero de Operación pueden editar Operación 24h.</span>
+          <span>Solo Jefe de Turno e Ingeniero de Operación pueden registrar en Operación 24h.</span>
         </div>
       )}
 
@@ -471,9 +502,12 @@ export default function SalaDeMandoGrid({
         <LayoutGrid size={14} />
         <span>
           Fecha: {fechaCargada} (Hoy) · Periodo actual: P{periodoActual}.
+          {' '}Esta grilla solo registra: lo guardado se consulta en el listado de abajo.
           {' '}Multi-select: Shift/Ctrl/arrastre + Enter replica · Esc limpia.
         </span>
       </div>
+
+      <LotesDelDia lotes={lotes} fecha={fechaCargada} cargando={cargandoLotes} error={errorLotes} />
     </div>
   );
 }

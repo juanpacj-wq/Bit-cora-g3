@@ -1,6 +1,6 @@
-// Router de Sala de Mando / MAND (E9, AUD-34/35). Grilla 3×24 (AUTH|PRUEBA|REDESP) + captura
-// append-only por lotes (D-056) + cierre diario manual. Montado bajo /api/sala-de-mando tras
-// requireEntra.
+// Router de Sala de Mando / MAND (E9, AUD-34/35). Captura append-only por lotes (D-056) sobre la
+// grilla 3×24 (AUTH|PRUEBA|REDESP) + listado del día en solo lectura + cierre diario manual.
+// Montado bajo /api/sala-de-mando tras requireEntra.
 
 import express from 'express';
 import sql from 'mssql';
@@ -37,59 +37,11 @@ async function resolverTurnoUnidadId(transaction, { planta_id, fecha_operativa, 
   return r.recordset[0]?.turno_unidad_id ?? null;
 }
 
-// GET /api/sala-de-mando?planta_id=&fecha=
-// Grilla 3×24 (AUTH|PRUEBA|REDESP) del día para el frontend de Sala de Mando.
-router.get('/', asyncH(async (req, res) => {
-  const sesion = req.sesion;
-  const planta_id = req.query.planta_id;
-  const fecha = req.query.fecha;
-  if (!planta_id || !fecha) return sendJSON(res, 400, { error: 'planta_id y fecha son requeridos' });
-  if (!plantaMatch(sesion, planta_id)) {
-    return sendJSON(res, 403, { error: 'No puede consultar otra planta' });
-  }
-  const db = await getDB();
-  const r = await db.request()
-    .input('planta_id', sql.VarChar(10), planta_id)
-    .input('fecha', sql.Date, new Date(fecha))
-    .query(`
-      SELECT ra.registro_id, ra.detalle, ra.creado_en, ra.fecha_evento,
-             te.notificar_dashboard_tipo AS tipo,
-             te.nombre AS tipo_evento_nombre,
-             TRY_CAST(JSON_VALUE(ra.campos_extra, '$.periodo') AS INT) AS periodo,
-             TRY_CAST(JSON_VALUE(ra.campos_extra, '$.valor_mw') AS FLOAT) AS valor_mw,
-             JSON_VALUE(ra.campos_extra, '$.funcionariocnd') AS funcionariocnd
-      FROM bitacora.registro_activo ra
-      INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
-      INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = ra.tipo_evento_id
-      WHERE b.codigo = 'MAND'
-        AND ra.planta_id = @planta_id
-        AND CAST(DATEADD(HOUR, -5, ra.fecha_evento) AS DATE) = @fecha
-        AND ra.estado = 'borrador'
-      ORDER BY ra.creado_en DESC
-    `);
-
-  const buildEmpty = () => ({
-    valores: Array(24).fill(null),
-    detalle: null,
-    funcionariocnd: null,
-    registros: {},
-  });
-  const out = { AUTH: buildEmpty(), PRUEBA: buildEmpty(), REDESP: buildEmpty() };
-  for (const row of r.recordset) {
-    const fila = out[row.tipo];
-    if (!fila) continue;
-    if (row.periodo && row.periodo >= 1 && row.periodo <= 24) {
-      // El primer recordset (más reciente) gana para una celda dada.
-      if (fila.valores[row.periodo - 1] == null) {
-        fila.valores[row.periodo - 1] = row.valor_mw;
-        fila.registros[row.periodo] = row.registro_id;
-      }
-    }
-    if (fila.detalle == null && row.detalle) fila.detalle = row.detalle;
-    if (fila.funcionariocnd == null && row.funcionariocnd) fila.funcionariocnd = row.funcionariocnd;
-  }
-  return sendJSON(res, 200, out);
-}));
+// D-056: acá vivía el pivote `GET /api/sala-de-mando` — devolvía la grilla 3×24 con UN valor por
+// celda (desempatando "el más reciente gana") para que el front la pintara como espejo editable.
+// Se dio de baja junto con `getGrilla`: la grilla ya no refleja lo guardado (es un formulario de
+// captura append-only) y el modelo dejó de tener "un valor por celda" — varios lotes coexisten para
+// el mismo (tipo, periodo, día, planta). Lo registrado se consulta por `GET /lotes`.
 
 // GET /api/sala-de-mando/lotes?planta_id=&fecha=
 // Listado del día agrupado por LOTE (D-056 §5). Solo lectura: con la grilla convertida en formulario

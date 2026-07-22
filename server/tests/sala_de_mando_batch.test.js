@@ -297,13 +297,15 @@ test('6. D-056: un segundo Guardar sobre el mismo periodo AGREGA, no pisa [crite
 // bitácora ya no existe. MAND queda fuera del cierre de turno (masivo) por su exclusión
 // `codigo NOT IN ('DISP','MAND')`, cubierta en cierre_y_fechas.test.js (A1).
 
-test('9. T1 regression — registro con fecha_evento UTC del día siguiente (22:30 Bogotá HOY) aparece en grilla del día Bogotá', async () => {
-  // F19.A: GET /api/sala-de-mando antes filtraba con CAST(fecha_evento AS DATE) = @fecha
+test('9. T1 regression — registro con fecha_evento UTC del día siguiente (22:30 Bogotá HOY) aparece en el listado del día Bogotá', async () => {
+  // F19.A: la lectura del día MAND antes filtraba con CAST(fecha_evento AS DATE) = @fecha
   // (UTC), por lo que entre 19:00 y 23:59 Bogotá los recién insertados (cuyo fecha_evento
-  // ya pertenecía al día UTC siguiente) aparecían fuera de la grilla → grilla vacía. La
-  // query ahora usa CAST(DATEADD(HOUR, -5, fecha_evento) AS DATE). Este test inserta
-  // explícitamente un registro con fecha_evento = HOY 22:30 Bogotá (= MAÑANA 03:30 UTC) y
-  // verifica que la grilla del día Bogotá actual lo incluye, sin importar la hora del run.
+  // ya pertenecía al día UTC siguiente) quedaban fuera → pantalla vacía. La query usa
+  // CAST(DATEADD(HOUR, -5, fecha_evento) AS DATE). Este test inserta explícitamente un
+  // registro con fecha_evento = HOY 22:30 Bogotá (= MAÑANA 03:30 UTC) y verifica que el día
+  // Bogotá actual lo incluye, sin importar la hora del run.
+  // D-056 E5: el pivote GET /api/sala-de-mando se dio de baja con la grilla-espejo; la
+  // regresión se ejerce ahora contra GET /lotes, que hereda el mismo acotador de día.
   await cleanMand();
   const db = await getDB();
 
@@ -327,7 +329,10 @@ test('9. T1 regression — registro con fecha_evento UTC del día siguiente (22:
     .input('p', sql.VarChar(10), PLANTA_ID)
     .input('fecha_evento', sql.DateTime2, fechaEvento22h30Bogota)
     .input('te', sql.Int, authTipoEventoId)
-    .input('campos_extra', sql.NVarChar(sql.MAX), JSON.stringify({ periodo: 23, valor_mw: 87.5, funcionariocnd: 'Madrugador' }))
+    // `lote_id` es lo que agrupa el listado (D-056): un registro sin él no tendría dónde caer.
+    .input('campos_extra', sql.NVarChar(sql.MAX), JSON.stringify({
+      periodo: 23, valor_mw: 87.5, funcionariocnd: 'Madrugador', lote_id: '9c0d1e2f-3a4b-4c5d-8e9f-0a1b2c3d4e5f',
+    }))
     .input('detalle', sql.NVarChar(sql.MAX), `${TEST_TAG} t1-regression`)
     .input('creado_por', sql.Int, ctx.usuarios.jdt.usuario_id)
     .query(`
@@ -338,13 +343,22 @@ test('9. T1 regression — registro con fecha_evento UTC del día siguiente (22:
               'borrador', '[]', '[]', '[]', @creado_por)
     `);
 
-  const { status, data } = await call('GET', `/api/sala-de-mando?planta_id=${PLANTA_ID}&fecha=${HOY}`, {
+  const { status, data } = await getLotes({ sesion_id: ctx.sesiones.jdt, fecha: HOY });
+  assert.equal(status, 200, JSON.stringify(data));
+  const lote = data.lotes.find((l) => l.tipo === 'AUTH');
+  assert.ok(lote, `el listado del día debe incluir el registro de las 22:30 — bug T1 reaparecido si falta. lotes=${JSON.stringify(data.lotes)}`);
+  const celda = lote.periodos.find((p) => p.periodo === 23);
+  assert.ok(celda, `el lote debe traer P23. periodos=${JSON.stringify(lote.periodos)}`);
+  assert.equal(celda.valor_mw, 87.5);
+});
+
+test('9b. D-056 E5 — el pivote GET /api/sala-de-mando ya no existe (404)', async () => {
+  // La grilla dejó de ser un espejo: no hay "un valor por celda" que devolver. Si alguien lo
+  // reintrodujera, volvería a existir una lectura que colapsa varios lotes de la misma celda en uno.
+  const { status } = await call('GET', `/api/sala-de-mando?planta_id=${PLANTA_ID}&fecha=${HOY}`, {
     sesion_id: ctx.sesiones.jdt,
   });
-  assert.equal(status, 200, JSON.stringify(data));
-  assert.ok(data.AUTH, 'respuesta debe incluir bloque AUTH');
-  // P23 → índice 22.
-  assert.equal(data.AUTH.valores[22], 87.5, `AUTH P23 debe valer 87.5 — bug T1 reaparecido si null. valores=${JSON.stringify(data.AUTH.valores)}`);
+  assert.equal(status, 404, 'el pivote se dio de baja en E5');
 });
 
 test('8. /cierre-diario manual → 200 closed:true; segundo intento → 200 skipped', async () => {
@@ -1415,8 +1429,9 @@ test('D-056 E3.10 — cerrarDiaMand arrastra lote_id y hora_llamada al históric
 // metadata se deriva asumiendo coherencia, sin desempate ad-hoc. `publicado` es un indicador
 // derivado del JOIN a evento_dashboard: acá se fija que cae por CELDA, no por lote.
 //
-// El pivote GET /api/sala-de-mando sigue vivo (lo consume SalaDeMandoGrid hasta E5): el test 9 lo
-// cubre y esta etapa no lo toca.
+// E5 dio de baja el pivote GET /api/sala-de-mando (su único consumidor era la grilla-espejo), así
+// que este endpoint es la ÚNICA lectura del día MAND: la cubren el test 9 (acotador de día Bogotá)
+// y el 9b (el pivote responde 404).
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 async function getLotes({ sesion_id, planta_id = PLANTA_ID, fecha } = {}) {
