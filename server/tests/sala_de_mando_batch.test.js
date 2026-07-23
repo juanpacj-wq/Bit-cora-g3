@@ -32,6 +32,18 @@ function periodoActual() {
 const HOY = hoyBogota();
 const P_ACTUAL = periodoActual();
 
+// D-057 (E1): un periodo REDESP LIBRE del lock, evaluado AL CORRER el test y con una hora de margen.
+// El patrón anterior — `Math.min(P_ACTUAL, 24)` — caía JUSTO sobre el umbral (`p < periodoActual`) y
+// además usaba el `P_ACTUAL` congelado al cargar el módulo. Cualquier corrida que cruce una hora en
+// punto (inevitable: la suite completa dura ~25 min) deja al servidor recalculando `periodoActual`
+// mientras el test sigue pidiendo el periodo viejo → `periodo_bloqueado` espurio. Pasó de verdad: 4
+// tests rojos al cruzar las 12:00 Bogotá, todos con `{periodo: 12, motivo: 'periodo_bloqueado'}`.
+// Los tests que ejercitan el lock a propósito siguen usando `P_ACTUAL - 1`: ahí quedarse corto en el
+// tiempo solo hace el periodo MÁS pasado, así que la staleness es inofensiva.
+function periodoRedespLibre() {
+  return Math.min(periodoActual() + 1, 24);
+}
+
 // D-056: 'HH:mm' Bogotá desplazado `deltaMin` minutos respecto de ahora. Devuelve null si el
 // desplazamiento se sale del día de la grilla (solo ocurre en los bordes 00:00 / 23:59) — el
 // servidor rechazaría esa hora con `hora_invalida` y el test perdería su intención.
@@ -85,9 +97,9 @@ after(async () => {
 
 test('1. POST guardar — 3 filas con hora → 200 { lotes: 3, registros: N }', async () => {
   await cleanMand();
-  // Elegimos un periodo REDESP >= P_ACTUAL para evitar el lock (variable según hora del run).
-  const pRedesp1 = Math.min(P_ACTUAL, 24);
-  const pRedesp2 = Math.min(P_ACTUAL + 1, 24);
+  // Elegimos periodos REDESP libres del lock (variables según la hora del run).
+  const pRedesp1 = periodoRedespLibre();
+  const pRedesp2 = Math.min(pRedesp1 + 1, 24);
 
   const body = {
     planta_id: PLANTA_ID,
@@ -504,7 +516,7 @@ test('D-055 1c. REDESP: el lock protege el VALOR, nunca la hora ni el comentario
   // igual mientras su VALOR caiga en el periodo actual o posterior. El lock nunca mira la hora.
   await cleanMand();
   const horaPasada = horaBogotaMin(-45) ?? '00:00';
-  const pLibre = Math.min(P_ACTUAL, 24);
+  const pLibre = periodoRedespLibre();
 
   const { status, data } = await postGuardar({
     sesion_id: ctx.sesiones.jdt,
@@ -627,7 +639,7 @@ test('D-055 4. cerrarDiaMand archiva AUTH, PRUEBA y REDESP (no solo autorizacion
     .query(`SELECT usuario_id FROM lov_bit.usuario WHERE username='SISTEMA'`)).recordset[0]?.usuario_id;
   assert.ok(sistema, 'usuario SISTEMA debe existir');
 
-  const pRedesp = Math.min(P_ACTUAL, 24);
+  const pRedesp = periodoRedespLibre();
   const alta = await postGuardar({
     sesion_id: ctx.sesiones.jdt,
     body: {
@@ -711,10 +723,15 @@ test('D-056 E1.3 — ningún registro MAND (planta real) con campos_extra JSON q
   assert.equal(r.recordset[0].activo, 0, 'activo MAND real sin lote_id debe ser 0');
 });
 
-test('D-056 E1.4 — los lote_id asignados son distintos entre sí (un NEWID por fila)', async () => {
-  // A la altura de E1 cada registro MAND previo es un lote de UN SOLO periodo: NEWID() se evalúa por
-  // fila ⇒ count(*) == count(distinct lote_id). (E3 introduce lotes multi-celda que comparten
-  // lote_id y reescribe este archivo, así que esta invariante es la correcta para el estado E1.)
+test('D-056 E1.4 — los lote_id que asignó F32.A1 son distintos entre sí (un NEWID por fila)', async () => {
+  // La migración convirtió cada registro MAND preexistente en un lote de UN SOLO periodo: NEWID() se
+  // evalúa por fila ⇒ count(*) == count(distinct lote_id) SOBRE LO QUE ELLA TOCÓ.
+  //
+  // D-057 (E1): el filtro `hora_llamada IS NULL` NO es cosmético — sin él la invariante es falsa en
+  // cuanto un operador real usa la captura de D-056, porque un lote multi-celda comparte lote_id
+  // ENTRE SUS FILAS a propósito. Se cayó apenas GEC3 registró sus primeros lotes de 8, 6 y 5
+  // periodos (26 filas / 10 lotes). La marca que separa un universo del otro ya está documentada en
+  // D-056: los migrados NO tienen la clave `hora_llamada`, y la captura la exige siempre.
   const db = await getDB();
   const r = await db.request()
     .input('m', sql.Int, MAND_BITACORA_ID)
@@ -724,13 +741,50 @@ test('D-056 E1.4 — los lote_id asignados son distintos entre sí (un NEWID por
       FROM (
         SELECT campos_extra FROM bitacora.registro_historico
           WHERE bitacora_id=@m AND planta_id<>@tst AND JSON_VALUE(campos_extra,'$.lote_id') IS NOT NULL
+            AND JSON_VALUE(campos_extra,'$.hora_llamada') IS NULL
         UNION ALL
         SELECT campos_extra FROM bitacora.registro_activo
           WHERE bitacora_id=@m AND planta_id<>@tst AND JSON_VALUE(campos_extra,'$.lote_id') IS NOT NULL
+            AND JSON_VALUE(campos_extra,'$.hora_llamada') IS NULL
       ) x
     `);
   const { total, distintos } = r.recordset[0];
   assert.equal(distintos, total, `esperado ${total} lote_id distintos, got ${distintos}`);
+});
+
+test('D-056 E1.4b — un lote multi-celda comparte lote_id entre sus filas (contracara de E1.4)', async () => {
+  // Fija la otra mitad de la invariante, que es la que E1.4 no puede afirmar: dentro de un lote
+  // capturado por D-056 el lote_id SE REPITE, y lo que no se repite es el periodo. Sin este test,
+  // "arreglar" E1.4 quitándole el filtro volvería a pasar sin que nadie lo note.
+  await cleanMand();
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e1-4b`,
+        periodos: [{ periodo: 21, valor_mw: 21 }, { periodo: 22, valor_mw: 22 }, { periodo: 23, valor_mw: 23 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const db = await getDB();
+  const r = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID)
+    .input('tst', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT COUNT(*) AS total,
+             COUNT(DISTINCT JSON_VALUE(campos_extra,'$.lote_id')) AS lotes,
+             COUNT(DISTINCT JSON_VALUE(campos_extra,'$.periodo')) AS periodos
+      FROM bitacora.registro_activo
+      WHERE bitacora_id=@m AND planta_id=@tst AND JSON_VALUE(campos_extra,'$.lote_id') IS NOT NULL
+    `);
+  assert.deepEqual(
+    { total: r.recordset[0].total, lotes: r.recordset[0].lotes, periodos: r.recordset[0].periodos },
+    { total: 3, lotes: 1, periodos: 3 },
+  );
+  await cleanMand();
 });
 
 test('D-056 E1.5 — idempotencia: un segundo run reasignaría 0 filas y el lote_id conocido sobrevive', async () => {
@@ -1109,7 +1163,7 @@ test('D-056 E3.4 — REDESP con valor en periodo pasado → periodo_bloqueado y 
       fecha: HOY,
       filas: [{
         tipo: 'REDESP', hora: HORA_OK, detalle: `${TEST_TAG} redesp tarde`, funcionariocnd: null,
-        periodos: [{ periodo: P_ACTUAL - 1, valor_mw: 120 }, { periodo: Math.min(P_ACTUAL, 24), valor_mw: 130 }],
+        periodos: [{ periodo: P_ACTUAL - 1, valor_mw: 120 }, { periodo: periodoRedespLibre(), valor_mw: 130 }],
       }],
     },
   });
@@ -1131,7 +1185,7 @@ test('D-056 E3.5 — REDESP guarda funcionariocnd = null aunque el cliente lo ma
       fecha: HOY,
       filas: [{
         tipo: 'REDESP', hora: HORA_OK, detalle: `${TEST_TAG} redesp func`, funcionariocnd: 'IGNORADO',
-        periodos: [{ periodo: Math.min(P_ACTUAL, 24), valor_mw: 140 }],
+        periodos: [{ periodo: periodoRedespLibre(), valor_mw: 140 }],
       }],
     },
   });
@@ -1311,7 +1365,7 @@ test('D-056 E3.9 — guard de coherencia: todo lote_id escrito tiene UNA sola ho
   // mantiene coherente. Este guard es la red que va a hacer falta cuando D-057 introduzca la
   // edición por lote: si una corrección toca unas celdas y no otras, acá se nota.
   await cleanMand();
-  const pRedesp = Math.min(P_ACTUAL, 24);
+  const pRedesp = periodoRedespLibre();
   const { status, data } = await postGuardar({
     sesion_id: ctx.sesiones.jdt,
     body: {
@@ -1611,4 +1665,140 @@ test('D-056 E4.5 — un cargo con puede_ver pero SIN puede_crear en MAND obtiene
 test('D-056 E4.6 — planta distinta a la de la sesión → 403 (plantaMatch)', async () => {
   const { status } = await getLotes({ sesion_id: ctx.sesiones.jdt, planta_id: 'GEC3' });
   assert.equal(status, 403);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D-057 · E1 — PUT /api/sala-de-mando/lotes/:lote_id: la corrección por lote.
+//
+// Humo happy-path del diff quirúrgico: un solo PUT cambia un valor, agrega un periodo, quita otro y
+// reescribe la descripción — conservando `lote_id` y los `registro_id` de las celdas que sobreviven
+// (reinsertar el lote entero dejaría huérfano `evento_dashboard.registro_origen_id`, que no tiene FK
+// posible, D-055 (c)). La matriz completa de los 14 criterios vive en E3.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+async function putLote({ sesion_id, lote_id, body }) {
+  return call('PUT', `/api/sala-de-mando/lotes/${encodeURIComponent(lote_id)}`, { sesion_id, body });
+}
+
+test('D-057 E1.1 — un PUT cambia, agrega y quita periodos conservando el lote', async () => {
+  await cleanMand();
+  // AUTH (sin lock de REDESP) sobre P10..P12: el resultado no depende de la hora del run.
+  const hora = horaBogotaMin(-12) ?? '00:00';
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e1-original`,
+        periodos: [{ periodo: 10, valor_mw: 100 }, { periodo: 11, valor_mw: 101 }, { periodo: 12, valor_mw: 102 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const previo = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes[0];
+  const ridsPrevios = Object.fromEntries(previo.periodos.map((p) => [p.periodo, p.registro_id]));
+
+  // P10 cambia de valor · P11 se quita (no viaja) · P13 se agrega · P12 queda idéntico.
+  // La hora NO cambia: así `celdas_recalculadas` deja ver que solo se recalculó lo que el diff tocó.
+  const { status, data } = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id: previo.lote_id,
+    body: {
+      planta_id: PLANTA_ID, hora, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e1-corregido`,
+      periodos: [{ periodo: 10, valor_mw: 150 }, { periodo: 12, valor_mw: 102 }, { periodo: 13, valor_mw: 103 }],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.lote_id, previo.lote_id, 'el lote conserva su identidad');
+  assert.deepEqual(data.resumen, {
+    actualizados: 1, creados: 1, eliminados: 1, celdas_recalculadas: 3,
+  }, 'P12 quedó idéntico y con la misma hora: no se recalcula');
+
+  const { data: despues } = await getLotes({ sesion_id: ctx.sesiones.jdt });
+  assert.equal(despues.lotes.length, 1, 'sigue siendo UN lote, no dos');
+  const lote = despues.lotes[0];
+  assert.equal(lote.lote_id, previo.lote_id);
+  assert.deepEqual(lote.periodos.map((p) => p.periodo), [10, 12, 13]);
+  assert.deepEqual(lote.periodos.map((p) => p.valor_mw), [150, 102, 103]);
+  assert.equal(lote.detalle, `${TEST_TAG} e1-corregido`, 'la descripción se aplica a nivel de LOTE');
+  assert.equal(lote.hora_llamada, new Date(`${HOY}T${hora}:00.000-05:00`).toISOString());
+  assert.equal(lote.creado_por.usuario_id, ctx.usuarios.jdt.usuario_id, 'la autoría original no se pierde');
+
+  const porPeriodo = Object.fromEntries(lote.periodos.map((p) => [p.periodo, p]));
+  assert.equal(porPeriodo[10].registro_id, ridsPrevios[10], 'la celda corregida conserva su registro_id');
+  assert.equal(porPeriodo[12].registro_id, ridsPrevios[12], 'la celda intacta conserva su registro_id');
+  assert.ok(porPeriodo[13].registro_id > 0, 'la celda agregada es una fila nueva');
+  for (const p of lote.periodos) assert.equal(p.publicado, true, 'las tres celdas vivas publican');
+
+  // La celda quitada dejó de estar publicada: sin ganador, la fila de evento_dashboard se ELIMINA
+  // (no `activa=0`), porque su origen dejó de existir y el puntero quedaría huérfano (D-055 (c)).
+  const db = await getDB();
+  const ev = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, HOY)
+    .query(`SELECT periodo FROM bitacora.evento_dashboard WHERE planta_id=@p AND fecha=@f AND tipo='AUTH'`);
+  assert.deepEqual(ev.recordset.map((r) => r.periodo).sort((a, b) => a - b), [10, 12, 13]);
+
+  // Auditoría (decisión 2): la corrección deliberada marca las celdas AFECTADAS — incluida la que
+  // solo recibió metadata nueva —, y deja sin sellar la que nació en este mismo PUT.
+  const audit = await db.request()
+    .input('mand', sql.Int, MAND_BITACORA_ID).input('p', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT registro_id, modificado_por,
+             TRY_CAST(JSON_VALUE(campos_extra,'$.periodo') AS INT) AS periodo
+      FROM bitacora.registro_activo WHERE bitacora_id=@mand AND planta_id=@p
+    `);
+  const modPor = Object.fromEntries(audit.recordset.map((r) => [r.periodo, r.modificado_por]));
+  assert.equal(modPor[10], ctx.usuarios.jdt.usuario_id, 'cambió de valor → sellada');
+  assert.equal(modPor[12], ctx.usuarios.jdt.usuario_id, 'cambió la descripción del lote → sellada');
+  assert.equal(modPor[13], null, 'la celda recién creada no se marca como modificada');
+
+  await cleanMand();
+});
+
+test('D-057 E1.2 — vaciar todos los periodos no borra: 400 lote_sin_celdas y nada se escribe', async () => {
+  await cleanMand();
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'PRUEBA', hora: HORA_OK, funcionariocnd: null, detalle: `${TEST_TAG} e1-vaciar`,
+        periodos: [{ periodo: 20, valor_mw: 20 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const lote = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes[0];
+
+  const { status, data } = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id: lote.lote_id,
+    body: { planta_id: PLANTA_ID, hora: HORA_OK, funcionariocnd: null, detalle: `${TEST_TAG} e1-vaciar`, periodos: [] },
+  });
+  assert.equal(status, 400, JSON.stringify(data));
+  assert.ok(data.errores.some((e) => e.motivo === 'lote_sin_celdas'), JSON.stringify(data));
+
+  const { data: despues } = await getLotes({ sesion_id: ctx.sesiones.jdt });
+  assert.equal(despues.lotes.length, 1, 'vaciar ≠ borrar: el lote sigue intacto');
+  assert.deepEqual(despues.lotes[0].periodos.map((p) => p.periodo), [20]);
+  await cleanMand();
+});
+
+test('D-057 E1.3 — lote inexistente → 404 lote_inexistente; otra planta → 403', async () => {
+  const inexistente = '00000000-0000-4000-8000-0000000000d7';
+  const a = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id: inexistente,
+    body: { planta_id: PLANTA_ID, hora: HORA_OK, funcionariocnd: 'X', detalle: null, periodos: [{ periodo: 5, valor_mw: 5 }] },
+  });
+  assert.equal(a.status, 404, JSON.stringify(a.data));
+  assert.equal(a.data.codigo, 'lote_inexistente');
+
+  const b = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id: inexistente,
+    body: { planta_id: 'GEC3', hora: HORA_OK, funcionariocnd: 'X', detalle: null, periodos: [{ periodo: 5, valor_mw: 5 }] },
+  });
+  assert.equal(b.status, 403, 'plantaMatch corta antes de tocar la BD');
 });
