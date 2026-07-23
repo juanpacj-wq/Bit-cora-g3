@@ -1802,3 +1802,118 @@ test('D-057 E1.3 — lote inexistente → 404 lote_inexistente; otra planta → 
   });
   assert.equal(b.status, 403, 'plantaMatch corta antes de tocar la BD');
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D-057 · E2 — DELETE /api/sala-de-mando/lotes/:lote_id: el borrado real.
+//
+// Humo del criterio 10 con dos lotes SOLAPADOS: borrar el que está publicado hace RETROCEDER la
+// celda compartida al lote sobreviviente, y borrar el último ELIMINA la fila de `evento_dashboard`
+// (nunca `activa=0`: sin origen vivo el puntero quedaría huérfano, D-055 (c)). La matriz completa de
+// los 14 criterios vive en E3.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+async function delLote({ sesion_id, lote_id, planta_id = PLANTA_ID }) {
+  const qs = planta_id == null ? '' : `?${new URLSearchParams({ planta_id })}`;
+  return call('DELETE', `/api/sala-de-mando/lotes/${encodeURIComponent(lote_id)}${qs}`, { sesion_id });
+}
+
+// Filas de evento_dashboard de un tipo, para el día y la planta-fixture. Solo lectura.
+async function eventosDashboard(tipo) {
+  const db = await getDB();
+  const r = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA)
+    .input('f', sql.Date, HOY)
+    .input('t', sql.VarChar(10), tipo)
+    .query(`
+      SELECT periodo, valor_mw, registro_origen_id, activa
+      FROM bitacora.evento_dashboard
+      WHERE planta_id = @p AND fecha = @f AND tipo = @t
+      ORDER BY periodo
+    `);
+  return r.recordset;
+}
+
+test('D-057 E2.1 — borrar el lote publicado hace retroceder la celda; borrar el último la elimina', async () => {
+  await cleanMand();
+  // AUTH (sin lock de REDESP) sobre P14..P16: el resultado no depende de la hora del run.
+  // Lote A: P14+P15 con hora temprana · Lote B: P15+P16 con hora tardía. Solapan SOLO en P15.
+  const horaA = horaBogotaMin(-32) ?? '00:00';
+  const horaB = horaBogotaMin(-2) ?? '00:00';
+  const alta = async (hora, periodos, marca) => postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{ tipo: 'AUTH', hora, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} ${marca}`, periodos }],
+    },
+  });
+  const rA = await alta(horaA, [{ periodo: 14, valor_mw: 140 }, { periodo: 15, valor_mw: 150 }], 'e2-A');
+  assert.equal(rA.status, 200, JSON.stringify(rA.data));
+  const rB = await alta(horaB, [{ periodo: 15, valor_mw: 155 }, { periodo: 16, valor_mw: 160 }], 'e2-B');
+  assert.equal(rB.status, 200, JSON.stringify(rB.data));
+
+  const lotes = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes;
+  assert.equal(lotes.length, 2);
+  const loteA = lotes.find((l) => l.detalle === `${TEST_TAG} e2-A`);
+  const loteB = lotes.find((l) => l.detalle === `${TEST_TAG} e2-B`);
+  assert.ok(loteA && loteB, JSON.stringify(lotes));
+  const ridA = Object.fromEntries(loteA.periodos.map((p) => [p.periodo, p.registro_id]));
+
+  // B gana P15 de forma DETERMINISTA en las dos ramas de `horaBogotaMin`: con horas distintas por
+  // `hora_llamada DESC`, y si el borde de medianoche las colapsó a la misma, por `creado_en DESC`
+  // (B se registró después). Es el desempate de `recalcularEventoDashboard`.
+  const antes = await eventosDashboard('AUTH');
+  assert.deepEqual(antes.map((e) => e.periodo), [14, 15, 16]);
+  assert.equal(antes[1].valor_mw, 155, 'P15 lo publica el lote B (hora más reciente)');
+
+  // ── Se borra el lote PUBLICADO en la celda compartida ────────────────────────────────────────
+  const d1 = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: loteB.lote_id });
+  assert.equal(d1.status, 200, JSON.stringify(d1.data));
+  assert.equal(d1.data.lote_id, loteB.lote_id);
+  assert.deepEqual(d1.data.resumen, { eliminados: 2, celdas_recalculadas: 2 });
+
+  const tras1 = await eventosDashboard('AUTH');
+  assert.deepEqual(tras1.map((e) => e.periodo), [14, 15], 'P16 no lo cubría nadie más: su fila DESAPARECE');
+  assert.equal(tras1[1].valor_mw, 150, 'P15 RETROCEDE al valor del lote A');
+  assert.equal(tras1[1].registro_origen_id, ridA[15], 'y su origen es la celda del lote sobreviviente');
+  assert.equal(tras1[1].activa, true, 'el retroceso deja la fila activa, no anulada');
+
+  const quedan = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes;
+  assert.equal(quedan.length, 1, 'el lote borrado desaparece del listado (borrado real, RN-04.c)');
+  assert.equal(quedan[0].lote_id, loteA.lote_id);
+  for (const p of quedan[0].periodos) assert.equal(p.publicado, true, 'A pasó a publicar sus dos celdas');
+
+  // ── Se borra el último lote: ya no queda ganador en ninguna celda ─────────────────────────────
+  const d2 = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: loteA.lote_id });
+  assert.equal(d2.status, 200, JSON.stringify(d2.data));
+  assert.deepEqual(d2.data.resumen, { eliminados: 2, celdas_recalculadas: 2 });
+  assert.equal((await eventosDashboard('AUTH')).length, 0, 'sin origen vivo la fila se ELIMINA, no queda activa=0');
+  assert.equal((await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes.length, 0);
+
+  // Sanidad global (E2): ningún puntero de la planta-fixture quedó apuntando a una fila borrada.
+  const db = await getDB();
+  const huerfanos = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT ed.evento_id
+      FROM bitacora.evento_dashboard ed
+      WHERE ed.planta_id = @p
+        AND NOT EXISTS (SELECT 1 FROM bitacora.registro_activo    ra WHERE ra.registro_id = ed.registro_origen_id)
+        AND NOT EXISTS (SELECT 1 FROM bitacora.registro_historico rh WHERE rh.registro_id = ed.registro_origen_id)
+    `);
+  assert.equal(huerfanos.recordset.length, 0, 'evento_dashboard sin registro_origen_id huérfano');
+
+  await cleanMand();
+});
+
+test('D-057 E2.2 — gates del DELETE: sin planta_id 400, otra planta 403, lote inexistente 404', async () => {
+  const inexistente = '00000000-0000-4000-8000-0000000000e2';
+  const sinPlanta = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: inexistente, planta_id: null });
+  assert.equal(sinPlanta.status, 400, 'planta_id viaja por query string, no por body');
+
+  const otraPlanta = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: inexistente, planta_id: 'GEC3' });
+  assert.equal(otraPlanta.status, 403, 'plantaMatch corta antes de tocar la BD');
+
+  const noExiste = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: inexistente });
+  assert.equal(noExiste.status, 404, JSON.stringify(noExiste.data));
+  assert.equal(noExiste.data.codigo, 'lote_inexistente');
+});

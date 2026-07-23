@@ -549,6 +549,120 @@ router.put('/lotes/:lote_id', asyncH(async (req, res) => {
   }
 }));
 
+// DELETE /api/sala-de-mando/lotes/:lote_id?planta_id= — BORRADO REAL de un lote (D-057).
+//
+// `planta_id` viaja por query string: un DELETE no lleva body fiable (fetch lo permite, pero
+// proxies e intermediarios pueden descartarlo).
+//
+// Borrado REAL, no anulación (RN-04.c): en MAND no existe el concepto de "registro anulado visible"
+// que sí tiene DISP — el listado del día muestra lo que hay que llamar al CND, y un renglón tachado
+// ahí no informa, confunde. La trazabilidad de lo borrado vive en el histórico del día cuando el
+// cierre diario lo archiva; un lote borrado antes del cierre simplemente nunca existió para el
+// dashboard.
+//
+// EL LOCK DE REDESP NO APLICA ACÁ, y es una decisión explícita (no un olvido): el lock protege el
+// VALOR de un periodo ya despachado contra una reescritura silenciosa, pero borrar el lote es la
+// corrección de un registro ERRADO. Si el lock aplicara, un redespacho mal digitado quedaría
+// publicado para siempre en cuanto pasara su hora — exactamente el problema que REQ-04 vino a
+// resolver. El `PUT` sí lo aplica sobre el delta, porque ahí sí hay reescritura de valor.
+//
+// Mismo gate que el `PUT`: `puede_crear` en MAND (matriz data-driven) + `plantaMatch`, sin chequeo
+// de `creado_por` (excepción a D-049, acotada a MAND) y sin gate de turno (MAND exento de
+// `turno_finalizado`/`turno_cerrado`/`turno_en_transicion`).
+router.delete('/lotes/:lote_id', asyncH(async (req, res) => {
+  const sesion = req.sesion;
+  const lote_id = String(req.params.lote_id ?? '');
+  const planta_id = req.query.planta_id;
+
+  if (!planta_id) {
+    return sendJSON(res, 400, { error: 'planta_id es requerido' });
+  }
+  // D-055: sin allowlist de plantas. `plantaMatch` acota a la unidad de la sesión.
+  if (!plantaMatch(sesion, planta_id)) {
+    return sendJSON(res, 403, { error: 'No puede borrar registros de otra planta' });
+  }
+  if (lote_id === '' || lote_id.length > 64) {
+    return sendJSON(res, 404, { error: 'El registro ya no existe. Actualiza el listado.', codigo: 'lote_inexistente' });
+  }
+
+  const db = await getDB();
+  const bit = await db.request().query(`SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo = 'MAND'`);
+  const MAND_ID = bit.recordset[0]?.bitacora_id;
+  if (!MAND_ID) {
+    console.error('[ERROR] config: bitácora MAND no encontrada en lov_bit.bitacora');
+    return sendJSON(res, 500, { error: 'Hay un problema de configuración del sistema. Contacta a soporte.', codigo: 'config_sistema' });
+  }
+  if (!(await hasPermisoBitacora(sesion, MAND_ID, 'puede_crear'))) {
+    return sendJSON(res, 403, { error: 'Sin permiso para borrar registros de MAND' });
+  }
+
+  const transaction = new sql.Transaction(db);
+  await transaction.begin();
+  try {
+    // Mismos cuatro desenlaces que el `PUT`, resueltos DENTRO de la transacción: 404 si nunca
+    // existió, 409 si el cierre diario ya lo archivó (el histórico no se corrige, RF-032), 403 si es
+    // de otra unidad.
+    const resuelto = await resolverLoteParaEscritura(transaction, { lote_id, mand_id: MAND_ID, planta_id });
+    if (resuelto.error) {
+      await transaction.rollback();
+      return sendJSON(res, resuelto.error.status, resuelto.error.cuerpo);
+    }
+    const filas = resuelto.filas;
+
+    // Las celdas que el lote ocupaba, capturadas ANTES de borrarlo — después ya no hay de dónde
+    // leerlas. La clave incluye la `fecha` de CADA fila (no la del lote): `recalcularEventoDashboard`
+    // se identifica por `(planta, fecha, periodo, tipo)`, y aunque un lote no se parte entre dos días
+    // por construcción (el `PUT` hereda `fecha_evento`), derivarla por fila hace el recálculo
+    // independiente de esa invariante.
+    const celdas = new Map();
+    for (const f of filas) {
+      if (!Number.isInteger(f.periodo) || !f.tipo) continue;
+      const fecha = fechaBogotaStr(f.fecha_evento);
+      celdas.set(`${fecha}|${f.tipo}|${f.periodo}`, { fecha, tipo: f.tipo, periodo: f.periodo });
+    }
+
+    // Borrado acotado por PK (`registro_id`), con los ids bindeados acá mismo: no puede alcanzar
+    // ninguna fila que este request no haya leído. Nunca por `planta_id` ni por `lote_id` suelto
+    // (regla D-055 — la suite corre contra la BD productiva).
+    const del = new sql.Request(transaction);
+    const params = filas.map((f, i) => {
+      del.input(`r${i}`, sql.Int, f.registro_id);
+      return `@r${i}`;
+    });
+    const res_del = await del.query(
+      `DELETE FROM bitacora.registro_activo WHERE registro_id IN (${params.join(', ')})`,
+    );
+    const eliminados = res_del.rowsAffected[0] ?? filas.length;
+
+    // Acá se materializa el criterio 10: cada celda liberada se resuelve DESDE CERO. Si otro lote la
+    // cubría, ese pasa a publicar (el vigente RETROCEDE); si no queda ninguno, la fila de
+    // `evento_dashboard` se ELIMINA — nunca `activa=0`, porque su origen dejó de existir y el
+    // puntero quedaría huérfano (`registro_origen_id` no tiene FK posible, D-055 (c)).
+    for (const { fecha, tipo, periodo } of celdas.values()) {
+      await recalcularEventoDashboard(transaction, { planta_id, fecha, periodo, tipo });
+    }
+
+    // REQ-02 / RQ-04.14 — punto de enganche de la CASCADA a las copias de SALAJDT/SALAING: cuando
+    // esas copias existan, su borrado va acá, dentro de esta misma transacción. Hoy no existen, así
+    // que no hay código que ejecutar: ni muerto, ni tras un flag.
+
+    await transaction.commit();
+    broadcastConteoBitacoras(planta_id).catch(() => {});
+    // Push cross-repo fire-and-forget, una vez por día tocado. Nunca dentro de la transacción.
+    for (const fecha of new Set([...celdas.values()].map((c) => c.fecha))) {
+      notifyDashboard({ plantas: [planta_id], fecha }).catch(() => {});
+    }
+
+    return sendJSON(res, 200, {
+      lote_id,
+      resumen: { eliminados, celdas_recalculadas: celdas.size },
+    });
+  } catch (err) {
+    try { await transaction.rollback(); } catch {}
+    throw err;
+  }
+}));
+
 // POST /api/sala-de-mando/guardar — captura APPEND-ONLY de Operación 24h (D-056).
 // Body: { planta_id, fecha, filas: [{ tipo, hora, detalle, funcionariocnd, periodos: [{periodo, valor_mw}] }] }
 //
