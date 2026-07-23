@@ -121,10 +121,11 @@ Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloquea
   **`zzz_session_leak_guard`**, que es justamente la red de seguridad que desactiva las sesiones
   sintéticas (`es_sintetico=1`). Las suites que crean sesiones en planta REAL (`consumos_combustible`,
   `conformacion_turno`, `rol_coordinador_carbon_maquinaria`) pueden haber quedado con sesiones
-  `activa=1` visibles en el panel CONECTADOS de producción. **Al recuperar la conexión hay que correr
-  `node --env-file=../.env --test tests/zzz_session_leak_guard.test.js`** (idempotente: desactiva y
-  reporta al ofensor). Generaliza el blindaje de 2026-07-05: el guard protege contra el olvido de un
-  `after()`, no contra que la BD desaparezca antes de que corra.
+  `activa=1` visibles en el panel CONECTADOS de producción. **RESUELTO en la misma sesión:** al
+  volver la conexión se corrió `node --env-file=../.env --test tests/zzz_session_leak_guard.test.js`
+  (idempotente: desactiva y reporta al ofensor) → verde. Generaliza el blindaje de 2026-07-05: el
+  guard protege contra el olvido de un `after()`, no contra que la BD desaparezca antes de que corra
+  — si una corrida se cae por infraestructura, hay que correrlo a mano.
 - **[E1] `npm test` NO respeta el orden de archivos declarado en `package.json`.** En el log de la 1ª
   corrida completa el orden real de finalización fue `conformacion_turno` → `consumos_combustible` →
   `fechas_bogota` → `finalizar_turno` → … → `sala_de_mando_batch`, contra un orden declarado que pone
@@ -222,8 +223,11 @@ para siempre en cuanto pasara su hora — justo lo que REQ-04 vino a resolver. V
   192.168.17.20:1433 in 15000ms`, `ETIMEOUT`) y se llevó puestos por timeout de conexión —no por
   assert— a `turno-entidad`, `turno_seguimiento`, `turno_transicion_write_gate` y
   `zzz_session_leak_guard`, cancelando el resto. Confirmado desde el SO: `Test-NetConnection
-  192.168.17.20 -Port 1433` → `TcpTestSucceeded: False`, `PingSucceeded: False`. Ver "Datos
-  descubiertos" para el pendiente que deja.
+  192.168.17.20 -Port 1433` → `TcpTestSucceeded: False`, `PingSucceeded: False`.
+- **Re-corrida tras recuperar la conexión** (confirma que no había nada más): `turno-entidad +
+  turno_seguimiento + turno_transicion_write_gate + sala_de_mando_batch` → **90/90 verde**
+  (`fail 0 · cancelled 0`), y `zzz_session_leak_guard` aislado → **1/1 verde** (higiene de sesiones
+  sintéticas resuelta).
 - **Prueba E2.1 — el criterio 10, con dos lotes AUTH solapados:** lote A (P14+P15, hora temprana) y
   lote B (P15+P16, hora tardía), que solapan solo en P15. Borrar B (el publicado en la celda
   compartida) deja `evento_dashboard` con P14+P15, **P15 con el valor y el `registro_origen_id` de
