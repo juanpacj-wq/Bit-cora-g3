@@ -4,6 +4,7 @@ import sql from 'mssql';
 import { getDB } from '../db.js';
 import { hashPassword } from '../utils/password.js';
 import { setupSessions, call, PLANTA_ID, TEST_TAG, deactivateSyntheticSessions } from './helpers.js';
+import { getTurnoColombia } from '../utils/turno.js';
 
 // D-027: tests del módulo Combustibles → Consumos (F26.B1).
 // Cubren: catálogo (1, 2), batch CRUD (3, 7), validaciones (4, 5, 6, 13, 14, 15), vista derivada (8),
@@ -44,11 +45,17 @@ async function setupOperadorCarbon() {
   await db.request()
     .input('usuario_id', sql.Int, u.usuario_id)
     .query(`UPDATE bitacora.sesion_activa SET activa = 0 WHERE usuario_id = @usuario_id`);
+  // El turno de la sesión debe ser el turno ACTUAL, nunca un 1 hardcodeado: con la suite corriendo
+  // en T2 (después de las 18:00 Bogotá) una sesión turno=1 tiene su ventana [06:00,18:00) ya vencida
+  // y el turno-sweeper la EXPULSA (activa=0) a los ≤60s → esta suite empieza a recibir 401 a mitad de
+  // corrida (tests 7 y 9). `helpers.js` ya había corregido esto para el resto de la suite; este
+  // helper local se había quedado con el literal. Es la causa mecánica del flake de `consumos`
+  // atribuido al "borde de turno": no hace falta cruzar el borde, basta con correr en T2.
   const ins = await db.request()
     .input('usuario_id', sql.Int, u.usuario_id)
     .input('planta_id', sql.VarChar(10), PLANTA_ID)
     .input('cargo_id', sql.Int, c.cargo_id)
-    .input('turno', sql.TinyInt, 1)
+    .input('turno', sql.TinyInt, getTurnoColombia())
     .query(`
       INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno)
       OUTPUT INSERTED.sesion_id

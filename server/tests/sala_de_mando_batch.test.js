@@ -1,5 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
@@ -856,7 +857,14 @@ async function tipoEventoIdMand(tipo) {
 // 'HH:mm' Bogotá → se compone hora_llamada como ISO UTC; si es null/undefined la CLAVE queda AUSENTE
 // (no null), como los registros migrados por F32.A1. `fecha_evento` se fija a mediodía Bogotá de HOY
 // para que el día Bogotá sea determinista a cualquier hora del run.
-async function seedRegistroMand({ tipo, periodo, hora, valor, lote_id, jdts = '[]', jefes = '[]' }) {
+//
+// D-057 (E3): `detalle` y `funcionariocnd` son opcionales para poder sembrar un LOTE completo con su
+// metadata — la vía por HTTP no sirve para los casos de REDESP en periodo PASADO, que el `POST
+// /guardar` rechaza por diseño y que la corrección necesita como estado inicial.
+async function seedRegistroMand({
+  tipo, periodo, hora, valor, lote_id, jdts = '[]', jefes = '[]',
+  detalle = `${TEST_TAG} e2`, funcionariocnd,
+}) {
   const db = await getDB();
   const teId = await tipoEventoIdMand(tipo);
   const campos = { periodo, valor_mw: valor };
@@ -864,12 +872,15 @@ async function seedRegistroMand({ tipo, periodo, hora, valor, lote_id, jdts = '[
   // `lote_id` es opcional: los tests de E2 no lo necesitan (la resolución del publicado es por celda
   // y lo ignora), pero el listado de E4 agrupa por él y necesita simular un registro migrado.
   if (lote_id) campos.lote_id = lote_id;
+  // Ausente ≠ null (misma distinción que `hora_llamada`): sin argumento la clave no se escribe, para
+  // no cambiar el shape que ven los tests de E2/E4.
+  if (funcionariocnd !== undefined) campos.funcionariocnd = funcionariocnd;
   const ins = await db.request()
     .input('mand', sql.Int, MAND_BITACORA_ID)
     .input('p', sql.VarChar(10), TEST_PLANTA)
     .input('fe', sql.DateTime2, new Date(`${HOY}T12:00:00-05:00`))
     .input('turno', sql.TinyInt, turnoFromPeriodo(periodo))
-    .input('detalle', sql.NVarChar(sql.MAX), `${TEST_TAG} e2`)
+    .input('detalle', sql.NVarChar(sql.MAX), detalle)
     .input('ce', sql.NVarChar(sql.MAX), JSON.stringify(campos))
     .input('te', sql.Int, teId)
     .input('ing', sql.NVarChar(sql.MAX), '[]')
@@ -1057,6 +1068,33 @@ async function registrosMand() {
       ORDER BY ra.registro_id
     `);
   return r.recordset;
+}
+
+// Guard de coherencia de lote (D-056 E3.9). La metadata del lote —hora, funcionario, descripción—
+// vive REPLICADA en cada celda y NINGÚN constraint la mantiene coherente: esta función es lo único
+// que la sostiene. Agrupa las filas vivas por `lote_id` y afirma que cada lote tiene UNA sola hora,
+// UN solo funcionario, UNA sola descripción, UN solo tipo y ningún periodo repetido.
+//
+// D-057 (E3): se extrajo del test de D-056 —que la creó pensando exactamente en esto ("la red que va
+// a hacer falta cuando D-057 introduzca la edición por lote")— para poder correrla también DESPUÉS
+// de un `PUT`, que es el escenario donde una corrección puede tocar unas celdas y no otras. Los dos
+// callers siguen vivos: el de la captura NO se reemplaza por el de la corrección.
+function verificarCoherenciaDeLotes(filas) {
+  const porLote = new Map();
+  for (const f of filas) {
+    if (!porLote.has(f.lote_id)) porLote.set(f.lote_id, []);
+    porLote.get(f.lote_id).push(f);
+  }
+  for (const [lote_id, celdas] of porLote) {
+    for (const campo of ['hora_llamada', 'funcionariocnd', 'detalle']) {
+      const distintos = new Set(celdas.map((c) => c[campo]));
+      assert.equal(distintos.size, 1, `lote ${lote_id}: ${campo} debe ser idéntico en sus ${celdas.length} celdas`);
+    }
+    // Un lote nunca mezcla tipos ni repite periodo.
+    assert.equal(new Set(celdas.map((c) => c.tipo)).size, 1, `lote ${lote_id}: no puede mezclar tipos`);
+    assert.equal(new Set(celdas.map((c) => c.periodo)).size, celdas.length, `lote ${lote_id}: no puede repetir periodo`);
+  }
+  return porLote;
 }
 
 test('D-056 E3.1 — un lote de P14..P18 crea 5 registros con el MISMO lote_id y la misma metadata [criterio 2]', async () => {
@@ -1391,22 +1429,8 @@ test('D-056 E3.9 — guard de coherencia: todo lote_id escrito tiene UNA sola ho
   assert.equal(status, 200, JSON.stringify(data));
   assert.equal(data.resumen.lotes, 3);
 
-  const filas = await registrosMand();
-  const porLote = new Map();
-  for (const f of filas) {
-    if (!porLote.has(f.lote_id)) porLote.set(f.lote_id, []);
-    porLote.get(f.lote_id).push(f);
-  }
+  const porLote = verificarCoherenciaDeLotes(await registrosMand());
   assert.equal(porLote.size, 3, 'tres filas del mismo Guardar = tres lotes distintos');
-  for (const [lote_id, celdas] of porLote) {
-    for (const campo of ['hora_llamada', 'funcionariocnd', 'detalle']) {
-      const distintos = new Set(celdas.map((c) => c[campo]));
-      assert.equal(distintos.size, 1, `lote ${lote_id}: ${campo} debe ser idéntico en sus ${celdas.length} celdas`);
-    }
-    // Un lote nunca mezcla tipos ni repite periodo.
-    assert.equal(new Set(celdas.map((c) => c.tipo)).size, 1);
-    assert.equal(new Set(celdas.map((c) => c.periodo)).size, celdas.length);
-  }
 });
 
 test('D-056 E3.10 — cerrarDiaMand arrastra lote_id y hora_llamada al histórico y sigue soft-deleteando el publicado', async () => {
@@ -1916,4 +1940,806 @@ test('D-057 E2.2 — gates del DELETE: sin planta_id 400, otra planta 403, lote 
   const noExiste = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: inexistente });
   assert.equal(noExiste.status, 404, JSON.stringify(noExiste.data));
   assert.equal(noExiste.data.codigo, 'lote_inexistente');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D-057 · E3 — Cobertura: criterios de aceptación de REQ-04 §6 + guards transversales.
+//
+// Qué NO está acá y por qué (para que ningún criterio quede como hueco silencioso):
+//  - Criterios 1, 3 y 4 (un renglón por lote · solo hoy y la planta de la sesión · sin
+//    Disponibilidad): los cubren `D-056 E4.1/E4.2/E4.6` y el test 9 (acotador de día Bogotá).
+//  - Criterio 2 (formato del mensaje de WhatsApp): FUERA DE ALCANCE de D-057 — REQ-04 §8.1 sigue
+//    bloqueado por falta de la plantilla literal y se resuelve en un flujo posterior (D-058).
+//  - Criterio 6 (en otra bitácora sigue prohibido editar lo ajeno): su cara negativa vive en
+//    `tests/registros_solo_autor.test.js`, que prueba que ni el ADMIN toca un registro ajeno por la
+//    rama genérica. Acá vive la cara POSITIVA (E3.1). Son un PAR: si alguien "unifica" la política
+//    de MAND con la genérica, uno de los dos tiene que ponerse rojo. No los desacoples.
+//  - Criterios 8 y 9-copias (cascada a SALAJDT/SALAING): FUERA DE ALCANCE — esas copias no existen
+//    todavía (REQ-02). En `mand.js` queda el punto de enganche anotado, sin código.
+//
+// Todo corre sobre TEST_PLANTA con TEST_TAG. Los lotes que necesitan un estado inicial imposible de
+// producir por HTTP (REDESP en periodo pasado) se siembran con `seedLoteMand`.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Siembra un LOTE completo (N celdas con el mismo lote_id y la misma metadata) directo en
+// registro_activo. Necesario para REDESP en periodos PASADOS: el `POST /guardar` los rechaza por
+// diseño (lock D-016), así que no hay forma de llegar por HTTP al estado que la corrección debe
+// manejar. Devuelve { lote_id, rids: {periodo → registro_id} }.
+async function seedLoteMand({ tipo, hora, periodos, detalle, funcionariocnd = null }) {
+  const lote_id = randomUUID();
+  const rids = {};
+  for (const { periodo, valor } of periodos) {
+    rids[periodo] = await seedRegistroMand({
+      tipo, periodo, hora, valor, lote_id, detalle, funcionariocnd,
+    });
+  }
+  return { lote_id, rids };
+}
+
+// Celdas vivas de un lote con TODO lo que la corrección puede tocar (valor, metadata, autoría y
+// fecha_evento). Solo lectura, acotada a la fixture.
+async function celdasDelLote(lote_id) {
+  const db = await getDB();
+  const r = await db.request()
+    .input('m', sql.Int, MAND_BITACORA_ID)
+    .input('p', sql.VarChar(10), TEST_PLANTA)
+    .input('lote', sql.NVarChar(64), lote_id)
+    .query(`
+      SELECT ra.registro_id, ra.detalle, ra.turno_id, ra.fecha_evento,
+             ra.creado_por, ra.modificado_por, ra.modificado_en,
+             te.notificar_dashboard_tipo AS tipo,
+             CONVERT(varchar(10), DATEADD(HOUR, -5, ra.fecha_evento), 23) AS dia_bogota,
+             TRY_CAST(JSON_VALUE(ra.campos_extra,'$.periodo') AS INT)    AS periodo,
+             TRY_CAST(JSON_VALUE(ra.campos_extra,'$.valor_mw') AS FLOAT) AS valor_mw,
+             JSON_VALUE(ra.campos_extra,'$.funcionariocnd') AS funcionariocnd,
+             JSON_VALUE(ra.campos_extra,'$.hora_llamada')   AS hora_llamada,
+             JSON_VALUE(ra.campos_extra,'$.lote_id')        AS lote_id
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = ra.tipo_evento_id
+      WHERE ra.bitacora_id=@m AND ra.planta_id=@p AND ra.estado='borrador'
+        AND JSON_VALUE(ra.campos_extra,'$.lote_id') = @lote
+      ORDER BY TRY_CAST(JSON_VALUE(ra.campos_extra,'$.periodo') AS INT)
+    `);
+  return r.recordset;
+}
+
+// Huella comparable de un lote: lo que un PUT rechazado NO puede haber movido. Incluye los
+// timestamps de auditoría, así que detecta hasta un UPDATE que "no cambió nada visible".
+function huellaDeLote(celdas) {
+  return celdas.map((c) => [
+    c.registro_id, c.periodo, c.valor_mw, c.detalle, c.funcionariocnd, c.hora_llamada,
+    c.creado_por, c.modificado_por, c.modificado_en?.getTime() ?? null,
+  ]);
+}
+
+test('D-057 E3.1 — un lote creado por el Ing. de Operación lo corrige y lo borra el Jefe de Turno [criterio 5]', async () => {
+  // La excepción a D-049 en su cara POSITIVA: en MAND el gate es `puede_crear` (matriz data-driven),
+  // NO `creado_por` — corregir Operación 24h es colaborativo por diseño (el turno entrante arregla lo
+  // que dejó mal el saliente). La cara negativa —en una bitácora genérica nadie toca lo ajeno, ni
+  // siquiera con puede_crear— la fija `registros_solo_autor.test.js`. Los dos tests son un par.
+  await cleanMand();
+  const hora = horaBogotaMin(-15) ?? '00:00';
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.ingOp,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e3-ajeno`,
+        periodos: [{ periodo: 10, valor_mw: 100 }, { periodo: 11, valor_mw: 101 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const lote = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes[0];
+  assert.equal(lote.creado_por.usuario_id, ctx.usuarios.ingOp.usuario_id, 'el lote lo creó el Ing. de Operación');
+
+  const put = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id: lote.lote_id,
+    body: {
+      planta_id: PLANTA_ID, hora, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e3-corregido`,
+      periodos: [{ periodo: 10, valor_mw: 150 }, { periodo: 11, valor_mw: 101 }],
+    },
+  });
+  assert.equal(put.status, 200, `el JdT no es el autor y debe poder corregir igual: ${JSON.stringify(put.data)}`);
+
+  const celdas = await celdasDelLote(lote.lote_id);
+  assert.equal(celdas.length, 2);
+  for (const c of celdas) {
+    assert.equal(c.creado_por, ctx.usuarios.ingOp.usuario_id, 'la autoría original NO se reescribe');
+    assert.equal(c.modificado_por, ctx.usuarios.jdt.usuario_id, 'quien corrigió queda atribuido');
+  }
+
+  // Borrar lo ajeno en MAND también es legal: mismo gate, misma excepción acotada.
+  const del = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: lote.lote_id });
+  assert.equal(del.status, 200, JSON.stringify(del.data));
+  assert.equal((await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes.length, 0);
+  await cleanMand();
+});
+
+test('D-057 E3.2 — un PUT cambia MW, hora, funcionario, descripción y el conjunto de periodos [criterio 7]', async () => {
+  await cleanMand();
+  const horaVieja = horaBogotaMin(-40) ?? '00:00';
+  const horaNueva = horaBogotaMin(-3) ?? '00:01';
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: horaVieja, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-2-viejo`,
+        periodos: [{ periodo: 10, valor_mw: 100 }, { periodo: 11, valor_mw: 101 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const lote_id = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes[0].lote_id;
+
+  // Las cinco cosas a la vez: P10 cambia de valor, P11 se quita, P12 se agrega, y hora/funcionario/
+  // descripción cambian.
+  const { status, data } = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id,
+    body: {
+      planta_id: PLANTA_ID, hora: horaNueva, funcionariocnd: 'Gómez', detalle: `${TEST_TAG} e3-2-nuevo`,
+      periodos: [{ periodo: 10, valor_mw: 150 }, { periodo: 12, valor_mw: 102 }],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.deepEqual(data.resumen, { actualizados: 1, creados: 1, eliminados: 1, celdas_recalculadas: 3 },
+    'cambiar la hora obliga a recalcular TODAS las celdas del lote: es el desempate de la publicación');
+
+  const celdas = await celdasDelLote(lote_id);
+  assert.deepEqual(celdas.map((c) => c.periodo), [10, 12], 'el conjunto exacto de periodos');
+  assert.deepEqual(celdas.map((c) => c.valor_mw), [150, 102]);
+  const horaEsperada = new Date(`${HOY}T${horaNueva}:00.000-05:00`).toISOString();
+  for (const c of celdas) {
+    assert.equal(c.hora_llamada, horaEsperada, 'la hora nueva aterriza en TODAS las celdas del lote');
+    assert.equal(c.funcionariocnd, 'Gómez');
+    assert.equal(c.detalle, `${TEST_TAG} e3-2-nuevo`);
+  }
+
+  // Lo publicado sigue a la corrección celda por celda: P11 salió, P12 entró.
+  const ev = await eventosDashboard('AUTH');
+  assert.deepEqual(ev.map((e) => e.periodo), [10, 12]);
+  assert.deepEqual(ev.map((e) => e.valor_mw), [150, 102]);
+  await cleanMand();
+});
+
+test('D-057 E3.3 — borrar un lote lo saca del listado y no toca a los demás [criterio 9]', async () => {
+  await cleanMand();
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [
+        {
+          tipo: 'AUTH', hora: horaBogotaMin(-20) ?? '00:00', funcionariocnd: 'Pérez',
+          detalle: `${TEST_TAG} e3-3-queda`, periodos: [{ periodo: 8, valor_mw: 80 }],
+        },
+        {
+          tipo: 'PRUEBA', hora: horaBogotaMin(-10) ?? '00:01', funcionariocnd: null,
+          detalle: `${TEST_TAG} e3-3-se-va`, periodos: [{ periodo: 9, valor_mw: 90 }],
+        },
+      ],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const lotes = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes;
+  const victima = lotes.find((l) => l.detalle === `${TEST_TAG} e3-3-se-va`);
+  const testigo = lotes.find((l) => l.detalle === `${TEST_TAG} e3-3-queda`);
+  assert.ok(victima && testigo, JSON.stringify(lotes));
+
+  const del = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: victima.lote_id });
+  assert.equal(del.status, 200, JSON.stringify(del.data));
+
+  const quedan = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes;
+  assert.equal(quedan.length, 1, 'el lote borrado desaparece del listado (borrado real, RN-04.c)');
+  assert.equal(quedan[0].lote_id, testigo.lote_id, 'el otro lote queda intacto');
+  assert.equal((await celdasDelLote(victima.lote_id)).length, 0, 'sus celdas ya no existen en la BD');
+  await cleanMand();
+});
+
+test('D-057 E3.4 — cadena completa de retroceso: tres lotes solapados, dos borrados seguidos [criterio 10]', async () => {
+  await cleanMand();
+  // Tres llamadas del CND al MISMO periodo, a horas distintas. El desempate es determinista incluso
+  // si `horaBogotaMin` cae en el borde del día y colapsa las tres a '00:00': ahí manda `creado_en
+  // DESC` y el orden de registro sigue siendo A → B → C.
+  const escalones = [
+    { marca: 'A', hora: horaBogotaMin(-40) ?? '00:00', valor: 141 },
+    { marca: 'B', hora: horaBogotaMin(-25) ?? '00:00', valor: 142 },
+    { marca: 'C', hora: horaBogotaMin(-10) ?? '00:00', valor: 143 },
+  ];
+  for (const e of escalones) {
+    const r = await postGuardar({
+      sesion_id: ctx.sesiones.jdt,
+      body: {
+        planta_id: PLANTA_ID, fecha: HOY,
+        filas: [{
+          tipo: 'AUTH', hora: e.hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-4-${e.marca}`,
+          periodos: [{ periodo: 14, valor_mw: e.valor }],
+        }],
+      },
+    });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+  }
+
+  const porMarca = Object.fromEntries(
+    (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes
+      .map((l) => [l.detalle.slice(-1), l]),
+  );
+  assert.equal(Object.keys(porMarca).length, 3, JSON.stringify(porMarca));
+
+  const publicado = async () => (await eventosDashboard('AUTH'))[0] ?? null;
+  assert.equal((await publicado()).valor_mw, 143, 'publica la llamada más reciente');
+
+  // 1er borrado: retrocede al escalón intermedio.
+  const d1 = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: porMarca.C.lote_id });
+  assert.equal(d1.status, 200, JSON.stringify(d1.data));
+  const tras1 = await publicado();
+  assert.equal(tras1.valor_mw, 142, 'el publicado RETROCEDE al lote B');
+  assert.equal(tras1.registro_origen_id, porMarca.B.periodos[0].registro_id);
+  assert.equal(tras1.activa, true, 'el retroceso deja la fila activa, nunca anulada');
+
+  // 2º borrado seguido: retrocede otra vez, no salta al vacío.
+  const d2 = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: porMarca.B.lote_id });
+  assert.equal(d2.status, 200, JSON.stringify(d2.data));
+  const tras2 = await publicado();
+  assert.equal(tras2.valor_mw, 141, 'el publicado RETROCEDE al lote A');
+  assert.equal(tras2.registro_origen_id, porMarca.A.periodos[0].registro_id);
+
+  // 3º: sin ningún lote vivo la fila se ELIMINA (no `activa=0`), porque su origen dejó de existir y
+  // el puntero quedaría huérfano — `registro_origen_id` no tiene FK posible (D-055 (c)).
+  const d3 = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id: porMarca.A.lote_id });
+  assert.equal(d3.status, 200, JSON.stringify(d3.data));
+  assert.equal((await eventosDashboard('AUTH')).length, 0, 'sin origen vivo la celda deja de existir en el dashboard');
+  await cleanMand();
+});
+
+test('D-057 E3.5 — REDESP: cambiar, agregar o quitar un periodo PASADO se rechaza [criterio 11 a/b/c]', async () => {
+  const pAct = periodoActual();
+  if (pAct <= 1) return; // a esta hora no hay ningún periodo pasado que bloquear
+  await cleanMand();
+  const pPasado = pAct - 1;
+  const pLibre = periodoRedespLibre();
+  const hora = horaBogotaMin(-20) ?? '00:00';
+
+  // Estado inicial sembrado: el `POST /guardar` no puede crear un REDESP en periodo pasado (lock
+  // D-016), pero un lote registrado a tiempo LLEGA a esa situación con solo pasar la hora — que es
+  // exactamente el escenario que la corrección debe rechazar (riesgo REQ-04 §5.4).
+  const { lote_id } = await seedLoteMand({
+    tipo: 'REDESP', hora, detalle: `${TEST_TAG} e3-5`, funcionariocnd: null,
+    periodos: [{ periodo: pPasado, valor: 50 }, { periodo: pLibre, valor: 60 }],
+  });
+  const huellaOriginal = huellaDeLote(await celdasDelLote(lote_id));
+
+  const cuerpo = (periodos) => ({
+    planta_id: PLANTA_ID, hora, funcionariocnd: null, detalle: `${TEST_TAG} e3-5`, periodos,
+  });
+  const rechazado = async (etiqueta, periodos) => {
+    const { status, data } = await putLote({ sesion_id: ctx.sesiones.jdt, lote_id, body: cuerpo(periodos) });
+    assert.equal(status, 400, `${etiqueta}: ${JSON.stringify(data)}`);
+    assert.ok(
+      data.errores?.some((e) => e.motivo === 'periodo_bloqueado'),
+      `${etiqueta}: esperado periodo_bloqueado, got ${JSON.stringify(data.errores)}`,
+    );
+    assert.deepEqual(huellaDeLote(await celdasDelLote(lote_id)), huellaOriginal, `${etiqueta}: nada se escribió`);
+  };
+
+  // (a) cambiar el VALOR de un periodo pasado.
+  await rechazado('cambiar valor pasado', [{ periodo: pPasado, valor_mw: 55 }, { periodo: pLibre, valor_mw: 60 }]);
+  // (b) AGREGAR un periodo pasado que el lote no tenía (solo si hay otro pasado disponible).
+  if (pAct >= 3) {
+    await rechazado('agregar periodo pasado', [
+      { periodo: pAct - 2, valor_mw: 45 }, { periodo: pPasado, valor_mw: 50 }, { periodo: pLibre, valor_mw: 60 },
+    ]);
+  }
+  // (c) QUITAR un periodo pasado: retirar lo publicado es un cambio de valor, no una omisión inocua.
+  await rechazado('quitar periodo pasado', [{ periodo: pLibre, valor_mw: 60 }]);
+  await cleanMand();
+});
+
+test('D-057 E3.6 — REDESP: cambiar solo hora y descripción con los periodos pasados idénticos se permite [criterio 11 d]', async () => {
+  const pAct = periodoActual();
+  if (pAct <= 1) return;
+  await cleanMand();
+  const pPasado = pAct - 1;
+  const horaVieja = horaBogotaMin(-40) ?? '00:00';
+  const horaNueva = horaBogotaMin(-2) ?? '00:01';
+  const { lote_id, rids } = await seedLoteMand({
+    tipo: 'REDESP', hora: horaVieja, detalle: `${TEST_TAG} e3-6-viejo`, funcionariocnd: null,
+    periodos: [{ periodo: pPasado, valor: 70 }],
+  });
+
+  // "El lock protege el VALOR, nunca el comentario": el operador tiene que poder arreglar la hora de
+  // la llamada y la descripción de un redespacho ya despachado.
+  const { status, data } = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id,
+    body: {
+      planta_id: PLANTA_ID, hora: horaNueva, funcionariocnd: null, detalle: `${TEST_TAG} e3-6-nuevo`,
+      periodos: [{ periodo: pPasado, valor_mw: 70 }],
+    },
+  });
+  assert.equal(status, 200, `hora y descripción pasan siempre: ${JSON.stringify(data)}`);
+
+  const celdas = await celdasDelLote(lote_id);
+  assert.equal(celdas.length, 1);
+  assert.equal(celdas[0].registro_id, rids[pPasado], 'la celda es la misma fila, no una reinserción');
+  assert.equal(celdas[0].valor_mw, 70, 'el valor protegido no se movió');
+  assert.equal(celdas[0].detalle, `${TEST_TAG} e3-6-nuevo`);
+  assert.equal(celdas[0].hora_llamada, new Date(`${HOY}T${horaNueva}:00.000-05:00`).toISOString());
+  assert.equal(celdas[0].modificado_por, ctx.usuarios.jdt.usuario_id, 'el cambio de metadata queda atribuido');
+  await cleanMand();
+});
+
+test('D-057 E3.7 — con el turno finalizado y la cabecera CERRADA se corrige y se borra igual [criterio 12]', async () => {
+  await cleanMand();
+  const db = await getDB();
+  // Mismo patrón que D-056 E3.8: se elige un periodo del turno que NO está corriendo, para que la
+  // cabecera que cerramos no sea la vigente y no contamine a las suites posteriores.
+  const pAct = periodoActual();
+  const periodo = (pAct >= 7 && pAct <= 18) ? 3 : 12;
+  const fop = fechaOperativaDePeriodo(HOY, periodo);
+  const turno = turnoFromPeriodo(periodo);
+  const hora = horaBogotaMin(-8) ?? '00:00';
+
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-7`,
+        periodos: [{ periodo, valor_mw: 88 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const lote_id = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes[0].lote_id;
+
+  const previo = (await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+    .query(`SELECT turno_unidad_id, estado FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`)
+  ).recordset[0] || null;
+
+  await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+    .input('cp', sql.Int, ctx.usuarios.jdt.usuario_id)
+    .query(`
+      IF EXISTS (SELECT 1 FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t)
+        UPDATE bitacora.turno_unidad
+          SET estado='CERRADO', motivo_cierre='MANUAL', cerrado_por=@cp, cerrado_en=SYSUTCDATETIME()
+          WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t;
+      ELSE
+        INSERT INTO bitacora.turno_unidad
+          (fecha_operativa, planta_id, turno, estado, inicio_nominal, fin_nominal,
+           motivo_cierre, cerrado_por, cerrado_en, creado_por)
+        VALUES (@f, @p, @t, 'CERRADO',
+                DATEADD(HOUR, 11, CAST(@f AS DATETIME2)), DATEADD(HOUR, 23, CAST(@f AS DATETIME2)),
+                'MANUAL', @cp, SYSUTCDATETIME(), @cp);
+    `);
+  // Finalización de turno VIGENTE en la sesión que va a corregir (D-040).
+  await db.request()
+    .input('sid', sql.Int, ctx.sesiones.jdt)
+    .query(`UPDATE bitacora.sesion_activa SET turno_finalizado_en = SYSUTCDATETIME() WHERE sesion_id = @sid`);
+
+  try {
+    // MAND está exenta de los gates de turno (D-040/D-045/D-046): la llamada al CND ocurre igual
+    // aunque el turno esté finalizado, y corregir lo mal digitado no puede quedar bloqueado.
+    const put = await putLote({
+      sesion_id: ctx.sesiones.jdt,
+      lote_id,
+      body: {
+        planta_id: PLANTA_ID, hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-7-corregido`,
+        periodos: [{ periodo, valor_mw: 99 }],
+      },
+    });
+    assert.equal(put.status, 200, `MAND exenta del turno (RQ-04.18): ${JSON.stringify(put.data)}`);
+    assert.notEqual(put.data.codigo, 'turno_finalizado');
+    assert.notEqual(put.data.codigo, 'turno_cerrado');
+    assert.notEqual(put.data.codigo, 'turno_en_transicion');
+    assert.equal((await celdasDelLote(lote_id))[0].valor_mw, 99);
+
+    const del = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id });
+    assert.equal(del.status, 200, JSON.stringify(del.data));
+    assert.equal((await celdasDelLote(lote_id)).length, 0);
+  } finally {
+    await db.request()
+      .input('sid', sql.Int, ctx.sesiones.jdt)
+      .query(`UPDATE bitacora.sesion_activa SET turno_finalizado_en = NULL WHERE sesion_id = @sid`);
+    if (previo) {
+      await db.request()
+        .input('id', sql.Int, previo.turno_unidad_id).input('e', sql.VarChar(12), previo.estado)
+        .query(`
+          UPDATE bitacora.turno_unidad
+            SET estado=@e, motivo_cierre=NULL, cerrado_por=NULL, cerrado_en=NULL
+            WHERE turno_unidad_id=@id
+        `);
+    } else {
+      // La cabecera la creamos nosotros: primero se van los registros que la referencian por FK
+      // (cleanMand, acotado a la fixture) y después ella.
+      await cleanMand();
+      await db.request()
+        .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+        .query(`DELETE FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`);
+    }
+    await cleanMand();
+  }
+});
+
+test('D-057 E3.8 — un cargo SIN puede_crear en MAND no corrige ni borra: 403 y nada cambia [criterio 13]', async () => {
+  await cleanMand();
+  const hora = horaBogotaMin(-6) ?? '00:00';
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-8`,
+        periodos: [{ periodo: 7, valor_mw: 70 }, { periodo: 8, valor_mw: 71 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const lote_id = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes[0].lote_id;
+  const huella = huellaDeLote(await celdasDelLote(lote_id));
+
+  // Ingeniero Químico: `puede_ver=1` en MAND (la ve todo el mundo) y `puede_crear=0`. El enforcement
+  // sale de la matriz data-driven — NUNCA de un cargo hardcodeado en el endpoint.
+  const put = await putLote({
+    sesion_id: ctx.sesiones.ingQuim,
+    lote_id,
+    body: {
+      planta_id: PLANTA_ID, hora, funcionariocnd: 'Intruso', detalle: `${TEST_TAG} e3-8-intruso`,
+      periodos: [{ periodo: 7, valor_mw: 999 }],
+    },
+  });
+  assert.equal(put.status, 403, JSON.stringify(put.data));
+
+  const del = await delLote({ sesion_id: ctx.sesiones.ingQuim, lote_id });
+  assert.equal(del.status, 403, JSON.stringify(del.data));
+
+  assert.deepEqual(huellaDeLote(await celdasDelLote(lote_id)), huella, 'el lote quedó exactamente igual');
+  // Y sigue viendo el listado: consultar lo registrado no es escribirlo (RN-04.f).
+  assert.equal((await getLotes({ sesion_id: ctx.sesiones.ingQuim })).status, 200);
+  await cleanMand();
+});
+
+test('D-057 E3.9 — una corrección que falla NO queda aplicada a medias [criterio 14]', async () => {
+  const pAct = periodoActual();
+  if (pAct <= 1) return; // sin periodo pasado no hay error tardío que provocar
+  await cleanMand();
+  const pPasado = pAct - 1;
+  const pLibre = periodoRedespLibre();
+  const pNuevo = Math.min(pLibre + 1, 24);
+  if (pNuevo === pLibre) return; // último periodo del día: no queda uno libre donde insertar
+  const hora = horaBogotaMin(-20) ?? '00:00';
+
+  const { lote_id } = await seedLoteMand({
+    tipo: 'REDESP', hora, detalle: `${TEST_TAG} e3-9`, funcionariocnd: null,
+    periodos: [{ periodo: pPasado, valor: 50 }, { periodo: pLibre, valor: 60 }],
+  });
+  // Se publica el estado inicial para que la comprobación de atomicidad incluya el dashboard: un
+  // rollback parcial que dejara la publicación movida sería tan grave como uno que dejara la celda.
+  for (const p of [pPasado, pLibre]) await recalc({ periodo: p, tipo: 'REDESP' });
+  const huella = huellaDeLote(await celdasDelLote(lote_id));
+  const evAntes = await eventosDashboard('REDESP');
+  assert.equal(evAntes.length, 2, 'las dos celdas del lote arrancan publicadas');
+
+  // El body pide CUATRO cosas válidas —cambiar el valor de un periodo libre, agregar otro, cambiar la
+  // descripción y la hora— y UNA inválida: el periodo pasado cambia de valor. El lote entero se cae.
+  const { status, data } = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id,
+    body: {
+      planta_id: PLANTA_ID, hora: horaBogotaMin(-1) ?? '00:01', funcionariocnd: null,
+      detalle: `${TEST_TAG} e3-9-no-debe-aterrizar`,
+      periodos: [
+        { periodo: pLibre, valor_mw: 65 },
+        { periodo: pNuevo, valor_mw: 66 },
+        { periodo: pPasado, valor_mw: 55 },
+      ],
+    },
+  });
+  assert.equal(status, 400, JSON.stringify(data));
+  assert.ok(data.errores?.some((e) => e.motivo === 'periodo_bloqueado' && e.periodo === pPasado), JSON.stringify(data.errores));
+
+  const despues = await celdasDelLote(lote_id);
+  assert.deepEqual(despues.map((c) => c.periodo), [pPasado, pLibre].sort((a, b) => a - b),
+    'ni el periodo nuevo se creó ni ninguno se borró');
+  assert.deepEqual(huellaDeLote(despues), huella,
+    'ningún valor, metadata ni sello de auditoría se movió (todo o nada, una sola transacción)');
+  assert.deepEqual(
+    (await eventosDashboard('REDESP')).map((e) => [e.periodo, e.valor_mw, e.registro_origen_id]),
+    evAntes.map((e) => [e.periodo, e.valor_mw, e.registro_origen_id]),
+    'la publicación al dashboard tampoco se movió',
+  );
+  await cleanMand();
+});
+
+test('D-057 E3.10 — un lote ya archivado por el cierre diario → 409 lote_cerrado en PUT y DELETE', async () => {
+  await cleanMand();
+  const db = await getDB();
+  const hora = horaBogotaMin(-7) ?? '00:00';
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-10`,
+        periodos: [{ periodo: 16, valor_mw: 60 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const lote_id = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes[0].lote_id;
+
+  const cierre = await call('POST', '/api/sala-de-mando/cierre-diario', {
+    sesion_id: ctx.sesiones.jdt,
+    body: { fecha: HOY, planta_id: PLANTA_ID },
+  });
+  assert.equal(cierre.status, 200, JSON.stringify(cierre.data));
+  assert.equal(cierre.data.closed, true);
+
+  // El histórico es inmutable (RF-032): la corrección se corta en el borde del día. El 409 le dice al
+  // front "refrescá el listado", que es distinto del 404 "esto nunca existió".
+  const put = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id,
+    body: { planta_id: PLANTA_ID, hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-10`, periodos: [{ periodo: 16, valor_mw: 61 }] },
+  });
+  assert.equal(put.status, 409, JSON.stringify(put.data));
+  assert.equal(put.data.codigo, 'lote_cerrado');
+
+  const del = await delLote({ sesion_id: ctx.sesiones.jdt, lote_id });
+  assert.equal(del.status, 409, JSON.stringify(del.data));
+  assert.equal(del.data.codigo, 'lote_cerrado');
+
+  // El CIET del cierre no lleva TEST_TAG (registrarCierreMand deja el detalle en NULL): se borra por
+  // PK para no acumular leftover entre corridas.
+  const ciet = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT TOP 1 ra.registro_id
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+      WHERE b.codigo='CIET' AND ra.planta_id=@p
+        AND JSON_VALUE(ra.campos_extra,'$.motivo')='mand-sweeper-diario'
+      ORDER BY ra.registro_id DESC
+    `);
+  if (ciet.recordset[0]) {
+    await db.request()
+      .input('rid', sql.Int, ciet.recordset[0].registro_id)
+      .query(`DELETE FROM bitacora.registro_activo WHERE registro_id = @rid`);
+  }
+  await cleanMand();
+});
+
+test('D-057 E3.11 — la celda que agrega el PUT HEREDA el fecha_evento del lote: nunca se parte entre dos días', async () => {
+  await cleanMand();
+  // El lote se siembra con `fecha_evento` = mediodía Bogotá de HOY, distinto del instante en que el
+  // PUT insertará la celda nueva. Si la herencia fallara y el INSERT usara SYSUTCDATETIME(), la celda
+  // agregada se despegaría del resto — y en las últimas horas del día Bogotá caería en OTRO día,
+  // partiendo el lote entre dos jornadas (el listado y el cierre diario acotan por día Bogotá).
+  const hora = horaBogotaMin(-5) ?? '00:00';
+  const { lote_id } = await seedLoteMand({
+    tipo: 'AUTH', hora, detalle: `${TEST_TAG} e3-11`, funcionariocnd: 'Pérez',
+    periodos: [{ periodo: 18, valor: 180 }, { periodo: 19, valor: 190 }],
+  });
+  const feEsperado = (await celdasDelLote(lote_id))[0].fecha_evento.getTime();
+
+  const { status, data } = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id,
+    body: {
+      planta_id: PLANTA_ID, hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-11`,
+      periodos: [{ periodo: 18, valor_mw: 180 }, { periodo: 19, valor_mw: 190 }, { periodo: 20, valor_mw: 200 }],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.resumen.creados, 1);
+
+  const celdas = await celdasDelLote(lote_id);
+  assert.deepEqual(celdas.map((c) => c.periodo), [18, 19, 20]);
+  for (const c of celdas) {
+    assert.equal(c.fecha_evento.getTime(), feEsperado, 'todas las celdas del lote comparten fecha_evento');
+    assert.equal(c.dia_bogota, HOY);
+  }
+  // Y el listado del día lo trae como UN solo lote, no como dos.
+  const lotes = (await getLotes({ sesion_id: ctx.sesiones.jdt, fecha: HOY })).data.lotes;
+  assert.equal(lotes.length, 1);
+  assert.deepEqual(lotes[0].periodos.map((p) => p.periodo), [18, 19, 20]);
+  await cleanMand();
+});
+
+test('D-057 E3.12 — la celda que agrega el PUT resuelve turno_id por el PERIODO (madrugada → T2 de F-1)', async () => {
+  await cleanMand();
+  const db = await getDB();
+  const periodo = 3; // madrugada: pertenece al T2 que arrancó a las 18:00 del día anterior (D-055 (b))
+  const fop = fechaOperativaDePeriodo(HOY, periodo);
+  const turno = turnoFromPeriodo(periodo);
+  assert.notEqual(fop, HOY, 'la madrugada pertenece al turno que arrancó el día anterior');
+
+  // Igual que D-056 E3.7: la cabecera de un turno pasado puede no existir en la fixture. Si la
+  // sembramos nosotros, la retiramos al final — una fila PROGRAMADO residente en 'TST' es sucesora
+  // candidata de cualquier `cerrarTurno` posterior y contaminaría a las suites que corren después.
+  const yaExistia = (await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+    .query(`SELECT turno_unidad_id FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`)
+  ).recordset[0] || null;
+
+  if (!yaExistia) {
+    await db.request()
+      .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+      .input('cp', sql.Int, ctx.usuarios.jdt.usuario_id)
+      .query(`
+        INSERT INTO bitacora.turno_unidad
+          (fecha_operativa, planta_id, turno, estado, inicio_nominal, fin_nominal, creado_por)
+        VALUES (@f, @p, @t, 'PROGRAMADO',
+                DATEADD(HOUR, 23, CAST(@f AS DATETIME2)), DATEADD(HOUR, 35, CAST(@f AS DATETIME2)), @cp);
+      `);
+  }
+  const esperado = (await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
+    .query(`SELECT turno_unidad_id FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`)
+  ).recordset[0].turno_unidad_id;
+
+  try {
+    const hora = horaBogotaMin(-5) ?? '00:00';
+    const alta = await postGuardar({
+      sesion_id: ctx.sesiones.jdt,
+      body: {
+        planta_id: PLANTA_ID, fecha: HOY,
+        filas: [{
+          tipo: 'AUTH', hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-12`,
+          periodos: [{ periodo: 12, valor_mw: 120 }],
+        }],
+      },
+    });
+    assert.equal(alta.status, 200, JSON.stringify(alta.data));
+    const lote_id = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes[0].lote_id;
+
+    // El PUT agrega la celda de madrugada. Su turno sale del PERIODO, no del instante de la
+    // corrección (que cae en el turno de ahora) ni del día de la grilla.
+    const { status, data } = await putLote({
+      sesion_id: ctx.sesiones.jdt,
+      lote_id,
+      body: {
+        planta_id: PLANTA_ID, hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-12`,
+        periodos: [{ periodo: 12, valor_mw: 120 }, { periodo, valor_mw: 75 }],
+      },
+    });
+    assert.equal(status, 200, JSON.stringify(data));
+
+    const celdas = await celdasDelLote(lote_id);
+    const madrugada = celdas.find((c) => c.periodo === periodo);
+    assert.ok(madrugada, JSON.stringify(celdas));
+    assert.equal(madrugada.turno_id, esperado, 'turno_id debe apuntar al T2 del día anterior');
+  } finally {
+    await cleanMand();
+    if (!yaExistia) {
+      await db.request()
+        .input('id', sql.Int, esperado)
+        .query(`DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
+    }
+  }
+});
+
+test('D-057 E3.13 — la auditoría marca solo las celdas AFECTADAS por cada corrección', async () => {
+  await cleanMand();
+  const hora = horaBogotaMin(-9) ?? '00:00';
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-13-v1`,
+        periodos: [{ periodo: 10, valor_mw: 100 }, { periodo: 11, valor_mw: 101 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const lote_id = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes[0].lote_id;
+  for (const c of await celdasDelLote(lote_id)) {
+    assert.equal(c.modificado_por, null, 'la captura no sella modificado_por (D-019 rige ahí)');
+  }
+
+  // (1) Cambiar SOLO la descripción sella TODAS las celdas: la metadata es del LOTE y vive replicada
+  //     en cada una — es la lección de D-055 (a), donde aplicarla dentro del loop del delta perdía el
+  //     comentario en silencio.
+  const soloDetalle = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id,
+    body: {
+      planta_id: PLANTA_ID, hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-13-v2`,
+      periodos: [{ periodo: 10, valor_mw: 100 }, { periodo: 11, valor_mw: 101 }],
+    },
+  });
+  assert.equal(soloDetalle.status, 200, JSON.stringify(soloDetalle.data));
+  assert.equal(soloDetalle.data.resumen.celdas_recalculadas, 0,
+    'ningún valor cambió y la hora tampoco: la publicación no se toca');
+
+  const trasV2 = await celdasDelLote(lote_id);
+  for (const c of trasV2) {
+    assert.equal(c.detalle, `${TEST_TAG} e3-13-v2`);
+    assert.equal(c.modificado_por, ctx.usuarios.jdt.usuario_id, 'cambió la descripción del lote → sellada');
+    assert.ok(c.modificado_en, 'y con su timestamp');
+  }
+  const selloV2 = Object.fromEntries(trasV2.map((c) => [c.periodo, c.modificado_en.getTime()]));
+
+  // (2) Cambiar SOLO el valor de P10, con la metadata idéntica: P11 no está afectada y su sello no
+  //     puede moverse. Si el UPDATE sellara todo el lote, este assert lo delata.
+  const soloValor = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id,
+    body: {
+      planta_id: PLANTA_ID, hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-13-v2`,
+      periodos: [{ periodo: 10, valor_mw: 155 }, { periodo: 11, valor_mw: 101 }],
+    },
+  });
+  assert.equal(soloValor.status, 200, JSON.stringify(soloValor.data));
+  assert.equal(soloValor.data.resumen.celdas_recalculadas, 1, 'solo la celda que cambió de valor se recalcula');
+
+  const trasV3 = Object.fromEntries((await celdasDelLote(lote_id)).map((c) => [c.periodo, c]));
+  assert.equal(trasV3[10].valor_mw, 155);
+  assert.ok(trasV3[10].modificado_en.getTime() >= selloV2[10], 'la celda corregida vuelve a sellarse');
+  assert.equal(trasV3[11].modificado_en.getTime(), selloV2[11],
+    'la celda que no cambió de valor ni recibió metadata nueva NO se re-sella');
+  await cleanMand();
+});
+
+test('D-057 E3.14 — guard de coherencia de lote: se sostiene también DESPUÉS de un PUT', async () => {
+  // Extensión del guard de D-056 E3.9 al escenario para el que fue escrito. La metadata del lote está
+  // REPLICADA por celda y ningún constraint la mantiene coherente: una corrección que tocara unas
+  // celdas y no otras (p. ej. aplicando la metadata dentro del loop del delta, D-055 (a)) dejaría un
+  // lote con dos horas distintas — y la publicación al dashboard se decide justamente por la hora.
+  await cleanMand();
+  const horaVieja = horaBogotaMin(-30) ?? '00:00';
+  const horaNueva = horaBogotaMin(-4) ?? '00:01';
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [
+        {
+          tipo: 'AUTH', hora: horaVieja, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e3-14-auth`,
+          periodos: [{ periodo: 14, valor_mw: 140 }, { periodo: 15, valor_mw: 150 }, { periodo: 16, valor_mw: 160 }],
+        },
+        {
+          tipo: 'PRUEBA', hora: horaVieja, funcionariocnd: null, detalle: `${TEST_TAG} e3-14-prueba`,
+          periodos: [{ periodo: 14, valor_mw: 40 }],
+        },
+      ],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const lotes = (await getLotes({ sesion_id: ctx.sesiones.jdt })).data.lotes;
+  const auth = lotes.find((l) => l.tipo === 'AUTH');
+  assert.ok(auth, JSON.stringify(lotes));
+
+  // Corrección que mueve las tres piezas de metadata Y el conjunto de periodos a la vez: quita P15,
+  // agrega P17 y deja P14/P16 vivos. Las celdas quedan de tres orígenes distintos (heredada,
+  // actualizada, recién insertada) — el peor caso para la coherencia.
+  const { status, data } = await putLote({
+    sesion_id: ctx.sesiones.jdt,
+    lote_id: auth.lote_id,
+    body: {
+      planta_id: PLANTA_ID, hora: horaNueva, funcionariocnd: 'Gómez', detalle: `${TEST_TAG} e3-14-corregido`,
+      periodos: [{ periodo: 14, valor_mw: 145 }, { periodo: 16, valor_mw: 160 }, { periodo: 17, valor_mw: 170 }],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+
+  const porLote = verificarCoherenciaDeLotes(await registrosMand());
+  assert.equal(porLote.size, 2, 'el lote corregido sigue siendo UNO, y el otro no se contaminó');
+  assert.deepEqual(
+    porLote.get(auth.lote_id).map((c) => c.periodo).sort((a, b) => a - b),
+    [14, 16, 17],
+  );
+  // El lote vecino conserva SU metadata: la corrección no se derrama al resto del día.
+  const vecino = [...porLote.entries()].find(([id]) => id !== auth.lote_id)[1];
+  assert.equal(vecino[0].detalle, `${TEST_TAG} e3-14-prueba`);
+  assert.equal(vecino[0].hora_llamada, new Date(`${HOY}T${horaVieja}:00.000-05:00`).toISOString());
+  await cleanMand();
 });
