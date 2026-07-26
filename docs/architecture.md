@@ -92,8 +92,10 @@ Bit-cora-g3/server/
 | `GET /api/disponibilidad?planta_id=` | Vista mini-dashboard DISP (vigente + historial paginado). |
 | `POST /api/disponibilidad/deshacer` | Borra vigente + restaura último histórico. Emite CIET 'Deshacer disponibilidad' con audit completo. |
 | `GET /api/disponibilidad/metricas?planta_id=&desde=&hasta=` | **D-024/D-026** — tiempo agregado por estado + acumulados (`disponible`, `no_disponible`) en una ventana + `ahora` (reloj UTC del server). Lee directo de `bitacora.disponibilidad_estado` (la vista `v_disp_intervalos` se dropeó en D-026). Consumido por el panel "Acumulado histórico por estado" del mini-dashboard (D-028). |
-| `GET /api/sala-de-mando?planta_id=&fecha=` | Grilla MAND del día (siempre hoy). |
-| `POST /api/sala-de-mando/guardar` | **Batch atómico**. Body `{planta_id, fecha, filas:[{tipo, detalle, funcionariocnd, periodos:[{periodo, valor_mw}]}]}`. Transacción única. (F16) |
+| `GET /api/sala-de-mando/lotes?planta_id=&fecha=` | **Listado del día por lotes** (D-056). Agrupa `registro_activo` por `campos_extra.lote_id`; expone `publicado` **por celda** como indicador derivado. Gated por `puede_ver`. |
+| `POST /api/sala-de-mando/guardar` | **Batch atómico append-only** (D-056). Body `{planta_id, fecha, filas:[{tipo, hora, detalle, funcionariocnd, periodos:[{periodo, valor_mw}]}]}`. **Solo INSERT**, un `lote_id` por fila. Transacción única. |
+| `PUT /api/sala-de-mando/lotes/:lote_id` | **Corrección por lote** (D-057). **Diff quirúrgico**: conserva `registro_id`/`creado_por` de las celdas que sobreviven; recalcula la publicación por celda tocada. Gated por `puede_crear`, **no** por autoría. |
+| `DELETE /api/sala-de-mando/lotes/:lote_id?planta_id=` | **Borrado real por lote** (D-057). Recalcula cada celda liberada → lo publicado retrocede al lote anterior vigente, o la fila de `evento_dashboard` se elimina. |
 | `POST /api/sala-de-mando/cierre-diario` | Trigger manual del sweeper (tests, recovery). Requiere `puede_cerrar_turno`. |
 | `GET /api/eventos-dashboard?tipo=&planta_id=` | Endpoint hacia dashboard-gen-gec3. `tipo ∈ {AUTH,REDESP,PRUEBA}` lee de `evento_dashboard`; `tipo=DISP` lee de `disponibilidad_dashboard`. |
 | `GET /api/catalogos/jdt-actual` | Para autocompletado. Lee `sesion_bitacora` con `finalizada_en IS NULL`. |
@@ -102,6 +104,7 @@ Bit-cora-g3/server/
 
 - `POST /api/auth/heartbeat`, `POST /api/auth/resume` (F2/F9): el modelo de sesión persistente reemplaza el heartbeat.
 - `GET /api/sala-de-mando/dias-pendientes` (F17): MAND solo muestra HOY; no hay paginación entre días.
+- `GET /api/sala-de-mando` (D-056): el pivote `{AUTH: {valores: Array(24), detalle, funcionariocnd}, …}` que alimentaba la grilla-espejo. Devuelve **404**; la grilla ya no carga nada del servidor y el listado del día lo reemplaza. No revivirlo.
 
 ---
 
@@ -162,34 +165,40 @@ El popup se cierra con: Esc, click fuera (botón y popup quedan excluidos por `c
 
 ### MAND (Operación 24h)
 
-**Diferenciadora:** grilla 24 periodos × 3 tipos × 2 plantas con batch save atómico. No se cierra por turno — se cierra automáticamente vía sweeper diario.
+**Diferenciadora:** grilla 24 periodos × 3 tipos × 2 plantas con batch save atómico. No se cierra por turno — se cierra automáticamente vía sweeper diario. Desde **D-056** la grilla es un **formulario de captura append-only** (registra, no edita) y desde **D-057** corregir y borrar existen **fuera de la grilla, por lote, desde el listado del día**. Son dos planos separados: capturar nunca lee del servidor; corregir siempre re-lee dentro de la transacción.
 
-**Modelo de guardado (frontend):**
+**Modelo de captura (frontend, D-056):**
 
-1. Al montar: `GET /api/sala-de-mando?planta_id=&fecha=<hoy_Bogota>` → `setSnapshot` + clonar a `buffer`.
+1. Al montar: la grilla nace **vacía**. No hay `GET` que la alimente (el pivote se dio de baja) ni par `snapshot`/`buffer`: `dirty` deriva solo del buffer de captura.
 2. Al editar celda: `setBuffer(...)`. NADA va al backend.
-3. Diff(snapshot, buffer) determina si el botón "Guardar" está habilitado.
-4. Click "Guardar" → `POST /api/sala-de-mando/guardar` con solo el diff → re-fetch → reset snapshot+buffer.
-5. `beforeunload` confirm si hay cambios pendientes.
-6. Tras `guardarBatch` ok, el hook emite `bitacora:counts-refresh` (CustomEvent en `window`). Consumidores: `useBitacoraCounts` refetchea `/api/bitacora/counts` (badge del tab), y `BitacorasGecelca3` refetchea `/api/registros/activos` para la bitácora activa (sincroniza el contador "X registros" de `BarraEstado` con el badge).
+3. Click "Guardar" → `POST /api/sala-de-mando/guardar` → la grilla se vacía **solo tras la confirmación**; ante un `400` **conserva lo capturado** (el operador no pierde lo escrito por un error de validación).
+4. `beforeunload` confirm si hay cambios pendientes.
+5. Tras `guardarBatch` ok, el hook emite `bitacora:counts-refresh` (CustomEvent en `window`). Consumidores: `useBitacoraCounts` refetchea `/api/bitacora/counts` (badge del tab), y `BitacorasGecelca3` refetchea `/api/registros/activos` para la bitácora activa (sincroniza el contador "X registros" de `BarraEstado` con el badge).
+6. Debajo, `LotesDelDia` lista los lotes del día — se refresca al montar, tras cada guardado y en el **mismo tick de 60s** de la grilla (no hay segundo temporizador).
 
-**Backend atómico (`POST /api/sala-de-mando/guardar`):**
+**Backend append-only (`POST /api/sala-de-mando/guardar`, D-056):**
 
-Por cada `(tipo, periodo)` del diff:
-- existe + `valor_mw != null` + `valor_mw` distinto → UPDATE + `modificado_por=sesion.usuario_id` + UPSERT `evento_dashboard`.
-- existe + `valor_mw == null` → DELETE + `evento_dashboard.activa=0`.
-- no existe + `valor_mw != null` → INSERT + UPSERT `evento_dashboard`.
-- `valor_mw` no cambió pero detalle/funcionariocnd sí → UPDATE solo campos compartidos, NO toca `modificado_por`.
+Por cada fila válida el servidor genera un `lote_id` (GUID) y hace **un INSERT por celda con valor** — nunca UPDATE, nunca DELETE. Las celdas vacías se omiten. La metadata del lote (`hora_llamada` ISO UTC compuesta server-side, `funcionariocnd`, `detalle`) viaja **replicada en cada celda** dentro de `campos_extra`. Por cada celda tocada se recalcula el vigente publicado **por celda** (`recalcularEventoDashboard`). Devuelve `{ resumen: { lotes, registros } }` o `400 { errores: [{tipo, periodo?, motivo}] }`.
 
-Todo en una transacción única. Si algo falla, rollback completo. Devuelve `{ resumen: { creados, actualizados, eliminados } }` o `400 { errores: [{tipo, periodo?, motivo}] }`.
+**Corrección por lote (`PUT`/`DELETE /api/sala-de-mando/lotes/:lote_id`, D-057):**
+
+El lote se re-lee **dentro de la transacción** (nunca se confía en el snapshot que vio el modal) y se diffea contra el body:
+
+- periodo en ambos, mismo `valor_mw` → solo metadata; no recalcula.
+- periodo en ambos, valor distinto → `UPDATE` + `modificado_por`/`modificado_en`; recalcula.
+- periodo solo en el body → `INSERT` con el **mismo `lote_id`** y `fecha_evento` **heredado** del lote; recalcula.
+- periodo solo en la BD → `DELETE` de esa fila; recalcula (ahí retrocede lo publicado).
+
+La metadata (hora / funcionario / descripción) se aplica **a nivel de lote**, recorriendo sus celdas vivas fuera del loop de periodos; cambiar la **hora** obliga a recalcular **todas** las celdas (es el criterio de desempate de la publicación). El `DELETE` borra las N filas y recalcula cada celda liberada. Ambos gated por `puede_crear` + planta de la sesión, **no** por autoría (excepción acotada a MAND de D-049). Desenlaces compartidos: `404 lote_inexistente` · `409 lote_cerrado` · `403 lote_de_otra_planta`.
 
 **Validaciones de negocio (errores específicos):**
 
-- `fecha_no_es_hoy` (solo HOY editable).
-- `periodo_bloqueado` (REDESP requiere `periodo >= floor(hora_bogota) + 1`, "periodo actual o posteriores").
+- `fecha_no_es_hoy` (solo HOY se captura).
+- `periodo_bloqueado` (REDESP requiere `periodo >= floor(hora_bogota) + 1`, "periodo actual o posteriores"). En la corrección se evalúa **sobre el delta**; no aplica al `DELETE` del lote.
+- `hora_requerida` / `hora_invalida` / `hora_futura` (hora de la llamada al CND, validada contra el reloj del **servidor** con 5 min de tolerancia; error de **lote**, sin `periodo`).
 - `funcionariocnd_requerido` (AUTH con al menos un valor exige funcionariocnd).
 - `funcionariocnd` en PRUEBA/REDESP → server lo fuerza a NULL silenciosamente (no es error).
-- `valor_mw_invalido`, `periodo_fuera_rango`, `tipo_invalido`, `periodos_invalido`.
+- `lote_sin_celdas` (metadata sin ninguna celda con valor — nunca un 200 mentiroso), `periodo_duplicado` (solo en el `PUT`), `valor_mw_invalido`, `periodo_fuera_rango`, `tipo_invalido`, `periodos_invalido`.
 
 **Lock REDESP (frontend):**
 

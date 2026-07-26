@@ -1254,6 +1254,119 @@ Cross-ref: [[D-055]] (metadata de fila, `turno_id`, huérfanos), [[D-019]], [[D-
 
 ---
 
+## D-057 — Corrección y borrado por lote en Operación 24h (el diff quirúrgico)
+
+**Fecha:** 2026-07-26
+
+**Contexto:** [[D-056]] dejó la grilla de MAND append-only y **sin forma de corregir**: el listado del
+día nacía en solo lectura y la grilla dejó de editar, así que un error de digitación solo se podía
+**tapar registrando encima con hora posterior** — y mientras tanto seguía publicado al dashboard de
+generación. Era la consecuencia (b) de D-056, asumida a conciencia al partir el trabajo. REQ-04
+(14 criterios de aceptación) fija la corrección; se ejecutó en cinco etapas sobre
+`feat/mand-correccion-lote-2026-07`, que además arrastra D-056 (nunca llegó a `main` por su cuenta).
+Alcance: `PUT`/`DELETE` sobre `/api/sala-de-mando/lotes/:lote_id` + los controles del listado.
+**Sin DDL, sin migración.**
+
+**Decisión:**
+
+**(1) El `PUT` es un diff quirúrgico, no un reemplazo.** Las celdas que sobreviven conservan
+`registro_id`, `creado_por` y `creado_en`; solo se `UPDATE`an las que cambian de `valor_mw`, se
+`DELETE`an las que ya no vienen y se `INSERT`an las nuevas **con el mismo `lote_id`**. **Por qué no
+DELETE+INSERT del lote entero:** dejaría huérfano `evento_dashboard.registro_origen_id`, que **no
+tiene FK posible** — el origen migra entre `registro_activo` y `registro_historico`, dos padres
+([[D-055]] (c), 35 filas reales de prod). Cada celda tocada se recalcula con
+`recalcularEventoDashboard` (por CELDA, [[D-056]] (4)); si cambia la **hora**, se recalculan **todas**
+las del lote, porque la hora es el criterio de desempate de la publicación. Todo en una transacción
+(criterio 14); `broadcastConteoBitacoras` y `notifyDashboard` van post-commit.
+
+**(2) Corrige el enunciado de REQ-04 §5.3: la excepción a [[D-049]] NO vive en `canEditarRegistro`.**
+MAND nunca pasa por ese helper — D-049 lo excluye explícitamente, igual que a DISP y COMB. La
+excepción vive en que el gate del `PUT`/`DELETE` es **`puede_crear` en MAND** (matriz data-driven,
+colaborativa por diseño), no `creado_por`. `permissions.js` **no se tocó**, y el par de tests prueba
+las dos caras: un no-autor **sí** corrige en MAND (`sala_de_mando_batch`), **no** en una bitácora
+genérica (`registros_solo_autor`). Es lo contrario de un bypass por cargo: el rol nunca se nombra.
+
+**(3) Auditoría: [[D-019]] se levanta en la corrección.** Cualquier cambio —valor, hora, funcionario
+o descripción— sella `modificado_por`/`modificado_en` en las celdas afectadas. D-019 sigue vigente
+**solo en la captura** (donde ya no hay nada que modificar): acá corregir es un acto deliberado, y
+**la hora decide qué se publica**, así que no es metadata cosmética. Resuelve REQ-04 §8.2.
+
+**(4) El lock de REDESP actúa sobre el DELTA.** Rebota `periodo_bloqueado` si un periodo pasado
+**cambia de valor**, **se agrega** o **se quita** (quitarlo retira el publicado = cambio de valor);
+deja pasar hora, funcionario, descripción y los periodos pasados **idénticos**. **Y no aplica al
+`DELETE` del lote completo**, decisión comentada en el código: borrar es corregir un registro
+ERRADO, no reescribir un valor pasado — si aplicara, un redespacho mal digitado quedaría publicado
+para siempre en cuanto pasara su hora, justo lo que REQ-04 vino a resolver.
+
+**(5) `fecha_evento` se HEREDA en las celdas insertadas.** Todas las celdas de un lote la comparten
+para que el lote **no se parta entre dos días Bogotá** (un lote de las 23:58 corregido a las 00:02).
+La fila insertada queda con un `fecha_evento` anterior a su propio `INSERT` y **es correcto**:
+`fecha_evento` identifica el **día del lote**, no el instante de escritura — esa atribución vive en
+`modificado_por`/`modificado_en`. El `turno_id` sale de `fechaOperativaDePeriodo` ([[D-055]] (b)),
+**jamás** del instante de la corrección: los periodos 1..6 son del T2 que arrancó a las 18:00 de F-1.
+
+**(6) El TIPO es inmutable.** No se acepta en el body; corregirlo es `DELETE` + volver a registrar.
+Moverlo tocaría **dos** claves del dashboard y arrastraría el remapeo de `tipo_evento_id` que vigila
+`guard_tipo_evento_coherente.test.js` ([[D-053]]).
+
+**(7) Vaciar ≠ borrar.** Un `PUT` que deja el lote sin ninguna celda → **`400 lote_sin_celdas`**
+(heredero de `detalle_sin_celdas`, [[D-055]]), nada se escribe; borrar es el `DELETE` explícito y
+confirmado (RN-04.c: en MAND **no hay anulación visible** — un renglón tachado en la lista de
+llamadas al CND confunde en vez de informar). **Nunca un 200 mentiroso.** Corolario del mismo
+principio: `valor_mw` ausente o nulo en el body **no es error, es ausencia** — la celda se borra,
+igual que en el `POST`; y dos veces el mismo periodo es `periodo_duplicado` (`400`) en vez de
+adivinar cuál gana.
+
+**(8) Última escritura gana, pero el diff se calcula DENTRO de la transacción** contra el estado real
+de la BD, nunca contra el snapshot que vio el modal: así una edición concurrente no revive una celda
+que el otro borró. Los cuatro desenlaces de `resolverLoteParaEscritura` los comparten `PUT` y
+`DELETE`: filas vivas → se opera · `lote_id` ya en `registro_historico` → **`409 lote_cerrado`**
+(familia de [[D-046]]; RF-032 intacto, el histórico no se toca) · sin filas → `404 lote_inexistente`
+· otra planta → `403 lote_de_otra_planta` (nunca se revela el contenido de otra unidad). El front
+ramifica por `codigo` ([[D-032]]) y los tres refrescan el listado.
+
+**(9) `campos_extra` se recompone entero en Node, no con `JSON_MODIFY`.** En modo lax
+`JSON_MODIFY(col, '$.k', NULL)` **borra la clave**, así que `funcionariocnd: null` (PRUEBA/REDESP)
+habría desaparecido del JSON y el shape divergiría del que escribe el `POST`. Efecto de segundo
+orden: la metadata del lote se aplica **recorriendo sus celdas vivas** (N updates por PK) en vez de
+un único `UPDATE` set-based — la exigencia de [[D-055]] (a) se conserva íntegra, porque el recorrido
+es por celda viva y **no** por el delta de periodos: la metadata aterriza aunque ningún valor cambie
+y aunque el lock deje todos los periodos intactos.
+
+**(10) Front: corregir y capturar son dos planos separados.** La grilla **no se tocó** (sigue
+naciendo vacía, [[D-056]] (1)) y `dirty` sigue derivando solo del buffer de captura, así que corregir
+no ensucia la grilla ni bloquea la finalización de turno. El listado suma lápiz y basurero **solo con
+`puede_crear`** (RN-04.f: sin permiso se ve idéntico, sin controles); `LoteEditorModal` precarga el
+lote, muestra el tipo **con candado**, deshabilita Guardar si no queda ningún valor —señalando
+Eliminar— y **deshabilita también quitar un periodo pasado en REDESP** (el lock rebota las tres
+ramas: ofrecer un control que siempre va a dar `400` le miente al operador). `LoteBorrarModal`
+confirma con el lote completo y **advierte el retroceso de lo publicado**. Todo se refresca con el
+tick de 60s que ya existía — **sin segundo temporizador**.
+
+**Consecuencias:** (a) Contrato cross-repo **sin cambios de shape**: `UQ_evento_planta_fecha_periodo_tipo`
+intacto, el dashboard sigue viendo un solo valor por `(planta, fecha, periodo, tipo)` — lo que cambia
+es **cuándo** se recalcula el vigente; `../docs/interfaces-cross-repo.md` no requiere edición.
+(b) **Sin DDL ni migración**: todo opera sobre `registro_activo` + `evento_dashboard`. (c) Queda
+**fuera** el **formato de mensaje de WhatsApp** (REQ-04 §8.1: falta la plantilla literal → D-058) y
+la **cascada a SALAJDT/SALAING** (REQ-02, esas copias todavía no existen): su punto de enganche quedó
+**anotado con un comentario en el lugar exacto de la transacción**, sin código muerto ni feature
+flag. (d) El **guard de coherencia de lote** que [[D-056]] pidió "para cuando D-057 traiga la
+edición" se extrajo a `verificarCoherenciaDeLotes()` y ahora corre en dos escenarios (tras capturar y
+tras corregir) — es lo único que sostiene la metadata replicada por celda; no lo borres. (e) De paso
+se corrigieron tres bombas de tiempo ajenas al alcance: `D-056 E1.4` afirmaba
+`COUNT(*) == COUNT(DISTINCT lote_id)` sobre planta real —cierto solo en el instante de la migración,
+falsificado por el primer lote multi-celda real (acotado a `hora_llamada IS NULL`, + `E1.4b` como
+contracara); cinco tests de REDESP elegían su periodo con `Math.min(P_ACTUAL, 24)`, **justo sobre el
+umbral** y congelado al cargar el módulo, así que la suite se caía al cruzar **cualquier hora en
+punto** (helper `periodoRedespLibre()`); y `consumos_combustible`/`rol_coordinador_carbon_maquinaria`
+sembraban `sesion_activa.turno = 1` **literal**, de modo que el sweeper expulsaba sus sesiones al
+correr en T2 (ahora `getTurnoColombia()`). (f) REQ-04 §8.2 y §8.4 quedan resueltas —auditoría en la
+decisión (3); rango de periodos **como lista cuando no son contiguos**, y los lotes no contiguos se
+permiten. Cross-ref: [[D-056]], [[D-055]], [[D-049]], [[D-019]], [[D-046]], [[D-032]], [[D-020]],
+[[D-030]], [[D-053]].
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

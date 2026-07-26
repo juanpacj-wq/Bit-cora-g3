@@ -21,7 +21,7 @@ NO hay GEC4, GEC1, GEC2. Cualquier referencia a otras es error de un agente conf
 
 | Código | Nombre | `formulario_especial` | UI | Notas |
 |---|---|---|---|---|
-| `MAND` | Operación 24h (anteriormente "Sala de Mando") | 1 | `SalaDeMandoGrid.jsx` | Grilla 24p × 3 tipos × 2 plantas. Batch save. No se cierra por turno (sweeper diario). Solo HOY editable. |
+| `MAND` | Operación 24h (anteriormente "Sala de Mando") | 1 | `SalaDeMandoGrid.jsx` | Grilla 24p × 3 tipos × 2 plantas. Batch save **append-only** (registra, no edita — D-056): nace vacía y cada Guardar agrupa la fila en un **lote**. Corregir y borrar son **por lote**, desde el listado del día (D-057). No se cierra por turno (sweeper diario). Solo HOY se captura. |
 | `DISP` | Disponibilidad | 1 | `DisponibilidadDashboard.jsx` | Mini-dashboard con tabs GEC3/GEC32. Sin cierre de turno. 1 vigente por planta. 4 estados (D-024): `En Servicio` (`1`, verde), `En Reserva` (`0`, azul), `Indisponible` (`-1`, rojo, salida forzada), `Mantenimiento` (`-1`, amarillo, consignación). `Indisponible` y `Mantenimiento` comparten `codigo=-1`; el discriminador es el string `evento`. Panel de acumulado histórico por estado (D-028): el del estado vigente crece en vivo, el resto congelado. |
 | `CIET` | Cierres y Finalizaciones | 0 | Solo histórico | Auditoría automática. Nadie tiene `puede_crear=1`. Tipos: Finalización de turno, Cierre de turno, Deshacer disponibilidad. |
 | `AUTOR` / similar | Autorizaciones (genérica histórica) | 0 | `GrillaRegistros` genérica | Bitácora estándar. |
@@ -93,6 +93,20 @@ La grilla MAND tiene 3 filas correspondientes a 3 `tipo_evento` de la bitácora 
 | `REDESP` | Redespacho | **Sí** (periodo >= actual) | NULL forzado |
 
 24 periodos × 3 tipos × 2 plantas = 144 celdas posibles. El periodo P1 cubre 00:00–00:59, P2 cubre 01:00–01:59, …, P15 cubre 14:00–14:59, …, P24 cubre 23:00–23:59 (hora Bogotá).
+
+---
+
+## Lote (MAND)
+
+**Lote** = el conjunto de registros nacidos de una misma fila/tipo en un mismo Guardar. Es la unidad de captura y de corrección desde D-056/D-057; representa **una llamada del CND**.
+
+| Concepto | Dónde vive | Nota |
+|---|---|---|
+| `lote_id` | `campos_extra.lote_id` (GUID de 36 chars) | Lo genera el **servidor**. Sin DDL: `campos_extra` viaja tal cual al histórico. |
+| `hora_llamada` | `campos_extra.hora_llamada` (ISO UTC) | Hora de la **llamada al CND**, distinta de `fecha_evento` (instante de guardado). En los registros migrados por `F32.A1` la clave está **AUSENTE** (ni `null` ni `""`). |
+| Metadata del lote | `detalle`, `funcionariocnd`, `hora_llamada` | **Replicada en cada celda**, sin constraint que la mantenga coherente: la sostiene un guard de test (`verificarCoherenciaDeLotes`). |
+
+Varios lotes **coexisten** en el mismo `(tipo, periodo, día, planta)` — el CND llama varias veces por el mismo periodo. Lo que el dashboard publica se resuelve **por celda**, no por lote (gana la mayor `hora_llamada`; los sin hora van últimos). Corregir y borrar actúan sobre **el lote completo**, nunca sobre un periodo suelto. Un lote no se parte entre dos días Bogotá: sus celdas comparten `fecha_evento`.
 
 ---
 
@@ -174,5 +188,9 @@ Los endpoints devuelven `{ error: 'codigo', ... }` o `{ errores: [{ tipo?, perio
 | `periodos_invalido` | POST MAND guardar | Array de periodos malformado. |
 | `periodo_fuera_rango` | POST MAND guardar | periodo ∉ [1,24]. |
 | `valor_mw_invalido` | POST MAND guardar | valor_mw no es número o es negativo. |
-| `periodo_bloqueado` | POST MAND guardar | REDESP intentando editar periodo < actual. |
-| `funcionariocnd_requerido` | POST MAND guardar | AUTH con valor sin funcionariocnd. |
+| `periodo_bloqueado` | POST MAND guardar · PUT lote | REDESP sobre periodo < actual. En el `PUT` se evalúa **sobre el delta** (valor cambiado, periodo agregado o quitado); no aplica al `DELETE` del lote. |
+| `funcionariocnd_requerido` | POST MAND guardar · PUT lote | AUTH con valor sin funcionariocnd. |
+| `hora_requerida` / `hora_invalida` / `hora_futura` | POST MAND guardar · PUT lote | Hora de la llamada al CND: falta, no es `HH:mm`/fuera del día del lote, o posterior a "ahora"+5 min (reloj del **servidor**). Error de **lote** (sin `periodo`). |
+| `lote_sin_celdas` | POST MAND guardar · PUT lote | Metadata sin ninguna celda con valor. Nunca un 200 mentiroso; vaciar no borra — para eso está el `DELETE`. |
+| `periodo_duplicado` | PUT lote | El mismo periodo dos veces en el body: el diff quedaría ambiguo. |
+| `lote_inexistente` (404) · `lote_cerrado` (409) · `lote_de_otra_planta` (403) | PUT/DELETE lote | El lote no existe · ya lo archivó el cierre diario (histórico inmutable) · pertenece a otra unidad. |
