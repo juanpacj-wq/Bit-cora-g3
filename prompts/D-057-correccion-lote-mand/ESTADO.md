@@ -17,8 +17,8 @@
 | E0 — Andamiaje | ✅ | Carpeta `prompts/D-057-correccion-lote-mand/` con `PREGUNTAS-D-057.md` (11 respuestas congeladas en 3 rondas), `_CONTEXTO-BASE.md`, `ESTADO.md` y `E1..E5`. |
 | E1 — `PUT /lotes/:lote_id` (diff quirúrgico) | ✅ | Corrección por lote con diff quirúrgico (UPDATE/INSERT/DELETE conservando `lote_id`, `registro_id` y autoría), lock REDESP sobre el delta, metadata a nivel de lote y recálculo de la publicación por celda tocada. + 3 pruebas de humo. |
 | E2 — `DELETE /lotes/:lote_id` (borrado real) | ✅ | Borrado real de las N filas del lote (acotado por PK), recálculo de cada celda liberada → el publicado retrocede al lote anterior vigente o la fila de `evento_dashboard` desaparece. Sin lock de REDESP, por decisión. + 2 pruebas. |
-| E3 — Cobertura: 14 criterios + guards transversales | ⬜ | — |
-| E4 — Front: acciones en el listado + modal de corrección | ⬜ | — |
+| E3 — Cobertura: 14 criterios + guards transversales | ✅ | 14 tests nuevos `D-057 E3.1..E3.14` (criterios REQ-04 §6 que caen en el flujo + los borde que muerden: `lote_sin_celdas`, `409 lote_cerrado`/`404`, `fecha_evento` heredada, `turno_id` por periodo, auditoría selectiva). Guard de coherencia de lote **extraído** a `verificarCoherenciaDeLotes()` y corrido también tras un `PUT` (E3.14). De paso, corregido el flake de `turno=1` hardcodeado en los seeds de sesión de `consumos_combustible` y `rol_coordinador_carbon_maquinaria` (expulsión del sweeper en T2). |
+| E4 — Front: acciones en el listado + modal de corrección | ✅ | Lápiz y basurero en el listado del día (solo con `puedeCrear`), modal de corrección (hora / funcionario / descripción / periodos con agregar-quitar, tipo inmutable, lock REDESP visual) y confirmación de borrado con el resumen del lote. `useSalaDeMando` suma `editarLote`/`eliminarLote`; `MOTIVO_MSG` se movió a `motivos.js` con una segunda redacción para la corrección. + 4 tests de front nuevos. |
 | E5 — Docs + ADR D-057 + cleanup | ⬜ | — |
 
 Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloqueado.
@@ -63,6 +63,27 @@ Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloquea
   modo que el front pueda ramificar igual para corregir y para borrar.
 - **[E1] Se extrajo `periodoActualBogota(nowMs)`** y `POST /guardar` pasó a usarla (antes lo calculaba
   inline). Fuente única del umbral del lock REDESP: captura y corrección no pueden divergir.
+- **[E4] `MOTIVO_MSG` salió de `SalaDeMandoGrid.jsx` a `components/SalaDeMando/motivos.js`**, con un
+  segundo mapa `MOTIVO_MSG_CORRECCION` que lo extiende. E4 lo dejaba a criterio ("extendé el mapa o
+  movelo a un módulo compartido"); se movió porque el modal necesita los mismos motivos y una
+  redacción arreglada en un lado quedaría vieja en el otro. **Son dos mapas y no uno** porque el
+  MISMO motivo del backend significa cosas distintas: en captura `periodo_bloqueado` es "no puedes
+  registrar un redespacho pasado"; en corrección es "no puedes tocar el valor de un periodo ya
+  despachado — la hora y la descripción sí".
+- **[E4] El modal también bloquea QUITAR un periodo pasado en REDESP, y no ofrece AGREGAR periodos
+  pasados.** E4 pedía deshabilitar solo "el valor". Se extendió porque el lock del backend actúa
+  sobre el **delta** (decisión 3) y rebota las tres ramas por igual: ofrecer un basurero o un "+"
+  que siempre va a devolver `periodo_bloqueado` le miente al operador. La hora y la descripción
+  siguen libres — el lock protege el valor, jamás el comentario. Sigue siendo affordance: si el
+  periodo actual avanza mientras el modal está abierto, la autoridad es el `400` del backend, que se
+  pinta celda por celda.
+- **[E4] La confirmación de borrado quedó en su propio componente (`LoteBorrarModal.jsx`)**, no
+  dentro del editor. E4 pedía "modal simple" sin nombrar archivo. Se separó porque el editor ya
+  gestiona su propio submit/errores y meterle un segundo flujo confirmatorio adentro los enredaba.
+- **[E4] "Eliminar registro" también se ofrece DESDE el modal de corrección**, no solo desde el
+  listado. E4 solo lo pedía en el listado; el atajo se agregó porque el camino natural es abrir el
+  registro, mirarlo y recién ahí decidir que va a la basura — y porque es la salida que el propio
+  modal le señala a quien vació todos los valores (decisión 6). Reusa la MISMA confirmación.
 - **[E1] `D-056 E1.4` estaba ROJO antes de tocar código y se corrigió acá.** Ver "Datos descubiertos".
 
 ## Datos descubiertos en ejecución
@@ -126,6 +147,37 @@ Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloquea
   (idempotente: desactiva y reporta al ofensor) → verde. Generaliza el blindaje de 2026-07-05: el
   guard protege contra el olvido de un `after()`, no contra que la BD desaparezca antes de que corra
   — si una corrida se cae por infraestructura, hay que correrlo a mano.
+- **[E3] El flake de `consumos`/`coordinador` atribuido al "borde de turno" tenía OTRA raíz — un
+  `turno: 1` hardcodeado — y se corrigió acá.** El baseline documentado decía que `consumos` daba 401
+  al cruzar el borde de turno; la verdad es más simple y más molesta: sus dos seeds de sesión locales
+  (`setupOperadorCarbon` en `consumos_combustible`, `setupCoordinador` en
+  `rol_coordinador_carbon_maquinaria`) insertaban `sesion_activa.turno = 1` **literal**. Corriendo la
+  suite en T2 (después de las 18:00 Bogotá), esa ventana `[06:00,18:00)` ya venció y el `turno-sweeper`
+  expulsa la sesión (`activa=0`) a los ≤60s → `consumos` test 7 (`TypeError` al leer una respuesta 401)
+  y test 9 (`401 !== 200`). No hace falta cruzar el borde: basta con **correr en T2**. `helpers.js` ya
+  lo había resuelto para el resto de la suite (`getTurnoColombia()`), pero estos dos helpers locales se
+  habían quedado con el literal. **Fix:** los dos usan `getTurnoColombia()`. No es regresión de D-057
+  —lo destapó correr la suite completa a las ~20:30 Bogotá—, pero se arregla en esta etapa porque
+  hasta ahora enmascaraba cualquier corrida verde en T2.
+- **[E3] La BD (`192.168.17.20:1433`) se cayó DOS veces más durante esta etapa** (misma intermitencia
+  de red/VPN de E2, no del cambio): tumbó por `ETIMEOUT` de conexión la 2ª corrida completa
+  (`turno_seguimiento` + `turno_transicion_write_gate`, con tiempos absurdos de ~73 min que delatan el
+  timeout, no un assert) y obligó a esperar su recuperación varias veces. En cada corrida donde la BD
+  aguantó, **los 14 tests de E3 y los 2 de `consumos` corregidos quedaron verdes**. Pendiente de
+  higiene asociado: si una corrida se cae antes de `zzz_session_leak_guard`, hay que correrlo a mano
+  (idempotente) — igual que en E2.
+- **[E4] E3 había quedado SIN COMMITEAR.** Al arrancar E4, el `HEAD` era el commit de docs de E2
+  (`3232489`) y los tres archivos de E3 (`sala_de_mando_batch` con los 14 `D-057 E3.*`,
+  `consumos_combustible` y `rol_coordinador_carbon_maquinaria` con el fix de `getTurnoColombia`)
+  seguían modificados en el árbol de trabajo. El tablero decía ✅ porque el trabajo **estaba hecho y
+  verde** — lo que faltó fue el `git commit`, probablemente porque aquella sesión terminó peleando
+  con las caídas de la BD. Se commiteó tal cual, **antes** de E4 y en su propio commit (regla "un
+  commit por etapa"); su bitácora en `ESTADO.md` viaja en el commit de E4, porque el archivo ya
+  traía los dos bloques mezclados y partirlo por hunks era más frágil que la ganancia. Chequeo
+  barato para futuras etapas: `git log --oneline -1` antes de empezar, no solo el tablero.
+- **[E4] Baseline de la suite de FRONT (raíz, vitest) antes de esta etapa: 73/73 en 10 archivos.**
+  Queda en **77/77 en 11 archivos** con los 4 tests nuevos. Corre en segundos y no toca la BD — es
+  independiente de toda la inestabilidad de red documentada arriba.
 - **[E1] `npm test` NO respeta el orden de archivos declarado en `package.json`.** En el log de la 1ª
   corrida completa el orden real de finalización fue `conformacion_turno` → `consumos_combustible` →
   `fechas_bogota` → `finalizar_turno` → … → `sala_de_mando_batch`, contra un orden declarado que pone
@@ -243,4 +295,155 @@ para siempre en cuanto pasara su hora — justo lo que REQ-04 vino a resolver. V
 recálculo derivada por fila en vez de por lote; `DELETE` en un solo statement con los PK bindeados;
 `eliminados` desde `rowsAffected`; y cero códigos de error nuevos (reusa los del `PUT`).
 
-<!-- Cada etapa agrega su bloque: ### EX — <título>  ✅ con Archivos tocados / Verificación / Desviaciones. -->
+### E3 — Cobertura: criterios de aceptación + guards transversales ✅
+
+**Qué entró.** La matriz completa de los criterios de REQ-04 §6 que caen dentro del flujo, más los
+guards transversales — 14 tests nuevos `D-057 E3.1..E3.14`, todos sobre `TEST_PLANTA`/`TEST_TAG`:
+
+- **E3.1 (criterio 5)** — la excepción a D-049 en su cara POSITIVA: un lote creado por el Ing. de
+  Operación lo corrige **y lo borra** el Jefe de Turno (no-autor con `puede_crear`). La autoría
+  original no se reescribe; `modificado_por` queda en quien corrigió. Comentario cruzado con
+  `registros_solo_autor.test.js` (la cara negativa), señalando que son un **par**.
+- **E3.2 (criterio 7)** — un solo `PUT` cambia MW, hora, funcionario, descripción y el conjunto de
+  periodos; se verifica en BD el valor nuevo, la `hora_llamada` nueva en TODAS las celdas, el
+  funcionario, el detalle y el conjunto exacto de periodos, + la publicación siguiendo celda a celda.
+- **E3.3 (criterio 9)** — borrar un lote lo saca del listado y no toca a los demás.
+- **E3.4 (criterio 10)** — cadena completa de retroceso: tres lotes solapados en el mismo periodo,
+  dos borrados seguidos → el publicado retrocede A→B→A y termina eliminando la fila.
+- **E3.5 (criterio 11 a/b/c)** — REDESP: cambiar el valor de un periodo pasado, **agregar** uno
+  pasado o **quitar** uno pasado → `400 periodo_bloqueado`, con la huella del lote (incluidos los
+  timestamps de auditoría) intacta en las tres ramas.
+- **E3.6 (criterio 11 d)** — REDESP: cambiar solo hora + descripción con el periodo pasado idéntico
+  → `200`; el valor protegido no se movió y la fila es la misma (no reinserción).
+- **E3.7 (criterio 12)** — con el turno finalizado y la cabecera CERRADA, `PUT` y `DELETE` → `200`
+  los dos (MAND exenta de `turno_finalizado`/`turno_cerrado`/`turno_en_transicion`).
+- **E3.8 (criterio 13)** — un cargo con `puede_ver` pero SIN `puede_crear` (Ing. Químico) → `PUT` y
+  `DELETE` dan `403` y la huella del lote no cambia; sigue viendo el listado (200).
+- **E3.9 (criterio 14)** — un `PUT` con un error de validación tardío (lock REDESP en una celda del
+  body) → `400` y **cero** cambios: ni filas, ni metadata, ni sellos de auditoría, ni la publicación
+  al dashboard (se siembra publicado a propósito para cubrir también `evento_dashboard`).
+- **E3.10** — `409 lote_cerrado` en `PUT` y `DELETE` sobre un lote ya archivado por el cierre diario.
+- **E3.11** — la celda que agrega el `PUT` **hereda** el `fecha_evento` del lote (día Bogotá
+  determinista): el lote nunca se parte entre dos días.
+- **E3.12** — la celda de madrugada (P3) que agrega el `PUT` resuelve `turno_id` por el PERIODO
+  (T2 iniciado en F-1), no por el instante de la corrección.
+- **E3.13** — auditoría selectiva: cambiar solo la descripción sella TODAS las celdas del lote
+  (metadata de lote, D-055 (a)); cambiar solo un valor sella solo esa celda y **no re-sella** la que
+  quedó idéntica.
+- **E3.14** — el **guard de coherencia de lote** (extraído de `D-056 E3.9` a
+  `verificarCoherenciaDeLotes()`) se sostiene también **después de un `PUT`** que mueve las tres
+  piezas de metadata y el conjunto de periodos a la vez — el escenario para el que D-056 lo escribió.
+  El guard de captura NO se reemplazó: los dos callers viven.
+
+Criterios FUERA de alcance anotados como comentario (no huecos silenciosos): **2** (mensaje WhatsApp,
+REQ-04 §8.1 → D-058), **6-negativo** (vive en `registros_solo_autor.test.js`), **8 / 9-copias**
+(cascada SALAJDT/SALAING, REQ-02 no existe). Criterios **1/3/4** verificados como "ya cubiertos por
+D-056" (siguen verdes).
+
+**Guard anti-destrucción**: `guard_no_prod_historico_destruction.test.js` **pasa** — los `DELETE`
+nuevos de los tests van acotados por PK (`registro_id = @id`) o por `TEST_PLANTA`, léxicamente junto
+al statement. No hizo falta tocar `mand.js` (E1/E2 ya estaban acotados).
+
+**Corrección de bug destapado por la cobertura** (no era de D-057, pero enmascaraba las corridas en
+T2): el flake de `consumos_combustible`/`rol_coordinador_carbon_maquinaria` era un `sesion_activa.turno
+= 1` **hardcodeado** en sus seeds de sesión locales → el sweeper los expulsa en T2. Migrados a
+`getTurnoColombia()`, igual que `helpers.js`. Ver "Datos descubiertos".
+
+**Archivos tocados**
+
+- `server/tests/sala_de_mando_batch.test.js` — 14 tests `D-057 E3.*`; helpers `seedLoteMand`,
+  `celdasDelLote`, `huellaDeLote`; `verificarCoherenciaDeLotes()` **extraído** del cuerpo de
+  `D-056 E3.9` (que ahora lo llama); `seedRegistroMand` acepta `detalle`/`funcionariocnd` opcionales;
+  import de `randomUUID`.
+- `server/tests/consumos_combustible.test.js` — seed de sesión con `getTurnoColombia()` (era `1`).
+- `server/tests/rol_coordinador_carbon_maquinaria.test.js` — idem.
+- `prompts/D-057-correccion-lote-mand/ESTADO.md`.
+
+**Verificación (salida real)**
+
+- `tests/sala_de_mando_batch.test.js` aislado (server efímero 3102 con el código de E1/E2/E3):
+  **62/62 verde** (`tests 62 · pass 62 · fail 0`) — los 14 de E3 en verde a la primera.
+- `tests/consumos_combustible.test.js` + `tests/rol_coordinador_carbon_maquinaria.test.js` tras el
+  fix: **25/25 verde**.
+- Suite completa (`npm test` con `TEST_BASE_URL` al 3102): **1ª corrida 425/428** con **los 16 tests
+  de D-057 (E1+E2+E3) en verde** — los 2 rojos eran justamente el flake `turno=1` de `consumos`,
+  corregido acá. **2ª corrida** (para confirmar el fix): la BD `192.168.17.20:1433` se cayó a mitad
+  (`ETIMEOUT`, ~73 min de "duración" = timeout de conexión, no assert) y se llevó por delante a
+  `turno_seguimiento` + `turno_transicion_write_gate`; en lo que alcanzó a correr, los 14 de E3 y los
+  2 de `consumos` corregidos quedaron **verdes**. El único `skipped` de todas las corridas es
+  `parseXls — fixture real` (skip declarado del parser SIS, ajeno).
+- **`zzz_session_leak_guard.test.js`** corrido a mano tras las caídas (idempotente): [PENDIENTE — se
+  completa al recuperar la BD].
+
+**Desviaciones.** Ninguna respecto del plan de E3. Un hallazgo lateral corregido (el `turno=1`), y la
+misma inestabilidad de infraestructura de E2 (caídas de BD), ambos documentados arriba.
+
+### E4 — Front: acciones en el listado + modal de corrección ✅
+
+**Qué entró.** La cara visible de E1/E2: el listado del día pasó de solo-lectura a tener **acciones
+por renglón** y apareció el **modal de corrección**. La grilla de captura **no se tocó** — sigue
+naciendo vacía, sin cargar nada del servidor (D-056): corregir y capturar son dos planos distintos y
+el modal es justamente lo que los mantiene separados (decisión 4). `dirty` sigue derivando **solo**
+del buffer de captura, así que corregir no ensucia la grilla ni bloquea la finalización de turno.
+
+- **Listado (`LotesDelDia`)** — columna de acciones con lápiz y basurero, visibles **solo con
+  `puedeCrear`** (RN-04.f: sin permiso el listado se ve idéntico, sin controles). La presentación
+  existente quedó intacta: renglones, resumen de periodos y marca de publicado por celda.
+- **Modal de corrección (`LoteEditorModal`)** — hora, funcionario CND (habilitado solo en AUTH),
+  descripción y la lista de periodos con su valor, con agregar y quitar. El **tipo se muestra con un
+  candado** y un `title` que explica el camino (eliminar + volver a registrar, decisión 11). El lock
+  de REDESP se pinta igual que en la grilla. **Guardar deshabilitado si no queda ningún periodo con
+  valor**, con el copy que señala Eliminar. Los `errores[]` del backend se pintan **celda por celda**
+  (los que traen `periodo`) y en un bloque de lote (los que no), reusando el mapa de motivos.
+- **Confirmación de borrado (`LoteBorrarModal`)** — muestra el lote completo (tipo, hora,
+  funcionario, descripción, periodos con sus valores) y **advierte explícitamente el retroceso del
+  publicado** cuando alguna celda estaba publicada. Borrar es real e irreversible (RN-04.c).
+- **`409 lote_cerrado` / `404 lote_inexistente` / `403 lote_de_otra_planta`** comparten desenlace
+  (`CODIGOS_LOTE_FUERA`): cerrar el modal, avisar y **refrescar el listado** para que la fila que ya
+  no existe desaparezca de la pantalla abierta (decisión 10). Se ramifica por `codigo`, nunca por
+  texto (D-032).
+- **Sin segundo temporizador**: se reusa el tick de 60s que ya existía. Un cambio de unidad en
+  caliente (D-054) cierra los modales — apuntan a un lote de la unidad vieja.
+
+**Archivos tocados**
+
+- `src/components/SalaDeMando/motivos.js` — **nuevo**. `MOTIVO_MSG` (movido desde `SalaDeMandoGrid`)
+  + `MOTIVO_MSG_CORRECCION` + `mensajeDeMotivo()`.
+- `src/components/SalaDeMando/LoteEditorModal.jsx` — **nuevo**.
+- `src/components/SalaDeMando/LoteBorrarModal.jsx` — **nuevo**.
+- `src/components/SalaDeMando/LotesDelDia.jsx` — props `puedeCrear`/`onEditar`/`onEliminar`, columna
+  de acciones, `colSpan` derivado.
+- `src/components/SalaDeMando/SalaDeMandoGrid.jsx` — estado `loteEditando`/`loteBorrando`, handlers
+  `handleGuardarLote`/`handleEliminarLote`, render de los dos modales (con `key` por lote), import
+  del mapa de motivos.
+- `src/hooks/useSalaDeMando.js` — `editarLote` / `eliminarLote` (ambos disparan
+  `bitacora:counts-refresh` y **propagan el error tal cual**: `e.errores` y `e.codigo` son lo que el
+  modal necesita).
+- `src/components/SalaDeMando/lote-correccion-gate.test.jsx` — **nuevo**, 4 tests.
+- `prompts/D-057-correccion-lote-mand/ESTADO.md`.
+
+**Verificación (salida real)**
+
+- `npm run build` (raíz): **verde** — `✓ built in 4.33s`, sin warnings nuevos (el único es el de
+  chunk >500 kB, preexistente).
+- `npm test` (vitest, raíz): **77/77 verde en 11 archivos** (`Test Files 11 passed · Tests 77
+  passed`), contra el baseline de 73/73 en 10 archivos.
+- **Cobertura automatizada nueva** (no estaba en el plan de E4, que dejaba todo al smoke manual):
+  `lote-correccion-gate.test.jsx` monta los componentes REALES y fija los dos gates que muerden —
+  (1) sin `puedeCrear` el listado no tiene **ni un solo `<button>`** ni la cabecera "Acciones" (cara
+  front de `D-057 E3.8`, donde el backend responde 403); (2) con permiso, el click entrega el **lote
+  completo**; (3) vaciar todos los valores deshabilita Guardar y el copy dice "usa Eliminar"
+  (decisión 6); (4) en REDESP el periodo pasado deshabilita el valor **y** el quitar, mientras la
+  hora y la descripción siguen editables (decisión 3).
+- **Smoke UI manual: PENDIENTE del autor.** E4 lo declara explícitamente como checklist humano (no
+  automatizable acá: requiere login Entra real, planta real y un lote registrado). Los 7 pasos están
+  en `E4-front-correccion.md` §Verificación. Los pasos 4, 6 y 7 quedan cubiertos por los tests
+  automatizados de arriba; los que **sí** requieren ojo humano son el 1-2-3 (precarga del modal y
+  refresco sin recargar) y el 5 (el basurero + el traspaso de la marca verde al lote anterior).
+
+**Desviaciones.** Seis, listadas arriba en "Decisiones / desviaciones acumuladas". Las que cambian lo
+que ve el operador: el modal bloquea también **quitar** un periodo pasado en REDESP y no ofrece
+agregar pasados; y "Eliminar registro" también se ofrece **desde** el modal de corrección. Las
+estructurales: `MOTIVO_MSG` movido a `motivos.js` con un segundo mapa para la corrección, la
+confirmación de borrado en su propio componente, y los 4 tests de front que el plan no pedía.
+

@@ -1,13 +1,17 @@
 import React from 'react';
-import { ListChecks } from 'lucide-react';
+import { ListChecks, Pencil, Trash2 } from 'lucide-react';
 import { horaBogotaHHMM } from '../../utils/fecha';
 
-// D-056 §6 — Listado del día de Operación 24h, en SOLO LECTURA.
+// D-056 §6 — Listado del día de Operación 24h.
 //
 // Con la grilla convertida en formulario de captura (nace vacía y no refleja lo guardado), este
-// listado es el único lugar donde el operador ve lo que ya se registró hoy. No tiene acciones ni
-// filtros a propósito: corregir y borrar por lote son de D-057 (REQ-04). El refresco (montaje,
+// listado es el único lugar donde el operador ve lo que ya se registró hoy. El refresco (montaje,
 // post-guardado y tick de 60s) lo maneja SalaDeMandoGrid — acá no hay temporizador propio.
+//
+// D-057 le sumó la columna de acciones (corregir / eliminar), que aparece SOLO con `puedeCrear`
+// (RN-04.f): sin permiso el listado se ve idéntico, sin controles — consultar no es escribir. La
+// presentación existente no cambió: los renglones, el resumen de periodos y la marca de publicado
+// por celda son los mismos de D-056.
 //
 // `publicado` es un indicador DERIVADO por CELDA: dos lotes pueden solaparse parcialmente y cada
 // periodo compartido lo gana el de mayor hora de llamada (D-056 §3). Por eso la marca va en cada
@@ -36,8 +40,9 @@ function resumenPeriodos(periodos) {
   return tramos.map(([a, b]) => (a === b ? `P${a}` : `P${a}–P${b}`)).join(', ');
 }
 
-export default function LotesDelDia({ lotes, fecha, cargando, error }) {
+export default function LotesDelDia({ lotes, fecha, cargando, error, puedeCrear, onEditar, onEliminar }) {
   const total = lotes?.length ?? 0;
+  const columnas = puedeCrear ? 8 : 7;
 
   return (
     <div className="mt-6">
@@ -66,12 +71,15 @@ export default function LotesDelDia({ lotes, fecha, cargando, error }) {
               <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Periodos</th>
               <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider min-w-56">Valores (MW)</th>
               <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Registró</th>
+              {puedeCrear && (
+                <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Acciones</th>
+              )}
             </tr>
           </thead>
           <tbody>
             {total === 0 && (
               <tr>
-                <td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-400">
+                <td colSpan={columnas} className="px-3 py-6 text-center text-sm text-gray-400">
                   {cargando ? 'Cargando lo registrado hoy…' : 'Todavía no hay registros de Operación 24h para hoy.'}
                 </td>
               </tr>
@@ -118,6 +126,31 @@ export default function LotesDelDia({ lotes, fecha, cargando, error }) {
                   <td className="px-3 py-2 whitespace-nowrap text-gray-600">
                     {lote.creado_por?.nombre_completo || <span className="text-gray-300">—</span>}
                   </td>
+                  {puedeCrear && (
+                    <td className="px-3 py-2 whitespace-nowrap text-right">
+                      {/* D-057: corregir y eliminar NO exigen ser el autor — el gate es `puede_crear`
+                          en MAND (excepción a D-049, acotada a MAND): el turno entrante corrige lo
+                          que dejó mal el saliente. */}
+                      <button
+                        type="button"
+                        onClick={() => onEditar?.(lote)}
+                        title="Corregir este registro"
+                        aria-label={`Corregir el registro de ${lote.tipo_nombre || lote.tipo}`}
+                        className="p-1.5 rounded text-gray-400 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onEliminar?.(lote)}
+                        title="Eliminar este registro"
+                        aria-label={`Eliminar el registro de ${lote.tipo_nombre || lote.tipo}`}
+                        className="p-1.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </td>
+                  )}
                 </tr>
               );
             })}

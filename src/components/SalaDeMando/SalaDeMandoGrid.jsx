@@ -3,6 +3,9 @@ import { LayoutGrid, AlertTriangle } from 'lucide-react';
 import { useSalaDeMando } from '../../hooks/useSalaDeMando';
 import { getTodayBogota, horaBogota, horaBogotaHHMM } from '../../utils/fecha';
 import LotesDelDia from './LotesDelDia';
+import LoteEditorModal from './LoteEditorModal';
+import LoteBorrarModal from './LoteBorrarModal';
+import { MOTIVO_MSG } from './motivos';
 
 const TIPOS = [
   { key: 'AUTH',   label: 'Autorización', color: '#1e40af' },
@@ -11,23 +14,11 @@ const TIPOS = [
 ];
 const TIPO_KEYS = TIPOS.map((t) => t.key);
 
-const MOTIVO_MSG = {
-  fecha_no_es_hoy: 'La fecha no es hoy. Recarga la página.',
-  tipo_invalido: 'Tipo de fila no reconocido',
-  periodos_invalido: 'Lista de periodos inválida',
-  periodo_fuera_rango: 'Periodo fuera de rango (1-24)',
-  valor_mw_invalido: 'Valor numérico inválido',
-  periodo_bloqueado: 'Periodo anterior al actual — solo se pueden registrar redespachos del periodo actual en adelante',
-  funcionariocnd_requerido: 'Funcionario CND es requerido para Autorización',
-  // D-056: la hora de la llamada al CND es atributo del LOTE (la fila entera), así que su error
-  // viaja sin `periodo` y se pinta en la fila, no sobre una celda.
-  hora_requerida: 'Indica la hora de la llamada al CND',
-  hora_invalida: 'Hora inválida — usa el formato HH:mm dentro del día de hoy',
-  hora_futura: 'La hora de la llamada no puede ser futura',
-  // Reemplaza a `detalle_sin_celdas` (D-055): la metadata (hora, funcionario, comentario) nace
-  // pegada a las celdas con valor de su lote. Sin ninguna celda no hay lote que registrar.
-  lote_sin_celdas: 'Escribe al menos un valor en la fila para poder registrarla',
-};
+// D-057: el lote dejó de existir mientras el modal estaba abierto — lo archivó el cierre diario
+// (409), lo borró otro operador (404) o es de otra unidad (403). Los tres tienen el mismo desenlace
+// en la UI: cerrar el modal y refrescar el listado, porque la pantalla quedó mostrando algo que ya
+// no está. Se ramifica por `codigo`, nunca por el texto (D-032).
+const CODIGOS_LOTE_FUERA = new Set(['lote_cerrado', 'lote_inexistente', 'lote_de_otra_planta']);
 
 // D-056: la grilla es un FORMULARIO DE CAPTURA, no un espejo del servidor. Arranca vacía (RQ-03.1),
 // se vacía tras cada guardado confirmado (RQ-03.2) y nunca carga lo ya guardado (RQ-03.3/4) — eso
@@ -80,7 +71,7 @@ export default function SalaDeMandoGrid({
   bitacora, plantaId, puedeCrear, showToast, onError,
   onDirtyChange, onGuardandoChange, registerSaveHandler,
 }) {
-  const { getLotes, guardarBatch } = useSalaDeMando();
+  const { getLotes, guardarBatch, editarLote, eliminarLote } = useSalaDeMando();
   const [buffer, setBuffer] = useState(() => emptyBuffer());
   const [seleccion, setSeleccion] = useState({ tipo: null, periodos: new Set() });
   const [anchorPeriodo, setAnchorPeriodo] = useState(null);
@@ -97,6 +88,11 @@ export default function SalaDeMandoGrid({
   const [lotes, setLotes] = useState([]);
   const [cargandoLotes, setCargandoLotes] = useState(true);
   const [errorLotes, setErrorLotes] = useState(null);
+  // D-057: corrección por lote. `loteEditando`/`loteBorrando` son SNAPSHOTS del listado, solo para
+  // pintar el modal — el diff real lo calcula el backend releyendo el lote dentro de la transacción
+  // (decisión 7), así que una edición concurrente no revive una celda que el otro ya borró.
+  const [loteEditando, setLoteEditando] = useState(null);
+  const [loteBorrando, setLoteBorrando] = useState(null);
   const tableRef = useRef(null);
   const guardarRef = useRef(null);
   // F18-fix: refs latentes para callbacks externos. El padre puede pasarlos como arrows
@@ -131,6 +127,9 @@ export default function SalaDeMandoGrid({
     setEditing({});
     setErrores([]);
     setFechaCargada(hoy);
+    // Un modal abierto apunta a un lote de la unidad VIEJA: se cierra, no se arrastra.
+    setLoteEditando(null);
+    setLoteBorrando(null);
     refrescarLotes(hoy);
   }, [plantaId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -203,6 +202,57 @@ export default function SalaDeMandoGrid({
       setGuardando(false);
     }
   }, [buffer, guardarBatch, plantaId, refrescarLotes]);
+
+  // ── D-057 · Corrección y borrado por lote ────────────────────────────────────────────────────
+  // Ninguno de los dos toca el buffer de captura: `dirty` sigue derivando SOLO de lo tecleado en la
+  // grilla. Corregir el histórico del día y capturar una llamada nueva son planos distintos; si se
+  // mezclaran, corregir "ensuciaría" la grilla y bloquearía la finalización de turno (D-040).
+  const handleGuardarLote = useCallback(async (payload) => {
+    const lote_id = loteEditando?.lote_id;
+    if (!lote_id) return;
+    try {
+      const r = await editarLote(lote_id, payload);
+      const res = r?.resumen || {};
+      const partes = [];
+      if (res.actualizados) partes.push(`${res.actualizados} ${res.actualizados === 1 ? 'valor corregido' : 'valores corregidos'}`);
+      if (res.creados) partes.push(`${res.creados} ${res.creados === 1 ? 'periodo agregado' : 'periodos agregados'}`);
+      if (res.eliminados) partes.push(`${res.eliminados} ${res.eliminados === 1 ? 'periodo quitado' : 'periodos quitados'}`);
+      // Sin ninguno de los tres, lo que cambió fue la metadata (hora / funcionario / descripción).
+      showToastRef.current?.(partes.length ? `Registro corregido: ${partes.join(' · ')}` : 'Registro actualizado');
+      setLoteEditando(null);
+      await refrescarLotes(fechaCargada);
+    } catch (e) {
+      if (CODIGOS_LOTE_FUERA.has(e?.codigo)) {
+        setLoteEditando(null);
+        onErrorRef.current?.(e.message);
+        await refrescarLotes(fechaCargada);
+        return; // se consume acá: el modal ya no está montado
+      }
+      throw e; // el modal pinta `errores[]` (celda por celda) o el mensaje saneado
+    }
+  }, [editarLote, loteEditando, refrescarLotes, fechaCargada]);
+
+  const handleEliminarLote = useCallback(async () => {
+    const lote = loteBorrando;
+    if (!lote?.lote_id) return;
+    try {
+      const r = await eliminarLote(lote.lote_id, plantaId);
+      const n = r?.resumen?.eliminados ?? 0;
+      showToastRef.current?.(`Registro eliminado${n ? `: ${n} ${n === 1 ? 'periodo' : 'periodos'}` : ''}`);
+      setLoteBorrando(null);
+      setLoteEditando(null); // si se llegó acá desde el modal de corrección, ese también se va
+      await refrescarLotes(fechaCargada);
+    } catch (e) {
+      if (CODIGOS_LOTE_FUERA.has(e?.codigo)) {
+        setLoteBorrando(null);
+        setLoteEditando(null);
+        onErrorRef.current?.(e.message);
+        await refrescarLotes(fechaCargada);
+        return;
+      }
+      throw e; // lo pinta el modal de confirmación
+    }
+  }, [eliminarLote, loteBorrando, plantaId, refrescarLotes, fechaCargada]);
 
   useEffect(() => { guardarRef.current = guardar; }, [guardar]);
   useEffect(() => {
@@ -507,7 +557,38 @@ export default function SalaDeMandoGrid({
         </span>
       </div>
 
-      <LotesDelDia lotes={lotes} fecha={fechaCargada} cargando={cargandoLotes} error={errorLotes} />
+      <LotesDelDia
+        lotes={lotes}
+        fecha={fechaCargada}
+        cargando={cargandoLotes}
+        error={errorLotes}
+        puedeCrear={puedeCrear}
+        onEditar={setLoteEditando}
+        onEliminar={setLoteBorrando}
+      />
+
+      {/* `key` por lote: cambiar de registro remonta el modal con su estado limpio, sin arrastrar lo
+          tecleado en el anterior. */}
+      {loteEditando && (
+        <LoteEditorModal
+          key={loteEditando.lote_id}
+          lote={loteEditando}
+          plantaId={plantaId}
+          periodoActual={periodoActual}
+          onGuardar={handleGuardarLote}
+          onEliminar={() => setLoteBorrando(loteEditando)}
+          onCerrar={() => setLoteEditando(null)}
+        />
+      )}
+
+      {loteBorrando && (
+        <LoteBorrarModal
+          key={`del-${loteBorrando.lote_id}`}
+          lote={loteBorrando}
+          onConfirmar={handleEliminarLote}
+          onCerrar={() => setLoteBorrando(null)}
+        />
+      )}
     </div>
   );
 }
