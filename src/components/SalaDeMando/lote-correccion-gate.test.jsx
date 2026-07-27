@@ -66,7 +66,11 @@ describe('LotesDelDia · acciones por permiso (D-057, RN-04.f)', () => {
     );
     expect(container.textContent).toContain('Autorización');
     expect(container.textContent).toContain('Llamada de prueba');
-    expect(container.querySelectorAll('button').length).toBe(0);
+    // D-058: el listado ya no tiene CERO botones — copiar el asiento y copiar el día se ofrecen con
+    // o sin `puedeCrear` (copiar no es escribir, RN-04.f). Lo que sigue sin ofrecerse es la
+    // ESCRITURA, que es lo que este test cuida.
+    expect(container.querySelector('button[aria-label^="Corregir"]')).toBeNull();
+    expect(container.querySelector('button[aria-label^="Eliminar"]')).toBeNull();
     expect(container.textContent).not.toContain('Acciones');
     teardown();
   });

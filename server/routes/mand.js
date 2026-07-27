@@ -13,6 +13,7 @@ import { hasPermisoBitacora, plantaMatch, puedeCerrarTurno } from '../middleware
 import { turnoFromPeriodo, fechaOperativaDePeriodo, fechaBogotaStr } from '../utils/turno.js';
 import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from '../utils/snapshots.js';
 import { recalcularEventoDashboard } from '../utils/notificador.js';
+import { asientoLote } from '../utils/asientos/index.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { notifyDashboard } from '../utils/notify-dashboard.js';
@@ -105,6 +106,29 @@ async function resolverLoteParaEscritura(ctx, { lote_id, mand_id, planta_id }) {
     } } };
   }
   return { filas };
+}
+
+// D-058 — asiento normalizado de un lote para el LISTADO del día (REQ-04 §8.1).
+//
+// El motor LANZA ante un tipo desconocido y eso está bien donde el texto se PERSISTE (el reflejo a
+// Sala): publicar un renglón en blanco en el histórico es peor que fallar. Acá, en cambio, se degrada
+// a `null` y se loguea: este endpoint es el único lugar donde el operador ve lo que registró hoy, y
+// `notificar_dashboard_tipo` es NULLABLE —`db.js` anticipa explícitamente "tipos que NO notifican"—,
+// así que un tipo MAND nuevo dejaría el día ENTERO en blanco con un 500. Se pierde un renglón, no la
+// jornada; el front pinta el resto de las columnas igual.
+function asientoDeLote(lote, planta_id) {
+  try {
+    return asientoLote({
+      tipo: lote.tipo,
+      planta_id,
+      periodos: lote.periodos,
+      funcionariocnd: lote.funcionariocnd,
+      detalle: lote.detalle,
+    });
+  } catch (e) {
+    console.warn(`[mand] asiento no renderizable para el lote ${lote.lote_id}:`, e?.message ?? e);
+    return null;
+  }
 }
 
 // D-056: acá vivía el pivote `GET /api/sala-de-mando` — devolvía la grilla 3×24 con UN valor por
@@ -215,7 +239,15 @@ router.get('/lotes', asyncH(async (req, res) => {
   // Orden: lo recién registrado arriba (hora_llamada DESC, los sin hora al final, desempate por
   // creado_en DESC). El orden definitivo de la presentación lo fija D-057 (RN-04.a).
   const lotes = [...porLote.values()];
-  for (const lote of lotes) lote.periodos.sort((a, b) => a.periodo - b.periodo);
+  for (const lote of lotes) {
+    lote.periodos.sort((a, b) => a.periodo - b.periodo);
+    // D-058: el texto lo arma el BACKEND y el front solo lo pinta (respuesta 6). El mismo asiento
+    // alimenta este renglón, la copia reflejada a las bitácoras de Sala (REQ-02) y la columna
+    // DESCRIPCIÓN del libro F03 (REQ-06): una sola implementación es lo único que garantiza que no
+    // diverjan. La hora NO va adentro — `hora_llamada` viaja aparte y cada consumidor la ubica en su
+    // columna—, así que un lote migrado por F32.A1 (sin hora) igual tiene su asiento.
+    lote.asiento = asientoDeLote(lote, planta_id);
+  }
   lotes.sort((a, b) => {
     if ((a.hora_llamada == null) !== (b.hora_llamada == null)) return a.hora_llamada == null ? 1 : -1;
     if (a.hora_llamada != null && a.hora_llamada !== b.hora_llamada) {

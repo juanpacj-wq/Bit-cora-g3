@@ -17,7 +17,7 @@
 |---|---|---|
 | E0 — Andamiaje | ✅ | `PREGUNTAS-D-058.md` (15 respuestas, 3 rondas), `_CONTEXTO-BASE.md`, `ESTADO.md`, `E1..E10`. |
 | E1 — Motor de asientos (puro) | ✅ | `utils/asientos/` (puro) + 28 tests unitarios + 6 guards contra el catálogo real. Nadie lo importa todavía. |
-| E2 — El asiento en el listado del día + copiar | ⬜ | — |
+| E2 — El asiento en el listado del día + copiar | ✅ | `GET /lotes` devuelve `asiento`; el listado lo pinta a todo el ancho + copiar renglón / copiar el día. Cierra REQ-04 §8.1 y §8.3. |
 | E3 — `seleccionable` + los 8 tipos espejo | ⬜ | — |
 | E4 — Reflejo a Sala: crear | ⬜ | — |
 | E5 — Reflejo a Sala: corregir y borrar | ⬜ | — |
@@ -62,6 +62,21 @@ E8 ──> E9
   (enganchar los tests al script `test` es regla dura del contexto base — el guard de D-041 existía
   y no corría por saltarse esto) y `prompts/D-058-asientos-operacion/` (el andamiaje estaba sin
   trackear; D-057 lo llevó versionado hasta su cleanup).
+- **E2 — en el LISTADO el asiento se degrada a `null` en vez de propagar el throw del motor.** El
+  contrato de E1 (lanzar ante un tipo desconocido) se mantiene intacto donde el texto se PERSISTE
+  —el reflejo de E4—, pero `GET /lotes` es la única vista de lo registrado hoy y
+  `notificar_dashboard_tipo` es NULLABLE (`db.js` anticipa "tipos que NO notifican"): un tipo MAND
+  nuevo dejaría el día ENTERO en 500. Se pierde un renglón y se loguea, no la jornada.
+- **E2 — el asiento va en una segunda fila a todo el ancho, no en una columna más.** Es una frase
+  completa y truncarla la volvería inútil justo para lo que existe (copiar y pegar). Las columnas
+  de D-056/D-057 quedan intactas.
+- **E2 — se ajustó una aserción de `lote-correccion-gate.test.jsx` (D-057)**, que contaba CERO
+  botones sin `puedeCrear` como proxy de "no hay acciones". Ahora hay botones de copiar sin
+  `puede_crear` (RN-04.f: copiar no es escribir), así que la aserción pasó a nombrar los controles
+  de ESCRITURA, que es lo que ese test cuida. Su intención no cambió.
+- **E2 — `useSalaDeMando.js` no se tocó** (estaba en la lista del commit del `.md`): `getLotes`
+  devuelve el payload tal cual y `asiento` viaja dentro de cada lote. No hacía falta cambiar nada y
+  agregar código muerto habría sido peor.
 
 ## Datos descubiertos en ejecución
 
@@ -155,5 +170,50 @@ E8 ──> E9
 
 **Desviaciones** — las cuatro registradas arriba en "Decisiones / desviaciones acumuladas".
 Ninguna cambia el contrato del motor ni las plantillas del insumo.
+
+### E2 — El asiento en el listado del día  ✅
+
+**Archivos tocados**
+- `server/routes/mand.js` — `import { asientoLote }` + helper `asientoDeLote(lote, planta_id)` y el
+  campo `asiento` en cada objeto de `GET /lotes`. El orden del listado no se tocó (`hora_llamada`
+  DESC, sin-hora al final, desempate `creado_en` DESC — RN-04.a).
+- `src/components/SalaDeMando/LotesDelDia.jsx` — el asiento en una segunda fila a todo el ancho +
+  `copiarTexto()` (portapapeles con fallback) + `textoDelDia()` + botón de copiar por renglón y
+  botón "Copiar el día" en la cabecera, con feedback breve por clave (`'dia'` o `lote_id`).
+- `server/tests/sala_de_mando_batch.test.js` — 3 tests nuevos (D-058 E2.1/E2.2/E2.3).
+- `src/components/lotes-del-dia-asiento-copiar.test.jsx` (nuevo) — 5 tests jsdom sobre el componente
+  REAL, con el portapapeles instrumentado.
+- `src/components/SalaDeMando/lote-correccion-gate.test.jsx` — la aserción "cero botones sin
+  `puedeCrear`" pasó a nombrar los controles de escritura (ver desviaciones).
+
+**Decisiones de implementación**
+- El backend arma el texto y el front SOLO lo pinta (respuesta 6). El front no conoce ninguna
+  plantilla: si mañana cambia una palabra del insumo, cambia en `utils/asientos/` y se propaga a los
+  tres consumidores.
+- El asiento va en una segunda fila con `colSpan`, no en una columna nueva: es una frase completa y
+  truncarla la volvería inútil justo para lo que existe (copiar y pegar en WhatsApp). El borde
+  inferior lo pinta la segunda fila para que el par se lea como un solo renglón.
+- La hora se antepone al copiar el día (`HH:MM — asiento`), NUNCA dentro del asiento: los lotes sin
+  hora salen sin prefijo, jamás un `null —`.
+- Fallback de portapapeles con `textarea` + `execCommand`: `navigator.clipboard` exige contexto
+  seguro y por HTTP plano no existe — sin fallback el botón sería decorativo justo donde más se usa.
+
+**Verificación real**
+- `npm run build` (raíz) → **verde**, 15,1 s.
+- `npx vitest run` (front) → **82/82 pass, 12 archivos** (77 previos + los 5 nuevos).
+- `node --test --test-concurrency=1 tests/sala_de_mando_batch.test.js` → **65/65 pass, 0 fail**
+  (62 previos + los 3 nuevos), 242 s.
+- `cd server && npm test` (suite completa, backend levantado, contra `PortalG3_dev`):
+  **tests 465 · suites 26 · pass 464 · fail 0 · cancelled 0 · skipped 1** (`parseXls`, skip
+  declarado ajeno) en 36,4 min. Baseline de E1 (462/461) **+ los 3 nuevos**, sin un solo rojo: ni el
+  flaky conocido de `finalizar_turno`, y `zzz_session_leak_guard` corrió último y pasó.
+- **Smoke visual**: se rasterizó el componente REAL (vitest+jsdom → HTML + el CSS del `dist` →
+  Edge headless → PNG) con tres lotes: AUTH compacto con detalle, REDESP con valores distintos por
+  periodo y un migrado sin hora. Las columnas de D-056/D-057 quedaron intactas, el asiento se lee
+  completo en su fila, la hora sigue en SU columna y los botones de copiar aparecen donde deben.
+
+**Desviaciones** — las cinco registradas arriba en "Decisiones / desviaciones acumuladas". Ninguna
+cambia el contrato del motor, las plantillas del insumo ni el shape previo de `GET /lotes` (el campo
+`asiento` se SUMA; nada se quitó ni se renombró).
 
 <!-- Cada etapa agrega su bloque: ### EX — <título>  ✅ con Archivos tocados / Verificación / Desviaciones. -->

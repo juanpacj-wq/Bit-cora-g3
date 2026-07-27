@@ -2743,3 +2743,110 @@ test('D-057 E3.14 — guard de coherencia de lote: se sostiene también DESPUÉS
   assert.equal(vecino[0].hora_llamada, new Date(`${HOY}T${horaVieja}:00.000-05:00`).toISOString());
   await cleanMand();
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D-058 · E2 — el asiento normalizado en el listado del día (REQ-04 §8.1).
+//
+// El texto lo arma el BACKEND con el motor de `utils/asientos/` y viaja en `lote.asiento`; el front
+// solo lo pinta (respuesta 6). Lo que se fija acá es el CABLEADO —que el tipo, la unidad, los
+// periodos con sus valores, el funcionario y la descripción del lote lleguen al motor y vuelvan
+// armados—, no las plantillas: esas ya las cubren los 28 tests PUROS de `asientos.test.js`, que
+// corren sin BD en 275 ms. Duplicarlas acá solo agregaría 25 minutos de suite.
+//
+// Los asientos nombran `TST` porque la suite opera sobre la planta-fixture: `unidadCanonica` no
+// valida contra el catálogo a propósito (el motor es puro), así que la unidad sale tal cual llega.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+test('D-058 E2.1 — cada lote trae el asiento de SU tipo y la hora nunca va adentro del texto', async () => {
+  await cleanMand();
+  const horaAuth = horaBogotaMin(-15) ?? '00:00';
+  const horaPrueba = horaBogotaMin(-5) ?? '00:01';
+
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [
+        {
+          tipo: 'AUTH', hora: horaAuth, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e2-auth`,
+          // Mismo valor en los dos periodos → forma COMPACTA (`150 MW del P10 al P11`).
+          periodos: [{ periodo: 10, valor_mw: 150 }, { periodo: 11, valor_mw: 150 }],
+        },
+        {
+          // Sin `detalle`: es el caso NORMAL (D-056) y la frase tiene que terminar en el dato duro,
+          // sin rótulo huérfano ni `undefined`.
+          tipo: 'PRUEBA', hora: horaPrueba, funcionariocnd: null, detalle: null,
+          periodos: [{ periodo: 12, valor_mw: 50 }],
+        },
+      ],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const { status, data } = await getLotes({ sesion_id: ctx.sesiones.jdt });
+  assert.equal(status, 200, JSON.stringify(data));
+  const auth = data.lotes.find((l) => l.tipo === 'AUTH');
+  const prueba = data.lotes.find((l) => l.tipo === 'PRUEBA');
+  assert.ok(auth && prueba, JSON.stringify(data.lotes));
+
+  assert.equal(
+    auth.asiento,
+    `Se recibe llamada del CND (J. Pérez) autorizando ${PLANTA_ID} a generar 150 MW del P10 al P11. ${TEST_TAG} e2-auth.`,
+  );
+  assert.equal(prueba.asiento, `Se declara prueba de ${PLANTA_ID} a 50 MW en el P12.`);
+
+  // La hora viaja SIEMPRE aparte: cada consumidor la ubica en su columna (el listado, la columna A
+  // del F03). Si se colara en el texto, el Excel la imprimiría dos veces.
+  assert.ok(auth.hora_llamada, 'el lote sí tiene hora_llamada, solo que fuera del asiento');
+  assert.ok(!auth.asiento.includes(horaAuth), `la hora ${horaAuth} no puede estar en el asiento`);
+  assert.ok(!/\d{1,2}:\d{2}/.test(auth.asiento), `el asiento no lleva ningún HH:MM: ${auth.asiento}`);
+  await cleanMand();
+});
+
+test('D-058 E2.2 — con valores distintos el asiento los lista periodo por periodo', async () => {
+  await cleanMand();
+  // Contracara de la compactación: el endpoint tiene que entregarle al motor las celdas REALES del
+  // lote, no un valor único. Si mandara solo el primero, este asiento saldría `109 MW del P10 al
+  // P11` y publicaría una carga que nadie autorizó.
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'Gómez', detalle: null,
+        periodos: [{ periodo: 10, valor_mw: 109 }, { periodo: 11, valor_mw: 134 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const { status, data } = await getLotes({ sesion_id: ctx.sesiones.jdt });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.lotes.length, 1);
+  assert.equal(
+    data.lotes[0].asiento,
+    `Se recibe llamada del CND (Gómez) autorizando ${PLANTA_ID} a generar P10: 109 MW; P11: 134 MW.`,
+  );
+  await cleanMand();
+});
+
+test('D-058 E2.3 — un lote migrado por F32.A1 (sin hora_llamada) igual trae su asiento', async () => {
+  await cleanMand();
+  // La clave `hora_llamada` está AUSENTE, no en null (D-056 (b)). El asiento no depende de ella:
+  // el texto nunca la llevó, así que estos registros viejos se leen igual de bien.
+  const loteMigrado = '00000000-0000-4000-8000-000000000058';
+  await seedRegistroMand({
+    tipo: 'AUTH', periodo: 9, hora: null, valor: 77, lote_id: loteMigrado,
+    funcionariocnd: 'CND-migrado', detalle: `${TEST_TAG} e2-migrado`,
+  });
+
+  const { status, data } = await getLotes({ sesion_id: ctx.sesiones.jdt });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.lotes.length, 1);
+  assert.equal(data.lotes[0].hora_llamada, null, 'sigue sin hora, como lo dejó la migración');
+  assert.equal(
+    data.lotes[0].asiento,
+    `Se recibe llamada del CND (CND-migrado) autorizando ${PLANTA_ID} a generar 77 MW en el P9. ${TEST_TAG} e2-migrado.`,
+  );
+  await cleanMand();
+});
