@@ -1529,6 +1529,13 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
     && Number(reg.turno) !== turnoFromFechaLocal(toBogotaLocal(reg.fecha_evento));
   const hasExtras = camposExtraDef.length > 0;
   const camposExtraValores = parseCamposExtra(reg.campos_extra);
+  // D-058 (RQ-02.5): asiento REFLEJADO desde Operación 24h. Se identifica por el vínculo con su lote
+  // de origen (`origen_lote_id`, dato — no etiqueta) y se rotula con el nombre que el backend resuelve
+  // del catálogo (D-052: el nombre visible de una bitácora vive SOLO en el seed, nunca acá).
+  // Que no muestre lápiz ni basurero NO se decide en esta línea: eso lo manda `puede_editar`, el
+  // espejo por fila de canEditarRegistro (D-049), que ya llega en 0 para estas filas.
+  const esReflejado = !!camposExtraValores.origen_lote_id;
+  const origenNombre = reg.origen_bitacora_nombre || "su bitácora de origen";
   const updateCampoExtra = (campo, valorRaw, tipo) => {
     let v = valorRaw;
     if (valorRaw === "" || valorRaw === null || valorRaw === undefined) {
@@ -1737,6 +1744,16 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
             </>
           ) : (
             <>
+              {/* D-058 (RQ-02.5): el asiento reflejado se identifica por su ORIGEN y no ofrece
+                  edición — se corrige en Operación 24h y la corrección reescribe esta copia. Mismo
+                  patrón de chip que "Bloqueado"; el ojo de lectura sigue disponible al lado. */}
+              {esReflejado && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 bg-gray-50"
+                  title={`Asiento generado en ${origenNombre}. Corrígelo allá y esta copia se actualiza sola.`}>
+                  <Lock size={14} />
+                  <span className="hidden sm:inline">{origenNombre}</span>
+                </span>
+              )}
               {puedeEditar ? (
                 <button onClick={onStartEdit} className="p-2 rounded-lg text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors" title="Editar">
                   <Edit3 size={16} />

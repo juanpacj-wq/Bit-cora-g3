@@ -133,3 +133,48 @@ describe('GrillaRegistros · gate solo-autor por fila (D-049)', () => {
     teardown();
   });
 });
+
+// D-058 E6 (RQ-02.5) — el asiento REFLEJADO desde Operación 24h se identifica por su ORIGEN y no
+// ofrece edición en su destino. El backend ya manda `puede_editar=false` (espejo de
+// canEditarRegistro con la condición nueva), así que la fila queda sin controles por el mismo camino
+// de D-049: acá se fija que además se ROTULA, y que el rótulo sale del payload
+// (`origen_bitacora_nombre`, resuelto del catálogo) y no de un literal del front (D-052).
+function makeReflejado(overrides = {}) {
+  return makeRegistro({
+    registro_id: 42,
+    detalle: 'Se recibe llamada del CND (juanpa) autorizando GEC3 a generar 20 MW del P7 al P14.',
+    campos_extra: JSON.stringify({ origen_bitacora: 'MAND', origen_lote_id: 'abc-123' }),
+    origen_bitacora_nombre: 'Operación 24h',
+    puede_editar: false,
+    ...overrides,
+  });
+}
+
+describe('GrillaRegistros · asiento reflejado de solo lectura (D-058 E6)', () => {
+  it('muestra el chip con el nombre del origen y no ofrece Editar/Eliminar', () => {
+    const { container, teardown } = renderGrilla({ registros: [makeReflejado()] });
+    expect(container.querySelector('button[title="Editar"]')).toBeNull();
+    expect(container.querySelector('button[title="Eliminar"]')).toBeNull();
+    expect(container.textContent).toContain('Operación 24h');
+    expect(container.querySelector('span[title*="Corrígelo allá"]')).toBeTruthy();
+    teardown();
+  });
+
+  it('el ojo sigue expandiendo la descripción en lectura, como en cualquier fila ajena', () => {
+    const { container, click, teardown } = renderGrilla({ registros: [makeReflejado()] });
+    const ojo = container.querySelector('button[title="Ver detalle completo"]');
+    expect(ojo).toBeTruthy();
+    click(ojo);
+    expect(container.querySelector('p.line-clamp-2')).toBeNull();
+    expect(container.querySelector('textarea')).toBeNull();
+    teardown();
+  });
+
+  it('un registro normal NO trae el chip de origen', () => {
+    const { container, teardown } = renderGrilla({
+      registros: [makeRegistro({ puede_editar: true })],
+    });
+    expect(container.querySelector('span[title*="Corrígelo allá"]')).toBeNull();
+    teardown();
+  });
+});

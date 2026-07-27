@@ -6,7 +6,7 @@ import express from 'express';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
-import { hasPermisoBitacora, plantaMatch, canEditarRegistro } from '../middleware/permissions.js';
+import { hasPermisoBitacora, plantaMatch, canEditarRegistro, esAsientoReflejado } from '../middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from '../utils/campos.js';
 import { periodoFromFechaBogota, turnoFromPeriodo, fechaBogotaStr } from '../utils/turno.js';
 import { resolverTurnoParaEscritura } from '../utils/turno-entidad.js';
@@ -91,6 +91,11 @@ router.get('/activos', asyncH(async (req, res) => {
   // D-049: `puede_editar` es el espejo por fila de canEditarRegistro (autor + misma planta +
   // puede_crear vigente del cargo de la sesión) para que la grilla pinte lápiz/basurero desde la
   // verdad del servidor. Es SOLO affordance de UI: el enforcement real sigue en PUT/DELETE.
+  // D-058 (RQ-02.5/6): se le suma la cuarta condición del helper — un asiento REFLEJADO desde
+  // Operación 24h no se edita en su destino. El helper y este espejo se cambian JUNTOS: es lo único
+  // que impide que la grilla ofrezca un lápiz que el backend va a rechazar.
+  // `origen_bitacora_nombre` sale del catálogo por `codigo` (D-052: el nombre visible vive SOLO en el
+  // seed, nunca hardcodeado en el front) — es lo que el chip de la fila muestra como origen.
   reqQ.input('ses_usuario', sql.Int, sesion.usuario_id);
   reqQ.input('ses_planta', sql.VarChar(10), sesion.planta_id);
   reqQ.input('ses_cargo', sql.Int, sesion.cargo_id);
@@ -100,14 +105,18 @@ router.get('/activos', asyncH(async (req, res) => {
            te.nombre AS tipo_evento_nombre,
            autor.nombre_completo AS creado_por_nombre,
            r.creado_por AS creado_por_id,
+           borigen.nombre AS origen_bitacora_nombre,
            CAST(CASE WHEN r.creado_por = @ses_usuario
                       AND r.planta_id = @ses_planta
                       AND COALESCE(perm.puede_crear, 0) = 1
+                      AND JSON_VALUE(r.campos_extra, '$.origen_lote_id') IS NULL
                  THEN 1 ELSE 0 END AS BIT) AS puede_editar
     FROM bitacora.registro_activo r
     INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
     INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = r.tipo_evento_id
     LEFT JOIN lov_bit.usuario autor ON autor.usuario_id = r.creado_por
+    LEFT JOIN lov_bit.bitacora borigen
+      ON borigen.codigo = JSON_VALUE(r.campos_extra, '$.origen_bitacora')
     LEFT JOIN lov_bit.cargo_bitacora_permiso perm
       ON perm.cargo_id = @ses_cargo AND perm.bitacora_id = r.bitacora_id
     WHERE ${where.join(' AND ')}
@@ -621,6 +630,17 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
   if (reg.estado !== 'borrador') {
     return sendJSON(res, 409, { error: 'Solo se pueden editar registros en borrador' });
   }
+  // D-058 (RQ-02.5/6): el asiento reflejado se corrige en su ORIGEN. `canEditarRegistro` ya lo
+  // rechaza —es la MISMA condición, el enforcement no está partido— y acá solo se elige el `codigo`
+  // y el mensaje: responderle "solo el autor puede editarlo" a quien ES el autor sería falso y lo
+  // dejaría sin saber a dónde ir a corregirlo.
+  if (esAsientoReflejado(reg)) {
+    return sendJSON(res, 403, {
+      error: 'Este asiento se generó en Operación 24h y no se edita acá',
+      codigo: 'asiento_reflejado',
+      mensaje: 'Este asiento se generó en Operación 24h. Corrígelo allá y se actualiza acá solo.',
+    });
+  }
   // D-049: solo el autor (con puede_crear vigente) edita. Código estable para que el front ramifique.
   if (!(await canEditarRegistro(sesion, reg))) {
     return sendJSON(res, 403, {
@@ -775,7 +795,8 @@ router.delete('/:id(\\d+)', asyncH(async (req, res) => {
   const check = await db.request()
     .input('registro_id', sql.Int, registro_id)
     .query(`
-      SELECT ra.registro_id, ra.estado, ra.bitacora_id, ra.planta_id, ra.creado_por, b.codigo AS bitacora_codigo
+      SELECT ra.registro_id, ra.estado, ra.bitacora_id, ra.planta_id, ra.creado_por,
+             ra.campos_extra, b.codigo AS bitacora_codigo
       FROM bitacora.registro_activo ra
       INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
       WHERE ra.registro_id = @registro_id
@@ -793,6 +814,17 @@ router.delete('/:id(\\d+)', asyncH(async (req, res) => {
 
   if (reg.estado !== 'borrador') {
     return sendJSON(res, 409, { error: 'Solo se pueden eliminar registros en borrador' });
+  }
+  // D-058 (RQ-02.5/6): el asiento reflejado se BORRA borrando su lote de origen, que cascadea a las
+  // dos copias (E5). Mismo criterio que el PUT: `canEditarRegistro` ya lo rechaza; acá solo se le
+  // pone nombre al motivo, porque el autor de la copia es el autor del origen y "solo el autor"
+  // sería una explicación falsa.
+  if (esAsientoReflejado(reg)) {
+    return sendJSON(res, 403, {
+      error: 'Este asiento se generó en Operación 24h y no se elimina acá',
+      codigo: 'asiento_reflejado',
+      mensaje: 'Este asiento se generó en Operación 24h. Elimina allá el lote y esta copia se va con él.',
+    });
   }
   // D-049: solo el autor (con puede_crear vigente) elimina. Código estable para que el front ramifique.
   if (!(await canEditarRegistro(sesion, reg))) {

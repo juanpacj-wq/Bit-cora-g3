@@ -21,7 +21,7 @@
 | E3 — `seleccionable` + los 8 tipos espejo | ✅ | Columna `seleccionable` (F33.A1) + 8 tipos espejo sembrados en `SALAJDT`/`SALAING` con `0`; el selector los esconde y el POST/PUT genérico los rechaza. 11 tests nuevos. |
 | E4 — Reflejo a Sala: crear | ✅ | `utils/reflejo-sala.js` (`crearReflejoLote`) enganchado en `POST /guardar`: cada lote se asienta en SALAJDT **y** SALAING dentro de la misma transacción. 6 tests nuevos sobre una segunda planta-fixture. |
 | E5 — Reflejo a Sala: corregir y borrar | ✅ | `actualizarReflejoLote`/`borrarReflejoLote` enganchados en el `PUT` y el `DELETE` de lotes: corregir regenera el asiento en las dos copias y borrar las borra, en la transacción del origen. 7 tests nuevos; suite 489/488. |
-| E6 — El asiento reflejado es de solo lectura | ⬜ | — |
+| E6 — El asiento reflejado es de solo lectura | ✅ | El asiento reflejado no se edita ni se borra en su destino **ni por su autor** (que es el del origen): `canEditarRegistro` + su espejo SQL, con `codigo` propio `asiento_reflejado` y chip de origen en la fila. 5 tests nuevos (2 back, 3 front); suite 491/490. |
 | E7 — XLSX ESM + plantilla F03 derivada | ⬜ | — |
 | E8 — Consulta unificada y armado del día | ⬜ | — |
 | E9 — Endpoint mensual + selector y botón | ⬜ | — |
@@ -141,6 +141,28 @@ E8 ──> E9
 - **E5 — se corrigió un comentario de E4 que afirmaba que `registro_activo.detalle` es `NOT NULL`.**
   No lo es desde una migración vieja (`db.js:547` lo pasa a `NULL`). El argumento que sostenía —una
   copia muda es peor que un error— no dependía de eso y quedó reescrito sin la premisa falsa.
+- **E6 — el rechazo lleva `codigo` propio (`asiento_reflejado`), no `solo_autor`.** El enforcement
+  sigue siendo UNO (`canEditarRegistro`, que ya devuelve `false`); el endpoint solo elige el motivo,
+  llamando al MISMO predicado. Razón: responderle "solo el autor puede editarlo" a quien **es** el
+  autor es una explicación falsa, y lo deja sin saber que la corrección va por Operación 24h. Efecto
+  lateral bueno: si alguien borra una de las dos ramas, la otra sigue bloqueando.
+- **E6 — el `GET /activos` suma `origen_bitacora_nombre`** (LEFT JOIN al catálogo por `codigo`). Sin
+  eso el chip tendría que hardcodear "Operación 24h" en el front, que es exactamente lo que prohíbe
+  la convención 25 (D-052: el nombre visible vive SOLO en el seed). El front recibe el rótulo; del
+  `campos_extra` solo lee el dato (`origen_lote_id`), nunca una etiqueta.
+- **E6 — el `check` del `DELETE` no traía `campos_extra`** (el del `PUT` sí). El helper no puede
+  decidir sobre una columna que el llamador no selecciona: sin agregarla, el gate habría quedado
+  **inerte justo en el borrado** y verde en los tests del `PUT`. Es el mismo tipo de trampa que el
+  `stripComments` de D-055.
+- **E6 — NO hizo falta blindar el POST/PUT genérico contra un `origen_lote_id` forjado a mano.** Se
+  evaluó (lección de E3: esconder no es impedir) y resultó ya cerrado por AUD-39: `validateCamposExtra`
+  arma `campos_extra` **solo** con las claves declaradas en `definicion_campos`, y las bitácoras de
+  Sala la tienen en `NULL` → por ese endpoint `campos_extra` sale `NULL`. Agregar un guard redundante
+  habría sido código que nadie puede hacer fallar.
+- **E6 — los tests marcan la copia a mano** (`UPDATE campos_extra … WHERE registro_id = @id`, acotado
+  por PK) en vez de generarla con el reflejo real: `TEST_PLANTA` no refleja (RN-02.e) y el reflejo de
+  verdad ya lo cubren E4/E5 sobre `'TSR'`. Lo que E6 prueba es el **gate**, que lo único que mira es
+  `origen_lote_id` — así el test no depende de que MAND corra en esa planta.
 
 ## Datos descubiertos en ejecución
 
@@ -204,6 +226,16 @@ E8 ──> E9
   (`cierre catch-up GEC3 2026-07-26: 17 registros`): archiva el día MAND anterior a
   `registro_historico`, que es lo que hace todos los días en producción. No es destrucción, pero
   después de levantarlo un lote de AYER responde `409 lote_cerrado` — no lo confundas con un bug.
+- **`JSON_VALUE` LANZA ante texto no-JSON; no devuelve `NULL`** (comprobado:
+  `SELECT JSON_VALUE('no soy json','$.x')` → *"JSON text is not properly formatted"*). Importa porque
+  el espejo del `GET /activos` lo evalúa sobre **cada fila del listado**: una sola fila con
+  `campos_extra` corrupto pondría la grilla entera en 500. Hoy es imposible —**cero** filas no-JSON en
+  `registro_activo`, y todos los escritores guardan `JSON.stringify(objeto)` o `NULL`— así que ni el
+  espejo ni el `UPDATE`/`DELETE` de E5 necesitan `ISJSON`. Si algún día se persistiera `campos_extra`
+  crudo del cliente, los tres se caen juntos: es la premisa que sostiene a los tres.
+- **El front NO ramifica por `codigo` en registros** (cero referencias a `solo_autor` en `src/`): el
+  403 se muestra por su `mensaje`. Por eso `asiento_reflejado` no necesitó cableado extra en el front
+  — el texto amigable ya viaja en la respuesta (D-032).
 - **El puerto 3002 puede estar tomado por el backend del usuario.** El arranque igual corre
   `initDB()` (la migración se aplica) y luego muere con `EADDRINUSE`. Para los tests HTTP se levanta
   uno efímero: `cd server && AUTH_TEST_BYPASS=1 SERVER_PORT=3102 node --env-file=../.env server.js`
@@ -494,5 +526,64 @@ altera el contrato del reflejo ni el comportamiento del `POST /guardar` para pla
 
 **Desviaciones** — las seis registradas arriba. La única que cambia lo pedido por el `.md` es el
 sello condicional (`CASE`), que alinea la copia con el criterio del origen en vez de contradecirlo.
+
+### E6 — El asiento reflejado es de solo lectura en su destino  ✅
+
+**Archivos tocados**
+- `server/middleware/permissions.js` — `esAsientoReflejado(registro)` + `CLAVE_ORIGEN_REFLEJO`
+  (predicado único sobre `campos_extra.origen_lote_id`) y su condición dentro de
+  `canEditarRegistro`, con la trampa del autor comentada.
+- `server/routes/registros.js` — el espejo SQL del `GET /activos` suma la MISMA condición
+  (`JSON_VALUE(r.campos_extra,'$.origen_lote_id') IS NULL`) y el campo `origen_bitacora_nombre`
+  (LEFT JOIN al catálogo por `codigo`); el `PUT` y el `DELETE` responden `403 asiento_reflejado` con
+  su mensaje; el `check` del `DELETE` pasó a traer `campos_extra`.
+- `src/BitacorasGecelca3.jsx` — `RegistroRow` deriva `esReflejado` del `campos_extra` y pinta el chip
+  de origen (mismo patrón que "Bloqueado"), al lado del ojo de lectura.
+- `server/tests/registros_solo_autor.test.js` — 2 tests nuevos (E6.6 y E6.7) + `marcarComoReflejado()`.
+- `src/components/grilla-solo-autor-gate.test.jsx` — 3 tests nuevos (chip + ojo + ausencia del chip).
+
+**Decisiones de implementación**
+- **El helper y su espejo SQL se cambiaron JUNTOS**, que es la regla de D-049 y lo único que impide
+  que la grilla ofrezca un lápiz que el backend rechaza. El test 7 los enfrenta en la misma corrida:
+  mismo autor, misma bitácora, misma planta, mismo cargo — lo único que cambia es el origen.
+- **Es una RESTRICCIÓN, no un bypass.** D-049/D-039 prohíben *ampliar* quién edita; acá se recorta, y
+  sin excepción para nadie (tampoco el ADMIN). La excepción de MAND no se tocó: sigue viviendo en el
+  gate `puede_crear` de su endpoint por lote, y MAND ni siquiera pasa por `canEditarRegistro`
+  (D-057 (c)). `sala_de_mando_batch` lo confirma en verde.
+- El front **no** decide la editabilidad: la sigue derivando de `puede_editar` (D-049). Lo único que
+  agrega el `campos_extra` es el chip — el dato, no la etiqueta, que viene resuelta del catálogo.
+- Las cinco decisiones restantes están arriba, en "Decisiones / desviaciones acumuladas".
+
+**Verificación real**
+- `node --test --test-concurrency=1 tests/registros_solo_autor.test.js` → **7/7 pass, 0 fail**, 61 s
+  (5 previos + los 2 nuevos). El 403 llega con `codigo: 'asiento_reflejado'` en `PUT` y en `DELETE`, y
+  la copia queda con su texto intacto.
+- `node --test --test-concurrency=1 tests/sala_de_mando_batch.test.js` → **78/78 pass, 0 fail**, 185 s.
+  **El par se lee junto** (lo pide el `.md`): la corrección de un lote por un NO-autor sigue
+  funcionando, y con ella los 14 criterios de D-057 y los 13 tests de D-058 E2/E4/E5.
+- `npx vitest run src/components/grilla-solo-autor-gate.test.jsx` → **8/8 pass** (5 previos + 3
+  nuevos). Suite front completa: **85/85 pass, 12 archivos** (82 previos + los 3).
+- `npm run build` (raíz) → **verde**, 14,1 s.
+- **Suite backend completa: `tests 491 · pass 490 · fail 0 · skipped 1`** (`parseXls`, skip declarado
+  ajeno), contra `PortalG3_dev` con el server efímero en 3102. Baseline de E5 (489/488) **+ los 2
+  nuevos**, sin un solo rojo — ni el flaky conocido de `finalizar_turno` (44/44 su bloque) — y
+  `zzz_session_leak_guard` corrió **último** y pasó. Se corrió en **11 bloques en primer plano**, por
+  las dos razones de entorno ya documentadas (los procesos en background mueren a los ~20 min y un
+  `npm test` de una pieza dura ~40). Reparto: (1) guards estáticos + módulos puros 79 · (2) tipos
+  espejo + coherencia + los dos guards de destrucción 21 · (3) revalidate + fechas + `turno-entidad`
+  83 · (4) auth + DISP 47 · (5) cierre + conformación 23 · (6) `sala_de_mando_batch` 78 · (7) COMB +
+  finalizar + cambiar unidad 44 · (8) `registros_turno_id` + gate de transición + seguimiento 9 ·
+  (9) históricos + guards no-auto-ejecutables + rol CyM + SIS + hardening + errores + IA 106 (1 skip)
+  · (10) `registros_solo_autor` 7 · (11) leak guard 1. Suma bruta 498; los dos guards de destrucción
+  (7 tests) cayeron en dos bloques → **491 únicos**.
+- **Smoke visual** (rasterizado del componente REAL: vitest+jsdom → HTML + el CSS del `dist` → Edge
+  headless → PNG), con una bitácora de Sala mostrando las dos filas lado a lado: el asiento reflejado
+  se lee completo, muestra el chip "Operación 24h" y el ojo de lectura, y **no** tiene lápiz ni
+  basurero; el registro tecleado a mano por el mismo autor conserva los dos. El artefacto era
+  temporal y se borró (no se commitea).
+
+**Desviaciones** — las seis registradas arriba. La única que se aparta de lo pedido por el `.md` es el
+`codigo` propio en vez de reusar `solo_autor`, que hace el rechazo *más* informativo sin partir el
+enforcement.
 
 <!-- Cada etapa agrega su bloque: ### EX — <título>  ✅ con Archivos tocados / Verificación / Desviaciones. -->
