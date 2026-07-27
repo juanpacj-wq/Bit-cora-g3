@@ -22,7 +22,7 @@
 | E4 — Reflejo a Sala: crear | ✅ | `utils/reflejo-sala.js` (`crearReflejoLote`) enganchado en `POST /guardar`: cada lote se asienta en SALAJDT **y** SALAING dentro de la misma transacción. 6 tests nuevos sobre una segunda planta-fixture. |
 | E5 — Reflejo a Sala: corregir y borrar | ✅ | `actualizarReflejoLote`/`borrarReflejoLote` enganchados en el `PUT` y el `DELETE` de lotes: corregir regenera el asiento en las dos copias y borrar las borra, en la transacción del origen. 7 tests nuevos; suite 489/488. |
 | E6 — El asiento reflejado es de solo lectura | ✅ | El asiento reflejado no se edita ni se borra en su destino **ni por su autor** (que es el del origen): `canEditarRegistro` + su espejo SQL, con `codigo` propio `asiento_reflejado` y chip de origen en la fila. 5 tests nuevos (2 back, 3 front); suite 491/490. |
-| E7 — XLSX ESM + plantilla F03 derivada | ⬜ | — |
+| E7 — XLSX ESM + plantilla F03 derivada | ✅ | ZIP propio en ESM (`leerZip`/`escribirZip`), plantilla derivada del F03 real y commiteada, y el clonador que emite N hojas con `dimension`/`mergeCells`/`Print_Area` recalculados. 18 tests puros; suite 509/508. Verificado abriendo el libro en Excel. |
 | E8 — Consulta unificada y armado del día | ⬜ | — |
 | E9 — Endpoint mensual + selector y botón | ⬜ | — |
 | E10 — Docs + ADR D-058 + cleanup | ⬜ | — |
@@ -163,6 +163,24 @@ E8 ──> E9
   por PK) en vez de generarla con el reflejo real: `TEST_PLANTA` no refleja (RN-02.e) y el reflejo de
   verdad ya lo cubren E4/E5 sobre `'TSR'`. Lo que E6 prueba es el **gate**, que lo único que mira es
   `origen_lote_id` — así el test no depende de que MAND corra en esa planta.
+- **E7 — `f03-libro.js` ya trae el render de las filas, que el `.md` había dejado para E9.** No es
+  adelanto de alcance: es que los tests que E7 exige —"las filas de datos usan `t="inlineStr"`",
+  "el XML escapa `&`, `<`, `>`"— **no se pueden escribir sin renderizar filas**. Se implementó
+  contra el shape exacto que E8 va a producir (`{fecha, bloques:[{turno_literal, jefe, ingenieros,
+  filas:[{hora, asiento}]}]}`), así que a E9 le queda cablear, no escribir el layout.
+- **E7 — la plantilla NO conserva la fila 6 (`FECHA:`), aunque sí su merge `B6:D6`.** El `.md` la
+  ponía entre las filas del encabezado, pero su valor cambia por hoja: dejarla obligaba a parchear
+  la celda `B6` dentro de un bloque clonado con un `replace` sobre XML ajeno. Se genera entera, con
+  los estilos documentados. Conserva el andamiaje y elimina la costura frágil.
+- **E7 — el módulo recibe la hora como `'HH:MM'` (string), no como `Date`.** Mantiene
+  `f03-libro.js` **puro**, igual que el motor de E1: sin reloj y sin TZ. La conversión a hora
+  Bogotá es de E8, que es quien consulta; el escritor solo traduce `'HH:MM'` a la fracción de día
+  que Excel guarda. Si recibiera un `Date`, la TZ entraría por dos puertas distintas.
+- **E7 — el script offline recorta las celdas J..M del encabezado.** El F03 real arrastra celdas
+  sueltas fuera del formato (relleno de un editor anterior) que inflaban la `dimension` a `A1:M40`
+  sin pintar nada. El formato ocupa A..I y la hoja derivada también.
+- **E7 — `tabSelected="1"` solo va en la primera hoja.** Si viaja en todas, Excel abre el libro con
+  las 31 hojas **agrupadas** y cualquier edición del usuario se replica en todas a la vez.
 
 ## Datos descubiertos en ejecución
 
@@ -236,6 +254,50 @@ E8 ──> E9
 - **El front NO ramifica por `codigo` en registros** (cero referencias a `solo_autor` en `src/`): el
   403 se muestra por su `mensaje`. Por eso `asiento_reflejado` no necesitó cableado extra en el front
   — el texto amigable ya viaja en la respuesta (D-032).
+- **MAPA DE ÍNDICES DE ESTILO del F03 (E8 y E9 lo consumen; NO re-descubrirlo a ojo).** Medido sobre
+  la hoja `2026-01-01` del formato real. La copia autoritativa vive en la cabecera de
+  `scripts/derivar-plantilla-f03.mjs`, junto al script que lo extrajo, y en la constante `S` de
+  `server/utils/f03-libro.js`:
+
+  | Fila del layout | A | B | C..H | I | Notas |
+  |---|---|---|---|---|---|
+  | 6 · `FECHA:` | 2 | 48 | 3 (E..H); C6/D6 = 48 | 4 | **B6 es un SERIAL**, no texto |
+  | `TURNO:` | 49 | 50 / 51 | 53 | 54 | D = **52** (valor) |
+  | `JEFE DE TURNO:` | 55 | 56 / 57 | 59 | 60 | D = **58** (valor) |
+  | `INGENIERO DE TURNO:` | 21 | 22 / 23 | 25 | 26 | D = **24** (valor) |
+  | `HH:MM` / `DESCRIPCIÓN…` | 11 | 64 | 65 | 66 | rótulos centrados |
+  | dato (intermedia) | 12 | 73 | 74 | 75 | A = hora, numFmt **20** (`h:mm`) |
+  | dato (última del bloque) | 16 | 76 | 77 | 78 | terna con borde inferior grueso |
+
+  Fuentes: `fontId=2` Arial Narrow 11 negrita (rótulos) · `fontId=4` Arial Narrow 10 negrita
+  (valores del encabezado de bloque) · `fontId=5` Arial Narrow 8 (filas de datos).
+- **`s=48` usa `numFmtId=164` = `[$-F800]dddd, mmmm dd, yyyy`, o sea FECHA LARGA — no `dd/mm/aaaa`.**
+  El insumo §7 y el `.md` de E9 dicen `dd/mm/aaaa`, pero el formato controlado real muestra
+  `jueves, 1 de enero de 2026`, y se respetó el archivo (D-058 calca el formato, no lo redefine).
+  **Si E9 quiere `dd/mm/aaaa` hay que agregar un `xf` nuevo a `styles.xml`** — no alcanza con cambiar
+  el valor de la celda. Decisión de E9, con el dato a la vista.
+- **El original es INCONSISTENTE en el estilo de la celda A de la última fila de cada bloque** (usa
+  12 en dos bloques y 16 en otro, ambos con `thickBot`). Se adoptó la terna coherente **16/76/77/78**,
+  que es la que cierra el recuadro con el borde grueso. El resultado se ve mejor que el papel.
+- **Las celdas de descripción llevan `wrapText="1"` y están COMBINADAS (B:I), y Excel NO autoajusta
+  el alto de una celda combinada** — hay que estimarlo o el texto largo sale cortado. `f03-libro.js`
+  usa ~115 caracteres por renglón y 12.75 pt por renglón (mínimo 16.5), que reproduce lo que el
+  humano hace a mano en el F03 (16.5 para una línea, 25.5 para dos).
+- **El serial de fecha de Excel se ancló contra el archivo real: `2026-01-01` → `46023`.** Es el
+  valor exacto de la celda B6 de esa hoja. Hay un test que lo fija; si el desfase de época se
+  rompiera, la hoja mostraría otro día y nadie lo notaría hasta imprimir.
+- **`printerSettings{N}.bin` son idénticos entre hojas; los `drawing{N}.xml` NO** (difieren en el
+  `id`/`creationId` de la imagen). Clonar uno solo para todas las hojas funciona igual: el `rId` del
+  drawing es interno a cada hoja y la imagen se referencia por el rels.
+- **`PageSetup.PrintArea` vía COM devuelve vacío TAMBIÉN en el F03 original.** No es un defecto del
+  generado: al abrir el libro sin activar la hoja, Excel no expone esa propiedad. La verificación
+  correcta es `Workbook.Names`, donde el original trae 32 y el generado uno por hoja.
+- **La causa REAL del flaky de `finalizar_turno` (4a2/4a3/4e/4f), medida el 2026-07-27:** la única
+  cabecera `turno_unidad` de la fixture `'TST'` queda en **`PROGRAMADO`** (no `CERRADO`, como decía
+  la nota previa) y el gate de escritura la trata como no escribible → `409 turno_cerrado` lejos de
+  todo borde de turno. **Reparación de la fixture** (no toca planta real):
+  `UPDATE bitacora.turno_unidad SET estado='ABIERTO', motivo_cierre=NULL, cerrado_en=NULL WHERE planta_id='TST' AND turno_unidad_id=(SELECT MAX(turno_unidad_id) FROM bitacora.turno_unidad WHERE planta_id='TST')`.
+  Con eso el archivo pasa **15/15**. No es regresión de ninguna etapa de D-058.
 - **El puerto 3002 puede estar tomado por el backend del usuario.** El arranque igual corre
   `initDB()` (la migración se aplica) y luego muere con `EADDRINUSE`. Para los tests HTTP se levanta
   uno efímero: `cd server && AUTH_TEST_BYPASS=1 SERVER_PORT=3102 node --env-file=../.env server.js`
@@ -585,5 +647,85 @@ sello condicional (`CASE`), que alinea la copia con el criterio del origen en ve
 **Desviaciones** — las seis registradas arriba. La única que se aparta de lo pedido por el `.md` es el
 `codigo` propio en vez de reusar `solo_autor`, que hace el rechazo *más* informativo sin partir el
 enforcement.
+
+### E7 — Escritor XLSX en ESM + plantilla F03 derivada  ✅
+
+**Archivos tocados**
+- `server/utils/xlsx.js` (nuevo) — port ESM del escritor de `js-scraper-carbon-g32/xlsx-write.js`
+  (que **no se tocó**: es otro proyecto, CommonJS) más el lector: `leerZip` recorre el **central
+  directory** desde el EOCD y soporta `stored` y `deflate` (`inflateRawSync`); `escribirZip`
+  devuelve **`Buffer`** en vez de escribir a disco (por eso no lleva el `assertWithinDir` de
+  AUD-28). Conserva `xmlEsc` y `colRef`. Sin ZIP64: lanza en vez de devolver basura.
+- `scripts/derivar-plantilla-f03.mjs` (nuevo) — **offline**, se corre a mano. Toma la primera hoja
+  con nombre `YYYY-MM-DD` (así ignora la duplicada `2026-01-24 (2)`, que además es el primer sheet
+  del libro), borra las filas de datos, recorta las celdas J..M, normaliza la vista y re-emite el
+  artefacto como ZIP **stored**. Lleva el **mapa de índices de estilo** en su cabecera.
+- `server/assets/f03-plantilla.xlsx` (nuevo, **artefacto binario commiteado**) — 125 001 bytes,
+  15 entradas, mono-hoja, con el logo, los estilos, el tema y el `sharedStrings` del formato real.
+- `server/utils/f03-libro.js` (nuevo) — el clonador: emite `sheet{N}.xml` + su `_rels` +
+  `drawing{N}.xml` + su `_rels` + `printerSettings{N}.bin` por día; regenera `workbook.xml`
+  (sheets + **un `definedName` por hoja**), `xl/_rels/workbook.xml.rels`, `[Content_Types].xml` y
+  `docProps/app.xml`; copia intactas `styles`, `theme1`, `sharedStrings`, `media/image1.png`,
+  `_rels/.rels` y `docProps/core.xml`; y recalcula por hoja `dimension`, `mergeCells` y `Print_Area`.
+- `server/tests/f03_libro.test.js` (nuevo) — 18 tests unitarios PUROS (344 ms, sin BD).
+- `server/package.json` — el archivo enganchado al script `test`, junto a los módulos puros.
+
+**Decisiones de implementación**
+- **`inlineStr` para todo lo que escribimos**, jamás `sharedStrings`: agregar entradas obligaría a
+  reindexar la tabla de strings, y esa tabla es la que sostiene los `t="s"` del encabezado GENE-F03
+  clonado — un índice corrido corrompe el título del formato. Hay test que cuenta que no aparece ni
+  un `t="s"` nuevo.
+- **El `Print_Area` se emite por hoja con su rango recalculado.** Es la trampa que marcaba el `.md`:
+  el original trae 32 `definedName` con rangos distintos (`$A$6:$I$25` … `$A$6:$I$32`) según cuántos
+  eventos tuvo cada día. Clonar el bloque sin recalcular imprime rangos vacíos en los días cortos y
+  corta los largos. El test cruza cada rango contra la `dimension` real de su hoja.
+- **El logo no se toca**: vive en `xl/media/`, se copia byte a byte y su `drawing` lo referencia por
+  `rId`. Hay test de identidad binaria.
+- Las cuatro decisiones restantes están arriba, en "Decisiones / desviaciones acumuladas".
+
+**Un bug encontrado y corregido durante la etapa** (vale la pena porque va a repetirse): la primera
+versión extraía filas con `/<row r="(\d+)"[\s\S]*?(?:<\/row>|\/>)/g`. Esa alternativa **no-greedy
+corta en el primer `/>`, que es una CELDA auto-cerrada y no el fin de la fila**, así que TODAS las
+filas del encabezado quedaron truncadas: la plantilla salía con XML partido. Pasaba los conteos y
+Excel la habría reportado como archivo corrupto. La forma correcta es
+`/<row\s[^>]*\/>|<row\s[^>]*>[\s\S]*?<\/row>/g`, y quedó comentada en los dos módulos + un test
+("el XML de cada hoja está bien formado") que compara aperturas contra cierres de `<row>` y `<c>`.
+Es hermano del `stripComments` de D-055: una regex silenciosamente inerte.
+
+**Verificación real**
+- `node --test --test-concurrency=1 tests/f03_libro.test.js` → **18/18 pass, 0 fail**, **344 ms**
+  (si tardara, habría tocado la BD y estaría mal).
+- **Suite backend completa: `tests 509 · pass 508 · fail 0 · skipped 1`** (`parseXls`, skip declarado
+  ajeno), contra `PortalG3_dev` con el server efímero en 3102. Baseline de E6 (491/490) **+ los 18
+  nuevos**, sin degradar. Corrida en **10 bloques en primer plano** por las dos razones de entorno ya
+  documentadas. Reparto: (1) guards estáticos + módulos puros + `f03_libro` 126 (1 skip) ·
+  (2) catálogos + tipos espejo + split sala + coherencia 24 · (3) revalidate + fechas +
+  `turno-entidad` 83 · (4) auth + DISP 47 · (5) cierre + conformación 23 · (6) `sala_de_mando_batch`
+  78 · (7) COMB + finalizar + cambiar unidad 44 · (8) `registros_turno_id` + gate de transición +
+  seguimiento + solo autor 16 · (9) históricos + rol CyM + SIS + hardening + IA 67 · (10) leak guard 1.
+- **El flaky conocido apareció y se diagnosticó, no se asumió.** `finalizar_turno` 4a2/4a3/4e/4f
+  fallaron con `409 turno_cerrado`. Consultando la BD: la única cabecera `turno_unidad` de `'TST'`
+  estaba en **`PROGRAMADO`**. Al reabrirla (acotado a la fixture) el archivo pasó **15/15**. Queda la
+  causa exacta y su reparación en "Datos descubiertos". No es regresión de E7: esta etapa no toca
+  ningún endpoint, gate ni tabla — sus únicos cambios sobre código existente son una entrada en el
+  script `test` de `server/package.json`.
+- `guard_no_prod_historico_destruction` + `guard_no_prod_disp_destruction` +
+  `guard_tipo_evento_coherente` verdes; `zzz_session_leak_guard` corrió **último** y pasó.
+- `npm run build` (raíz) → **verde**, 9,4 s. No se tocó front; se corrió como sanity.
+- **SMOKE MANUAL EN EXCEL — hecho, y es lo único que el test no puede cubrir.** Se generó un libro
+  de 31 hojas con contenido sintético y se abrió con Excel real (COM):
+  **no aparece la advertencia de archivo corrupto** (criterio 9 de REQ-06), Excel NO reparó nada,
+  se leen las 31 hojas con sus nombres `2026-01-01`…`2026-01-31`, **el logo está presente**
+  (`Shapes.Count = 1`), el encabezado GENE-F03 y su `Fecha: 01/06/2017` quedaron intactos, la celda
+  `B6` muestra `jueves, 1 de enero de 2026`, la hora se lee `3:15` (numFmt del formato) y
+  `Workbook.Names` trae los 31 `Print_Area` con el rango recalculado.
+  Además se exportó la hoja 1 a PNG y se **inspeccionó visualmente**: los tres bloques con sus
+  rótulos, las dos unidades mezcladas, el texto con `&` y `<en línea>` correctamente escapado y el
+  renglón largo partido en dos líneas con su alto. La hoja se lee como el formato controlado.
+  Los artefactos eran temporales y no se commitean.
+
+**Desviaciones** — las seis registradas arriba. Ninguna cambia el formato de salida respecto del
+papel; la única que se aparta de lo pedido por el `.md` es que el render de filas quedó en E7 en vez
+de E9, y es porque los tests que E7 exige no se pueden escribir sin él.
 
 <!-- Cada etapa agrega su bloque: ### EX — <título>  ✅ con Archivos tocados / Verificación / Desviaciones. -->
