@@ -8,8 +8,9 @@ import { fechaOperativaDePeriodo, turnoFromPeriodo } from '../utils/turno.js';
 import { recalcularEventoDashboard } from '../utils/notificador.js';
 import { crearReflejoLote, actualizarReflejoLote } from '../utils/reflejo-sala.js';
 import { resolverOAbrirTurnoAbierto } from '../utils/turno-entidad.js';
+import { leerZip } from '../utils/xlsx.js';
 import {
-  setupSessions, cleanupTestRegistros, call, TEST_PLANTA, TEST_TAG,
+  setupSessions, cleanupTestRegistros, call, callBinario, TEST_PLANTA, TEST_TAG,
   TEST_PLANTA_REFLEJO, setupSesionReflejo,
 } from './helpers.js';
 
@@ -3633,4 +3634,188 @@ test('D-058 E5.7 — un PUT que no cambia nada no sella las copias (paridad con 
     assert.equal(c.detalle, previo.asiento, 'y el texto es el mismo');
   }
   await cleanReflejo();
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// D-058 E9 — GET /api/sala-de-mando/reporte-mensual (REQ-06)
+//
+// La descarga del libro mensual GENE-F03. Es SOLO LECTURA: ningún test de este bloque escribe nada
+// (el único que siembra —E9.7— lo hace para comprobar que la planta-fixture NO sale en el libro, y
+// limpia con `cleanMand`).
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+const MES_ACTUAL = HOY.slice(0, 7);
+
+// `YYYY-MM` de `n` meses atrás del actual (Bogotá). Se calcula relativo a HOY y no se hardcodea un
+// mes: un literal como '2026-05' se vuelve FUTURO —y el endpoint lo rechaza con `mes_futuro`— si
+// alguien corre la suite antes de esa fecha, y el test fallaría por la razón equivocada.
+function mesAtras(n) {
+  const [y, m] = MES_ACTUAL.split('-').map(Number);
+  const d = new Date(Date.UTC(y, m - 1 - n, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+// Días de un mes `YYYY-MM`. `Date.UTC(y, m, 0)` es el día 0 del mes siguiente: resuelve febrero y
+// los bisiestos sin tabla (mismo cálculo que `diasDelMes` en f03-datos.js).
+function diasDe(mes) {
+  const [y, m] = mes.split('-').map(Number);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+// El mes PASADO más reciente con exactamente `n` días. Busca hacia atrás para no depender de la
+// fecha en que se corra la suite.
+function mesPasadoCon(n) {
+  for (let i = 1; i <= 14; i++) {
+    const mes = mesAtras(i);
+    if (diasDe(mes) === n) return mes;
+  }
+  throw new Error(`no se encontró un mes pasado de ${n} días`);
+}
+
+async function descargarLibro({ sesion_id, mes }) {
+  const qs = mes === undefined ? '' : `?mes=${encodeURIComponent(mes)}`;
+  return callBinario('GET', `/api/sala-de-mando/reporte-mensual${qs}`, { sesion_id });
+}
+
+// Nombres de las hojas, EN ORDEN, leídos del `xl/workbook.xml` del libro descargado.
+function hojasDelLibro(buffer) {
+  const zip = leerZip(buffer);
+  const workbook = zip.get('xl/workbook.xml').toString('utf8');
+  return [...workbook.matchAll(/<sheet name="([^"]+)"/g)].map((m) => m[1]);
+}
+
+// Todo el XML de las hojas concatenado: sirve para preguntar si un texto aparece EN ALGÚN renglón
+// del libro (sin importar en qué día ni en qué bloque cayó).
+function textoDelLibro(buffer) {
+  const zip = leerZip(buffer);
+  let todo = '';
+  for (const [nombre, datos] of zip) {
+    if (nombre.startsWith('xl/worksheets/sheet')) todo += datos.toString('utf8');
+  }
+  return todo;
+}
+
+// Foto de las tablas que el reporte LEE. Sirve para probar RN-06.f / criterio 10: generar el libro
+// no puede cambiar una sola fila.
+async function fotoDeLaBD() {
+  const db = await getDB();
+  const r = await db.request().query(`
+    SELECT
+      (SELECT COUNT(*) FROM bitacora.registro_activo)        AS activos,
+      (SELECT COUNT(*) FROM bitacora.registro_historico)     AS historicos,
+      (SELECT COUNT(*) FROM bitacora.evento_dashboard)       AS dashboard,
+      (SELECT COUNT(*) FROM bitacora.disponibilidad_estado)  AS disponibilidad,
+      (SELECT COUNT(*) FROM bitacora.mand_cierre_log)        AS cierres
+  `);
+  return r.recordset[0];
+}
+
+test('D-058 E9.1 — un cargo con solo puede_ver en MAND NO descarga: 403 [criterio 2 de REQ-06]', async () => {
+  // El gate NO puede derivarse de la visibilidad: la matriz le da `puede_ver` en MAND a TODOS los
+  // cargos (`WHEN b.codigo = 'MAND' THEN 1`), y este mismo cargo obtiene 200 en `GET /lotes`
+  // (D-056 E4.5). Lo que lo separa es `puede_crear`, data-driven (RQ-06.11/12).
+  const { status, buffer } = await descargarLibro({ sesion_id: ctx.sesiones.ingQuim, mes: MES_ACTUAL });
+  assert.equal(status, 403, buffer.toString('utf8').slice(0, 200));
+  const cuerpo = JSON.parse(buffer.toString('utf8'));
+  assert.equal(cuerpo.codigo, 'sin_permiso_descarga');
+
+  // Contracara en la misma corrida: el mismo mes, con un cargo que sí registra, baja el archivo.
+  const ok = await descargarLibro({ sesion_id: ctx.sesiones.jdt, mes: MES_ACTUAL });
+  assert.equal(ok.status, 200);
+});
+
+test('D-058 E9.2 — con puede_crear baja un .xlsx real, con el nombre del formato controlado', async () => {
+  const { status, headers, buffer } = await descargarLibro({ sesion_id: ctx.sesiones.jdt, mes: MES_ACTUAL });
+  assert.equal(status, 200, buffer.toString('utf8').slice(0, 200));
+  assert.equal(
+    headers.get('content-type'),
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  );
+
+  const disposicion = headers.get('content-disposition');
+  assert.ok(disposicion.startsWith('attachment;'), `se esperaba attachment: ${disposicion}`);
+  // Las dos formas del nombre: el `filename*` en UTF-8 percent-encoded (la tilde de "operación") y
+  // el `filename` ASCII de respaldo. Mandar la tilde cruda en un header la entrega como latin-1.
+  assert.ok(
+    disposicion.includes(`filename*=UTF-8''${MES_ACTUAL.replace('-', '_')}_OPG3-F03`),
+    `sin filename* con el mes: ${disposicion}`,
+  );
+  assert.ok(disposicion.includes('operaci%C3%B3n.xlsx'), `la tilde no viajó codificada: ${disposicion}`);
+  assert.ok(/filename="[\x20-\x7e]+"/.test(disposicion), `el respaldo no es ASCII puro: ${disposicion}`);
+
+  // Es un ZIP de verdad (firma del local file header), no un JSON de error con status 200.
+  assert.deepEqual([...buffer.subarray(0, 4)], [0x50, 0x4b, 0x03, 0x04]);
+  const hojas = hojasDelLibro(buffer);
+  assert.equal(hojas.length, diasDe(MES_ACTUAL), 'una hoja por día del mes en curso');
+});
+
+test('D-058 E9.3 — mes futuro → 400 mes_futuro (paridad con el fecha_futura de COMB)', async () => {
+  const [y, m] = MES_ACTUAL.split('-').map(Number);
+  const siguiente = new Date(Date.UTC(y, m, 1));
+  const mesFuturo = `${siguiente.getUTCFullYear()}-${String(siguiente.getUTCMonth() + 1).padStart(2, '0')}`;
+
+  const { status, buffer } = await descargarLibro({ sesion_id: ctx.sesiones.jdt, mes: mesFuturo });
+  assert.equal(status, 400, buffer.toString('utf8').slice(0, 200));
+  assert.equal(JSON.parse(buffer.toString('utf8')).codigo, 'mes_futuro');
+});
+
+test('D-058 E9.4 — mes mal formado → 400 mes_invalido; sin mes → el mes en curso', async () => {
+  for (const mes of ['2026-13', '2026-00', '2026', 'julio', '2026-7']) {
+    const { status, buffer } = await descargarLibro({ sesion_id: ctx.sesiones.jdt, mes });
+    assert.equal(status, 400, `mes "${mes}" debió rechazarse: ${buffer.toString('utf8').slice(0, 120)}`);
+    assert.equal(JSON.parse(buffer.toString('utf8')).codigo, 'mes_invalido', `mes "${mes}"`);
+  }
+  // `mes` ausente cae al mes Bogotá en curso, misma paridad que la `fecha` de `GET /lotes` (y lo que
+  // pide RQ-06.4). No es un 400: el caso normal del botón es "descargá el mes en curso".
+  const sinMes = await descargarLibro({ sesion_id: ctx.sesiones.jdt, mes: undefined });
+  assert.equal(sinMes.status, 200, sinMes.buffer.toString('utf8').slice(0, 200));
+  assert.equal(hojasDelLibro(sinMes.buffer).length, diasDe(MES_ACTUAL));
+});
+
+test('D-058 E9.5 — 31, 30 y 28 hojas según el mes, en orden y con el día por nombre [criterio 4]', async () => {
+  for (const dias of [31, 30, 28]) {
+    const mes = mesPasadoCon(dias);
+    const { status, buffer } = await descargarLibro({ sesion_id: ctx.sesiones.jdt, mes });
+    assert.equal(status, 200, `${mes}: ${buffer.toString('utf8').slice(0, 200)}`);
+
+    const hojas = hojasDelLibro(buffer);
+    assert.equal(hojas.length, dias, `${mes} debe traer ${dias} hojas`);
+    // Ascendente y sin huecos: la hoja i es el día i del mes. Un día sin eventos igual está presente
+    // (RQ-06.8) — con la adopción actual, la mayoría del libro sale así, y es correcto.
+    const esperadas = Array.from({ length: dias }, (_, i) => `${mes}-${String(i + 1).padStart(2, '0')}`);
+    assert.deepEqual(hojas, esperadas, `${mes}: las hojas deben ir del día 1 al ${dias}`);
+  }
+});
+
+test('D-058 E9.6 — la descarga no cambia NADA en la BD [criterio 10 / RN-06.f]', async () => {
+  const antes = await fotoDeLaBD();
+  const { status } = await descargarLibro({ sesion_id: ctx.sesiones.jdt, mes: MES_ACTUAL });
+  assert.equal(status, 200);
+  assert.deepEqual(await fotoDeLaBD(), antes, 'generar el libro es solo lectura');
+});
+
+test('D-058 E9.7 — la planta-fixture no sale en el libro [RN-06.g]', async () => {
+  await cleanMand();
+  // Un lote REAL sobre 'TST', creado por el endpoint de captura. Si el alcance del libro fuera "todas
+  // las plantas", su asiento —que arrastra el TEST_TAG dentro del detalle— aparecería en la hoja de
+  // hoy. `PLANTAS_F03` es lo que lo deja afuera, sin que producción nombre ninguna fixture.
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, detalle: `${TEST_TAG} e9-tst`, funcionariocnd: 'Pérez',
+        periodos: [{ periodo: 7, valor_mw: 120 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const { status, buffer } = await descargarLibro({ sesion_id: ctx.sesiones.jdt, mes: MES_ACTUAL });
+  assert.equal(status, 200);
+  assert.ok(
+    !textoDelLibro(buffer).includes(TEST_TAG),
+    'un registro de la planta-fixture se coló en el libro del formato controlado',
+  );
+  await cleanMand();
 });

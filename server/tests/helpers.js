@@ -135,6 +135,19 @@ export async function deactivateSyntheticSessions() {
   return r.rowsAffected[0];
 }
 
+// D-058 E9: hermano de `call` para endpoints que responden BYTES (el libro mensual F03). No puede
+// reusar `call` porque ese hace `res.json()` y se comería el `.xlsx`. Devuelve también los headers:
+// el `Content-Type` y el `Content-Disposition` son parte del contrato de una descarga.
+// Un error del backend sí viene en JSON, así que el llamador lo parsea del buffer cuando `status`
+// no es 200.
+export async function callBinario(method, path, { sesion_id } = {}) {
+  const headers = {};
+  if (sesion_id != null) headers['X-Sesion-Id'] = String(sesion_id);
+  const res = await fetch(`${BASE_URL}${path}`, { method, headers });
+  const buffer = Buffer.from(await res.arrayBuffer());
+  return { status: res.status, headers: res.headers, buffer };
+}
+
 export async function call(method, path, { body, sesion_id } = {}) {
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';

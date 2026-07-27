@@ -7,13 +7,15 @@ import sql from 'mssql';
 import { randomUUID } from 'node:crypto';
 import * as dbBindings from '../db.js';
 import { getDB } from '../db.js';
-import { sendJSON } from '../utils/http.js';
+import { sendJSON, CORS_HEADERS } from '../utils/http.js';
 import { responderError } from '../utils/errores.js';
 import { hasPermisoBitacora, plantaMatch, puedeCerrarTurno } from '../middleware/permissions.js';
 import { turnoFromPeriodo, fechaOperativaDePeriodo, fechaBogotaStr } from '../utils/turno.js';
 import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from '../utils/snapshots.js';
 import { recalcularEventoDashboard } from '../utils/notificador.js';
 import { asientoLote } from '../utils/asientos/index.js';
+import { armarMes } from '../utils/f03-datos.js';
+import { construirLibroF03 } from '../utils/f03-libro.js';
 import { crearReflejoLote, actualizarReflejoLote, borrarReflejoLote } from '../utils/reflejo-sala.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
@@ -258,6 +260,97 @@ router.get('/lotes', asyncH(async (req, res) => {
   });
 
   return sendJSON(res, 200, { planta_id, fecha, lotes });
+}));
+
+// ── D-058 (REQ-06) · Libro mensual GENE-F03 ──────────────────────────────────────────────────
+
+const RE_MES = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+// Nombre del archivo, calcado del formato controlado real
+// (`2026_01_OPG3-F03 Estado G3 y eventos diarios de operación.xlsx`).
+//
+// Viaja en las DOS formas del mismo `Content-Disposition`: `filename*` en UTF-8 percent-encoded
+// (RFC 5987) y un `filename` ASCII de respaldo. Los headers HTTP no son UTF-8: mandar la tilde de
+// "operación" cruda la entrega como latin-1 y el archivo se descarga con el nombre roto.
+function nombreArchivoF03(mes) {
+  const utf8 = `${mes.replace('-', '_')}_OPG3-F03 Estado G3 y eventos diarios de operación.xlsx`;
+  // Respaldo sin tildes: descomponer y soltar los diacríticos deja "operacion", no "operaci_n".
+  const ascii = [...utf8.normalize('NFD')].filter((c) => c.charCodeAt(0) < 128).join('');
+  return { utf8, ascii };
+}
+
+// GET /api/sala-de-mando/reporte-mensual?mes=YYYY-MM
+//
+// El libro mensual del formato controlado: una hoja por día del mes, tres bloques de turno por hoja
+// y las dos unidades mezcladas en orden cronológico. Junta lo que consulta `f03-datos.js` (E8) con
+// lo que escribe `f03-libro.js` (E7, clonando la plantilla real del F03).
+//
+// **Solo lectura** (RN-06.f): no escribe una fila, no deja rastro y no notifica al dashboard.
+// Generación en memoria, sin streaming — un mes son cientos de KB (REQ-06 §5.4).
+//
+// **El gate es `puede_crear` en MAND y NO puede derivarse de la visibilidad** (RQ-06.11/12): la
+// matriz le da `puede_ver` en MAND a TODOS los cargos (`WHEN b.codigo = 'MAND' THEN 1`), así que
+// exigir `puede_ver` sería no exigir nada. Data-driven como siempre, nunca por nombre de cargo.
+//
+// **No recibe `planta_id`** (RQ-06.3 / decisión E): el libro trae las dos unidades sin importar en
+// cuál esté la sesión — el formato de referencia las nombra juntas en la misma frase, y partirlo por
+// planta obligaría a duplicar o mutilar esos renglones. Por eso tampoco hay `plantaMatch` acá: no
+// hay una planta que acotar, y el alcance del documento lo fija `PLANTAS_F03` (que deja fuera a las
+// plantas-fixture, RN-06.g).
+router.get('/reporte-mensual', asyncH(async (req, res) => {
+  const sesion = req.sesion;
+
+  // `mes` es opcional y cae al mes Bogotá en curso — misma paridad que la `fecha` de `GET /lotes`, y
+  // es lo que pide RQ-06.4 ("el mes de la fecha en curso"). Siempre con el shift explícito de D-020:
+  // `new Date().getMonth()` daría el mes del reloj del servidor, que en el borde no es el de Bogotá.
+  const mesActual = fechaBogotaStr(Date.now()).slice(0, 7);
+  const mes = (req.query.mes == null || req.query.mes === '') ? mesActual : String(req.query.mes);
+  if (!RE_MES.test(mes)) {
+    return sendJSON(res, 400, {
+      error: 'El mes debe venir en formato AAAA-MM.',
+      codigo: 'mes_invalido',
+    });
+  }
+  // Paridad con el `fecha_futura` de COMB: un mes que todavía no empezó no tiene nada que narrar, y
+  // pedirlo es un error del cliente — no un libro vacío. El mes EN CURSO sí se descarga (es el caso
+  // normal), y un mes pasado sin eventos tampoco es error: devuelve el libro con sus hojas vacías
+  // (RN-06.h). Comparación de cadenas `YYYY-MM`: ordena igual que la fecha.
+  if (mes > mesActual) {
+    return sendJSON(res, 400, {
+      error: 'No puedes descargar un mes que todavía no empieza.',
+      codigo: 'mes_futuro',
+    });
+  }
+
+  const db = await getDB();
+  const bit = await db.request().query(`SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo = 'MAND'`);
+  const MAND_ID = bit.recordset[0]?.bitacora_id;
+  if (!MAND_ID) {
+    console.error('[ERROR] config: bitácora MAND no encontrada en lov_bit.bitacora');
+    return sendJSON(res, 500, { error: 'Hay un problema de configuración del sistema. Contacta a soporte.', codigo: 'config_sistema' });
+  }
+  if (!(await hasPermisoBitacora(sesion, MAND_ID, 'puede_crear'))) {
+    return sendJSON(res, 403, {
+      error: 'Solo quien registra en Operación 24h puede descargar el libro mensual.',
+      codigo: 'sin_permiso_descarga',
+    });
+  }
+
+  const dias = await armarMes(db, { mes });
+  const libro = construirLibroF03(dias);
+
+  const { utf8, ascii } = nombreArchivoF03(mes);
+  // Respuesta BINARIA: no pasa por `sendJSON` (que fija Content-Type JSON). Un error posterior no es
+  // posible acá — el buffer ya está armado —, así que no hay riesgo de escribir headers dos veces.
+  res.writeHead(200, {
+    'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'Content-Length': libro.length,
+    'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(utf8)}`,
+    // El libro refleja lo registrado AHORA: un mes en curso cambia entre dos descargas del mismo día.
+    'Cache-Control': 'no-store',
+    ...CORS_HEADERS,
+  });
+  return res.end(libro);
 }));
 
 // Formato de la hora de la llamada tal como la manda el front (`<input type="time">`): HH:mm en

@@ -24,7 +24,7 @@
 | E6 — El asiento reflejado es de solo lectura | ✅ | El asiento reflejado no se edita ni se borra en su destino **ni por su autor** (que es el del origen): `canEditarRegistro` + su espejo SQL, con `codigo` propio `asiento_reflejado` y chip de origen en la fila. 5 tests nuevos (2 back, 3 front); suite 491/490. |
 | E7 — XLSX ESM + plantilla F03 derivada | ✅ | ZIP propio en ESM (`leerZip`/`escribirZip`), plantilla derivada del F03 real y commiteada, y el clonador que emite N hojas con `dimension`/`mergeCells`/`Print_Area` recalculados. 18 tests puros; suite 509/508. Verificado abriendo el libro en Excel. |
 | E8 — Consulta unificada y armado del día | ✅ | `utils/f03-datos.js`: las cuatro fuentes de las dos unidades, cada una con su hora canónica y su doble tabla, repartidas en los tres bloques por hora de calendario y con el encabezado resuelto. 21 tests nuevos; suite 530/529. Contrastado contra el mes real: 20 renglones = 15 lotes + 5 registros de Sala. |
-| E9 — Endpoint mensual + selector y botón | ⬜ | — |
+| E9 — Endpoint mensual + selector y botón | ✅ | `GET /reporte-mensual?mes=YYYY-MM` (gate `puede_crear`, solo lectura) + barra con selector de mes y Descargar en Operación 24h, con el mes en el hash. 7 tests back y 12 front; suite 537/536. Verificado abriendo el libro real en Excel. |
 | E10 — Docs + ADR D-058 + cleanup | ⬜ | — |
 
 Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloqueado.
@@ -209,6 +209,32 @@ E8 ──> E9
   columna no es IDENTITY (preserva el id original del `registro_activo` que se archivó), así que un id
   positivo inventado podría colisionar mañana con el que IDENTITY le asigne a una fila real y romper
   el archivado del cierre. Negativo es imposible de colisionar y se limpia por el mismo acotador.
+- **E9 — la celda `FECHA:` se queda en FECHA LARGA (`domingo, 26 de julio de 2026`), no en
+  `dd/mm/aaaa`.** El `.md` pedía `dd/mm/aaaa`, pero el estilo de esa celda en el formato controlado
+  real (`s=48` → `numFmtId=164`) es fecha larga — el dato que E7 dejó anotado para que E9 decidiera
+  con él a la vista. Se respeta el archivo: D-058 **calca** el formato, no lo redefine, y cambiarlo
+  exigiría agregar un `xf` nuevo a `styles.xml` (o sea, editar el formato controlado) para ganar
+  nada. Si algún día se quiere el corto, ese es el trabajo.
+- **E9 — el parámetro `mes` es OPCIONAL: sin él cae al mes Bogotá en curso.** El `.md` solo fijaba el
+  400 por formato. Se hizo opcional por paridad con `GET /lotes` (donde `fecha` ausente = hoy) y
+  porque es lo que pide RQ-06.4 literalmente ("el mes de la fecha en curso"): el caso normal del
+  botón es descargar el mes corriente. El formato inválido sigue siendo `400`, ahora con `codigo`
+  propio (`mes_invalido`), que es lo que el front necesita para ramificar sin leer texto (D-032).
+- **E9 — el hash de MAND ahora lleva siempre `?mes=`**, como DISP lleva `planta` y COMB `fecha`. Un
+  `#/op24h` pelado sigue siendo válido al entrar (el parse lo acepta y no inventa params) y se
+  reescribe al canónico con `replaceState`, que es exactamente lo que ya hacían las otras dos
+  secciones. **No se tocó el día de la grilla**: sigue siendo siempre hoy y sin selector de fecha.
+- **E9 — la descarga tiene su propio estado de carga (`descargando`), separado de `guardando`.** Si
+  compartieran, generar el libro deshabilitaría el botón **Guardar** del header (que deriva de
+  `onGuardandoChange`) y una descarga bloquearía una captura pendiente, que es justo lo contrario de
+  lo que hace falta a las 18:00.
+- **E9 — `helpers.js` gana `callBinario` (no estaba en la lista de archivos del `.md`).** El `call`
+  de siempre hace `res.json()` y se comería el `.xlsx`; y los headers (`Content-Type`,
+  `Content-Disposition`) son parte del contrato de una descarga, así que el helper los devuelve.
+- **E9 — tres tests más de los cinco que pedía el `.md`**: el "sin `mes` → mes en curso" (la rama
+  nueva del endpoint), **E9.7** (un lote real en la planta-fixture **no** aparece en el libro: RN-06.g
+  de punta a punta, sobre el ENDPOINT y no sobre el módulo) y los 12 del front (8 de `appRoute` para
+  el `mes` en el hash + 4 de la barra sobre el componente REAL).
 - **E8 — tres usuarios-fixture sin sesión (`test_f03_a/b/c`).** La PK de `conformacion_turno` es
   `(fecha, planta, turno, usuario_id)`: un bloque con jefe E ingeniero necesita DOS usuarios distintos
   y el caso de las dos unidades un tercero. Van con `activo = 0`, sin `azure_oid` y con
@@ -344,6 +370,22 @@ E8 ──> E9
   hora DERIVADA del periodo (P1→00:00 … P5→04:00). Se ven como cinco autorizaciones de 90 MW en vez de
   una sola con `del P1 al P5` porque nacieron con un `lote_id` por fila (ya anotado arriba). No es
   defecto del armado.
+- **EL LIBRO REAL, BAJADO DEL ENDPOINT (E9, 2026-07-27).** `GET /reporte-mensual?mes=2026-07` →
+  **200**, `549 788 bytes`, **31 hojas** (`2026-07-01` … `2026-07-31`), **31 `Print_Area`** y
+  **20 renglones** repartidos en 6 días: `08:1 · 09:1 · 14:2 · 15:8 · 23:3 · 26:5`. Cuadra EXACTO con
+  lo que E8 midió llamando a `armarMes` directo, así que el endpoint no agrega ni pierde nada.
+- **El encabezado `JEFE DE TURNO` / `INGENIERO DE TURNO` sale en blanco en casi todo julio, y NO es
+  bug.** Se verificó contra la BD: la única presencia registrada esos días es del cargo
+  `Administrador y Debugging`, que no es ninguno de los dos que el F03 nombra (§7.1), así que la celda
+  queda vacía a propósito — el papel también se deja en blanco cuando nadie lo llenó. **El 2026-07-08
+  sí tiene `Ingeniero Jefe de Turno` en `conformacion_turno` y la hoja lo muestra**, en los dos
+  bloques del día: es la prueba de punta a punta de que el encabezado se resuelve de verdad.
+- **`Content-Disposition` real de la respuesta** (E9), para no re-derivarlo:
+  `attachment; filename="2026_07_OPG3-F03 Estado G3 y eventos diarios de operacion.xlsx"; filename*=UTF-8''2026_07_OPG3-F03%20…%20operaci%C3%B3n.xlsx`.
+  Las dos formas son necesarias: los headers HTTP no son UTF-8, así que la tilde cruda llegaría rota,
+  y el `filename` ASCII es el respaldo del cliente que no entienda RFC 5987.
+- **El `Print_Area` se recalcula de verdad por hoja** (medido en el libro real, con Excel):
+  `'2026-07-26'!$A$6:$I$25` en un día con 5 eventos y `'2026-07-02'!$A$6:$I$20` en un día vacío.
 - **El puerto 3002 puede estar tomado por el backend del usuario.** El arranque igual corre
   `initDB()` (la migración se aplica) y luego muere con `EADDRINUSE`. Para los tests HTTP se levanta
   uno efímero: `cd server && AUTH_TEST_BYPASS=1 SERVER_PORT=3102 node --env-file=../.env server.js`
@@ -839,5 +881,91 @@ de E9, y es porque los tests que E7 exige no se pueden escribir sin él.
 **Desviaciones** — las seis registradas arriba. La única que se aparta de lo pedido por el `.md` es
 que `'TSR'` no se excluye por nombre sino por quedar fuera del alcance del libro, que es lo que la
 nota de E4 pedía conseguir sin que producción conozca la fixture.
+
+### E9 — Endpoint del libro mensual + selector de mes y botón de descarga  ✅
+
+**Archivos tocados**
+- `server/routes/mand.js` — `GET /reporte-mensual?mes=YYYY-MM`: valida el mes, rechaza el futuro
+  (`400 mes_futuro`), gatea por `hasPermisoBitacora(sesion, MAND_ID, 'puede_crear')` y responde el
+  `Buffer` con `Content-Type` de `.xlsx` y `Content-Disposition: attachment` (nombre en las dos
+  formas). Más `nombreArchivoF03` y `RE_MES`. Junta `armarMes` (E8) con `construirLibroF03` (E7); no
+  se tocó `server.js` (D-037).
+- `src/utils/fecha.js` — `getCurrentMonthBogota()` (derivado de `getTodayBogota`, nunca de
+  `new Date().getMonth()`).
+- `src/routing/appRoute.js` — `mesValido` + el param `mes` de MAND en `parseHash`/`buildHash`.
+- `src/hooks/useSalaDeMando.js` — `descargarReporteMensual(mes)`: `fetch` con `credentials:'include'`
+  → `blob` → object URL → click sintético → `revokeObjectURL`, con el contrato de error de `useApi`
+  (`codigo` estable) y `nombreDeContentDisposition` para respetar el nombre que mandó el servidor.
+- `src/components/SalaDeMando/SalaDeMandoGrid.jsx` — la barra del libro (`<input type="month">` con
+  `max` = mes en curso + botón **Descargar**), gateada por `puedeCrear`, con su propio estado de
+  carga y `MSG_DESCARGA` (ramificación por `codigo`).
+- `src/BitacorasGecelca3.jsx` — `mandMes` lifted + su ref + las dos ramas de sincronización
+  ruta↔estado + las props nuevas de `SalaDeMandoGrid`.
+- `server/tests/helpers.js` — `callBinario` (ver desviaciones).
+- `server/tests/sala_de_mando_batch.test.js` — 7 tests nuevos (E9.1..E9.7) + `descargarLibro`,
+  `hojasDelLibro`, `textoDelLibro`, `fotoDeLaBD` y los helpers de meses relativos.
+- `src/routing/appRoute.test.js` — 8 tests nuevos + el caso MAND-con-mes en el round-trip.
+- `src/components/SalaDeMando/libro-mensual-descarga.test.jsx` (nuevo) — 4 tests jsdom sobre el
+  componente REAL, con `fetch` y el ancla de descarga instrumentados.
+
+**Decisiones de implementación**
+- **El gate es `puede_crear` y quedó comentado por qué no puede salir de la visibilidad**: la matriz
+  le da `puede_ver` en MAND a TODOS los cargos, así que exigir `puede_ver` sería no exigir nada. El
+  test lo prueba en la misma corrida con los dos cargos (E9.1), y el mismo cargo que recibe 403 acá
+  sigue obteniendo 200 en `GET /lotes` (D-056 E4.5): consultar no es descargar.
+- **El endpoint no recibe `planta_id` ni llama a `plantaMatch`**: no hay una planta que acotar (el
+  libro trae las dos, RQ-06.3) y el alcance lo fija `PLANTAS_F03`, que además deja fuera a las dos
+  plantas-fixture sin que producción las nombre (E8). E9.7 lo comprueba **por el endpoint**: un lote
+  real en `'TST'` no aparece en el libro.
+- **Respuesta binaria fuera de `sendJSON`**, pero con los mismos `CORS_HEADERS`; los errores siguen
+  en JSON, así que el front puede ramificar por `codigo` en los dos caminos. `Cache-Control:
+  no-store` porque el mes en curso cambia entre dos descargas del mismo día.
+- **La descarga va por `fetch` + blob y NUNCA por `window.open`/`<a href>` directo**: el endpoint
+  vive tras `requireEntra` y sin la cookie de sesión el operador vería un JSON 401 en una pestaña en
+  vez de su archivo.
+- Las cinco decisiones restantes están arriba, en "Decisiones / desviaciones acumuladas".
+
+**Verificación real**
+- `node --test --test-concurrency=1 --test-name-pattern="D-058 E9"` → **7/7 pass, 0 fail**, 50 s.
+- `node --test --test-concurrency=1 tests/sala_de_mando_batch.test.js` (archivo completo) →
+  **85/85 pass, 0 fail**, 161 s. Baseline de E6 (78) **+ los 7 nuevos**: siguen verdes los 14
+  criterios de D-057, el reflejo de E4/E5 y los dos `verificarCoherenciaDeLotes()`.
+- `npx vitest run` (front completo) → **97/97 pass, 13 archivos** (85 previos + 8 de `appRoute` + 4
+  del componente nuevo).
+- `npm run build` (raíz) → **verde**, 16,5 s.
+- **Suite backend completa: `tests 537 · pass 536 · fail 0 · skipped 1`** (`parseXls`, skip declarado
+  ajeno), contra `PortalG3_dev` con el server efímero en 3102. Baseline de E8 (530/529) **+ los 7
+  nuevos**, sin degradar. Corrida en **10 bloques en primer plano** por las dos razones de entorno ya
+  documentadas. Reparto: (1) guards + módulos puros + `f03_libro` + `f03_datos` 108 · (2) catálogos +
+  tipos espejo + split sala + coherencia 24 · (3) revalidate + fechas + `turno-entidad` 83 · (4) auth
+  + DISP 47 · (5) cierre + conformación 23 · (6) `sala_de_mando_batch` 85 · (7) COMB + finalizar +
+  cambiar unidad 44 · (8) `registros_turno_id` + solo autor + gate de transición + seguimiento 16 ·
+  (9) históricos + guards no-auto-ejecutables + rol CyM + SIS + hardening + errores + IA 106 (1 skip)
+  · (10) leak guard 1. **El flaky conocido de `finalizar_turno` no apareció** (44/44 su bloque) y
+  `zzz_session_leak_guard` corrió **último** y pasó.
+- **SMOKE MANUAL, punto por punto** (lo que pide el `.md`; el 1 y el 4 se cubrieron rasterizando el
+  componente REAL, que es lo automatizable sin Playwright):
+  1. **Con permiso** → la barra "Libro mensual de eventos" aparece arriba de la grilla, con el mes en
+     curso ya elegido (`julio de 2026`) y el botón **Descargar**. ✅
+  2. **Descarga del mes en curso** → `200`, `549 788 bytes`, y **abre en Excel real (COM) sin
+     advertencia de archivo corrupto y sin reparar nada**: 31 hojas, **el logo presente**
+     (`Shapes.Count = 1`), el encabezado GENE-F03 intacto (`Código: GENE-F03`, `Título: Estado G3 y
+     eventos diarios de operación`) y `Fecha: 01/06/2017` —la de emisión del FORMATO— sin tocar. ✅
+  3. **El mes viaja en el hash**: `buildHash`/`parseHash` son inversos para `#/op24h?mes=YYYY-MM` (8
+     tests), el dashboard lo escribe con `replaceState` y lo deriva de vuelta al montar → sobrevive a
+     F5. ✅
+  4. **Con un cargo de solo lectura el botón no está** (test front 1 + rasterizado: la misma pantalla,
+     sin selector ni botón), y si igual se invoca el endpoint responde **403** (E9.1). ✅
+  5. **Una hoja con eventos** (`2026-07-26`): los tres bloques con sus literales
+     (`00:00-06:00` / `06:00 - 18:00` / `18:00 - 00:00`), las filas en orden ascendente dentro de cada
+     uno (14:13 y 17:16 en el T1; 20:04, 20:12 y 20:12 en el T2) y el bloque de madrugada vacío pero
+     presente. Una hoja sin eventos (`2026-07-02`) trae encabezados y ninguna fila. ✅
+- **Consulta directa a la BD tras la corrida**: la descarga no cambió una sola fila (E9.6 compara la
+  foto de `registro_activo`/`registro_historico`/`evento_dashboard`/`disponibilidad_estado`/
+  `mand_cierre_log` antes y después), y el smoke desactivó sus sesiones sintéticas al terminar.
+
+**Desviaciones** — las seis registradas arriba. Ninguna cambia el contrato del libro; la única que se
+aparta de lo pedido por el `.md` en la SALIDA es la fecha larga de la celda `FECHA:`, y es porque el
+formato controlado real es así.
 
 <!-- Cada etapa agrega su bloque: ### EX — <título>  ✅ con Archivos tocados / Verificación / Desviaciones. -->

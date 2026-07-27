@@ -33,7 +33,7 @@ import { useBitacoraSesion, useFinalizarTurno, useRevertirTurno } from "./hooks/
 import { useAppRoute } from "./hooks/useAppRoute";
 import { useMejorarTexto, MAX_TEXTO_IA } from "./hooks/useMejorarTexto";
 import { buildHash } from "./routing/appRoute";
-import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
+import { getTodayBogota, getCurrentMonthBogota, shiftDate, horaBogota } from "./utils/fecha";
 import { resolverOtraUnidad } from "./utils/unidades";
 import { FILTROS_VACIOS } from "./utils/filtros";
 import { asset } from "./config/paths";
@@ -1850,10 +1850,13 @@ export default function App() {
   const [vista, setVista] = useState('bitacoras');
 
   // D-035: subestado de las secciones con UI propia, lifted al dashboard para que la URL pueda
-  // deep-linkearlo (DISP=planta, COMB=fecha). La URL es la fuente única de verdad; estos states
-  // son su espejo en React. COMB arranca en hoy (Bogotá); DISP se siembra al entrar (ver derive).
+  // deep-linkearlo (DISP=planta, COMB=fecha, MAND=mes del libro F03). La URL es la fuente única de
+  // verdad; estos states son su espejo en React. COMB arranca en hoy (Bogotá) y MAND en el mes en
+  // curso; DISP se siembra al entrar (ver derive).
   const [dispPlanta, setDispPlanta] = useState(null);
   const [combFecha, setCombFecha] = useState(() => getTodayBogota());
+  // D-058: el mes del LIBRO mensual, no el día de la grilla (que es siempre hoy, D-017/D-056).
+  const [mandMes, setMandMes] = useState(() => getCurrentMonthBogota());
 
   // D-035: routing por hash. `route` (parseado) es la lectura; `navigate` empuja estado→URL.
   const { route, navigate } = useAppRoute();
@@ -1959,9 +1962,11 @@ export default function App() {
   const activeBitacoraRef = useRef(activeBitacora);
   const dispPlantaRef = useRef(dispPlanta);
   const combFechaRef = useRef(combFecha);
+  const mandMesRef = useRef(mandMes);
   activeBitacoraRef.current = activeBitacora;
   dispPlantaRef.current = dispPlanta;
   combFechaRef.current = combFecha;
+  mandMesRef.current = mandMes;
 
   const codigoActivo = useMemo(
     () => bitacorasPermitidas.find((b) => b.bitacora_id === activeBitacora)?.codigo || null,
@@ -1999,6 +2004,12 @@ export default function App() {
     if (target.codigo === 'COMB' && route.params.fecha && route.params.fecha !== combFechaRef.current) {
       setCombFecha(route.params.fecha);
     }
+    // D-058: el mes del libro F03 viene del hash si se deep-linkeó; si no, se queda el que ya había
+    // (por defecto, el mes en curso). Nunca se resetea al entrar: cambiar de pestaña y volver no
+    // debería devolverte a julio cuando estabas consolidando junio.
+    if (target.codigo === 'MAND' && route.params.mes && route.params.mes !== mandMesRef.current) {
+      setMandMes(route.params.mes);
+    }
   }, [route, sesion, bitacorasPermitidas]);
 
   // (b) Escribir estado HACIA la ruta. Subestado (planta/fecha) y el primer write canónico usan
@@ -2011,6 +2022,7 @@ export default function App() {
     if (vista === 'historicos') desired = { vista: 'historicos', codigo: null, params: {} };
     else if (codigoActivo === 'DISP') desired = { vista: 'bitacoras', codigo: 'DISP', params: { planta: dispPlanta } };
     else if (codigoActivo === 'COMB') desired = { vista: 'bitacoras', codigo: 'COMB', params: { fecha: combFecha } };
+    else if (codigoActivo === 'MAND') desired = { vista: 'bitacoras', codigo: 'MAND', params: { mes: mandMes } };
     else if (codigoActivo) desired = { vista: 'bitacoras', codigo: codigoActivo, params: {} };
     if (!desired) return;
     const sectionKey = `${desired.vista}:${desired.codigo}`;
@@ -2018,7 +2030,7 @@ export default function App() {
     prevSectionKey.current = sectionKey;
     if (buildHash(desired) === window.location.hash) return;
     navigate(desired, { replace });
-  }, [sesion, bitacorasPermitidas, vista, codigoActivo, dispPlanta, combFecha, navigate]);
+  }, [sesion, bitacorasPermitidas, vista, codigoActivo, dispPlanta, combFecha, mandMes, navigate]);
 
   // Carga tipos evento cuando cambia la bitácora
   useEffect(() => {
@@ -2534,6 +2546,8 @@ export default function App() {
               onDirtyChange={setMandDirty}
               onGuardandoChange={setMandGuardando}
               registerSaveHandler={registerMandSave}
+              mes={mandMes}
+              onMesChange={setMandMes}
             />
           ) : bitacoraActiva?.codigo === 'DISP' ? (
             <DisponibilidadDashboard

@@ -43,6 +43,31 @@ describe('routing/appRoute — parseHash', () => {
     });
   });
 
+  // D-058: el mes del libro F03 es subestado de MAND. Mismo criterio que la fecha de COMB — el
+  // futuro se descarta, con paridad al 400 `mes_futuro` del backend.
+  describe('MAND — validación del mes del libro (D-058)', () => {
+    beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-06-29T15:00:00.000Z')); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    test('mes pasado válido se conserva', () => {
+      expect(parseHash('#/op24h?mes=2026-05')).toEqual({ vista: 'bitacoras', codigo: 'MAND', params: { mes: '2026-05' } });
+    });
+    test('el mes en curso (Bogotá) se conserva', () => {
+      expect(parseHash('#/op24h?mes=2026-06')).toEqual({ vista: 'bitacoras', codigo: 'MAND', params: { mes: '2026-06' } });
+    });
+    test('mes futuro se descarta', () => {
+      expect(parseHash('#/op24h?mes=2026-07')).toEqual({ vista: 'bitacoras', codigo: 'MAND', params: {} });
+    });
+    test('mes mal formado se descarta', () => {
+      expect(parseHash('#/op24h?mes=2026-13')).toEqual({ vista: 'bitacoras', codigo: 'MAND', params: {} });
+      expect(parseHash('#/op24h?mes=2026-00')).toEqual({ vista: 'bitacoras', codigo: 'MAND', params: {} });
+      expect(parseHash('#/op24h?mes=junio')).toEqual({ vista: 'bitacoras', codigo: 'MAND', params: {} });
+    });
+    test('sin mes → sin params (la grilla sigue siendo siempre hoy)', () => {
+      expect(parseHash('#/op24h')).toEqual({ vista: 'bitacoras', codigo: 'MAND', params: {} });
+    });
+  });
+
   describe('COMB — validación de fecha', () => {
     beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-06-29T15:00:00.000Z')); });
     afterEach(() => { vi.useRealTimers(); });
@@ -77,6 +102,14 @@ describe('routing/appRoute — buildHash', () => {
     test('fecha válida', () => { expect(buildHash({ vista: 'bitacoras', codigo: 'COMB', params: { fecha: '2026-06-20' } })).toBe('#/comb?fecha=2026-06-20'); });
     test('fecha futura → sin query', () => { expect(buildHash({ vista: 'bitacoras', codigo: 'COMB', params: { fecha: '2999-01-01' } })).toBe('#/comb'); });
   });
+
+  describe('MAND con mes (D-058)', () => {
+    beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-06-29T15:00:00.000Z')); });
+    afterEach(() => { vi.useRealTimers(); });
+    test('mes válido', () => { expect(buildHash({ vista: 'bitacoras', codigo: 'MAND', params: { mes: '2026-05' } })).toBe('#/op24h?mes=2026-05'); });
+    test('mes futuro → sin query', () => { expect(buildHash({ vista: 'bitacoras', codigo: 'MAND', params: { mes: '2999-01' } })).toBe('#/op24h'); });
+    test('sin mes → sin query (compat con el #/op24h de siempre)', () => { expect(buildHash({ vista: 'bitacoras', codigo: 'MAND', params: {} })).toBe('#/op24h'); });
+  });
 });
 
 describe('routing/appRoute — round-trip parse∘build', () => {
@@ -85,6 +118,7 @@ describe('routing/appRoute — round-trip parse∘build', () => {
 
   const casos = [
     { vista: 'bitacoras', codigo: 'MAND', params: {} },
+    { vista: 'bitacoras', codigo: 'MAND', params: { mes: '2026-05' } },
     { vista: 'bitacoras', codigo: 'DISP', params: { planta: 'GEC3' } },
     { vista: 'bitacoras', codigo: 'DISP', params: { planta: 'GEC32' } },
     { vista: 'bitacoras', codigo: 'COMB', params: { fecha: '2026-06-20' } },

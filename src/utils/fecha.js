@@ -7,6 +7,14 @@ export function getTodayBogota() {
   return fmt.format(new Date());
 }
 
+// D-058 (REQ-06): mes en curso en Bogotá, `YYYY-MM`. Se deriva del MISMO día Bogotá que usa el
+// resto de la app — nunca de `new Date().getMonth()`, que el 1° a las 00:30 Bogotá (05:30 UTC)
+// devolvería el mes anterior o el siguiente según dónde esté el navegador. Es el valor por defecto
+// del selector del libro mensual y también su tope: el futuro no se puede pedir.
+export function getCurrentMonthBogota() {
+  return getTodayBogota().slice(0, 7);
+}
+
 export function shiftDate(yyyymmdd, deltaDays) {
   if (!yyyymmdd) return yyyymmdd;
   const d = new Date(`${yyyymmdd}T12:00:00`);

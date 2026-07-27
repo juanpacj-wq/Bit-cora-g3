@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { LayoutGrid, AlertTriangle } from 'lucide-react';
+import { LayoutGrid, AlertTriangle, Download, FileSpreadsheet } from 'lucide-react';
 import { useSalaDeMando } from '../../hooks/useSalaDeMando';
-import { getTodayBogota, horaBogota, horaBogotaHHMM } from '../../utils/fecha';
+import { getTodayBogota, getCurrentMonthBogota, horaBogota, horaBogotaHHMM } from '../../utils/fecha';
 import LotesDelDia from './LotesDelDia';
 import LoteEditorModal from './LoteEditorModal';
 import LoteBorrarModal from './LoteBorrarModal';
@@ -19,6 +19,16 @@ const TIPO_KEYS = TIPOS.map((t) => t.key);
 // en la UI: cerrar el modal y refrescar el listado, porque la pantalla quedó mostrando algo que ya
 // no está. Se ramifica por `codigo`, nunca por el texto (D-032).
 const CODIGOS_LOTE_FUERA = new Set(['lote_cerrado', 'lote_inexistente', 'lote_de_otra_planta']);
+
+// D-058 (REQ-06): mensajes de la descarga del libro mensual, por `codigo` y NUNCA por texto (D-032).
+// El backend ya manda un mensaje apto para el usuario; estos lo reemplazan solo donde el front puede
+// decir algo más útil, porque conoce la pantalla (el selector, el permiso). Lo que no esté acá cae al
+// mensaje saneado que vino en la respuesta.
+const MSG_DESCARGA = {
+  mes_futuro: 'Ese mes todavía no empieza. Elige el mes en curso o uno anterior.',
+  mes_invalido: 'El mes no es válido. Elígelo en el selector de arriba.',
+  sin_permiso_descarga: 'No tienes permiso para descargar el libro mensual de Operación 24h.',
+};
 
 // D-056: la grilla es un FORMULARIO DE CAPTURA, no un espejo del servidor. Arranca vacía (RQ-03.1),
 // se vacía tras cada guardado confirmado (RQ-03.2) y nunca carga lo ya guardado (RQ-03.3/4) — eso
@@ -67,11 +77,15 @@ function filasDeBuffer(buf) {
 // F17: grilla 3×24 de Operación 24h (MAND). F10 (paginación entre días) eliminada — la grilla solo
 // captura para HOY y el cierre es automático vía sweeper diario (F16). Multi-select estilo Excel +
 // lock REDESP por periodo actual. D-056: captura append-only por lotes + listado del día debajo.
+// D-058: `mes`/`onMesChange` son CONTROLADOS por el dashboard, igual que la planta de DISP y la
+// fecha de COMB (D-035): el subestado vive en la URL (`#/op24h?mes=YYYY-MM`) y sobrevive a un F5.
+// Es el mes del LIBRO, no el día de la grilla — la grilla sigue siendo siempre hoy (D-017/D-056).
 export default function SalaDeMandoGrid({
   bitacora, plantaId, puedeCrear, showToast, onError,
   onDirtyChange, onGuardandoChange, registerSaveHandler,
+  mes, onMesChange,
 }) {
-  const { getLotes, guardarBatch, editarLote, eliminarLote } = useSalaDeMando();
+  const { getLotes, guardarBatch, editarLote, eliminarLote, descargarReporteMensual } = useSalaDeMando();
   const [buffer, setBuffer] = useState(() => emptyBuffer());
   const [seleccion, setSeleccion] = useState({ tipo: null, periodos: new Set() });
   const [anchorPeriodo, setAnchorPeriodo] = useState(null);
@@ -93,6 +107,10 @@ export default function SalaDeMandoGrid({
   // (decisión 7), así que una edición concurrente no revive una celda que el otro ya borró.
   const [loteEditando, setLoteEditando] = useState(null);
   const [loteBorrando, setLoteBorrando] = useState(null);
+  // D-058: la generación del libro tarda (consulta las cuatro fuentes del mes y arma 28..31 hojas),
+  // así que el botón necesita su propio estado de carga. NO se mezcla con `guardando`: el header
+  // deriva de ese el botón "Guardar", y una descarga no puede deshabilitarlo.
+  const [descargando, setDescargando] = useState(false);
   const tableRef = useRef(null);
   const guardarRef = useRef(null);
   // F18-fix: refs latentes para callbacks externos. El padre puede pasarlos como arrows
@@ -254,6 +272,27 @@ export default function SalaDeMandoGrid({
     }
   }, [eliminarLote, loteBorrando, plantaId, refrescarLotes, fechaCargada]);
 
+  // ── D-058 · Libro mensual F03 (REQ-06) ───────────────────────────────────────────────────────
+  // El mes por defecto es el EN CURSO en Bogotá, y también es el tope: pedir un mes que no empezó no
+  // tiene sentido y el backend lo rechaza con `mes_futuro` aunque el front se evada.
+  const mesActual = getCurrentMonthBogota();
+  const mesSeleccionado = mes || mesActual;
+
+  const descargarLibro = useCallback(async () => {
+    setDescargando(true);
+    try {
+      await descargarReporteMensual(mesSeleccionado);
+      showToastRef.current?.(`Libro de ${mesSeleccionado} descargado`);
+    } catch (e) {
+      // Se ramifica por `codigo`, jamás por el texto (D-032). `mes_futuro` además se auto-sana:
+      // el selector vuelve al mes en curso para que el siguiente clic funcione.
+      if (e?.codigo === 'mes_futuro') onMesChange?.(mesActual);
+      onErrorRef.current?.(MSG_DESCARGA[e?.codigo] ?? e.message);
+    } finally {
+      setDescargando(false);
+    }
+  }, [descargarReporteMensual, mesSeleccionado, mesActual, onMesChange]);
+
   useEffect(() => { guardarRef.current = guardar; }, [guardar]);
   useEffect(() => {
     registerSaveHandler?.(() => guardarRef.current?.());
@@ -395,6 +434,45 @@ export default function SalaDeMandoGrid({
 
   return (
     <div className="flex-1 overflow-auto px-6 py-4">
+      {/* D-058 (REQ-06 / RQ-06.1): barra del libro mensual. Gateada por `puedeCrear` — el mismo flag
+          data-driven que gobierna registrar y corregir (RQ-06.11/12). Sin permiso NO se pinta, y si
+          alguien invoca el endpoint igual, el backend responde 403: el front comunica, no protege. */}
+      {puedeCrear && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5">
+          <FileSpreadsheet size={16} className="text-gray-500" />
+          <span className="text-sm font-semibold text-gray-700">Libro mensual de eventos</span>
+          <span className="hidden text-xs text-gray-400 sm:inline">
+            Formato GENE-F03 · una hoja por día, con GEC3 y GEC32
+          </span>
+
+          <label htmlFor="f03-mes" className="ml-auto text-xs font-medium text-gray-500">Mes</label>
+          <input
+            id="f03-mes"
+            type="month"
+            value={mesSeleccionado}
+            max={mesActual}
+            disabled={descargando}
+            onChange={(e) => {
+              // Un `<input type="month">` vacío (el usuario borra el campo) no cambia nada: sin mes
+              // no hay libro que pedir, y dejarlo vacío deshabilitaría el botón sin explicar por qué.
+              const v = e.target.value;
+              if (v && v <= mesActual) onMesChange?.(v);
+            }}
+            className="rounded border border-gray-200 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-gray-50"
+          />
+          <button
+            type="button"
+            onClick={descargarLibro}
+            disabled={descargando}
+            title="Descargar el libro del mes seleccionado en formato Excel"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-sm font-medium text-emerald-800 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Download size={15} />
+            {descargando ? 'Generando…' : 'Descargar'}
+          </button>
+        </div>
+      )}
+
       {errorGlobal?.motivo === 'fecha_no_es_hoy' && (
         <div className="bg-red-100 border border-red-300 rounded-xl px-4 py-3 mb-3 flex items-center gap-2 text-sm text-red-900">
           <AlertTriangle size={16} />
