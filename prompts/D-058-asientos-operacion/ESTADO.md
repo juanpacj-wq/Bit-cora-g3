@@ -20,7 +20,7 @@
 | E2 — El asiento en el listado del día + copiar | ✅ | `GET /lotes` devuelve `asiento`; el listado lo pinta a todo el ancho + copiar renglón / copiar el día. Cierra REQ-04 §8.1 y §8.3. |
 | E3 — `seleccionable` + los 8 tipos espejo | ✅ | Columna `seleccionable` (F33.A1) + 8 tipos espejo sembrados en `SALAJDT`/`SALAING` con `0`; el selector los esconde y el POST/PUT genérico los rechaza. 11 tests nuevos. |
 | E4 — Reflejo a Sala: crear | ✅ | `utils/reflejo-sala.js` (`crearReflejoLote`) enganchado en `POST /guardar`: cada lote se asienta en SALAJDT **y** SALAING dentro de la misma transacción. 6 tests nuevos sobre una segunda planta-fixture. |
-| E5 — Reflejo a Sala: corregir y borrar | ✅ | `actualizarReflejoLote`/`borrarReflejoLote` enganchados en el `PUT` y el `DELETE` de lotes: corregir regenera el asiento en las dos copias y borrar las borra, en la transacción del origen. 7 tests nuevos (archivo MAND 78/78). **`npm test` completo pendiente**: la BD se cayó (red corporativa) — ver bloque E5. |
+| E5 — Reflejo a Sala: corregir y borrar | ✅ | `actualizarReflejoLote`/`borrarReflejoLote` enganchados en el `PUT` y el `DELETE` de lotes: corregir regenera el asiento en las dos copias y borrar las borra, en la transacción del origen. 7 tests nuevos; suite 489/488. |
 | E6 — El asiento reflejado es de solo lectura | ⬜ | — |
 | E7 — XLSX ESM + plantilla F03 derivada | ⬜ | — |
 | E8 — Consulta unificada y armado del día | ⬜ | — |
@@ -187,13 +187,23 @@ E8 ──> E9
 - **`broadcastConteoBitacoras` NO necesitó cambio** (RQ-02.4): `fetchSnapshot` agrupa por
   `bitacora_id` sobre **todas** las bitácoras no ocultas de la planta, así que las dos copias entran
   al contador de SALAJDT/SALAING solas.
-- **La BD de la red corporativa se cae sola (E5, 2026-07-26).** A mitad de un `npm test`,
-  `192.168.17.20:1433` dejó de aceptar TCP y TODOS los archivos que tocan BD se pusieron rojos: el
-  primer test de cada archivo falla a los **~15 s** (el `connectionTimeout` de `mssql`) y los demás
-  al instante. El `turno-sweeper` del server efímero loguea el mismo `Failed to connect … in
-  15000ms`. **Ese patrón —15 s el primero, 0 ms el resto, archivos enteros en rojo— es infra, no
-  regresión**: confirmalo con `bash -c 'cat < /dev/null > /dev/tcp/192.168.17.20/1433'` antes de
-  buscar la causa en el código, y relanzá la suite cuando vuelva.
+- **La BD de la red corporativa se cae sola, y más de una vez (E5, 2026-07-26/27).** Pasó **dos
+  veces** en la misma sesión: `192.168.17.20:1433` deja de aceptar TCP (~25 min la primera; los
+  adaptadores Ethernet quedan "medios desconectados" y el ping falla) y TODOS los archivos que tocan
+  BD se ponen rojos: el primer test de cada archivo falla a los **~15 s** (el `connectionTimeout` de
+  `mssql`) y los demás al instante; el `turno-sweeper` del server efímero loguea el mismo `Failed to
+  connect … in 15000ms`. **Ese patrón —15 s el primero, 0 ms el resto, archivos enteros en rojo— es
+  infra, no regresión**: confirmalo con `bash -c 'cat < /dev/null > /dev/tcp/192.168.17.20/1433'`
+  antes de buscar la causa en el código.
+- **Los procesos en background de la sesión mueren a los ~20 min** (server efímero y `npm test`, los
+  dos con exit 127 al mismo tiempo). Como un `npm test` completo dura ~40 min, la forma que SÍ
+  termina es **por bloques de archivos en primer plano** (cada uno bajo los 10 min del tool), con el
+  server efímero levantado aparte y revisado con `curl /health` entre bloques. `zzz_session_leak_guard`
+  va en el último bloque, como en el script `test`.
+- **Levantar el server efímero dispara el catch-up del `mand-sweeper` sobre plantas REALES**
+  (`cierre catch-up GEC3 2026-07-26: 17 registros`): archiva el día MAND anterior a
+  `registro_historico`, que es lo que hace todos los días en producción. No es destrucción, pero
+  después de levantarlo un lote de AYER responde `409 lote_cerrado` — no lo confundas con un bug.
 - **El puerto 3002 puede estar tomado por el backend del usuario.** El arranque igual corre
   `initDB()` (la migración se aplica) y luego muere con `EADDRINUSE`. Para los tests HTTP se levanta
   uno efímero: `cd server && AUTH_TEST_BYPASS=1 SERVER_PORT=3102 node --env-file=../.env server.js`
@@ -464,11 +474,23 @@ altera el contrato del reflejo ni el comportamiento del `POST /guardar` para pla
   `guard_tipo_evento_coherente` → **10/10 pass**: el `UPDATE`/`DELETE` de los tests nuevos lleva su
   acotador de fixture léxicamente junto al statement (`registro_id = @r`, `TEST_PLANTA_REFLEJO`).
 - `npm run build` (raíz) → **verde**, 15,9 s. No se tocó front; se corrió como sanity.
-- `cd server && npm test` (suite completa) → **PENDIENTE**: la BD (`192.168.17.20:1433`) se volvió
-  inalcanzable a mitad de la corrida y dejó rojos todos los archivos que la tocan (fallo de 15 s =
-  timeout de conexión, incluido el `turno-sweeper` del server efímero). **No es regresión de E5** —
-  los tres bloques de arriba corrieron completos y verdes contra la misma BD minutos antes. Se
-  relanza cuando la red vuelva.
+- **Suite completa: `tests 489 · pass 488 · fail 0 · skipped 1`** (`parseXls`, skip declarado ajeno),
+  contra `PortalG3_dev` con el server efímero en 3102. Baseline de E4 (482/481) **+ los 7 nuevos**,
+  sin un solo rojo — **ni el flaky conocido de `finalizar_turno`** (44/44 su bloque) — y
+  `zzz_session_leak_guard` corrió **último** y pasó, igual que en el script `test`.
+  Se corrió en **10 bloques de archivos en vez de un `npm test` de una sola pieza**, por dos razones
+  de entorno, ninguna del código: la red corporativa tiró la BD **dos veces** (ver "Datos
+  descubiertos") y los procesos en background de esta sesión mueren a los ~20 min, así que un `npm
+  test` de 40 min no llega al final. Cada bloque corrió en primer plano bajo los 10 min. Reparto:
+  (1) guards estáticos + módulos puros 134/133+1skip · (2) catálogos/tipos espejo/coherencia 30 ·
+  (3) revalidate + fechas + `turno-entidad` 83 · (4) auth + DISP 47 · (5) cierre + conformación 23 ·
+  (6) `sala_de_mando_batch` 78 · (7) COMB + finalizar + cambiar unidad 44 · (8) registros + gate de
+  transición + seguimiento 6+8 · (9) históricos + rol CyM + SIS + IA 35 · (10) leak guard 1.
+- **Consulta directa a la BD tras la corrida**: **cero** filas en `'TSR'` (vivas e histórico), **cero**
+  en `'TST'`, **cero** copias con `origen_lote_id` en CUALQUIER planta (o sea: la suite no dejó ni un
+  asiento reflejado, tampoco archivado), **cero** registros de Sala en GEC3/GEC32, **cero** sesiones
+  sintéticas activas, **cero** `evento_dashboard` de fixtures, **cero** incoherencias
+  `tipo_evento.bitacora_id ≠ registro.bitacora_id`. MAND real intacto (26 celdas vivas en GEC3).
 
 **Desviaciones** — las seis registradas arriba. La única que cambia lo pedido por el `.md` es el
 sello condicional (`CASE`), que alinea la copia con el criterio del origen en vez de contradecirlo.
