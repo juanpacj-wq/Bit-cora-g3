@@ -6,7 +6,12 @@ import { getDB } from '../db.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
 import { fechaOperativaDePeriodo, turnoFromPeriodo } from '../utils/turno.js';
 import { recalcularEventoDashboard } from '../utils/notificador.js';
-import { setupSessions, cleanupTestRegistros, call, TEST_PLANTA, TEST_TAG } from './helpers.js';
+import { crearReflejoLote } from '../utils/reflejo-sala.js';
+import { resolverOAbrirTurnoAbierto } from '../utils/turno-entidad.js';
+import {
+  setupSessions, cleanupTestRegistros, call, TEST_PLANTA, TEST_TAG,
+  TEST_PLANTA_REFLEJO, setupSesionReflejo,
+} from './helpers.js';
 
 // D-055: esta suite operaba sobre PLANTA_ID ('GEC3', planta REAL) y su cleanMand() borraba
 // `registro_historico` de MAND en GEC3 SIN acotar por fecha ni por tag — con la suite corriendo
@@ -93,6 +98,9 @@ before(async () => {
 
 after(async () => {
   await cleanMand();
+  // D-058 E4: la segunda planta-fixture (la que SÍ refleja) tiene su propia limpieza — sus filas
+  // viven en MAND *y* en las dos bitácoras de Sala, así que `cleanMand` no las alcanza.
+  await cleanReflejo();
   await cleanupTestRegistros();
 });
 
@@ -2849,4 +2857,353 @@ test('D-058 E2.3 — un lote migrado por F32.A1 (sin hora_llamada) igual trae su
     `Se recibe llamada del CND (CND-migrado) autorizando ${PLANTA_ID} a generar 77 MW en el P9. ${TEST_TAG} e2-migrado.`,
   );
   await cleanMand();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D-058 · E4 — el lote registrado se asienta en SALAJDT y SALAING (REQ-02).
+//
+// Estos tests NO corren sobre `TEST_PLANTA`: RN-02.e la excluye del reflejo a propósito (si
+// reflejara, cada `npm test` sembraría asientos de prueba en las bitácoras de Sala sobre la BD
+// productiva, D-030). Corren sobre `TEST_PLANTA_REFLEJO`, la segunda planta-fixture — sembrada con
+// `activa = 0`, invisible en el selector del login y rechazada por `validarPlantaOperable`, así que
+// ningún operador puede verla ni entrar a ella. Ver `tests/helpers.js`.
+//
+// El caso "TEST_PLANTA no refleja" sí se prueba, con la sesión de siempre (E4.5).
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+let ctxReflejo;
+async function sesionReflejo() {
+  if (!ctxReflejo) ctxReflejo = await setupSesionReflejo();
+  return ctxReflejo;
+}
+
+async function lotesReflejo(sesion_id) {
+  const r = await call('GET', `/api/sala-de-mando/lotes?planta_id=${TEST_PLANTA_REFLEJO}`, { sesion_id });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  return r.data.lotes;
+}
+
+// Limpieza de la planta-fixture del reflejo. Acotada a `TEST_PLANTA_REFLEJO` y SIN parámetro de
+// planta, igual que `cleanMand` (D-055): imposible apuntarla a GEC3/GEC32 por error. Barre TODA la
+// planta y no solo MAND —sin filtrar por `bitacora_id`— porque el reflejo escribe en dos bitácoras
+// más que el origen y una copia mal dirigida tiene que quedar limpia igual.
+async function cleanReflejo() {
+  assert.equal(TEST_PLANTA_REFLEJO, 'TSR', 'cleanReflejo solo puede correr sobre la planta-fixture');
+  const db = await getDB();
+  await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+    .query(`
+      DELETE FROM bitacora.evento_dashboard WHERE planta_id = @p;
+      DELETE FROM bitacora.registro_activo WHERE planta_id = @p;
+      DELETE FROM bitacora.registro_historico WHERE planta_id = @p;
+      DELETE FROM bitacora.mand_cierre_log WHERE planta_id = @p;
+    `);
+}
+
+// Las COPIAS de un lote: se buscan por `campos_extra.origen_lote_id`, nunca por `registro_id` — la
+// copia también migra al histórico y no hay FK posible (D-055 (c)). Trae el `bitacora_id` del tipo
+// de evento aparte del de la fila: compararlos ES el guard de coherencia de D-053.
+async function copiasDelLote(lote_id) {
+  const db = await getDB();
+  const r = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+    .input('lote', sql.NVarChar(64), lote_id)
+    .query(`
+      SELECT ra.registro_id, ra.bitacora_id, ra.detalle, ra.fecha_evento, ra.turno, ra.turno_id,
+             ra.estado, ra.creado_por, ra.modificado_por,
+             b.codigo AS bitacora_codigo,
+             te.nombre AS tipo_nombre, te.bitacora_id AS tipo_bitacora_id, te.seleccionable,
+             JSON_VALUE(ra.campos_extra, '$.origen_bitacora') AS origen_bitacora,
+             JSON_VALUE(ra.campos_extra, '$.origen_lote_id')  AS origen_lote_id
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+      INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = ra.tipo_evento_id
+      WHERE ra.planta_id = @p
+        AND JSON_VALUE(ra.campos_extra, '$.origen_lote_id') = @lote
+      ORDER BY b.codigo
+    `);
+  return r.recordset;
+}
+
+// Todas las filas de Sala de la planta-fixture, reflejadas o no. Sirve para afirmar AUSENCIA.
+async function registrosSalaReflejo() {
+  const db = await getDB();
+  const r = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+    .query(`
+      SELECT ra.registro_id, b.codigo AS bitacora_codigo, ra.detalle,
+             JSON_VALUE(ra.campos_extra, '$.origen_lote_id') AS origen_lote_id
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+      WHERE ra.planta_id = @p AND b.codigo IN ('SALAJDT', 'SALAING', 'SALAOP')
+    `);
+  return r.recordset;
+}
+
+test('D-058 E4.1 — un lote crea DOS copias (SALAJDT + SALAING) con el mismo origen_lote_id; SALAOP ninguna', async () => {
+  await cleanReflejo();
+  const s = await sesionReflejo();
+  const alta = await postGuardar({
+    sesion_id: s.sesion_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e4-1`,
+        periodos: [{ periodo: 10, valor_mw: 150 }, { periodo: 11, valor_mw: 150 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const lotes = await lotesReflejo(s.sesion_id);
+  assert.equal(lotes.length, 1, JSON.stringify(lotes));
+  const copias = await copiasDelLote(lotes[0].lote_id);
+
+  assert.equal(copias.length, 2, `deben ser exactamente dos copias: ${JSON.stringify(copias)}`);
+  assert.deepEqual(copias.map((c) => c.bitacora_codigo), ['SALAING', 'SALAJDT'],
+    'las dos bitácoras de Sala, sin importar cuál de los dos cargos originó el evento (RQ-02.2)');
+  for (const c of copias) {
+    assert.equal(c.origen_lote_id, lotes[0].lote_id, 'el vínculo con el origen es por LOTE');
+    assert.equal(c.origen_bitacora, 'MAND');
+    assert.equal(c.estado, 'borrador');
+    assert.equal(c.modificado_por, null, 'nace sin corregir');
+    // D-053: el tipo_evento TIENE que pertenecer a la bitácora de la fila. No hay FK ni CHECK que lo
+    // garantice y el drift es invisible hasta que alguien abre el editor.
+    assert.equal(c.tipo_bitacora_id, c.bitacora_id, `tipo_evento de otra bitácora en ${c.bitacora_codigo}`);
+    assert.equal(c.tipo_nombre, 'Autorización', 'el nombre literal del catálogo de MAND');
+    assert.equal(c.seleccionable, false, 'el tipo espejo no es tecleable a mano (E3)');
+  }
+
+  // RQ-02.3: SALAOP queda fuera. Se verifica sobre TODAS las filas de Sala de la fixture, no solo
+  // sobre las del lote: una copia mal dirigida aparecería igual acá.
+  const enSala = await registrosSalaReflejo();
+  assert.equal(enSala.filter((r) => r.bitacora_codigo === 'SALAOP').length, 0,
+    `SALAOP no recibe copia: ${JSON.stringify(enSala)}`);
+  assert.equal(enSala.length, 2, 'y no se escribió nada más en Sala');
+  await cleanReflejo();
+});
+
+test('D-058 E4.2 — el detalle de la copia ES el asiento del listado, con la hora y el autor del origen', async () => {
+  await cleanReflejo();
+  const s = await sesionReflejo();
+  const hora = horaBogotaMin(-7) ?? '00:00';
+  const alta = await postGuardar({
+    sesion_id: s.sesion_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, fecha: HOY,
+      filas: [{
+        tipo: 'REDESP', hora, funcionariocnd: 'ignorado', detalle: `${TEST_TAG} e4-2`,
+        periodos: [{ periodo: periodoRedespLibre(), valor_mw: 120 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const lote = (await lotesReflejo(s.sesion_id))[0];
+  const copias = await copiasDelLote(lote.lote_id);
+  assert.equal(copias.length, 2);
+
+  for (const c of copias) {
+    // FUENTE ÚNICA: el listado del día y la bitácora de Sala no pueden decir cosas distintas del
+    // mismo evento. Las dos salidas vienen del mismo motor (`utils/asientos/`), no de dos plantillas.
+    assert.equal(c.detalle, lote.asiento, 'la copia dice EXACTAMENTE lo que muestra el listado');
+    assert.ok(c.detalle.includes(`redespacho para ${TEST_PLANTA_REFLEJO}`), c.detalle);
+
+    // `fecha_evento` = la HORA DE LA LLAMADA, no el instante de la escritura (dato narrativo).
+    assert.equal(new Date(c.fecha_evento).toISOString(), lote.hora_llamada,
+      'la copia se asienta a la hora en que llamó el CND');
+    // RN-02.c: el autor es el del ORIGEN, nunca SISTEMA.
+    assert.equal(c.creado_por, s.usuario_id);
+    assert.ok(c.turno === 1 || c.turno === 2);
+  }
+  await cleanReflejo();
+});
+
+test('D-058 E4.3 — dos lotes en un mismo Guardar → dos pares de copias, cada uno con su texto', async () => {
+  await cleanReflejo();
+  const s = await sesionReflejo();
+  const alta = await postGuardar({
+    sesion_id: s.sesion_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, fecha: HOY,
+      filas: [
+        {
+          tipo: 'AUTH', hora: horaBogotaMin(-20) ?? '00:00', funcionariocnd: 'Gómez',
+          detalle: null, periodos: [{ periodo: 8, valor_mw: 109 }, { periodo: 9, valor_mw: 134 }],
+        },
+        {
+          tipo: 'PRUEBA', hora: horaBogotaMin(-3) ?? '00:01', funcionariocnd: null,
+          detalle: `${TEST_TAG} e4-3`, periodos: [{ periodo: 12, valor_mw: 50 }],
+        },
+      ],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const lotes = await lotesReflejo(s.sesion_id);
+  assert.equal(lotes.length, 2);
+  const auth = lotes.find((l) => l.tipo === 'AUTH');
+  const prueba = lotes.find((l) => l.tipo === 'PRUEBA');
+
+  const copiasAuth = await copiasDelLote(auth.lote_id);
+  const copiasPrueba = await copiasDelLote(prueba.lote_id);
+  assert.equal(copiasAuth.length, 2);
+  assert.equal(copiasPrueba.length, 2);
+  assert.equal((await registrosSalaReflejo()).length, 4, 'cuatro copias en total, ni una de más');
+
+  // Cada par lleva SU tipo espejo y SU texto: un reflejo "por Guardar" en vez de "por lote" habría
+  // mezclado los dos eventos en un solo renglón.
+  for (const c of copiasAuth) {
+    assert.equal(c.tipo_nombre, 'Autorización');
+    assert.equal(c.detalle, auth.asiento);
+    assert.ok(c.detalle.includes('P8: 109 MW; P9: 134 MW'), c.detalle);
+  }
+  for (const c of copiasPrueba) {
+    assert.equal(c.tipo_nombre, 'Pruebas');
+    assert.equal(c.detalle, prueba.asiento);
+    assert.ok(c.detalle.startsWith(`Se declara prueba de ${TEST_PLANTA_REFLEJO}`), c.detalle);
+  }
+  await cleanReflejo();
+});
+
+test('D-058 E4.4 — turno_id de la copia sale del turno ABIERTO de la unidad, no del periodo', async () => {
+  // La decisión con la razón más larga de la etapa: `fecha_evento` es narrativo y `turno_id` NO —
+  // es el puntero de archivado (D-045). Una copia apuntando a un turno ya CERRADO no la archiva
+  // nadie y queda viva en `registro_activo` para siempre.
+  //
+  // El contraste se construye con un periodo que NO cae en el turno abierto: su celda MAND resuelve
+  // el `turno_id` por `fechaOperativaDePeriodo` (D-055 (b)) → una cabecera que la fixture no tiene,
+  // así que queda en NULL. La copia, en cambio, tiene que apuntar al turno ABIERTO.
+  // El periodo se elige AL CORRER, no se hardcodea: cuál de los tres bloques coincide con el turno
+  // abierto depende de la hora, y un P3 fijo colisiona con la ventana entre 00:00 y 06:00 Bogotá.
+  await cleanReflejo();
+  const db = await getDB();
+  const s = await sesionReflejo();
+  const abierto = await resolverOAbrirTurnoAbierto(db, TEST_PLANTA_REFLEJO);
+  assert.ok(abierto?.turno_unidad_id, 'la fixture necesita un turno ABIERTO para este caso');
+  const diaAbierto = new Date(abierto.fecha_operativa).toISOString().slice(0, 10);
+  const periodoAjeno = [3, 12, 20].find((p) => (
+    fechaOperativaDePeriodo(HOY, p) !== diaAbierto || turnoFromPeriodo(p) !== abierto.turno
+  ));
+  assert.ok(periodoAjeno, 'siempre hay un bloque de la grilla fuera del turno abierto');
+
+  try {
+    const alta = await postGuardar({
+      sesion_id: s.sesion_id,
+      body: {
+        planta_id: TEST_PLANTA_REFLEJO, fecha: HOY,
+        filas: [{
+          tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e4-4`,
+          periodos: [{ periodo: periodoAjeno, valor_mw: 90 }],
+        }],
+      },
+    });
+    assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+    const lote = (await lotesReflejo(s.sesion_id))[0];
+    const celda = (await db.request()
+      .input('p', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+      .input('lote', sql.NVarChar(64), lote.lote_id)
+      .query(`
+        SELECT turno_id FROM bitacora.registro_activo
+        WHERE planta_id = @p AND JSON_VALUE(campos_extra, '$.lote_id') = @lote
+      `)).recordset[0];
+    assert.equal(celda.turno_id, null,
+      `la celda MAND del P${periodoAjeno} resuelve por periodo → cabecera inexistente en la fixture`);
+
+    for (const c of await copiasDelLote(lote.lote_id)) {
+      assert.equal(c.turno_id, abierto.turno_unidad_id,
+        'la copia se archiva con el turno ABIERTO, no con el del periodo');
+    }
+  } finally {
+    // Los registros primero: `registro_activo.turno_id` tiene FK a `turno_unidad`.
+    await cleanReflejo();
+    await db.request()
+      .input('id', sql.Int, abierto.turno_unidad_id)
+      .query(`DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
+  }
+});
+
+test('D-058 E4.5 — la planta-fixture TEST_PLANTA no genera copias (RN-02.e)', async () => {
+  await cleanMand();
+  const db = await getDB();
+  const alta = await postGuardar({
+    sesion_id: ctx.sesiones.jdt,
+    body: {
+      planta_id: PLANTA_ID, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora: HORA_OK, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e4-5`,
+        periodos: [{ periodo: 10, valor_mw: 100 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  // La suite corre contra la BD PRODUCTIVA (D-030): sin este guard, cada corrida dejaría asientos de
+  // prueba en las bitácoras de Sala. Se mira TODA la planta-fixture, no solo el lote.
+  const enSala = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA)
+    .query(`
+      SELECT COUNT(*) AS n
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+      WHERE ra.planta_id = @p AND b.codigo IN ('SALAJDT', 'SALAING', 'SALAOP')
+    `);
+  assert.equal(enSala.recordset[0].n, 0, 'TEST_PLANTA no refleja');
+  await cleanMand();
+});
+
+test('D-058 E4.6 — si el reflejo falla, el lote tampoco queda (atomicidad, criterio 8)', async () => {
+  await cleanReflejo();
+  const db = await getDB();
+  const s = await sesionReflejo();
+  const lote_id = randomUUID();
+  const tipoAuth = await tipoEventoIdMand('AUTH');
+
+  // Reproduce la composición del endpoint —celdas + reflejo en UNA transacción— y le inyecta una
+  // falla REAL en el INSERT de la copia: `creado_por` inexistente viola la FK a lov_bit.usuario.
+  // No se simula con un throw temprano a propósito: lo que hay que probar es que un error de SQL a
+  // mitad del reflejo se propaga y revierte TAMBIÉN el origen.
+  const tx = new sql.Transaction(db);
+  await tx.begin();
+  let fallo = null;
+  try {
+    await new sql.Request(tx)
+      .input('m', sql.Int, MAND_BITACORA_ID)
+      .input('p', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+      .input('te', sql.Int, tipoAuth)
+      .input('ce', sql.NVarChar(sql.MAX), JSON.stringify({
+        periodo: 10, valor_mw: 100, funcionariocnd: 'Pérez', lote_id,
+        hora_llamada: new Date().toISOString(),
+      }))
+      .input('creado_por', sql.Int, s.usuario_id)
+      .query(`
+        INSERT INTO bitacora.registro_activo
+          (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+           estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
+        VALUES (@m, @p, SYSUTCDATETIME(), 1, 'atomicidad', @ce, @te, 'borrador', '[]', '[]', '[]', @creado_por)
+      `);
+    await crearReflejoLote(tx, {
+      planta_id: TEST_PLANTA_REFLEJO,
+      lote_id,
+      tipo: 'AUTH',
+      periodos: [{ periodo: 10, valor_mw: 100 }],
+      funcionariocnd: 'Pérez',
+      detalle: null,
+      hora_llamada: new Date().toISOString(),
+      creado_por: 2147483000, // no existe → viola la FK dentro del reflejo
+      snapshots: { ingenieros_snapshot: '[]', jdts_snapshot: '[]', jefes_snapshot: '[]' },
+    });
+    await tx.commit();
+  } catch (e) {
+    fallo = e;
+    await tx.rollback();
+  }
+
+  assert.ok(fallo, 'el reflejo NO puede tragarse el error: eso dejaría un origen sin copias');
+  const r = await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+    .query(`SELECT COUNT(*) AS n FROM bitacora.registro_activo WHERE planta_id = @p`);
+  assert.equal(r.recordset[0].n, 0, 'ni el lote ni las copias: o los tres lados o ninguno (RQ-02.9)');
+  await cleanReflejo();
 });

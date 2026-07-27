@@ -19,7 +19,7 @@
 | E1 — Motor de asientos (puro) | ✅ | `utils/asientos/` (puro) + 28 tests unitarios + 6 guards contra el catálogo real. Nadie lo importa todavía. |
 | E2 — El asiento en el listado del día + copiar | ✅ | `GET /lotes` devuelve `asiento`; el listado lo pinta a todo el ancho + copiar renglón / copiar el día. Cierra REQ-04 §8.1 y §8.3. |
 | E3 — `seleccionable` + los 8 tipos espejo | ✅ | Columna `seleccionable` (F33.A1) + 8 tipos espejo sembrados en `SALAJDT`/`SALAING` con `0`; el selector los esconde y el POST/PUT genérico los rechaza. 11 tests nuevos. |
-| E4 — Reflejo a Sala: crear | ⬜ | — |
+| E4 — Reflejo a Sala: crear | ✅ | `utils/reflejo-sala.js` (`crearReflejoLote`) enganchado en `POST /guardar`: cada lote se asienta en SALAJDT **y** SALAING dentro de la misma transacción. 6 tests nuevos sobre una segunda planta-fixture. |
 | E5 — Reflejo a Sala: corregir y borrar | ⬜ | — |
 | E6 — El asiento reflejado es de solo lectura | ⬜ | — |
 | E7 — XLSX ESM + plantilla F03 derivada | ⬜ | — |
@@ -94,6 +94,31 @@ E8 ──> E9
   cableado F6 matchea `b.codigo='MAND'`, pero nada lo fija) y dos guards estáticos que verifican que
   los lookups de `registros.js` y `catalogos.js` conservan el filtro. Los estáticos corren sin BD y
   sin servidor: si el filtro se cae, no depende de que el test funcional esté levantado.
+- **E4 — el guard de RN-02.e vive DENTRO del módulo, no replicado en cada enganche.** El `.md` lo
+  pedía en `mand.js`; está en `crearReflejoLote` (y el enganche lo señala con un comentario). Motivo:
+  E5 agrega dos call sites más y el ADR de DISP traerá otros — un guard copiado es un guard que
+  alguien olvida (mismo criterio que `sesion-contexto.js`, D-054). Sin impacto funcional.
+- **E4 — la planta-fixture que SÍ refleja vive en `tests/helpers.js`, NO en `db.js`, y se siembra con
+  `activa = 0`.** El `.md` ofrecía "misma mecánica que `TEST_PLANTA_ID` en `db.js`", pero declararla
+  en `db.js` obligaba a excluirla también en `catalogos.js`/`sesion-contexto.js`/`eventos-dashboard.js`
+  — y ahí aparecía la incoherencia de fondo: si el código de producto la conociera como "planta de
+  test", el reflejo terminaría excluyéndola y la suite dejaría de probar lo que dice probar.
+  Producción no la conoce: para el producto es una planta cualquiera. El `activa = 0` es lo que la
+  vuelve inofensiva — `GET /api/catalogos/plantas` y `validarPlantaOperable` filtran por `activa = 1`,
+  así que ningún operador puede verla ni entrar a ella, y `sesion_activa` no valida la planta más allá
+  de la FK.
+- **E4 — usuario sintético propio (`test_reflejo_jdt`), no los de `setupSessions`.** `ensureSesion`
+  desactiva las otras sesiones del mismo usuario (sesión única, D-035): reusar `test_jdt` habría
+  matado su sesión sobre `TST` y el resto de la suite de MAND se habría dado 401 a sí misma (la
+  lección de D-055, acá en versión "dos plantas"). Precedente: `test_opcarbon`/`test_coord_cym`.
+- **E4 — dos guards tocados.** `guard_no_prod_historico_destruction` suma `TEST_PLANTA_REFLEJO`/`'TSR'`
+  a sus acotadores (es una fixture, acota igual de fuerte que `'TST'`), y `zzz_session_leak_guard`
+  excluye `TSR` de "planta real": con `activa = 0` una sesión ahí no puede aparecer en el panel
+  CONECTADOS de nadie, que es exactamente lo que ese guard protege. Su `after()` la desactiva igual.
+- **E4 — `crearReflejoLote` LANZA; no degrada.** Ante `hora_llamada` ausente/inválida, asiento vacío o
+  tipo espejo faltante, corta la transacción. Es la contracara deliberada del degradado a `null` de
+  E2: allá el texto se MUESTRA (perder un renglón es mejor que perder la jornada), acá se PERSISTE en
+  el histórico — una copia muda o sin hora sería peor que un error.
 
 ## Datos descubiertos en ejecución
 
@@ -124,6 +149,22 @@ E8 ──> E9
   20/21/22 y DISP 23 quedaron intactos. Total: 30 tipos, 8 con `seleccionable = 0`, cero duplicados
   `(bitacora_id, nombre)`. Ojo: los ids de `SALAING` salieron ANTES que los de `SALAJDT` (el
   `CROSS JOIN` ordena por `bitacora_id`, y `SALAING` es posterior en el catálogo pero menor en id).
+- **Cómo quedó resuelta la planta-fixture que SÍ refleja (E5 y E8 dependen de esto).**
+  `TEST_PLANTA_REFLEJO = 'TSR'` + `setupSesionReflejo()`, **ambos en `server/tests/helpers.js`** (no
+  en `db.js`: producción no la conoce). Se siembra `activa = 0` → invisible en el selector del login
+  y rechazada por `validarPlantaOperable`; la sesión se inserta directo en `sesion_activa`, que no
+  valida la planta más allá de la FK. Usuario propio `test_reflejo_jdt` (cargo `Ingeniero Jefe de
+  Turno`, con `puede_crear` en MAND por matriz). **E5 la reusa tal cual**: los tests de corrección y
+  borrado van en `sala_de_mando_batch.test.js` con `sesionReflejo()` y limpian con `cleanReflejo()`
+  (borra `registro_activo`/`registro_historico`/`evento_dashboard`/`mand_cierre_log` de `'TSR'`).
+  **E8** debe excluir `'TSR'` del libro F03 igual que `'TST'` (RN-06.g).
+- **`es_sintetico` se marca en el ARRANQUE** (`db.js`, `UPDATE … WHERE username LIKE 'test\_%'`), así
+  que un usuario creado a mitad de corrida queda en `0` hasta el próximo restart: `deactivateSynthetic
+  Sessions()` no lo alcanzaría y el guard final saldría rojo. Por eso `setupSesionReflejo` lo setea
+  **explícito** en el MERGE. Vale para cualquier fixture nueva.
+- **`broadcastConteoBitacoras` NO necesitó cambio** (RQ-02.4): `fetchSnapshot` agrupa por
+  `bitacora_id` sobre **todas** las bitácoras no ocultas de la planta, así que las dos copias entran
+  al contador de SALAJDT/SALAING solas.
 - **El puerto 3002 puede estar tomado por el backend del usuario.** El arranque igual corre
   `initDB()` (la migración se aplica) y luego muere con `EADDRINUSE`. Para los tests HTTP se levanta
   uno efímero: `cd server && AUTH_TEST_BYPASS=1 SERVER_PORT=3102 node --env-file=../.env server.js`
@@ -293,5 +334,66 @@ cambia el contrato del motor, las plantillas del insumo ni el shape previo de `G
 **Desviaciones** — las cuatro registradas arriba en "Decisiones / desviaciones acumuladas". La única
 con impacto funcional es el enforcement en el POST/PUT genérico, que **cierra** un hueco en vez de
 abrirlo y no altera ningún camino existente (todos los tipos que ya se usaban quedaron en `1`).
+
+### E4 — Reflejo a Sala: crear  ✅
+
+**Archivos tocados**
+- `server/utils/reflejo-sala.js` (nuevo) — `crearReflejoLote(tx, {...})` + `plantaRefleja` (guard
+  RN-02.e, una sola vez) + `BITACORAS_REFLEJO` / `TIPO_ESPEJO_MAND`. Inserta las DOS copias con el
+  asiento del motor de E1, resuelve `tipo_evento_id` por `(bitacora_id, nombre)` en cada llamada y
+  no abre ni cierra transacciones: se compone con la del origen. E5 le agrega `actualizar`/`borrar`.
+- `server/routes/mand.js` — `POST /guardar` acumula `lotesCreados` y, tras el recálculo de
+  `evento_dashboard` y **dentro de la misma transacción**, llama al reflejo una vez por lote. Sin
+  `try/catch`: si falla, revierte también el lote.
+- `server/tests/helpers.js` — `TEST_PLANTA_REFLEJO` (`'TSR'`, `activa = 0`) + `setupSesionReflejo()`.
+- `server/tests/sala_de_mando_batch.test.js` — 6 tests nuevos (E4.1..E4.6) + `cleanReflejo()`,
+  `copiasDelLote()`, `registrosSalaReflejo()`; el `after()` del archivo limpia la fixture nueva.
+- `server/tests/guard_no_prod_historico_destruction.test.js` — `TEST_PLANTA_REFLEJO`/`'TSR'` como
+  acotadores de fixture.
+- `server/tests/zzz_session_leak_guard.test.js` — `TSR` fuera de "planta real" (ver desviaciones).
+
+**Decisiones de implementación**
+- **`fecha_evento` y `turno_id` van por criterios DISTINTOS, y las dos razones quedaron comentadas en
+  el código.** `fecha_evento` = la `hora_llamada` del lote (dato narrativo: el asiento se lee donde
+  el operador lo espera y coincide con el listado y con el F03). `turno_id` = el turno **ABIERTO** de
+  la unidad, porque no es narrativo sino el **puntero de archivado** (D-045): una copia apuntando a
+  un turno ya CERRADO no la archiva nadie y queda viva en `registro_activo` para siempre, y el
+  rescate de huérfanos tampoco la alcanza (solo levanta `turno_id IS NULL`). Por eso `NULL` cuando no
+  hay turno abierto. **No contradice a D-055 (b)**: allá la celda pertenece a UN periodo; acá el
+  asiento es del LOTE, cuyos periodos pueden caer en dos turnos.
+- La columna vieja `turno` (1|2) sí sale de la hora del asiento
+  (`turnoFromPeriodo(periodoFromFechaBogota(hora))`): describe cuándo pasó, no dónde se archiva.
+- El vínculo es `campos_extra.origen_lote_id`, por LOTE y no por registro: la copia también migra al
+  histórico, así que no hay FK posible (mismo argumento de D-055 (c)).
+- El `tipo_evento_id` se resuelve en cada llamada por `(bitacora_id, nombre)` y **nunca se cachea**;
+  si falta alguno de los 8 tipos de F33.A1, lanza en vez de insertar un tipo de otra bitácora (el
+  drift invisible de D-053).
+- Los snapshots se **reusan** de la transacción de MAND: recalcularlos costaría tres queries más y,
+  con la sesión moviéndose, podría dar otro resultado.
+- **Estado intermedio conocido hasta E6:** la copia nace con `creado_por` = el autor del origen, así
+  que hoy ese autor **puede** editarla o borrarla desde su bitácora de Sala (`canEditarRegistro`
+  exige autoría + `puede_crear`, D-049). RQ-02.5 lo cierra en E6, que es donde vive esa tarea; no se
+  adelantó acá para no partir el gate entre dos etapas.
+
+**Verificación real**
+- `node --test --test-concurrency=1 --test-name-pattern="D-058 E4"` → **6/6 pass**, 90 s.
+- `node --test --test-concurrency=1 tests/sala_de_mando_batch.test.js` (archivo completo) →
+  **71/71 pass, 0 fail**, 307 s. Baseline de E2 (65) **+ los 6 nuevos**.
+- `cd server && npm test` (suite completa, server efímero en 3102, contra `PortalG3_dev`):
+  **tests 482 · suites 26 · pass 481 · fail 0 · cancelled 0 · skipped 1** (`parseXls`, skip declarado
+  ajeno) en 40,8 min. Baseline de E3 (476/475) **+ los 6 nuevos**, sin un solo rojo: ni el flaky
+  conocido de `finalizar_turno`, y `zzz_session_leak_guard` corrió último y pasó.
+  `guard_tipo_evento_coherente` y `guard_no_prod_historico_destruction` verdes.
+- **Consulta directa a la BD tras la corrida** (lo que pide la etapa): **cero** filas residuales en
+  `'TSR'`, **cero** copias con `origen_lote_id` en cualquier planta, **cero** sesiones sintéticas
+  activas, **cero** `turno_unidad` de la fixture, **cero** `evento_dashboard` de `'TST'`/`'TSR'`,
+  **cero** incoherencias `tipo_evento.bitacora_id ≠ registro.bitacora_id`, y **cero** registros de
+  Sala en GEC3/GEC32 (o sea: la suite no dejó ni un asiento en planta real). `'TSR'` quedó residente
+  con `activa = 0` y `test_reflejo_jdt` con `es_sintetico = 1`.
+- `npm run build` (raíz) → **verde**, 15,8 s. No se tocó front; se corrió como sanity.
+
+**Desviaciones** — las cinco registradas arriba en "Decisiones / desviaciones acumuladas". La única
+que cambia lo pedido por el `.md` es dónde viven el guard de RN-02.e y la planta-fixture; ninguna
+altera el contrato del reflejo ni el comportamiento del `POST /guardar` para plantas reales.
 
 <!-- Cada etapa agrega su bloque: ### EX — <título>  ✅ con Archivos tocados / Verificación / Desviaciones. -->

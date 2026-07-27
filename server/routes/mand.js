@@ -14,6 +14,7 @@ import { turnoFromPeriodo, fechaOperativaDePeriodo, fechaBogotaStr } from '../ut
 import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from '../utils/snapshots.js';
 import { recalcularEventoDashboard } from '../utils/notificador.js';
 import { asientoLote } from '../utils/asientos/index.js';
+import { crearReflejoLote } from '../utils/reflejo-sala.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { notifyDashboard } from '../utils/notify-dashboard.js';
@@ -890,6 +891,7 @@ router.post('/guardar', asyncH(async (req, res) => {
     // (ya no borran nada) y las correcciones viven en el histórico del apartado (D-057 / REQ-04).
     let registrosCreados = 0;
     const celdasTocadas = new Map(); // `${tipo}|${periodo}` → { tipo, periodo } (dedupe para el recálculo)
+    const lotesCreados = []; // { lote_id, fila } — insumo del reflejo a Sala (REQ-02), abajo
 
     for (const fila of filasNorm) {
       const tipoEventoId = tipoMap[fila.tipo].tipo_evento_id;
@@ -938,6 +940,7 @@ router.post('/guardar', asyncH(async (req, res) => {
         registrosCreados++;
         celdasTocadas.set(`${fila.tipo}|${periodo}`, { tipo: fila.tipo, periodo });
       }
+      lotesCreados.push({ lote_id, fila });
     }
 
     // Publicación al dashboard: el vigente de cada celda tocada se resuelve DESDE CERO (D-056 E2),
@@ -949,7 +952,34 @@ router.post('/guardar', asyncH(async (req, res) => {
       await recalcularEventoDashboard(transaction, { planta_id, fecha, periodo, tipo });
     }
 
+    // REQ-02 — el lote se asienta en LAS DOS bitácoras de Sala (SALAJDT + SALAING), una llamada por
+    // lote, DENTRO de esta misma transacción: si el reflejo falla, el lote tampoco queda (RQ-02.9).
+    // Nada de try/catch acá — tragarse el error dejaría un origen sin copias, que es exactamente la
+    // desincronización que REQ-02 elimina.
+    //
+    // El reflejo NO notifica al dashboard (RN-02.a: el contrato cross-repo se alimenta del origen,
+    // y `notifyDashboard` sigue disparándose una sola vez más abajo) ni cuenta para presencia o
+    // conformación (RN-02.b: nada de `marcarParticipante`). La planta-fixture no refleja (RN-02.e):
+    // ese guard vive UNA sola vez, dentro de `crearReflejoLote`, para que ningún enganche lo olvide.
+    for (const { lote_id, fila } of lotesCreados) {
+      await crearReflejoLote(transaction, {
+        planta_id,
+        lote_id,
+        tipo: fila.tipo,
+        periodos: fila.periodos,
+        funcionariocnd: fila.funcionariocnd,
+        detalle: fila.detalle,
+        hora_llamada: fila.hora_llamada,
+        creado_por: sesion.usuario_id,
+        // Los snapshots ya los calculó esta transacción: recalcularlos daría el mismo resultado con
+        // tres queries más, y con la sesión moviéndose podría dar OTRO.
+        snapshots: { ingenieros_snapshot, jdts_snapshot, jefes_snapshot },
+      });
+    }
+
     await transaction.commit();
+    // Las copias son registros REALES de SALAJDT/SALAING (RQ-02.4): cuentan en el contador de la
+    // pestaña como cualquier otro. El broadcast ya cubre todas las bitácoras de la planta.
     broadcastConteoBitacoras(planta_id).catch(() => {});
     // Push cross-repo al dashboard (fire-and-forget) SOLO si se escribió algo. Nunca bloquea la
     // respuesta al operador (ver notify-dashboard.js).

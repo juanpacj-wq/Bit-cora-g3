@@ -20,7 +20,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { initDB, getDB, TEST_PLANTA_ID } from '../db.js';
-import { deactivateSyntheticSessions } from './helpers.js';
+import { deactivateSyntheticSessions, TEST_PLANTA_REFLEJO } from './helpers.js';
 
 let db;
 before(async () => { await initDB(); db = await getDB(); });
@@ -29,13 +29,19 @@ before(async () => { await initDB(); db = await getDB(); });
 after(async () => { await deactivateSyntheticSessions(); });
 
 test('ninguna sesión sintética queda activa en una planta real al cerrar la suite', async () => {
+  // D-058 E4: la segunda planta-fixture ('TSR', la que SÍ refleja) también queda fuera. No es una
+  // grieta en el invariante: se siembra con `activa = 0`, así que ni el selector del login
+  // (`GET /api/catalogos/plantas`) ni `validarPlantaOperable` la aceptan — una sesión sintética ahí
+  // no puede aparecer en el panel CONECTADOS de nadie, que es lo que este guard protege. El `after()`
+  // la desactiva igual.
   const { recordset: leaks } = await db.request()
     .input('tp', sql.VarChar(10), TEST_PLANTA_ID)
+    .input('tpr', sql.VarChar(10), TEST_PLANTA_REFLEJO)
     .query(`
       SELECT u.username, sa.planta_id, sa.turno, COUNT(*) AS n
       FROM bitacora.sesion_activa sa
       JOIN lov_bit.usuario u ON u.usuario_id = sa.usuario_id
-      WHERE sa.activa = 1 AND u.es_sintetico = 1 AND sa.planta_id <> @tp
+      WHERE sa.activa = 1 AND u.es_sintetico = 1 AND sa.planta_id NOT IN (@tp, @tpr)
       GROUP BY u.username, sa.planta_id, sa.turno
       ORDER BY sa.planta_id, u.username
     `);
