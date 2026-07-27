@@ -18,7 +18,7 @@
 | E0 — Andamiaje | ✅ | `PREGUNTAS-D-058.md` (15 respuestas, 3 rondas), `_CONTEXTO-BASE.md`, `ESTADO.md`, `E1..E10`. |
 | E1 — Motor de asientos (puro) | ✅ | `utils/asientos/` (puro) + 28 tests unitarios + 6 guards contra el catálogo real. Nadie lo importa todavía. |
 | E2 — El asiento en el listado del día + copiar | ✅ | `GET /lotes` devuelve `asiento`; el listado lo pinta a todo el ancho + copiar renglón / copiar el día. Cierra REQ-04 §8.1 y §8.3. |
-| E3 — `seleccionable` + los 8 tipos espejo | ⬜ | — |
+| E3 — `seleccionable` + los 8 tipos espejo | ✅ | Columna `seleccionable` (F33.A1) + 8 tipos espejo sembrados en `SALAJDT`/`SALAING` con `0`; el selector los esconde y el POST/PUT genérico los rechaza. 11 tests nuevos. |
 | E4 — Reflejo a Sala: crear | ⬜ | — |
 | E5 — Reflejo a Sala: corregir y borrar | ⬜ | — |
 | E6 — El asiento reflejado es de solo lectura | ⬜ | — |
@@ -77,6 +77,23 @@ E8 ──> E9
 - **E2 — `useSalaDeMando.js` no se tocó** (estaba en la lista del commit del `.md`): `getLotes`
   devuelve el payload tal cual y `asiento` viaja dentro de cada lote. No hacía falta cambiar nada y
   agregar código muerto habría sido peor.
+- **E3 — `seleccionable` también se hace cumplir en el POST/PUT genérico, no solo en el selector.**
+  El `.md` pedía filtrar `GET /bitacoras/:id/tipos-evento`, pero ESCONDER el tipo no impide
+  POSTearlo con el id directo — y esa fila es exactamente el asiento sin `origen_lote_id` que la
+  etapa existe para evitar (lección de D-046: lo que solo bloquea el front es evadible por
+  devtools). Se agregó `AND seleccionable = 1` a los dos lookups `(tipo_evento_id, bitacora_id)` de
+  `registros.js`, que ya rechazaban con el mismo 400. **No es un bypass ni toca
+  `canEditarRegistro`** (es una restricción, y la excepción de MAND sigue donde vive) y **no
+  estorba a E4/E5**: el reflejo inserta por SQL directo, no por este endpoint.
+- **E3 — el `UPDATE` complementario solo fuerza el `0` de las 8 filas espejo**, no `seleccionable=1`
+  en el resto (el patrón `oculta` de CIET sí hace los dos lados). Forzar el 1 afirmaría que ningún
+  otro tipo puede estar oculto jamás, que es más de lo que esta etapa sabe; los preexistentes ya
+  quedan en 1 por el `DEFAULT WITH VALUES`.
+- **E3 — dos tests no previstos en el `.md`**: un guard de que ningún tipo espejo tiene
+  `notificar_dashboard_tipo` (RN-02.a: la copia no publica al dashboard; hoy es NULL porque el
+  cableado F6 matchea `b.codigo='MAND'`, pero nada lo fija) y dos guards estáticos que verifican que
+  los lookups de `registros.js` y `catalogos.js` conservan el filtro. Los estáticos corren sin BD y
+  sin servidor: si el filtro se cae, no depende de que el test funcional esté levantado.
 
 ## Datos descubiertos en ejecución
 
@@ -100,6 +117,19 @@ E8 ──> E9
   `SERVER_PORT` del `.env` (3002), no de `PORT`.
 - Volumen real hoy en la BD: MAND 26 celdas / 10 lotes · DISP 1 estado · Sala 5 registros — lo
   esperado por el contexto base.
+- **Los `tipo_evento_id` que sembró F33.A1** (para depurar E4 — el código **nunca** los cachea, los
+  resuelve por `(bitacora_id, nombre)`): `SALAING` → 30 `Autorización`, 31 `Pruebas`,
+  32 `Redespacho`, 33 `Cambio de Disponibilidad`; `SALAJDT` → 34, 35, 36, 37 en el mismo orden.
+  Los `Evento General` de Sala siguen siendo 17 (`SALAJDT`) y 28 (`SALAING`), y los de MAND
+  20/21/22 y DISP 23 quedaron intactos. Total: 30 tipos, 8 con `seleccionable = 0`, cero duplicados
+  `(bitacora_id, nombre)`. Ojo: los ids de `SALAING` salieron ANTES que los de `SALAJDT` (el
+  `CROSS JOIN` ordena por `bitacora_id`, y `SALAING` es posterior en el catálogo pero menor en id).
+- **El puerto 3002 puede estar tomado por el backend del usuario.** El arranque igual corre
+  `initDB()` (la migración se aplica) y luego muere con `EADDRINUSE`. Para los tests HTTP se levanta
+  uno efímero: `cd server && AUTH_TEST_BYPASS=1 SERVER_PORT=3102 node --env-file=../.env server.js`
+  y la suite con `TEST_BASE_URL=http://localhost:3102`. **Importante:** si se prueba contra el 3002
+  ajeno, se está probando el código VIEJO — el test del filtro pasaría o fallaría por la razón
+  equivocada.
 
 ## Baseline y riesgos conocidos al arrancar
 
@@ -215,5 +245,53 @@ Ninguna cambia el contrato del motor ni las plantillas del insumo.
 **Desviaciones** — las cinco registradas arriba en "Decisiones / desviaciones acumuladas". Ninguna
 cambia el contrato del motor, las plantillas del insumo ni el shape previo de `GET /lotes` (el campo
 `asiento` se SUMA; nada se quitó ni se renombró).
+
+### E3 — `seleccionable` + los 8 tipos espejo  ✅
+
+**Archivos tocados**
+- `server/db.js` — **F33.A1**, en dos puntos: (a) la columna `seleccionable BIT NOT NULL DEFAULT 1
+  WITH VALUES` **junto al DDL de `lov_bit.tipo_evento`**, para que exista ANTES de cualquier seed;
+  (b) el seed de los 8 tipos espejo (`CROSS JOIN` de los 4 nombres × `SALAJDT`/`SALAING`,
+  idempotente por `NOT EXISTS (bitacora_id, nombre)`) más el `UPDATE` complementario que reafirma el
+  `0` en cada arranque. El seed va después del cableado de `notificar_dashboard_tipo`, dentro del
+  bloque de catálogos que se reconstruye en cada arranque.
+- `server/routes/catalogos.js` — `GET /bitacoras/:id/tipos-evento` filtra `seleccionable = 1`.
+- `server/routes/registros.js` — los dos lookups `(tipo_evento_id, bitacora_id)` (POST `:269` y
+  PUT `:637`) exigen `seleccionable = 1` (ver desviaciones). Mismo 400 que ya devolvían.
+- `server/tests/tipos_evento_espejo.test.js` (nuevo) — 11 tests.
+- `server/package.json` — el archivo nuevo enganchado al script `test`, después de
+  `catalogo_bitacoras`.
+
+**Decisiones de implementación**
+- La columna se llama `seleccionable`, no `activo`: `activo` se confunde con "bitácora activa" (y
+  con `usuario.activo`). Los tipos preexistentes quedan en `1` por el `DEFAULT WITH VALUES` — la
+  migración no toca ni una fila de datos.
+- Los nombres son literales del catálogo de origen (`Autorización` con tilde, `Pruebas` en plural,
+  `Cambio de Disponibilidad`) y el test 3 los fija contra MAND/DISP: si mañana se renombra uno allá,
+  el espejo queda huérfano y ahora se entera un test, no el histórico.
+- El cuarto tipo se sembró aunque el reflejo de DISP esté fuera de alcance (respuesta 13): el seed
+  se reconstruye en cada arranque y así no hay que volver a tocar el bloque cuando llegue su ADR.
+- Sembrar tipos NO tocó la matriz de permisos: el operador sigue tecleando en `Evento General`.
+
+**Verificación real**
+- `node --test --test-concurrency=1 tests/tipos_evento_espejo.test.js` (contra el server efímero en
+  3102) → **11/11 pass, 0 fail**, 118 s.
+- **Comprobación directa en la BD tras el arranque con la migración:** 30 tipos en total, exactamente
+  **8 con `seleccionable = 0`** (los espejo, ids 30–37), **cero duplicados** `(bitacora_id, nombre)`,
+  y **ninguna otra fila cambió** — `MAND` (20/21/22, con su `notificar_dashboard_tipo`
+  `AUTH`/`PRUEBA`/`REDESP` intacto), `DISP` (23) y los `Evento General` de Sala (17/28) siguen en
+  `seleccionable = 1`. Los 8 espejo quedaron con `notificar_dashboard_tipo = NULL` y
+  `es_default = 0`.
+- `cd server && npm test` (suite completa, contra `PortalG3_dev`, server efímero en 3102):
+  **tests 476 · suites 26 · pass 475 · fail 0 · cancelled 0 · skipped 1** (`parseXls`, skip
+  declarado ajeno) en 40,1 min. Baseline de E2 (465/464) **+ los 11 nuevos**, sin un solo rojo: ni
+  el flaky conocido de `finalizar_turno`, y `zzz_session_leak_guard` corrió último y pasó.
+  `guard_tipo_evento_coherente` verde.
+- `npm run build` (raíz) → **verde**, 9,9 s. No se tocó front; se corrió como sanity del cambio de
+  payload del selector (solo desaparecen opciones que nadie usaba).
+
+**Desviaciones** — las cuatro registradas arriba en "Decisiones / desviaciones acumuladas". La única
+con impacto funcional es el enforcement en el POST/PUT genérico, que **cierra** un hueco en vez de
+abrirlo y no altera ningún camino existente (todos los tipos que ya se usaban quedaron en `1`).
 
 <!-- Cada etapa agrega su bloque: ### EX — <título>  ✅ con Archivos tocados / Verificación / Desviaciones. -->

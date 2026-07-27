@@ -266,6 +266,10 @@ router.post('/', asyncH(async (req, res) => {
   const creado_por = sesion.usuario_id;
 
   // F6: lookup expandido — código de bitácora, nombre del tipo y notificar_dashboard_tipo.
+  // D-058 (F33.A1): `seleccionable = 1` obligatorio. Los tipos ESPEJO del reflejo de Operación 24h
+  // solo los escribe reflejo-sala.js por SQL directo; a mano no se teclean. Esconderlos del selector
+  // (GET /tipos-evento) no basta — un cliente que ya conoce el id los postearía igual, y el asiento
+  // resultante no reflejaría ningún lote (D-046: lo que solo bloquea el front es evadible).
   const teCheck = await db.request()
     .input('te', sql.Int, tipo_evento_id)
     .input('b', sql.Int, bitacora_id)
@@ -275,7 +279,7 @@ router.post('/', asyncH(async (req, res) => {
              bb.codigo AS bitacora_codigo
       FROM lov_bit.tipo_evento te
       INNER JOIN lov_bit.bitacora bb ON bb.bitacora_id = te.bitacora_id
-      WHERE te.tipo_evento_id = @te AND te.bitacora_id = @b
+      WHERE te.tipo_evento_id = @te AND te.bitacora_id = @b AND te.seleccionable = 1
     `);
   if (teCheck.recordset.length === 0) {
     return sendJSON(res, 400, { error: 'tipo_evento_id no pertenece a la bitácora' });
@@ -635,10 +639,15 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
     }
   }
   if (tipo_evento_id) {
+    // D-058 (F33.A1): mismo gate que el POST — un PUT que cambie el tipo tampoco puede aterrizar en
+    // un tipo espejo del reflejo (`seleccionable = 0`).
     const teCheck = await db.request()
       .input('te', sql.Int, tipo_evento_id)
       .input('b', sql.Int, reg.bitacora_id)
-      .query(`SELECT 1 AS ok FROM lov_bit.tipo_evento WHERE tipo_evento_id = @te AND bitacora_id = @b`);
+      .query(`
+        SELECT 1 AS ok FROM lov_bit.tipo_evento
+        WHERE tipo_evento_id = @te AND bitacora_id = @b AND seleccionable = 1
+      `);
     if (teCheck.recordset.length === 0) {
       return sendJSON(res, 400, { error: 'tipo_evento_id no pertenece a la bitácora' });
     }

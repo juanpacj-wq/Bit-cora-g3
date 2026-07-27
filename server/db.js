@@ -456,6 +456,23 @@ export async function initDB() {
       CREATE INDEX IX_tipo_evento_bit ON lov_bit.tipo_evento(bitacora_id);
   `);
 
+  // F33.A1 (D-058): visibilidad del tipo en el selector de la grilla genérica. La tabla no tenía
+  // columna de visibilidad y GET /api/catalogos/bitacoras/:id/tipos-evento devolvía TODOS los tipos,
+  // así que cualquier tipo sembrado se volvía tecleable a mano. Con los tipos espejo del reflejo
+  // (SALAJDT/SALAING, sembrados más abajo) eso sería grave: el JdT podría crear "una autorización"
+  // que no refleja ningún lote y, sin origen_lote_id, esa fila es indistinguible de un reflejo real
+  // para el generador del Excel — justo la doble digitación que REQ-02 elimina.
+  //
+  // Se llama `seleccionable`, NO `activo`: `activo` se confunde con "bitácora activa" (y con
+  // usuario.activo). Los tipos preexistentes quedan en 1 por el DEFAULT WITH VALUES; solo el seed de
+  // los espejo baja a 0. Va acá, junto al DDL de la tabla, para que exista ANTES de cualquier seed.
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.tipo_evento','seleccionable') IS NULL
+      ALTER TABLE lov_bit.tipo_evento
+        ADD seleccionable BIT NOT NULL
+          CONSTRAINT DF_tipo_evento_seleccionable DEFAULT 1 WITH VALUES;
+  `);
+
   await db.request().batch(`
     IF OBJECT_ID('lov_bit.cargo_bitacora_permiso', 'U') IS NULL
     CREATE TABLE lov_bit.cargo_bitacora_permiso (
@@ -940,6 +957,48 @@ export async function initDB() {
     UPDATE te SET notificar_dashboard_tipo = 'REDESP'
     FROM lov_bit.tipo_evento te INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
     WHERE b.codigo = 'MAND' AND te.nombre = 'Redespacho' AND te.notificar_dashboard_tipo IS NULL;
+  `);
+
+  // F33.A1 (D-058): tipos de evento ESPEJO para el reflejo de Operación 24h hacia las bitácoras de
+  // Sala de Mando. El asiento copiado necesita un tipo_evento propio en SALAJDT/SALAING porque no
+  // hay FK ni CHECK que ate registro.bitacora_id con tipo_evento.bitacora_id y el drift es invisible
+  // hasta que alguien abre el editor, con el dato ya en el histórico inmutable (D-053).
+  //
+  // Los nombres son LITERALES de sus catálogos de origen — 'Autorización' con tilde, 'Pruebas' en
+  // plural (MAND) y 'Cambio de Disponibilidad' (DISP). Si no se copian literales, el histórico
+  // termina con dos etiquetas para lo mismo.
+  //
+  // El cuarto se siembra aunque el reflejo de DISP quede fuera de este ADR: el seed se reconstruye
+  // en CADA arranque, así que sembrarlo ahora evita volver a tocar este bloque cuando llegue.
+  // Sembrar tipos NO cambia la matriz de permisos: el operador sigue tecleando en 'Evento General'.
+  await db.request().batch(`
+    INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden, seleccionable)
+    SELECT b.bitacora_id, s.nombre, s.orden, 0
+    FROM lov_bit.bitacora b
+    CROSS JOIN (VALUES
+      ('Autorización',             1),
+      ('Pruebas',                  2),
+      ('Redespacho',               3),
+      ('Cambio de Disponibilidad', 4)
+    ) AS s(nombre, orden)
+    WHERE b.codigo IN ('SALAJDT','SALAING')
+      AND NOT EXISTS (
+        SELECT 1 FROM lov_bit.tipo_evento te
+        WHERE te.bitacora_id = b.bitacora_id AND te.nombre = s.nombre
+      );
+  `);
+
+  // UPDATE complementario (mismo patrón que el `oculta` de CIET, arriba): garantiza el flag en cada
+  // arranque, así un seteo accidental fuera-de-init queda revertido. Solo fuerza el 0 de las 8 filas
+  // espejo — deliberadamente NO fuerza `seleccionable = 1` en el resto, para no cerrarle la puerta a
+  // un tipo oculto futuro que no sea de este reflejo.
+  await db.request().batch(`
+    UPDATE te SET seleccionable = 0
+    FROM lov_bit.tipo_evento te
+    INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+    WHERE b.codigo IN ('SALAJDT','SALAING')
+      AND te.nombre IN ('Autorización','Pruebas','Redespacho','Cambio de Disponibilidad')
+      AND te.seleccionable <> 0;
   `);
 
   // Matriz de permisos (cargo × bitácora) derivada del Excel 2026.

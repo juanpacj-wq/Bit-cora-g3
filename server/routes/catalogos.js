@@ -55,6 +55,12 @@ router.get('/bitacoras', asyncH(async (req, res) => {
 }));
 
 // GET /api/catalogos/bitacoras/:id/tipos-evento
+// D-058 (F33.A1): `seleccionable = 0` esconde los tipos ESPEJO del reflejo de Operación 24h
+// (Autorización / Pruebas / Redespacho / Cambio de Disponibilidad en SALAJDT y SALAING). Este
+// endpoint alimenta el selector de tipo de GrillaRegistros: sin el filtro, el JdT podría teclear a
+// mano "una autorización" en Sala que no refleja ningún lote — sin origen_lote_id, indistinguible de
+// un reflejo real e imposible de rastrear. El reflejo NO pasa por acá: resuelve su tipo_evento_id
+// por (bitacora_id, nombre) directo contra la tabla.
 router.get('/bitacoras/:id/tipos-evento', asyncH(async (req, res) => {
   const bitacora_id = parseInt(req.params.id, 10);
   const db = await getDB();
@@ -63,7 +69,7 @@ router.get('/bitacoras/:id/tipos-evento', asyncH(async (req, res) => {
     .query(`
       SELECT tipo_evento_id, bitacora_id, nombre, es_default, orden
       FROM lov_bit.tipo_evento
-      WHERE bitacora_id = @bitacora_id
+      WHERE bitacora_id = @bitacora_id AND seleccionable = 1
       ORDER BY orden
     `);
   return sendJSON(res, 200, { tipos_evento: result.recordset });
