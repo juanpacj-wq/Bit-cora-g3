@@ -23,7 +23,7 @@
 | E5 — Reflejo a Sala: corregir y borrar | ✅ | `actualizarReflejoLote`/`borrarReflejoLote` enganchados en el `PUT` y el `DELETE` de lotes: corregir regenera el asiento en las dos copias y borrar las borra, en la transacción del origen. 7 tests nuevos; suite 489/488. |
 | E6 — El asiento reflejado es de solo lectura | ✅ | El asiento reflejado no se edita ni se borra en su destino **ni por su autor** (que es el del origen): `canEditarRegistro` + su espejo SQL, con `codigo` propio `asiento_reflejado` y chip de origen en la fila. 5 tests nuevos (2 back, 3 front); suite 491/490. |
 | E7 — XLSX ESM + plantilla F03 derivada | ✅ | ZIP propio en ESM (`leerZip`/`escribirZip`), plantilla derivada del F03 real y commiteada, y el clonador que emite N hojas con `dimension`/`mergeCells`/`Print_Area` recalculados. 18 tests puros; suite 509/508. Verificado abriendo el libro en Excel. |
-| E8 — Consulta unificada y armado del día | ⬜ | — |
+| E8 — Consulta unificada y armado del día | ✅ | `utils/f03-datos.js`: las cuatro fuentes de las dos unidades, cada una con su hora canónica y su doble tabla, repartidas en los tres bloques por hora de calendario y con el encabezado resuelto. 21 tests nuevos; suite 530/529. Contrastado contra el mes real: 20 renglones = 15 lotes + 5 registros de Sala. |
 | E9 — Endpoint mensual + selector y botón | ⬜ | — |
 | E10 — Docs + ADR D-058 + cleanup | ⬜ | — |
 
@@ -181,6 +181,39 @@ E8 ──> E9
   sin pintar nada. El formato ocupa A..I y la hoja derivada también.
 - **E7 — `tabSelected="1"` solo va en la primera hoja.** Si viaja en todas, Excel abre el libro con
   las 31 hojas **agrupadas** y cualquier edición del usuario se replica en todas a la vez.
+- **E8 — el alcance del libro es una CONSTANTE inyectable (`PLANTAS_F03 = ['GEC3','GEC32']`), no un
+  `<> TEST_PLANTA_ID`.** Es lo que hace cumplir RN-06.g y, de paso, deja fuera a `'TSR'` —lo que pedía
+  la nota de E4— **sin que producción tenga que nombrar ninguna de las dos fixtures**. No contradice a
+  D-055: lo que ahí se prohibió fue una allowlist en un endpoint de ESCRITURA, porque volvía imposible
+  escribir sobre una fixture; acá es el ALCANCE del documento (RQ-06.3 / decisión E) y es inyectable
+  **justamente para que los tests puedan armar el mes sobre su fixture**. Se descartó el filtro
+  alternativo `planta.activa = 1` (que también excluiría `'TSR'`) porque ata la salida de un reporte
+  HISTÓRICO a un flag mutable: apagar una unidad borraría retroactivamente sus meses ya emitidos.
+- **E8 — la ventana SQL se abre ±1 día y el recorte fino lo hace el día canónico, en Node.** El filtro
+  va por `fecha_evento` (indexado, y es lo que ata cada celda a su día de grilla) mientras que la fila
+  se ubica por su hora CANÓNICA, y las dos pueden separarse en el borde — el caso extremo es un lote
+  guardado en el milisegundo en que cruza la medianoche. Un día de holgura cuesta nada y elimina la
+  clase entera de "el evento del 1° a las 00:0x no salió".
+- **E8 — el encabezado UNE `conformacion_turno` y `turno_participante`, no elige entre los dos.** El
+  `.md` decía "si el turno no cerró **se completa** con `turno_participante`"; un `UNION` de las dos
+  fuentes lo cumple y además cubre el caso mixto (GEC3 cerró, GEC32 sigue abierto), que un `else`
+  habría dejado a medias. Como la conformación se construye A PARTIR de la presencia, unir es
+  idempotente para un turno cerrado.
+- **E8 — el escape hatch del encabezado se llama `incluirSinteticos`, igual que el de
+  `buildConformacionSnapshot`.** El filtro `es_sintetico = 0` (D-044) es correcto —un fixture jamás
+  debe nombrarse en un formato controlado— pero dejaba los tests del encabezado sin forma de probarse.
+  Reusar el NOMBRE del hatch de D-044 no es cosmético: el guardrail estático que ya vive en
+  `conformacion_turno.test.js` escanea todo `server/` en busca de `incluirSinteticos: true`, así que el
+  módulo nuevo queda custodiado **sin agregar un guard**.
+- **E8 — las filas de `registro_historico` de la fixture se siembran con `registro_id` NEGATIVO.** La
+  columna no es IDENTITY (preserva el id original del `registro_activo` que se archivó), así que un id
+  positivo inventado podría colisionar mañana con el que IDENTITY le asigne a una fila real y romper
+  el archivado del cierre. Negativo es imposible de colisionar y se limpia por el mismo acotador.
+- **E8 — tres usuarios-fixture sin sesión (`test_f03_a/b/c`).** La PK de `conformacion_turno` es
+  `(fecha, planta, turno, usuario_id)`: un bloque con jefe E ingeniero necesita DOS usuarios distintos
+  y el caso de las dos unidades un tercero. Van con `activo = 0`, sin `azure_oid` y con
+  `es_sintetico = 1` **explícito** (el barrido de `db.js` solo corre en el arranque), y **nunca** se les
+  crea sesión — así no tocan el panel CONECTADOS ni el leak guard.
 
 ## Datos descubiertos en ejecución
 
@@ -298,6 +331,19 @@ E8 ──> E9
   todo borde de turno. **Reparación de la fixture** (no toca planta real):
   `UPDATE bitacora.turno_unidad SET estado='ABIERTO', motivo_cierre=NULL, cerrado_en=NULL WHERE planta_id='TST' AND turno_unidad_id=(SELECT MAX(turno_unidad_id) FROM bitacora.turno_unidad WHERE planta_id='TST')`.
   Con eso el archivo pasa **15/15**. No es regresión de ninguna etapa de D-058.
+- **CUÁNTO TRAE EL MES REAL (E9 juzga su salida contra esto).** Corrida de solo lectura del
+  2026-07-27 con `armarMes` y las plantas por defecto: **julio 2026 = 31 hojas y 20 renglones**
+  (`≈500 ms`); **mayo y junio 2026 = 0 renglones**. El 20 cuadra EXACTO con la BD: MAND tiene 15 lotes
+  (10 vivos en `registro_activo` + 5 archivados en `registro_historico`, 26+17 celdas) y Sala 5
+  registros (`SALAJDT` 4 + `SALAING` 1, todos en el histórico); `SALAOP` (1) queda fuera por diseño.
+  **DISP no aporta ningún renglón a julio**: el único estado real de la BD arranca el **2017-07-06**
+  (dato viejo de prueba) y sale, correctamente, en la hoja de ese día si se pide `2017-07`.
+  Los días con eventos en julio son 08, 09, 14, 15, 23 y 26 — **el resto de las hojas sale vacío, y eso
+  es correcto**: es adopción, no software.
+- **Los 5 renglones del 2026-07-15 en el bloque `00:00-06:00` son los migrados por `F32.A1`**, con su
+  hora DERIVADA del periodo (P1→00:00 … P5→04:00). Se ven como cinco autorizaciones de 90 MW en vez de
+  una sola con `del P1 al P5` porque nacieron con un `lote_id` por fila (ya anotado arriba). No es
+  defecto del armado.
 - **El puerto 3002 puede estar tomado por el backend del usuario.** El arranque igual corre
   `initDB()` (la migración se aplica) y luego muere con `EADDRINUSE`. Para los tests HTTP se levanta
   uno efímero: `cd server && AUTH_TEST_BYPASS=1 SERVER_PORT=3102 node --env-file=../.env server.js`
@@ -727,5 +773,71 @@ Es hermano del `stripComments` de D-055: una regex silenciosamente inerte.
 **Desviaciones** — las seis registradas arriba. Ninguna cambia el formato de salida respecto del
 papel; la única que se aparta de lo pedido por el `.md` es que el render de filas quedó en E7 en vez
 de E9, y es porque los tests que E7 exige no se pueden escribir sin él.
+
+### E8 — Consulta unificada de las cuatro fuentes y armado del día  ✅
+
+**Archivos tocados**
+- `server/utils/f03-datos.js` (nuevo) — `armarMes(pool, { mes })` y las cuatro consultas:
+  `eventosMand` (unión `registro_activo` ∪ `registro_historico` agrupada por `campos_extra.lote_id`),
+  `eventosDisponibilidad` (tabla base, por `fecha_inicio_estado`), `eventosSala` (las dos bitácoras,
+  excluyendo los reflejados) y `personalPorTurno` (`conformacion_turno` ∪ `turno_participante`). Más
+  `horaCanonicaDeLote`, `claveTurnoDeBloque`, `indiceDeBloque` y `PLANTAS_F03`/`BLOQUES` exportados.
+  **Solo lectura**; devuelve exactamente el shape que `f03-libro.js` (E7) ya consume.
+- `server/tests/f03_datos.test.js` (nuevo) — 21 tests contra la BD, sobre las plantas-fixture.
+- `server/package.json` — el archivo enganchado al script `test`, junto a `f03_libro`.
+
+**Decisiones de implementación**
+- **La hora de MAND es `hora_llamada` y nunca `fecha_evento`** (D-056), y cuando la clave está
+  AUSENTE (`F32.A1`) se deriva del primer periodo del lote sobre el día Bogotá de su `fecha_evento`.
+  El test lo prueba en el caso que duele: llamada 16:38 digitada 20:05 → la fila va al bloque del T1,
+  no al del T2.
+- **El T2 se parte por medianoche**: cada evento cae en el día de calendario en que ocurrió y aparece
+  **exactamente una vez** en todo el libro (criterio 6b). El bloque `00:00-06:00` del día F toma su
+  encabezado del turno `(F-1, 2)` — el mismo desfase que `fechaOperativaDePeriodo` resuelve para los
+  periodos 1..6 de la grilla (D-055 (b)).
+- **De Sala se excluyen los reflejados** (`origen_lote_id IS NULL`). Sin esa línea un evento de MAND
+  sale TRES veces en la misma hoja: el original + su copia en SALAJDT + la de SALAING.
+- **El orden es ASCENDENTE dentro del bloque** y quedó comentado por qué NO se unifica con el
+  descendente del listado (RN-04.a): son órdenes distintos a propósito. El desempate va por instante
+  real (`ms`) y una clave estable, no por el texto `HH:MM`, que empata a cada minuto.
+- **Un tipo desconocido degrada a "sin renglón" + log**, como el listado de E2 y por la misma razón
+  (el libro es mensual: un dato raro no puede tumbar la descarga entera). Donde el texto se PERSISTE
+  —el reflejo, E4— el motor sigue lanzando.
+- Las seis decisiones restantes están arriba, en "Decisiones / desviaciones acumuladas".
+
+**Verificación real**
+- `node --test --test-concurrency=1 tests/f03_datos.test.js` → **21/21 pass, 0 fail**, 50 s.
+- **Suite backend completa: `tests 530 · pass 529 · fail 0 · skipped 1`** (`parseXls`, skip declarado
+  ajeno), contra `PortalG3_dev` con el server efímero en 3102. Baseline de E7 (509/508) **+ los 21
+  nuevos**, sin degradar. Corrida en **10 bloques en primer plano** por las dos razones de entorno ya
+  documentadas. Reparto: (1) guards estáticos + módulos puros + `f03_libro` + `f03_datos` 108 ·
+  (2) catálogos + tipos espejo + split sala + coherencia 24 · (3) revalidate + fechas + `turno-entidad`
+  83 · (4) auth + DISP 47 · (5) cierre + conformación 23 · (6) `sala_de_mando_batch` 78 · (7) COMB +
+  finalizar + cambiar unidad 44 · (8) `registros_turno_id` + solo autor + gate de transición +
+  seguimiento 16 · (9) históricos + guards no-auto-ejecutables + rol CyM + SIS + hardening + errores +
+  IA 106 (1 skip) · (10) leak guard 1.
+- **El flaky conocido apareció y se diagnosticó, no se asumió.** `finalizar_turno` 4a2/4a3/4e/4f
+  fallaron con `409 turno_cerrado`; la única cabecera `turno_unidad` de `'TST'` estaba en
+  **`PROGRAMADO`** (la causa exacta ya medida en E7). Con la reparación de la fixture —acotada a
+  `planta_id='TST'`— el bloque pasó **44/44**. No es regresión de E8: esta etapa no toca ningún
+  endpoint, gate ni tabla; su único cambio sobre código existente es una entrada en el script `test`.
+- `guard_no_prod_historico_destruction` + `guard_no_prod_disp_destruction` +
+  `guard_tipo_evento_coherente` verdes, y **el guardrail estático de `incluirSinteticos` (D-044)
+  también** — que es el que ahora custodia el escape hatch nuevo. `zzz_session_leak_guard` corrió
+  **último** y pasó.
+- `npm run build` (raíz) → **verde**, 14,8 s. No se tocó front; se corrió como sanity.
+- **Corrida manual contra el mes en curso** (solo lectura, plantas por defecto): 31 hojas, **20
+  renglones**, ~500 ms — y cuadra EXACTO con lo que hay en la BD (15 lotes de MAND + 5 registros de
+  Sala; `SALAOP` fuera). El detalle está en "Datos descubiertos", que es contra lo que E9 debe
+  juzgar su salida.
+- **Consulta directa a la BD tras la corrida**: **cero** filas en `'TSR'` y `'TST'` (vivas e
+  histórico), **cero** `registro_id` negativos en el histórico, **cero** conformación/`turno_unidad`
+  de fixtures, **cero** copias con `origen_lote_id` en cualquier planta, **cero** sesiones sintéticas
+  activas. MAND real intacto (26 celdas vivas en GEC3) y el **vigente de DISP de GEC3 sigue en pie**
+  (`En Servicio`).
+
+**Desviaciones** — las seis registradas arriba. La única que se aparta de lo pedido por el `.md` es
+que `'TSR'` no se excluye por nombre sino por quedar fuera del alcance del libro, que es lo que la
+nota de E4 pedía conseguir sin que producción conozca la fixture.
 
 <!-- Cada etapa agrega su bloque: ### EX — <título>  ✅ con Archivos tocados / Verificación / Desviaciones. -->
