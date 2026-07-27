@@ -6,7 +6,7 @@ import { getDB } from '../db.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
 import { fechaOperativaDePeriodo, turnoFromPeriodo } from '../utils/turno.js';
 import { recalcularEventoDashboard } from '../utils/notificador.js';
-import { crearReflejoLote } from '../utils/reflejo-sala.js';
+import { crearReflejoLote, actualizarReflejoLote } from '../utils/reflejo-sala.js';
 import { resolverOAbrirTurnoAbierto } from '../utils/turno-entidad.js';
 import {
   setupSessions, cleanupTestRegistros, call, TEST_PLANTA, TEST_TAG,
@@ -1962,8 +1962,9 @@ test('D-057 E2.2 — gates del DELETE: sin planta_id 400, otra planta 403, lote 
 //    `tests/registros_solo_autor.test.js`, que prueba que ni el ADMIN toca un registro ajeno por la
 //    rama genérica. Acá vive la cara POSITIVA (E3.1). Son un PAR: si alguien "unifica" la política
 //    de MAND con la genérica, uno de los dos tiene que ponerse rojo. No los desacoples.
-//  - Criterios 8 y 9-copias (cascada a SALAJDT/SALAING): FUERA DE ALCANCE — esas copias no existen
-//    todavía (REQ-02). En `mand.js` queda el punto de enganche anotado, sin código.
+//  - Criterios 8 y 9-copias (cascada a SALAJDT/SALAING): eran FUERA DE ALCANCE cuando estos tests se
+//    escribieron —las copias no existían—; los cubre `D-058 E5`, al final de este archivo. Corren
+//    sobre `TEST_PLANTA_REFLEJO` porque `TEST_PLANTA` no refleja por diseño (RN-02.e).
 //
 // Todo corre sobre TEST_PLANTA con TEST_TAG. Los lotes que necesitan un estado inicial imposible de
 // producir por HTTP (REDESP en periodo pasado) se siembran con `seedLoteMand`.
@@ -3205,5 +3206,431 @@ test('D-058 E4.6 — si el reflejo falla, el lote tampoco queda (atomicidad, cri
     .input('p', sql.VarChar(10), TEST_PLANTA_REFLEJO)
     .query(`SELECT COUNT(*) AS n FROM bitacora.registro_activo WHERE planta_id = @p`);
   assert.equal(r.recordset[0].n, 0, 'ni el lote ni las copias: o los tres lados o ninguno (RQ-02.9)');
+  await cleanReflejo();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D-058 · E5 — corregir o borrar el lote CASCADEA a sus copias de Sala (REQ-02 / RQ-04.14).
+//
+// Cubre los criterios 8 y 9 de REQ-04 y el 5, 6 y 8 de REQ-02, que D-057 dejó explícitamente fuera
+// de alcance ("las copias no existen todavía"). Corren sobre `TEST_PLANTA_REFLEJO` por la misma
+// razón que E4: `TEST_PLANTA` no refleja por diseño (RN-02.e).
+//
+// Decisión H: corregir REGENERA el texto de las copias; no se agrega un renglón de corrección. La
+// bitácora de Sala muestra el estado ACTUAL y el rastro vive en `modificado_por`/`modificado_en`.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Siembra un lote MAND completo en la planta-fixture del reflejo Y sus dos copias, en UNA sola
+// transacción — igual que hace `POST /guardar`. Hace falta para el estado inicial que el endpoint
+// rechaza por diseño (REDESP en periodo PASADO, lock D-016): sin esto no hay forma de llegar por
+// HTTP a lo que la corrección sí tiene que saber manejar.
+//
+// Las copias las crea el MÓDULO DE PRODUCCIÓN, nunca un INSERT del test: sembradas a mano, el test
+// estaría probando su propia idea de cómo debe verse una copia en vez de la del código.
+async function seedLoteReflejo({ tipo, hora, periodos, detalle = null, funcionariocnd = null }) {
+  const db = await getDB();
+  const s = await sesionReflejo();
+  const teId = await tipoEventoIdMand(tipo);
+  const lote_id = randomUUID();
+  const hora_llamada = new Date(`${HOY}T${hora}:00-05:00`).toISOString();
+  const tx = new sql.Transaction(db);
+  await tx.begin();
+  try {
+    for (const { periodo, valor_mw } of periodos) {
+      await new sql.Request(tx)
+        .input('mand', sql.Int, MAND_BITACORA_ID)
+        .input('p', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+        .input('fe', sql.DateTime2, new Date(`${HOY}T12:00:00-05:00`))
+        .input('turno', sql.TinyInt, turnoFromPeriodo(periodo))
+        .input('detalle', sql.NVarChar(sql.MAX), detalle)
+        .input('ce', sql.NVarChar(sql.MAX), JSON.stringify({
+          periodo, valor_mw, funcionariocnd, lote_id, hora_llamada,
+        }))
+        .input('te', sql.Int, teId)
+        .input('cp', sql.Int, s.usuario_id)
+        .query(`
+          INSERT INTO bitacora.registro_activo
+            (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id,
+             estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por)
+          VALUES (@mand, @p, @fe, @turno, @detalle, @ce, @te, 'borrador', '[]', '[]', '[]', @cp)
+        `);
+    }
+    await crearReflejoLote(tx, {
+      planta_id: TEST_PLANTA_REFLEJO,
+      lote_id, tipo, periodos, funcionariocnd, detalle, hora_llamada,
+      creado_por: s.usuario_id,
+      snapshots: { ingenieros_snapshot: '[]', jdts_snapshot: '[]', jefes_snapshot: '[]' },
+    });
+    await tx.commit();
+  } catch (e) {
+    try { await tx.rollback(); } catch {}
+    throw e;
+  }
+  return { lote_id, hora_llamada };
+}
+
+test('D-058 E5.1 — el PUT reescribe el asiento en las DOS copias, sin reinsertarlas [criterio 8 de REQ-04]', async () => {
+  await cleanReflejo();
+  const s = await sesionReflejo();
+  const hora = horaBogotaMin(-15) ?? '00:00';
+  const alta = await postGuardar({
+    sesion_id: s.sesion_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora, funcionariocnd: 'J. Pérez', detalle: `${TEST_TAG} e5-1`,
+        periodos: [{ periodo: 10, valor_mw: 100 }, { periodo: 11, valor_mw: 100 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+
+  const previo = (await lotesReflejo(s.sesion_id))[0];
+  const copiasAntes = await copiasDelLote(previo.lote_id);
+  assert.equal(copiasAntes.length, 2);
+  assert.ok(copiasAntes[0].detalle.includes('100 MW del P10 al P11'), copiasAntes[0].detalle);
+
+  // P10 cambia de valor, P12 se agrega y cambia la descripción: el asiento pasa de compacto
+  // (`100 MW del P10 al P11`) a lista por periodo, que es la prueba de que se RE-RENDERIZÓ y no de
+  // que se le pegó un texto encima.
+  const { status, data } = await putLote({
+    sesion_id: s.sesion_id,
+    lote_id: previo.lote_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, hora, funcionariocnd: 'J. Pérez',
+      detalle: `${TEST_TAG} e5-1-corregido`,
+      periodos: [
+        { periodo: 10, valor_mw: 150 }, { periodo: 11, valor_mw: 100 }, { periodo: 12, valor_mw: 164 },
+      ],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+
+  const lote = (await lotesReflejo(s.sesion_id))[0];
+  const copias = await copiasDelLote(previo.lote_id);
+  assert.equal(copias.length, 2, 'siguen siendo DOS: la corrección no duplica el asiento (decisión H)');
+  assert.deepEqual(copias.map((c) => c.bitacora_codigo), ['SALAING', 'SALAJDT']);
+  assert.deepEqual(
+    copias.map((c) => c.registro_id).sort((a, b) => a - b),
+    copiasAntes.map((c) => c.registro_id).sort((a, b) => a - b),
+    'la copia se ACTUALIZA en su sitio: reinsertarla perdería su identidad en el histórico',
+  );
+
+  for (const c of copias) {
+    assert.equal(c.detalle, lote.asiento, 'la copia dice EXACTAMENTE lo que muestra el listado corregido');
+    assert.ok(c.detalle.includes('P10: 150 MW; P11: 100 MW; P12: 164 MW'), c.detalle);
+    assert.ok(c.detalle.includes('e5-1-corregido'), 'la descripción nueva viaja al asiento');
+    assert.ok(!c.detalle.includes('100 MW del P10 al P11'), 'el texto viejo no sobrevive');
+    // RN-02.c: la autoría original NO se pisa; quién corrigió queda en `modificado_por`.
+    assert.equal(c.creado_por, s.usuario_id);
+    assert.equal(c.modificado_por, s.usuario_id, 'la corrección sella la copia');
+  }
+  await cleanReflejo();
+});
+
+test('D-058 E5.2 — un PUT que solo mueve la HORA mueve la fecha_evento de las copias, sin tocar el texto', async () => {
+  await cleanReflejo();
+  const s = await sesionReflejo();
+  const horaInicial = horaBogotaMin(-40) ?? '00:00';
+  const horaNueva = horaBogotaMin(-5) ?? '00:05';
+  if (horaInicial === horaNueva) return; // borde del día: no hay dos horas distintas que comparar
+  const alta = await postGuardar({
+    sesion_id: s.sesion_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, fecha: HOY,
+      filas: [{
+        tipo: 'PRUEBA', hora: horaInicial, funcionariocnd: null, detalle: `${TEST_TAG} e5-2`,
+        periodos: [{ periodo: 9, valor_mw: 50 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const previo = (await lotesReflejo(s.sesion_id))[0];
+  const antes = await copiasDelLote(previo.lote_id);
+
+  const { status, data } = await putLote({
+    sesion_id: s.sesion_id,
+    lote_id: previo.lote_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, hora: horaNueva, funcionariocnd: null,
+      detalle: `${TEST_TAG} e5-2`, periodos: [{ periodo: 9, valor_mw: 50 }],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+
+  const lote = (await lotesReflejo(s.sesion_id))[0];
+  for (const c of await copiasDelLote(previo.lote_id)) {
+    // La HORA NO va dentro del asiento (es columna del listado y del F03), así que el texto queda
+    // idéntico y lo que se mueve es `fecha_evento` — que es donde el F03 y el listado la leen.
+    assert.equal(c.detalle, lote.asiento);
+    assert.equal(c.detalle, antes[0].detalle, 'el texto no cambia: la hora nunca estuvo adentro');
+    assert.equal(new Date(c.fecha_evento).toISOString(), lote.hora_llamada,
+      'la copia se movió a la hora corregida');
+    assert.notEqual(new Date(c.fecha_evento).toISOString(),
+      new Date(antes[0].fecha_evento).toISOString());
+    assert.equal(c.modificado_por, s.usuario_id, 'mover la hora también sella la copia');
+  }
+  await cleanReflejo();
+});
+
+test('D-058 E5.3 — con REDESP bloqueado, cambiar solo el detalle SÍ reescribe las copias', async () => {
+  const pAct = periodoActual();
+  if (pAct <= 1) return; // sin periodo pasado no hay lock que ejercitar
+  await cleanReflejo();
+  const s = await sesionReflejo();
+  const pPasado = pAct - 1;
+  const hora = horaBogotaMin(-30) ?? '00:00';
+
+  // Estado inicial imposible de producir por HTTP (el POST rechaza REDESP en periodo pasado): se
+  // siembra el lote CON sus copias, igual que lo haría la captura.
+  const { lote_id } = await seedLoteReflejo({
+    tipo: 'REDESP', hora, detalle: `${TEST_TAG} e5-3`,
+    periodos: [{ periodo: pPasado, valor_mw: 120 }],
+  });
+  const antes = await copiasDelLote(lote_id);
+  assert.equal(antes.length, 2, 'el lote sembrado arranca con sus dos copias');
+
+  // Mismo valor y misma hora, otra descripción: el lock de D-057 actúa sobre el DELTA de VALOR, así
+  // que esto pasa — el lock protege lo despachado, jamás el comentario (D-055 (a)).
+  const { status, data } = await putLote({
+    sesion_id: s.sesion_id,
+    lote_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, hora, funcionariocnd: null,
+      detalle: `${TEST_TAG} e5-3-aclaracion`, periodos: [{ periodo: pPasado, valor_mw: 120 }],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+
+  const lote = (await lotesReflejo(s.sesion_id))[0];
+  for (const c of await copiasDelLote(lote_id)) {
+    assert.equal(c.detalle, lote.asiento);
+    assert.ok(c.detalle.includes('e5-3-aclaracion'), c.detalle);
+    assert.ok(!c.detalle.includes('e5-3.'), 'la aclaración REEMPLAZA, no se acumula');
+    assert.ok(c.detalle.includes(`120 MW en el P${pPasado}`), 'el valor bloqueado sigue intacto');
+    assert.equal(c.modificado_por, s.usuario_id);
+  }
+  await cleanReflejo();
+});
+
+test('D-058 E5.4 — el DELETE del lote borra las DOS copias [criterio 9 de REQ-04]', async () => {
+  await cleanReflejo();
+  const s = await sesionReflejo();
+  const alta = await postGuardar({
+    sesion_id: s.sesion_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, fecha: HOY,
+      filas: [
+        {
+          tipo: 'AUTH', hora: horaBogotaMin(-25) ?? '00:00', funcionariocnd: 'Gómez',
+          detalle: `${TEST_TAG} e5-4-a`, periodos: [{ periodo: 8, valor_mw: 90 }],
+        },
+        {
+          tipo: 'PRUEBA', hora: horaBogotaMin(-4) ?? '00:01', funcionariocnd: null,
+          detalle: `${TEST_TAG} e5-4-b`, periodos: [{ periodo: 13, valor_mw: 40 }],
+        },
+      ],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const lotes = await lotesReflejo(s.sesion_id);
+  const auth = lotes.find((l) => l.tipo === 'AUTH');
+  const prueba = lotes.find((l) => l.tipo === 'PRUEBA');
+  assert.equal((await registrosSalaReflejo()).length, 4, 'cuatro copias antes de borrar');
+
+  const del = await delLote({
+    sesion_id: s.sesion_id, lote_id: auth.lote_id, planta_id: TEST_PLANTA_REFLEJO,
+  });
+  assert.equal(del.status, 200, JSON.stringify(del.data));
+
+  assert.equal((await copiasDelLote(auth.lote_id)).length, 0,
+    'borrado REAL, no anulación: un renglón tachado en la bitácora del turno confunde (RN-04.c)');
+  // Y solo las suyas: la cascada va acotada por `origen_lote_id`, nunca por planta ni por bitácora.
+  assert.equal((await copiasDelLote(prueba.lote_id)).length, 2, 'el otro lote conserva sus copias');
+  const enSala = await registrosSalaReflejo();
+  assert.equal(enSala.length, 2, JSON.stringify(enSala));
+  await cleanReflejo();
+});
+
+test('D-058 E5.5 — si el cierre de turno ya archivó la copia, el PUT igual responde 200 y el histórico no se toca', async () => {
+  await cleanReflejo();
+  const db = await getDB();
+  const s = await sesionReflejo();
+  const hora = horaBogotaMin(-18) ?? '00:00';
+  const alta = await postGuardar({
+    sesion_id: s.sesion_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e5-5`,
+        periodos: [{ periodo: 14, valor_mw: 80 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const previo = (await lotesReflejo(s.sesion_id))[0];
+  const copias = await copiasDelLote(previo.lote_id);
+  assert.equal(copias.length, 2);
+
+  // Simula el cierre de turno de Sala sobre UNA de las dos copias: pasa al histórico (mismo shape
+  // que archiva `cerrarTurno`) y desaparece de `registro_activo`. La otra queda viva, así que el
+  // mismo PUT ejercita los dos caminos a la vez.
+  const archivada = copias[0].registro_id;
+  await db.request()
+    .input('r', sql.Int, archivada)
+    .input('cp', sql.Int, s.usuario_id)
+    .query(`
+      INSERT INTO bitacora.registro_historico
+        (registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra,
+         tipo_evento_id, estado, ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por,
+         creado_en, modificado_por, modificado_en, cerrado_por, cerrado_en, fecha_cierre_operativo)
+      SELECT registro_id, bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra,
+             tipo_evento_id, 'cerrado', ingenieros_snapshot, jdts_snapshot, jefes_snapshot,
+             creado_por, creado_en, modificado_por, modificado_en, @cp, SYSUTCDATETIME(),
+             CAST(DATEADD(HOUR, -5, SYSUTCDATETIME()) AS DATE)
+      FROM bitacora.registro_activo WHERE registro_id = @r;
+      DELETE FROM bitacora.registro_activo WHERE registro_id = @r;
+    `);
+  const histAntes = (await db.request()
+    .input('r', sql.Int, archivada)
+    .query(`SELECT detalle, fecha_evento, modificado_por FROM bitacora.registro_historico WHERE registro_id = @r`)
+  ).recordset[0];
+  assert.ok(histAntes, 'la copia quedó archivada');
+
+  // `rowsAffected = 0` sobre la archivada NO es error, y rechazar la corrección con 409 volvería
+  // incorregible un lote a las 18:01 por el estado de su reflejo (criterio 12 de REQ-04: MAND está
+  // exenta de los gates de turno).
+  const { status, data } = await putLote({
+    sesion_id: s.sesion_id,
+    lote_id: previo.lote_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, hora, funcionariocnd: 'Pérez',
+      detalle: `${TEST_TAG} e5-5-corregido`, periodos: [{ periodo: 14, valor_mw: 95 }],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+
+  const histDespues = (await db.request()
+    .input('r', sql.Int, archivada)
+    .query(`SELECT detalle, fecha_evento, modificado_por FROM bitacora.registro_historico WHERE registro_id = @r`)
+  ).recordset[0];
+  assert.deepEqual(
+    [histDespues.detalle, histDespues.fecha_evento.getTime(), histDespues.modificado_por],
+    [histAntes.detalle, histAntes.fecha_evento.getTime(), histAntes.modificado_por],
+    'el histórico no se reescribe (RF-032)',
+  );
+
+  const vivas = await copiasDelLote(previo.lote_id);
+  assert.equal(vivas.length, 1, 'quedó una sola copia viva');
+  assert.ok(vivas[0].detalle.includes('95 MW'), 'y esa sí se corrigió');
+  assert.ok(vivas[0].detalle.includes('e5-5-corregido'), vivas[0].detalle);
+
+  // Y borrar el lote tampoco se traba con la copia archivada.
+  const del = await delLote({
+    sesion_id: s.sesion_id, lote_id: previo.lote_id, planta_id: TEST_PLANTA_REFLEJO,
+  });
+  assert.equal(del.status, 200, JSON.stringify(del.data));
+  assert.equal((await copiasDelLote(previo.lote_id)).length, 0);
+  assert.equal(
+    (await db.request().input('r', sql.Int, archivada)
+      .query(`SELECT COUNT(*) AS n FROM bitacora.registro_historico WHERE registro_id = @r`)
+    ).recordset[0].n,
+    1,
+    'la copia archivada sigue en el histórico: el borrado del origen no lo alcanza',
+  );
+  await cleanReflejo();
+});
+
+test('D-058 E5.6 — una corrección que falla en el reflejo no queda aplicada a medias [criterio 14 de REQ-04]', async () => {
+  await cleanReflejo();
+  const db = await getDB();
+  const s = await sesionReflejo();
+  const hora = horaBogotaMin(-22) ?? '00:00';
+  const alta = await postGuardar({
+    sesion_id: s.sesion_id,
+    body: {
+      planta_id: TEST_PLANTA_REFLEJO, fecha: HOY,
+      filas: [{
+        tipo: 'AUTH', hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e5-6`,
+        periodos: [{ periodo: 15, valor_mw: 70 }],
+      }],
+    },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const previo = (await lotesReflejo(s.sesion_id))[0];
+  const rid = previo.periodos[0].registro_id;
+  const copiasAntes = await copiasDelLote(previo.lote_id);
+  const huella = copiasAntes.map((c) => [c.registro_id, c.detalle, c.modificado_por]);
+
+  // Reproduce la composición del PUT —origen + reflejo en UNA transacción— y le inyecta una falla
+  // REAL dentro del reflejo: `modificado_por` inexistente viola la FK a lov_bit.usuario. No se
+  // simula con un throw temprano a propósito: lo que hay que probar es que un error de SQL a mitad
+  // de la cascada revierte TAMBIÉN la corrección del origen.
+  const tx = new sql.Transaction(db);
+  await tx.begin();
+  let fallo = null;
+  try {
+    await new sql.Request(tx)
+      .input('registro_id', sql.Int, rid)
+      .input('detalle', sql.NVarChar(sql.MAX), `${TEST_TAG} e5-6-no-debe-aterrizar`)
+      .query(`UPDATE bitacora.registro_activo SET detalle = @detalle WHERE registro_id = @registro_id`);
+    await actualizarReflejoLote(tx, {
+      planta_id: TEST_PLANTA_REFLEJO,
+      lote_id: previo.lote_id,
+      tipo: 'AUTH',
+      periodos: [{ periodo: 15, valor_mw: 71 }], // cambia el texto → el CASE sí sella → la FK truena
+      funcionariocnd: 'Pérez',
+      detalle: `${TEST_TAG} e5-6-no-debe-aterrizar`,
+      hora_llamada: previo.hora_llamada,
+      modificado_por: 2147483000, // no existe → viola la FK dentro del reflejo
+    });
+    await tx.commit();
+  } catch (e) {
+    fallo = e;
+    try { await tx.rollback(); } catch {}
+  }
+
+  assert.ok(fallo, 'el reflejo NO puede tragarse el error');
+  const celda = (await db.request()
+    .input('p', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+    .input('lote', sql.NVarChar(64), previo.lote_id)
+    .query(`
+      SELECT detalle FROM bitacora.registro_activo
+      WHERE planta_id = @p AND JSON_VALUE(campos_extra, '$.lote_id') = @lote
+    `)).recordset[0];
+  assert.equal(celda.detalle, `${TEST_TAG} e5-6`, 'el origen no quedó corregido');
+  assert.deepEqual(
+    (await copiasDelLote(previo.lote_id)).map((c) => [c.registro_id, c.detalle, c.modificado_por]),
+    huella,
+    'ni las copias: o los tres lados o ninguno (RQ-02.9)',
+  );
+  await cleanReflejo();
+});
+
+test('D-058 E5.7 — un PUT que no cambia nada no sella las copias (paridad con el origen)', async () => {
+  await cleanReflejo();
+  const s = await sesionReflejo();
+  const hora = horaBogotaMin(-10) ?? '00:00';
+  const cuerpo = {
+    planta_id: TEST_PLANTA_REFLEJO, hora, funcionariocnd: 'Pérez', detalle: `${TEST_TAG} e5-7`,
+    periodos: [{ periodo: 16, valor_mw: 60 }],
+  };
+  const alta = await postGuardar({
+    sesion_id: s.sesion_id,
+    body: { planta_id: TEST_PLANTA_REFLEJO, fecha: HOY, filas: [{ tipo: 'AUTH', ...cuerpo }] },
+  });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const previo = (await lotesReflejo(s.sesion_id))[0];
+
+  // El mismo lote, reenviado igual. El origen no sella nada (D-057, decisión 2: solo se marcan las
+  // celdas AFECTADAS) y la copia sigue el mismo criterio — si sellara igual, la bitácora de Sala
+  // diría que alguien corrigió un asiento que nadie tocó.
+  const { status, data } = await putLote({ sesion_id: s.sesion_id, lote_id: previo.lote_id, body: cuerpo });
+  assert.equal(status, 200, JSON.stringify(data));
+
+  for (const c of await copiasDelLote(previo.lote_id)) {
+    assert.equal(c.modificado_por, null, 'sin cambio real no hay sello de corrección');
+    assert.equal(c.detalle, previo.asiento, 'y el texto es el mismo');
+  }
   await cleanReflejo();
 });

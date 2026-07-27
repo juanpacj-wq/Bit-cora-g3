@@ -20,7 +20,7 @@
 | E2 — El asiento en el listado del día + copiar | ✅ | `GET /lotes` devuelve `asiento`; el listado lo pinta a todo el ancho + copiar renglón / copiar el día. Cierra REQ-04 §8.1 y §8.3. |
 | E3 — `seleccionable` + los 8 tipos espejo | ✅ | Columna `seleccionable` (F33.A1) + 8 tipos espejo sembrados en `SALAJDT`/`SALAING` con `0`; el selector los esconde y el POST/PUT genérico los rechaza. 11 tests nuevos. |
 | E4 — Reflejo a Sala: crear | ✅ | `utils/reflejo-sala.js` (`crearReflejoLote`) enganchado en `POST /guardar`: cada lote se asienta en SALAJDT **y** SALAING dentro de la misma transacción. 6 tests nuevos sobre una segunda planta-fixture. |
-| E5 — Reflejo a Sala: corregir y borrar | ⬜ | — |
+| E5 — Reflejo a Sala: corregir y borrar | ✅ | `actualizarReflejoLote`/`borrarReflejoLote` enganchados en el `PUT` y el `DELETE` de lotes: corregir regenera el asiento en las dos copias y borrar las borra, en la transacción del origen. 7 tests nuevos (archivo MAND 78/78). **`npm test` completo pendiente**: la BD se cayó (red corporativa) — ver bloque E5. |
 | E6 — El asiento reflejado es de solo lectura | ⬜ | — |
 | E7 — XLSX ESM + plantilla F03 derivada | ⬜ | — |
 | E8 — Consulta unificada y armado del día | ⬜ | — |
@@ -119,6 +119,28 @@ E8 ──> E9
   tipo espejo faltante, corta la transacción. Es la contracara deliberada del degradado a `null` de
   E2: allá el texto se MUESTRA (perder un renglón es mejor que perder la jornada), acá se PERSISTE en
   el histórico — una copia muda o sin hora sería peor que un error.
+- **E5 — el sello de auditoría de la copia va por `CASE` contra el valor anterior, no incondicional.**
+  El `.md` pedía "sella `modificado_por`/`modificado_en` con el usuario que corrigió"; se implementó
+  como lo hace el ORIGEN (D-057, decisión 2: solo se sellan las celdas AFECTADAS), así que un `PUT`
+  que no mueve ni el asiento ni la hora deja la copia sin sellar. Sellar incondicionalmente diría que
+  alguien corrigió un asiento que nadie tocó, y rompería la paridad con MAND. Cubierto por E5.7.
+- **E5 — `turno_id` NO se re-resuelve al corregir.** Es el puntero de archivado que se fijó al crear
+  la copia (D-045); reapuntarlo al turno abierto de HOY movería una copia de turno por el solo hecho
+  de corregir el origen. Y no arreglaría nada: si su turno ya hubiera cerrado, la copia no estaría
+  viva en `registro_activo`. Lo que sí se mueve con la hora es `fecha_evento` (narrativo) y la
+  columna vieja `turno` (1|2), que describe cuándo pasó.
+- **E5 — el `UPDATE`/`DELETE` van acotados también por `planta_id` y por `bitacora_id IN (…)`**, no
+  solo por `origen_lote_id`. El `IN` no es decorativo: sin él, el DML por lote alcanzaría cualquier
+  fila que mañana reuse la clave — el reflejo de DISP, que tiene su propio ADR pendiente.
+- **E5 — la validación común de crear/corregir se extrajo a `normalizarLote`** (tipo, `lote_id`,
+  hora, asiento no vacío y `turno`). Si cada función armara el asiento por su cuenta, un lote
+  corregido podría quedar redactado distinto del mismo lote recién capturado — la divergencia que
+  REQ-02 elimina. Sin cambio de contrato: `crearReflejoLote` se comporta igual que en E4.
+- **E5 — un test más de los seis pedidos por el `.md`** (E5.7, el `PUT` que no cambia nada): es la
+  única cobertura de la rama `ELSE` del `CASE` de auditoría, que si no quedaría sin probar.
+- **E5 — se corrigió un comentario de E4 que afirmaba que `registro_activo.detalle` es `NOT NULL`.**
+  No lo es desde una migración vieja (`db.js:547` lo pasa a `NULL`). El argumento que sostenía —una
+  copia muda es peor que un error— no dependía de eso y quedó reescrito sin la premisa falsa.
 
 ## Datos descubiertos en ejecución
 
@@ -165,6 +187,13 @@ E8 ──> E9
 - **`broadcastConteoBitacoras` NO necesitó cambio** (RQ-02.4): `fetchSnapshot` agrupa por
   `bitacora_id` sobre **todas** las bitácoras no ocultas de la planta, así que las dos copias entran
   al contador de SALAJDT/SALAING solas.
+- **La BD de la red corporativa se cae sola (E5, 2026-07-26).** A mitad de un `npm test`,
+  `192.168.17.20:1433` dejó de aceptar TCP y TODOS los archivos que tocan BD se pusieron rojos: el
+  primer test de cada archivo falla a los **~15 s** (el `connectionTimeout` de `mssql`) y los demás
+  al instante. El `turno-sweeper` del server efímero loguea el mismo `Failed to connect … in
+  15000ms`. **Ese patrón —15 s el primero, 0 ms el resto, archivos enteros en rojo— es infra, no
+  regresión**: confirmalo con `bash -c 'cat < /dev/null > /dev/tcp/192.168.17.20/1433'` antes de
+  buscar la causa en el código, y relanzá la suite cuando vuelva.
 - **El puerto 3002 puede estar tomado por el backend del usuario.** El arranque igual corre
   `initDB()` (la migración se aplica) y luego muere con `EADDRINUSE`. Para los tests HTTP se levanta
   uno efímero: `cd server && AUTH_TEST_BYPASS=1 SERVER_PORT=3102 node --env-file=../.env server.js`
@@ -395,5 +424,53 @@ abrirlo y no altera ningún camino existente (todos los tipos que ya se usaban q
 **Desviaciones** — las cinco registradas arriba en "Decisiones / desviaciones acumuladas". La única
 que cambia lo pedido por el `.md` es dónde viven el guard de RN-02.e y la planta-fixture; ninguna
 altera el contrato del reflejo ni el comportamiento del `POST /guardar` para plantas reales.
+
+### E5 — Reflejo a Sala: corregir y borrar (la cascada)  ✅
+
+**Archivos tocados**
+- `server/utils/reflejo-sala.js` — `actualizarReflejoLote` (UPDATE del asiento + `fecha_evento` +
+  `turno`, con el sello de auditoría por `CASE`) y `borrarReflejoLote` (DELETE de las copias vivas),
+  más `resolverBitacorasDestino` (los dos `bitacora_id` por `codigo`) y `normalizarLote` (el núcleo
+  compartido con la captura). Arriba de las dos, el bloque que explica por qué `rowsAffected = 0`
+  **no es error** y por qué no se responde 409.
+- `server/routes/mand.js` — los dos puntos de enganche que D-057 dejó anotados sin código
+  (`PUT` y `DELETE` de lotes) pasaron a llamar al módulo, **dentro de la transacción existente**,
+  después del diff/borrado y del recálculo de `evento_dashboard`. Sin `try/catch`.
+- `server/tests/sala_de_mando_batch.test.js` — 7 tests nuevos (E5.1..E5.7) + `seedLoteReflejo()`
+  (siembra un lote con sus copias vía el módulo de producción, para el estado inicial que el `POST`
+  rechaza por diseño: REDESP en periodo pasado). Se actualizó el comentario de la cabecera de
+  D-057 E3 que declaraba la cascada "fuera de alcance".
+
+**Decisiones de implementación**
+- **Corregir REGENERA el texto de las copias** (decisión H): no se agrega un renglón de corrección.
+  La bitácora de Sala muestra el estado ACTUAL y el rastro vive en `modificado_por`/`modificado_en`.
+- **El `PUT` recibe el estado POSTERIOR al diff**, no el body crudo: el asiento tiene que describir
+  lo que quedó en la BD. La búsqueda de las copias va por `origen_lote_id`, nunca por `registro_id`.
+- **Un `409` por "copia archivada" habría sido un bug, no una protección**, y quedó comentado en el
+  código para que nadie lo "arregle": volvería incorregible un lote a las 18:01 por el estado de su
+  reflejo, invirtiendo la jerarquía y contradiciendo el criterio 12 de REQ-04 (MAND está exenta de
+  los gates de turno, D-057). El histórico no se reescribe (RF-032) y el origen se corrige igual.
+- Las tres decisiones restantes —sello por `CASE`, `turno_id` inmutable, acotadores del DML— están
+  arriba, en "Decisiones / desviaciones acumuladas".
+
+**Verificación real**
+- `node --test --test-concurrency=1 --test-name-pattern="D-058 E5"` → **7/7 pass, 0 fail**, 113 s.
+- `node --test --test-concurrency=1 tests/sala_de_mando_batch.test.js` (archivo completo) →
+  **78/78 pass, 0 fail**, 423 s. Baseline de E4 (71) **+ los 7 nuevos**. Con ellos siguen verdes los
+  14 criterios de D-057 (diff quirúrgico, retroceso del publicado, lock sobre el delta,
+  `lote_sin_celdas`, `409 lote_cerrado`) y **los dos llamados a `verificarCoherenciaDeLotes()`** —
+  el de la captura y el de la corrección (D-056 (c)).
+- `guard_no_prod_historico_destruction` + `guard_no_prod_disp_destruction` +
+  `guard_tipo_evento_coherente` → **10/10 pass**: el `UPDATE`/`DELETE` de los tests nuevos lleva su
+  acotador de fixture léxicamente junto al statement (`registro_id = @r`, `TEST_PLANTA_REFLEJO`).
+- `npm run build` (raíz) → **verde**, 15,9 s. No se tocó front; se corrió como sanity.
+- `cd server && npm test` (suite completa) → **PENDIENTE**: la BD (`192.168.17.20:1433`) se volvió
+  inalcanzable a mitad de la corrida y dejó rojos todos los archivos que la tocan (fallo de 15 s =
+  timeout de conexión, incluido el `turno-sweeper` del server efímero). **No es regresión de E5** —
+  los tres bloques de arriba corrieron completos y verdes contra la misma BD minutos antes. Se
+  relanza cuando la red vuelva.
+
+**Desviaciones** — las seis registradas arriba. La única que cambia lo pedido por el `.md` es el
+sello condicional (`CASE`), que alinea la copia con el criterio del origen en vez de contradecirlo.
 
 <!-- Cada etapa agrega su bloque: ### EX — <título>  ✅ con Archivos tocados / Verificación / Desviaciones. -->

@@ -14,7 +14,7 @@ import { turnoFromPeriodo, fechaOperativaDePeriodo, fechaBogotaStr } from '../ut
 import { snapshotJDTs, snapshotJefes, snapshotIngenieros } from '../utils/snapshots.js';
 import { recalcularEventoDashboard } from '../utils/notificador.js';
 import { asientoLote } from '../utils/asientos/index.js';
-import { crearReflejoLote } from '../utils/reflejo-sala.js';
+import { crearReflejoLote, actualizarReflejoLote, borrarReflejoLote } from '../utils/reflejo-sala.js';
 import { cerrarDiaMand } from '../utils/mand-sweeper.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { notifyDashboard } from '../utils/notify-dashboard.js';
@@ -562,9 +562,29 @@ router.put('/lotes/:lote_id', asyncH(async (req, res) => {
       await recalcularEventoDashboard(transaction, { planta_id, fecha, periodo, tipo: t });
     }
 
-    // REQ-02 / RQ-04.14 — punto de enganche de la CASCADA a las copias de SALAJDT/SALAING: cuando
-    // esas copias existan, su corrección va acá, dentro de esta misma transacción (mismo diff, mismo
-    // todo-o-nada). Hoy no existen, así que no hay código que ejecutar: ni muerto, ni tras un flag.
+    // REQ-02 / RQ-04.14 — CASCADA a las copias de SALAJDT/SALAING, dentro de esta MISMA transacción:
+    // el origen, la publicación y las dos copias se aplican todos o ninguno (RQ-02.9). Sin try/catch
+    // a propósito — tragarse el error dejaría la bitácora de Sala contando una versión del evento que
+    // ya no existe, que es justo la desincronización que REQ-02 elimina.
+    //
+    // Se le pasa el estado POSTERIOR al diff (`entrantes`, la metadata efectiva), nunca el body
+    // crudo: el asiento tiene que describir lo que quedó en la BD. Corregir REGENERA el texto
+    // (decisión H); el rastro de la corrección vive en `modificado_por`/`modificado_en`.
+    //
+    // Si el cierre de turno de Sala ya archivó las copias, esto afecta CERO filas y no pasa nada: el
+    // histórico no se reescribe (RF-032) y la corrección del origen procede igual — un 409 acá
+    // volvería incorregible un lote a las 18:01 por el estado de su reflejo (criterio 12 de REQ-04).
+    // La planta-fixture no refleja (RN-02.e): ese guard vive UNA vez, dentro del módulo.
+    await actualizarReflejoLote(transaction, {
+      planta_id,
+      lote_id,
+      tipo,
+      periodos: [...entrantes.entries()].map(([periodo, valor_mw]) => ({ periodo, valor_mw })),
+      funcionariocnd: funcEff,
+      detalle: detalleEff,
+      hora_llamada: horaIso,
+      modificado_por: sesion.usuario_id,
+    });
 
     await transaction.commit();
     if (creados + eliminados > 0) broadcastConteoBitacoras(planta_id).catch(() => {});
@@ -675,9 +695,15 @@ router.delete('/lotes/:lote_id', asyncH(async (req, res) => {
       await recalcularEventoDashboard(transaction, { planta_id, fecha, periodo, tipo });
     }
 
-    // REQ-02 / RQ-04.14 — punto de enganche de la CASCADA a las copias de SALAJDT/SALAING: cuando
-    // esas copias existan, su borrado va acá, dentro de esta misma transacción. Hoy no existen, así
-    // que no hay código que ejecutar: ni muerto, ni tras un flag.
+    // REQ-02 / RQ-04.14 — CASCADA: borrar el lote borra sus copias de Sala, en esta misma
+    // transacción (o los tres lados o ninguno, RQ-02.9). Borrado REAL y no anulación, igual que el
+    // origen: el evento se registró por error y un renglón tachado en la bitácora del turno confunde
+    // en vez de informar (RN-04.c).
+    //
+    // Cero filas afectadas NO es error: si el cierre de turno de Sala ya archivó las copias, el
+    // histórico se queda como está (RF-032) y el borrado del origen procede igual. La planta-fixture
+    // no refleja (RN-02.e): ese guard vive UNA vez, dentro del módulo.
+    await borrarReflejoLote(transaction, { planta_id, lote_id });
 
     await transaction.commit();
     broadcastConteoBitacoras(planta_id).catch(() => {});
