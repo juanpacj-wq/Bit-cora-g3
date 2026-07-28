@@ -1367,6 +1367,158 @@ permiten. Cross-ref: [[D-056]], [[D-055]], [[D-049]], [[D-019]], [[D-046]], [[D-
 
 ---
 
+## D-058 — Asientos normalizados de operación: un motor, tres salidas
+
+**Fecha:** 2026-07-27
+
+**Contexto:** tres requerimientos distintos estaban bloqueados por **la misma pregunta**: con qué
+texto se narra un evento de operación. REQ-04 §8.1 pedía el "formato de WhatsApp" del listado del
+día, REQ-02 §8.1 la plantilla del asiento que se copia a las bitácoras de Sala, y REQ-06 §8.1 el
+layout del libro mensual — y los tres bloqueos se cerraron de una vez en
+`docs/requerimientos/FORMATO-ASIENTOS-OPERACION.md`, analizando el formato controlado **GENE-F03**
+real (32 hojas de enero 2026, 342 eventos escritos a mano). Hoy ese texto lo redacta cada ingeniero
+a mano, tres veces: en el chat, en su bitácora de Sala y en el F03 del mes. D-058 lo genera **una
+vez, server-side**, y lo entrega a los tres lugares. Se ejecutó en diez etapas sobre
+`feat/asientos-operacion-2026-07`. **Un solo cambio de DDL** (`F33.A1`) y **cero dependencias
+nuevas**.
+
+**Decisión:**
+
+**(1) Un motor puro y server-side es la fuente única de las tres salidas.**
+`server/utils/asientos/` (sin BD, sin reloj, sin `fetch`) implementa las plantillas de §5 del insumo
+y las convenciones canónicas de §4: unidad `GEC3`/`GEC32`, potencia entera con `MW` (**no `MWh`**:
+es potencia por periodo), periodos compactados a `del P17 al P19` cuando el lote comparte valor y
+desplegados a `P17: 109 MW; P18: 134 MW` cuando difieren, `detalle` al final tras punto. **El front
+no conoce ninguna plantilla** — recibe el texto ya armado. Si el motor viviera en el cliente, las
+tres salidas divergirían el día que alguien toque una de ellas, que es exactamente lo que este ADR
+existe para impedir. La hora **nunca** va dentro del asiento: es la columna A del F03 y una columna
+propia del listado.
+
+**(2) Un tipo desconocido LANZA donde el texto se persiste y DEGRADA donde solo se muestra.** El
+motor lanza ante un tipo/estado fuera de su enum (viene de una columna con `CHECK`: es bug del
+llamador, y un renglón mudo en el histórico es peor que un error), y el reflejo hereda ese contrato.
+Pero `GET /lotes` y el armado del libro **degradan a "sin renglón" + log**: son vistas de un día y de
+un mes enteros, y `notificar_dashboard_tipo` es NULLABLE — un tipo MAND nuevo dejaría la jornada
+entera en 500. Se pierde un renglón, no la jornada.
+
+**(3) El asiento de MAND se copia a `SALAJDT` y `SALAING` dentro de la transacción del origen.**
+`server/utils/reflejo-sala.js` (`crearReflejoLote` / `actualizarReflejoLote` / `borrarReflejoLote`)
+se engancha en el `POST /guardar`, el `PUT` y el `DELETE` por lote de D-057, **sin `try/catch`**: si
+el reflejo falla, se revierte también el lote (RQ-02.9). El vínculo es
+`campos_extra.origen_lote_id` (+ `origen_bitacora`) — **por lote, jamás por `registro_id`**, porque
+la copia también migra al histórico y no hay FK posible (mismo argumento de [[D-055]] (c)). El
+`tipo_evento_id` se resuelve por `(bitacora_id, nombre)` **en cada llamada, nunca cacheado**
+([[D-053]]). `SALAOP` no recibe copia (RQ-02.3) y `TEST_PLANTA` no refleja (RN-02.e), con ese guard
+**dentro del módulo** y no replicado en cada enganche.
+
+**(4) `fecha_evento` y `turno_id` de la copia van por criterios DISTINTOS.** `fecha_evento` = la
+`hora_llamada` del lote, porque es **narrativo**: el asiento se lee donde el operador lo espera y
+coincide con el listado y con el F03. `turno_id` = el turno **ABIERTO** de la unidad al insertar,
+porque **no** es narrativo: es el **puntero de archivado** ([[D-045]]). Una copia apuntando a un
+turno ya `CERRADO` **no la archiva nadie** y queda viva en `registro_activo` para siempre, y el
+rescate de huérfanos de D-045 tampoco la alcanza (solo levanta `turno_id IS NULL`) — por eso `NULL`
+cuando no hay turno abierto. No contradice a [[D-055]] (b): allá la celda pertenece a **un** periodo;
+acá el asiento es del **lote**, cuyos periodos pueden caer en dos turnos.
+
+**(5) `rowsAffected = 0` en la cascada NO es error, y quedó comentado en el código para que nadie lo
+"arregle".** Es el caso **esperado** tras el cierre de turno de Sala, que ya archivó las copias. El
+histórico no se reescribe (RF-032) y la corrección del origen **procede igual**: un `409` volvería
+incorregible un lote a las 18:01 **por el estado de su reflejo** — invierte la jerarquía y
+contradice el criterio 12 de REQ-04, ya probado en D-057 (MAND es exenta de los gates de turno). El
+`UPDATE`/`DELETE` va acotado por `origen_lote_id` **+ `planta_id` + `bitacora_id IN (…)`**: sin el
+`IN`, el DML alcanzaría cualquier fila que mañana reuse la clave — el reflejo de DISP, por ejemplo.
+El sello de auditoría de la copia va por `CASE` contra el valor anterior, igual que el origen: un
+`PUT` que no mueve nada no dice que alguien corrigió.
+
+**(6) `lov_bit.tipo_evento.seleccionable` (`F33.A1`) existe porque sembrar un tipo lo vuelve
+tecleable.** Los 8 tipos espejo (`Autorización` · `Pruebas` · `Redespacho` · `Cambio de
+Disponibilidad` × `SALAJDT`/`SALAING`, con los nombres **literales** del catálogo de origen) se
+siembran con `seleccionable = 0`. Sin esa columna, el JdT vería `Autorización` en el selector de
+`SALAJDT` y podría crear un asiento **sin `origen_lote_id`**: indistinguible de un reflejo real para
+el libro e imposible de rastrear al origen — la doble digitación que REQ-02 elimina. Se llama
+`seleccionable` y no `activo` (que se confunde con "bitácora activa"). **Y esconder no es impedir**
+(lección de [[D-046]]): el filtro no vive solo en `GET /bitacoras/:id/tipos-evento`, sino también en
+los dos lookups `(tipo_evento_id, bitacora_id)` del `POST`/`PUT` genérico de `registros.js`, que ya
+rechazaban con el mismo 400.
+
+**(7) El asiento reflejado es de solo lectura en su destino, también para su autor.** Como la copia
+nace con `creado_por` = el autor del origen, la regla "solo el autor" de [[D-049]] **le habría dado
+permiso**. `canEditarRegistro` suma el predicado `esAsientoReflejado` y el `GET /activos` la MISMA
+condición en su espejo SQL (los dos **siempre juntos**, regla de D-049), y el `PUT`/`DELETE`
+responden `403` con `codigo` propio **`asiento_reflejado`** en vez de `solo_autor`: responderle "solo
+el autor puede editarlo" a quien **es** el autor es una explicación falsa y lo deja sin saber que la
+corrección va por Operación 24h. **Es una restricción, no un bypass** — recorta quién edita, no lo
+amplía, y no exceptúa a nadie (tampoco al ADMIN). La excepción de MAND no se toca: sigue viviendo en
+el gate `puede_crear` de su endpoint por lote (D-057 (c)).
+
+**(8) El `.xlsx` clona la plantilla REAL, no la reconstruye.**
+`scripts/derivar-plantilla-f03.mjs` corre **offline** y deriva `server/assets/f03-plantilla.xlsx`
+(artefacto binario commiteado) del F03 de enero: conserva el logo, los estilos, el tema, el
+`sharedStrings` y el encabezado GENE-F03, y se re-emite como ZIP **stored** para que en runtime solo
+haya que clonar bytes. `server/utils/xlsx.js` es el port ESM del escritor propio del repo — **cero
+dependencias nuevas** (REQ-01 §5.1). Tres invariantes: **`inlineStr` para todo lo que escribimos**
+(agregar a `sharedStrings` obligaría a reindexar la tabla que sostiene los `t="s"` del encabezado
+clonado); **`Print_Area` por hoja con su rango recalculado** (el original trae 32 `definedName` con
+rangos distintos: clonar el bloque imprime rangos vacíos en los días cortos y corta los largos); y
+`dimension`/`mergeCells` recalculados al alto real, con el alto de fila estimado porque **Excel no
+autoajusta una celda combinada con `wrapText`**. D-058 **calca** el formato: la celda `FECHA:` se
+queda en fecha larga porque su estilo real (`numFmtId=164`) es fecha larga, no `dd/mm/aaaa`.
+
+**(9) El libro lee los ORIGINALES y excluye las copias.** `armarMes` consulta las cuatro fuentes de
+las dos unidades —MAND (`registro_activo` ∪ `registro_historico`, agrupado por `lote_id`), DISP
+(tabla base, por `fecha_inicio_estado`), las dos bitácoras de Sala **con
+`origen_lote_id IS NULL`**— y el encabezado por `conformacion_turno` ∪ `turno_participante`. Sin esa
+exclusión un evento de MAND saldría **tres veces** en la misma hoja. Cada evento se ubica por su
+**hora canónica** (MAND: `hora_llamada`, **nunca** `fecha_evento`; ausente en los migrados por
+`F32.A1` → derivada del primer periodo) y cae en el bloque **por hora de calendario**, no por
+`turno_id`: **el T2 se parte por medianoche** y cada evento aparece **exactamente una vez** en todo
+el libro. Orden **ascendente** dentro del bloque — deliberadamente distinto al descendente del
+listado (RN-04.a). El alcance es la constante inyectable `PLANTAS_F03 = ['GEC3','GEC32']`, que hace
+cumplir RN-06.g y deja fuera a las dos plantas-fixture **sin que producción las nombre**; no
+contradice a [[D-055]] (ahí se prohibió una allowlist en un endpoint de **escritura**), y no se ató a
+`planta.activa = 1` porque apagar una unidad borraría retroactivamente sus meses ya emitidos.
+
+**(10) `GET /api/sala-de-mando/reporte-mensual?mes=YYYY-MM` es solo lectura y gatea por
+`puede_crear`.** No puede gatear por `puede_ver`: la matriz le da `puede_ver` en MAND a **todos** los
+cargos, así que exigirlo sería no exigir nada — y el mismo cargo que recibe 403 acá sigue obteniendo
+200 en `GET /lotes` (consultar no es descargar). `mes` es **opcional** (sin él, el mes Bogotá en
+curso, por paridad con `GET /lotes`); formato inválido → `400 mes_invalido`, futuro → `400
+mes_futuro`, mes sin eventos → libro con hojas vacías. El front descarga por **`fetch` + blob**,
+nunca por `window.open`: el endpoint vive tras `requireEntra` y sin cookie el operador vería un JSON
+401 en una pestaña. El mes viaja en el hash (`#/op24h?mes=YYYY-MM`, `replaceState`) como DISP lleva
+`planta` y COMB `fecha` ([[D-035]]); **el día de la grilla no se tocó** — sigue siendo siempre hoy.
+
+**Consecuencias:** (a) **El reflejo de DISP queda FUERA** y merece su propio ADR: sus 4 tipos espejo
+ya están sembrados, pero crear/editar/**deshacer con copia anulada** (RQ-02.12) suma un estado visual
+nuevo a la grilla de Sala y tres enganches más, y no comparte casi nada con el generador del libro.
+Con él quedan abiertas REQ-02 §3.4 y REQ-06 §8.3. (b) **DDL mínimo:** una sola columna
+(`F33.A1`, idempotente, `DEFAULT 1 WITH VALUES` → ni una fila de datos tocada) y **ninguna migración
+de datos**; el `UPDATE` complementario reafirma el `0` de las 8 filas espejo en cada arranque, y no
+fuerza `1` en el resto (afirmaría que ningún otro tipo puede ocultarse jamás). (c) **Contrato
+cross-repo intacto:** D-058 no toca `evento_dashboard` ni `disponibilidad_dashboard`; nada que
+coordinar con `dashboard-gen-gec3/`. (d) **La adopción es real y baja, y el generador no la
+compensa:** julio 2026 rinde 31 hojas y **20 renglones** (15 lotes de MAND + 5 registros de Sala), la
+mayoría de hojas sale vacía y el encabezado `JEFE`/`INGENIERO DE TURNO` queda en blanco casi todo el
+mes porque la única presencia registrada es de un cargo que el F03 no nombra. **Es correcto**: el F03
+se llena hoy a mano y las bitácoras de Sala todavía no se usan — es adopción, no software, y es la
+razón por la que **no** hay que autogenerar texto para tapar el hueco. (e) Los registros migrados por
+`F32.A1` traen un `lote_id` **por fila**, así que no compactan: una autorización de 90 MW en P1..P5
+rinde cinco renglones en vez de uno con `del P1 al P5`. No es defecto del motor —solo puede agrupar
+lo que el dato ya trae junto— pero se ve así en el listado y en el libro. (f) Quedan **resueltas**:
+REQ-02 §8.1 y §8.2, REQ-04 §8.1 y §8.3 (con lo que REQ-04 se queda **sin bloqueante vivo**), y
+REQ-06 §8.1 a §8.4 — las tres últimas **por construcción**: el estado DISP se asienta una vez en su
+instante de inicio, un evento deshecho no existe en la tabla, y el libro refleja el estado final del
+lote (decisión H del insumo). (g) Dos trampas que se pagaron en esta ronda y valen para la próxima:
+una regex de `<row>` con `[\s\S]*?(?:<\/row>|\/>)` **corta en la primera celda auto-cerrada** y
+produce XML partido que pasa todos los conteos (hermana del `stripComments` inerte de [[D-055]]), y
+`JSON_VALUE` **lanza** ante texto no-JSON en vez de devolver `NULL`, así que el espejo del
+`GET /activos` depende de que `campos_extra` sea siempre JSON o `NULL` — hoy lo es, y esa premisa
+sostiene tres consultas. Cross-ref: [[D-057]], [[D-056]], [[D-055]], [[D-053]], [[D-049]],
+[[D-046]], [[D-045]], [[D-044]], [[D-035]], [[D-032]], [[D-030]], [[D-020]], y REQ-02 / REQ-04 /
+REQ-06 + `FORMATO-ASIENTOS-OPERACION.md`.
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

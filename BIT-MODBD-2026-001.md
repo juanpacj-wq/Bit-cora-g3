@@ -5,14 +5,20 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 2.2 |
-| Fecha | 2026-07-22 |
+| Versión | 2.3 |
+| Fecha | 2026-07-27 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
 
 > **Convenciones:** las tablas de catálogos viven en `lov_bit`; las tablas operativas en `bitacora`. Los campos JSON usan `NVARCHAR(MAX)` y se validan en la capa de aplicación.
 
+> **Cambios v2.3 (2026-07-27) — Asientos normalizados y reflejo a Sala (D-058):**
+> - **Nueva columna `lov_bit.tipo_evento.seleccionable BIT NOT NULL DEFAULT 1` (`F33.A1`, §2.5)** — idempotente, `WITH VALUES`, **sin tocar una sola fila de datos**. `0` = el tipo existe para el sistema (reflejo, histórico, filtros) pero **nadie lo puede elegir a mano**. Se llama `seleccionable` y no `activo` (que se confunde con "bitácora activa"). El filtro vive en `GET /api/catalogos/bitacoras/:id/tipos-evento` **y también** en los dos lookups `(tipo_evento_id, bitacora_id)` del `POST`/`PUT` genérico de `registros.js`: esconder una opción no impide postear su id.
+> - **8 tipos espejo sembrados con `seleccionable = 0`** (§2.5): `Autorización` · `Pruebas` · `Redespacho` · `Cambio de Disponibilidad` × `SALAJDT`/`SALAING`, con los nombres **literales** de sus catálogos de origen. Idempotentes por `(bitacora_id, nombre)`, se reconstruyen en cada arranque, quedan con `notificar_dashboard_tipo = NULL` y **no** cambian la matriz de permisos.
+> - **Nueva §7.11** — los asientos reflejados: `campos_extra` gana `origen_bitacora` y `origen_lote_id` en las copias de Sala (**sin DDL**, viajan tal cual al histórico); el vínculo es **por lote, nunca por `registro_id`** (no hay FK posible: la copia también migra al histórico); `fecha_evento` = hora de llamada pero `turno_id` = turno **ABIERTO**; `rowsAffected = 0` en la cascada **no es error**; y la copia es **solo lectura en su destino incluso para su autor** (`403 asiento_reflejado`, restricción y no bypass de D-049).
+> - **Sin migración de datos, sin cambios de contrato cross-repo**: `evento_dashboard` y `disponibilidad_dashboard` no se tocan. El reflejo de **DISP queda fuera** (sus tipos ya están sembrados) y tiene ADR propio pendiente. Ver D-058.
+>
 > **Cambios v2.2 (2026-07-22) — Operación 24h append-only (D-056):**
 > - **§7.9 actualizada** con el modelo de captura append-only de MAND: `POST /api/sala-de-mando/guardar` **solo INSERTA** (murió la máquina de 4 casos), varios registros pueden coexistir por `(tipo, periodo, día, planta)`, body y motivos de error nuevos (`hora_requerida`/`hora_invalida`/`hora_futura`/`lote_sin_celdas`; retirado `detalle_sin_celdas`). El pivote `GET /api/sala-de-mando` **se dio de baja** (404); lo reemplaza `GET /api/sala-de-mando/lotes` (listado del día, solo lectura, agrupado por `lote_id`).
 > - **`campos_extra` de MAND gana `lote_id` y `hora_llamada`** (sin DDL — viajan tal cual al histórico). `lote_id`: GUID del servidor por fila/tipo en cada Guardar, agrupa el lote y sostiene su metadata **replicada por celda sin constraint** (solo la cubre un guard de test). `hora_llamada`: ISO UTC compuesta server-side desde `HH:mm` Bogotá; **`fecha_evento` no cambia**; en los migrados la clave está **AUSENTE**, y ese NULL va último en todo `ORDER BY`.
@@ -306,6 +312,8 @@ INSERT INTO lov_bit.bitacora (nombre, codigo, formulario_especial, definicion_ca
 -- notificar_dashboard_tipo (F6): si != NULL, al INSERT/UPDATE del registro se hace UPSERT
 --   en bitacora.evento_dashboard con este valor en la columna `tipo`. NULL = no notifica.
 --   Reemplaza al flag JSON `notificar_dashboard:true` que vivía en `bitacora.definicion_campos`.
+-- seleccionable (F33.A1, D-058): 0 = el tipo existe para el sistema (reflejo, histórico, filtros)
+--   pero NADIE lo puede elegir a mano. Sin esta columna, sembrar un tipo lo vuelve tecleable.
 CREATE TABLE lov_bit.tipo_evento (
     tipo_evento_id           INT           IDENTITY(1,1) PRIMARY KEY,
     bitacora_id              INT           NOT NULL
@@ -315,7 +323,9 @@ CREATE TABLE lov_bit.tipo_evento (
     orden                    INT           NOT NULL DEFAULT 0,
     notificar_dashboard_tipo VARCHAR(10)   NULL
         CONSTRAINT CK_te_notificar_dashboard_tipo
-        CHECK (notificar_dashboard_tipo IN ('AUTH','REDESP','PRUEBA'))
+        CHECK (notificar_dashboard_tipo IN ('AUTH','REDESP','PRUEBA')),
+    seleccionable            BIT           NOT NULL
+        CONSTRAINT DF_tipo_evento_seleccionable DEFAULT 1   -- F33.A1 (D-058)
 );
 
 CREATE INDEX IX_tipo_evento_bit ON lov_bit.tipo_evento(bitacora_id);
@@ -344,7 +354,39 @@ INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden) VALUES
     (1, 'Cambio de Estado', 1),
     (1, 'Redespacho', 2),
     (1, 'Sincronización', 3);
+
+-- F33.A1 (D-058) — los 8 TIPOS ESPEJO de los asientos reflejados: los 4 nombres LITERALES del
+-- catálogo de origen (MAND: 'Autorización' con tilde y 'Pruebas' en plural; DISP: 'Cambio de
+-- Disponibilidad') × las 2 bitácoras de Sala que reciben copia. Idempotente por (bitacora_id,
+-- nombre); se reconstruye en cada arranque, igual que el resto de catálogos.
+INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden, seleccionable)
+SELECT b.bitacora_id, s.nombre, s.orden, 0
+FROM lov_bit.bitacora b
+CROSS JOIN (VALUES ('Autorización', 1), ('Pruebas', 2), ('Redespacho', 3),
+                   ('Cambio de Disponibilidad', 4)) AS s(nombre, orden)
+WHERE b.codigo IN ('SALAJDT','SALAING')
+  AND NOT EXISTS (SELECT 1 FROM lov_bit.tipo_evento te
+                  WHERE te.bitacora_id = b.bitacora_id AND te.nombre = s.nombre);
+
+-- El UPDATE complementario reafirma el 0 en cada arranque (mismo patrón que el `oculta` de CIET).
+-- Deliberadamente NO fuerza `seleccionable = 1` en el resto: eso afirmaría que ningún otro tipo
+-- puede ocultarse jamás. Los preexistentes quedan en 1 por el DEFAULT WITH VALUES.
+UPDATE te SET seleccionable = 0
+FROM lov_bit.tipo_evento te
+INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+WHERE b.codigo IN ('SALAJDT','SALAING')
+  AND te.nombre IN ('Autorización','Pruebas','Redespacho','Cambio de Disponibilidad')
+  AND te.seleccionable <> 0;
 ```
+
+> **`seleccionable = 0` no es "inactivo": es "no elegible a mano" (D-058).** Los 8 espejo existen
+> para que el reflejo tenga un `tipo_evento_id` coherente con su bitácora (`guard_tipo_evento_
+> coherente`, D-053), para el histórico y para filtrar por tipo — pero **nadie los puede teclear**.
+> El filtro `seleccionable = 1` vive en `GET /api/catalogos/bitacoras/:id/tipos-evento` **y también**
+> en los dos lookups `(tipo_evento_id, bitacora_id)` del `POST`/`PUT` genérico de `registros.js`:
+> esconder una opción no impide postear su id. Los 8 quedan con `notificar_dashboard_tipo = NULL`
+> (la copia **no** publica al dashboard, RN-02.a) y `es_default = 0`. El reflejo resuelve el id por
+> `(bitacora_id, nombre)` contra la tabla, así que el filtro no lo afecta.
 
 ### 2.6 Permisos cargo ↔ bitácora
 
@@ -1511,6 +1553,49 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 - **Tests de componentes RTL**: `HistoricoTable`, `EstadoActualCard`, `BarraEstado`, `SalaDeMandoGrid` no tienen tests automáticos de render con TZ override. Smoke manual con DevTools cubre el gap hoy.
 - **CI matrix con GH Actions**: el repo no tiene CI configurado. F21 dejó tests corriendo localmente (`npm test`). Cuando se agregue GH Actions, configurar matriz `TZ=UTC,America/Bogota,Asia/Tokyo` para detectar regresiones por uso accidental de `getHours()`/`getTimezoneOffset()` sin TZ explícito.
 
+### 7.11 Asientos reflejados en las bitácoras de Sala (D-058)
+
+Un lote de Operación 24h se **copia** como registro real de `SALAJDT` **y** `SALAING` (nunca
+`SALAOP`), dentro de la MISMA transacción del `POST /guardar` · `PUT` · `DELETE` por lote
+(`server/utils/reflejo-sala.js`). Sin DDL: la copia es una fila normal de `registro_activo` y viaja
+al histórico como cualquier otra. Lo único nuevo son **dos claves de `campos_extra`**:
+
+```json
+{ "origen_bitacora": "MAND", "origen_lote_id": "<GUID del lote de origen>" }
+```
+
+- **El vínculo es por `lote_id`, NUNCA por `registro_id`.** La copia *también* migra a
+  `registro_historico`, así que —igual que `evento_dashboard.registro_origen_id` (D-055 (c))— **no
+  hay FK posible**: el padre tiene dos tablas. La integridad la sostienen el código y los tests.
+- **Cómo se buscan las copias** (siempre acotado por las tres condiciones, no solo por el lote —
+  sin el `IN`, el DML alcanzaría cualquier fila que mañana reuse la clave, p. ej. el reflejo de DISP):
+
+  ```sql
+  FROM bitacora.registro_activo
+  WHERE JSON_VALUE(campos_extra, '$.origen_lote_id') = @lote_id
+    AND bitacora_id IN (@salajdt, @salaing)
+    AND planta_id = @planta_id
+  ```
+
+- **`rowsAffected = 0` NO es error:** significa que el cierre de turno de Sala ya archivó las copias.
+  El histórico no se reescribe (RF-032) y la corrección del origen procede igual.
+- **`fecha_evento` = `hora_llamada` del lote** (narrativo: el asiento se lee donde el operador lo
+  espera) pero **`turno_id` = el turno ABIERTO** de la unidad al insertar (puntero de archivado,
+  §4.10 / D-045), o `NULL` si no hay ninguno. Son criterios distintos **a propósito**.
+- **Solo lectura en su destino, incluso para su autor** (que es el del origen):
+  `canEditarRegistro` y el espejo SQL del `GET /api/registros/activos` comparten el predicado
+  `JSON_VALUE(campos_extra,'$.origen_lote_id') IS NULL`; el `PUT`/`DELETE` responde
+  `403 asiento_reflejado`. Es una **restricción**, no un bypass de D-049.
+- La copia **no** publica al dashboard (RN-02.a) ni cuenta para presencia/conformación (RN-02.b), y
+  el generador del libro F03 la **excluye** (lee los originales; si no, el evento saldría tres veces).
+- ⚠️ `JSON_VALUE` **lanza** ante texto no-JSON (no devuelve `NULL`), y el espejo se evalúa por fila
+  del listado: una sola fila con `campos_extra` corrupto pondría la grilla en 500. Hoy es imposible
+  —todos los escritores guardan `JSON.stringify(objeto)` o `NULL`— y esa premisa sostiene las tres
+  consultas. Si algún día se persistiera `campos_extra` crudo del cliente, se caen juntas.
+
+**El reflejo de Disponibilidad queda FUERA de D-058** (sus 4 tipos espejo ya están sembrados): tiene
+ADR propio pendiente, porque agrega el estado "copia anulada" de RQ-02.12.
+
 ---
 
 ## 8. Historial de versiones
@@ -1528,6 +1613,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 | 1.8 | 2026-05-21 | Consumos de Combustibles (D-027). **Nueva §2.7** `lov_bit.combustible` (catálogo por planta, 18 seeds: 8 GEC3 + 10 GEC32 con tipos `ALIMENTADOR/CALIZA/ACPM`). **Nueva §4.9** `bitacora.consumo_combustible` (long-format transaccional, `cantidad DECIMAL(12,3)`, UQ compuesto, columnas Bogotá) + vista `v_consumo_periodo` (pivot con `total_carbon_ton = SUM(tipo='ALIMENTADOR')`, `caliza_ton`, `acpm_gal`). §2.4 gana fila `COMB` (formulario_especial=1, icono Flame). §2.6 matriz extendida con CASE para COMB. Permisos: `Operador de Planta - Carbón y Caliza` + JdT crean; resto ven. Migración idempotente F26.B1 (ortogonal a F26.A1). Endpoints `GET /api/combustibles/catalogo`, `GET /api/combustibles/consumos`, `POST /api/combustibles/consumos` (batch atómico, regla D-019 paridad `modificado_por` solo si cantidad cambió). Frontend bajo `src/components/Combustibles/` integrado a categoría jerárquica nueva "Combustibles". 12 tests en `consumos_combustible.test.js`. |
 | 2.0 | 2026-07-14 | **Split de Sala de Mando por rol (D-053).** §2.4: la fila `SALA` ("Sala de Mando Operativa") se vuelve tres — `SALAJDT` (Sala de Mando - Jefe de Turno), `SALAING` (- Ing. de Operación), `SALAOP` (- Operador). **`SALA` NO se borró: se renombró a `SALAJDT`** conservando `bitacora_id=14`, `orden=3` y su `tipo_evento` (misma fila → su histórico no se movió); el rename va en el `UPDATE` del "Paso 1" de `db.js`, nunca dentro del `MERGE` (matchea por `codigo` → habría dejado la vieja huérfana). `orden` renumerado (AGUA 4→6 … MAND 12→14) para dejar las tres contiguas; el orden relativo se preserva. §2.6: **se rompe la simetría JdT/IngOp** (ya no tienen filas idénticas) — el `IN ('DISP','AUTH','SALA')` de `puede_crear` se parte en `JdT → IN ('DISP','SALAJDT')` e `IngOp → IN ('DISP','SALAING')`, preservando DISP para ambos; el `Operador de Planta - Sala de Mando` pasa a `SALAOP` y **no ve** las otras dos; `'AUTH'` retirado (código muerto: `activa=0` + la matriz filtra `activa=1`). **Nueva §4.11** `bitacora.registro_historico_backup_D053` (respaldo residente, excepción explícita a RF-032). Migración **F30.A1**: reparte `registro_activo`/`registro_historico` por el cargo del autor reconstruido por evidencia (`turno_participante`/`conformacion_turno` por `turno_id` → `sesion_activa` con cargo único), move-out por atribución positiva (lo no atribuible no se toca y se loguea), con remapeo **acoplado** de `tipo_evento_id` y validación `THROW` de integridad. Pre-flight de prod: `sql/snippets/reporte-split-sala-D053.sql` (solo lectura + guardrail). Tests: `split_sala_permisos.test.js` (matriz + regresión DISP), `guard_tipo_evento_coherente.test.js` (drift `tipo_evento_id` ↔ `bitacora_id`, el riesgo que ninguna FK ni lectura cubre), `registros_solo_autor` reescrito con ADMIN como no-autor. |
 | 2.2 | 2026-07-22 | **Operación 24h append-only (D-056).** §7.9 reescrita en su encabezado: la grilla MAND pasa de espejo persistente editable a **formulario de captura** — `POST /api/sala-de-mando/guardar` **siempre INSERTA** (se retiran la máquina de 4 casos, el UPDATE de metadata a nivel de fila y el motivo `detalle_sin_celdas`), varios registros coexisten por `(tipo, periodo, día, planta)`, y aparecen los motivos `hora_requerida`/`hora_invalida`/`hora_futura`/`lote_sin_celdas`. **`campos_extra` de MAND gana `lote_id`** (GUID del servidor por fila/tipo; agrupa el lote; su metadata queda **replicada por celda sin constraint**, sostenida solo por un guard de test) **y `hora_llamada`** (ISO UTC compuesta server-side desde `HH:mm` Bogotá, validada contra el reloj del server con 5 min de tolerancia; **`fecha_evento` no cambia**; **AUSENTE** en lo migrado, y ese NULL va último en todo `ORDER BY` y nunca gana por hora). §5.1: el vigente publicado se resuelve **por CELDA y desde cero** con `recalcularEventoDashboard` (`upsertEventoDashboard` queda para la rama genérica de `registros.js`) — los lotes se solapan parcialmente, así que decidir por lote publica mal los periodos compartidos; **sin ganador se BORRA** la fila (el soft-delete `activa=0` sigue intacto en `cerrarDiaMand`). El pivote `GET /api/sala-de-mando` se dio de baja (404); lo reemplaza `GET /api/sala-de-mando/lotes` (listado del día, solo lectura, `publicado` por celda como indicador derivado, gated por `puede_ver`). Migración **F32.A1** (excepción a RF-032): respaldos **residentes** `registro_historico_backup_D056` / `registro_activo_backup_D056` (**no se borran**) + `JSON_MODIFY('$.lote_id', NEWID())` por fila, idempotente por `ISJSON=1 AND JSON_VALUE('$.lote_id') IS NULL`, sin alterar valores/autores/fechas y logueando lo no-JSON. Verificada en prod: 0 históricos / 7 activos convertidos. Corrección y borrado por lote quedan para D-057. |
+| 2.3 | 2026-07-27 | **Asientos normalizados de operación (D-058).** §2.5: columna **`lov_bit.tipo_evento.seleccionable BIT NOT NULL DEFAULT 1`** (migración **`F33.A1`**, idempotente por `COL_LENGTH`, `WITH VALUES` → cero filas de datos tocadas) + seed de los **8 tipos espejo** (`Autorización` · `Pruebas` · `Redespacho` · `Cambio de Disponibilidad` × `SALAJDT`/`SALAING`, nombres **literales** del catálogo de origen) con `seleccionable = 0`, idempotentes por `(bitacora_id, nombre)` y reafirmados por un `UPDATE` complementario en cada arranque — que **no** fuerza `1` en el resto. El filtro `seleccionable = 1` se aplica en `GET /api/catalogos/bitacoras/:id/tipos-evento` **y** en los dos lookups del `POST`/`PUT` de `registros.js` (esconder no es impedir). **Nueva §7.11** — asientos reflejados: `campos_extra.origen_bitacora` + `origen_lote_id` en las copias de `SALAJDT`/`SALAING` (**sin DDL**), vínculo **por lote y nunca por `registro_id`** (la copia también migra al histórico → no hay FK posible, precedente D-055 (c)), búsqueda acotada por lote **+ planta + `bitacora_id IN`**, `rowsAffected = 0` **no es error** (las copias ya se archivaron; RF-032 intacto y la corrección del origen procede), `fecha_evento` = hora de llamada (narrativo) vs `turno_id` = turno **ABIERTO** (puntero de archivado, D-045), y solo lectura en destino **incluso para su autor** (`403 asiento_reflejado`, restricción — no bypass de D-049 — con `canEditarRegistro` y su espejo SQL cambiados juntos). **Sin migración de datos** y **sin cambios en el contrato cross-repo**. El reflejo de **DISP queda fuera** (tipos ya sembrados): ADR propio pendiente. |
 | 1.9 | 2026-07-03 | Rol ADMIN (D-039). Cargo 13 `Administrador y Debugging` (App Role `ADMINISTRADOR_DEBUGGING`), `solo_lectura=0`, `puede_cerrar_turno=1`. §2.6 matriz extendida: cláusula `WHEN c.nombre='Administrador y Debugging' THEN 1` como primer WHEN de `puede_ver` y `puede_crear` → acceso total data-driven (ve+crea en toda bitácora activa), sin superusuario por código. Override defensivo DISP (F12.A6) incluye al admin en su `CASE ... IN (...)`. Sin hard-delete de históricos (append-only intacto). `entra-roles.js` mapea el App Role→cargo (1:1, 13 roles) y lo pone primero en `PRECEDENCE`. Tests: `entra_roles.test.js` (13 roles + precedencia) y `rol_admin_debugging.test.js` (matriz completa + regresión override DISP + idempotencia). |
 
 ---

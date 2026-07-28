@@ -88,9 +88,11 @@ La grilla MAND tiene 3 filas correspondientes a 3 `tipo_evento` de la bitácora 
 
 | Fila / `tipo` en payload | `tipo_evento.nombre` | Lock por hora | FuncionarioCND |
 |---|---|---|---|
-| `AUTH` | Autorizaciones | No | **Requerido** (si algún valor en la fila) |
-| `PRUEBA` | Pruebas | No | NULL forzado |
-| `REDESP` | Redespacho | **Sí** (periodo >= actual) | NULL forzado |
+| `AUTH` | `Autorización` | No | **Requerido** (si algún valor en la fila) |
+| `PRUEBA` | `Pruebas` | No | NULL forzado |
+| `REDESP` | `Redespacho` | **Sí** (periodo >= actual) | NULL forzado |
+
+> Los `tipo_evento.nombre` son **literales** y así se copian a los tipos espejo de las bitácoras de Sala (D-058): `Autorización` con tilde y en singular, `Pruebas` en plural. Renombrar uno acá deja el espejo huérfano y el histórico con dos etiquetas para lo mismo — hay test que lo fija.
 
 24 periodos × 3 tipos × 2 plantas = 144 celdas posibles. El periodo P1 cubre 00:00–00:59, P2 cubre 01:00–01:59, …, P15 cubre 14:00–14:59, …, P24 cubre 23:00–23:59 (hora Bogotá).
 
@@ -107,6 +109,30 @@ La grilla MAND tiene 3 filas correspondientes a 3 `tipo_evento` de la bitácora 
 | Metadata del lote | `detalle`, `funcionariocnd`, `hora_llamada` | **Replicada en cada celda**, sin constraint que la mantenga coherente: la sostiene un guard de test (`verificarCoherenciaDeLotes`). |
 
 Varios lotes **coexisten** en el mismo `(tipo, periodo, día, planta)` — el CND llama varias veces por el mismo periodo. Lo que el dashboard publica se resuelve **por celda**, no por lote (gana la mayor `hora_llamada`; los sin hora van últimos). Corregir y borrar actúan sobre **el lote completo**, nunca sobre un periodo suelto. Un lote no se parte entre dos días Bogotá: sus celdas comparten `fecha_evento`.
+
+---
+
+## Asiento (D-058)
+
+**Asiento** = el texto con que se narra un evento de operación, **armado por el servidor** y no por la persona. Nace en `server/utils/asientos/` (módulo puro) y es el **mismo** en los tres lugares donde aparece: el renglón del listado del día de Operación 24h, la copia en las bitácoras de Sala y la fila del libro mensual GENE-F03.
+
+| Fuente | Cómo se arma |
+|---|---|
+| MAND (`AUTH` / `REDESP` / `PRUEBA`) | Plantilla por tipo + unidad + carga. Ej.: `Se recibe llamada del CND (Juan Pérez) autorizando GEC3 a generar 150 MW del P17 al P19.` |
+| DISP (4 estados) | Una frase por estado. Ej.: `GEC3 E/L en servicio.` |
+| Bitácoras de Sala | **Literal**, tal como lo escribió el ingeniero — sin normalizar ni corregir. Se le antepone `{UNIDAD} — ` **solo si el texto no nombra ya la unidad**. |
+
+Convenciones canónicas: unidad `GEC3`/`GEC32` (nunca `G3.0`/`G3.2`), potencia **entera en `MW`** (es potencia por periodo, **no `MWh`**), periodos compactados (`del P17 al P19`) cuando todo el lote comparte valor y desplegados (`P17: 109 MW; P18: 134 MW`) cuando difieren, `detalle` al final tras punto. **La hora nunca va dentro del asiento**: es una columna aparte. Especificación completa: `docs/requerimientos/FORMATO-ASIENTOS-OPERACION.md`.
+
+---
+
+## Asiento reflejado / tipo espejo (D-058)
+
+**Asiento reflejado** = la **copia** de un evento de Operación 24h en `SALAJDT` y `SALAING` (nunca `SALAOP`). Es un registro real de esa bitácora —cuenta en el contador, cierra por turno, viaja al histórico— pero **derivado**: se identifica por `campos_extra.origen_lote_id`, muestra un chip con su bitácora de origen y **no se edita ni se borra en su destino, tampoco por su autor** (`403 asiento_reflejado`). La única fuente de verdad es el origen.
+
+**Tipo espejo** = los `lov_bit.tipo_evento` que existen en `SALAJDT`/`SALAING` con los nombres literales de MAND y DISP (`Autorización`, `Pruebas`, `Redespacho`, `Cambio de Disponibilidad`) para que la copia tenga un tipo coherente con su bitácora. Van con **`seleccionable = 0`**: existen para el sistema, pero **nadie los puede elegir a mano** — si se pudieran, alguien crearía "una autorización" sin origen, indistinguible de un reflejo real e imposible de rastrear.
+
+> El reflejo de **Disponibilidad** todavía **no está cableado** (sus tipos espejo sí están sembrados): tiene ADR propio pendiente.
 
 ---
 
@@ -194,3 +220,6 @@ Los endpoints devuelven `{ error: 'codigo', ... }` o `{ errores: [{ tipo?, perio
 | `lote_sin_celdas` | POST MAND guardar · PUT lote | Metadata sin ninguna celda con valor. Nunca un 200 mentiroso; vaciar no borra — para eso está el `DELETE`. |
 | `periodo_duplicado` | PUT lote | El mismo periodo dos veces en el body: el diff quedaría ambiguo. |
 | `lote_inexistente` (404) · `lote_cerrado` (409) · `lote_de_otra_planta` (403) | PUT/DELETE lote | El lote no existe · ya lo archivó el cierre diario (histórico inmutable) · pertenece a otra unidad. |
+| `asiento_reflejado` (403) | PUT/DELETE registro | Es la **copia** de un evento de Operación 24h: se corrige en su origen, no en la bitácora de Sala. Se rechaza **también a su autor** (que es el del origen) — por eso no reusa `solo_autor`, que sería una explicación falsa. |
+| `mes_invalido` · `mes_futuro` | GET reporte-mensual | `mes` no cumple `YYYY-MM` · el mes pedido es posterior al mes Bogotá en curso. **Un mes sin eventos no es error**: devuelve el libro con las hojas vacías. `mes` ausente = mes en curso. |
+| `sin_permiso_descarga` (403) | GET reporte-mensual | El cargo no tiene `puede_crear` en MAND. Sigue pudiendo **consultar** el listado del día: consultar no es descargar. |
