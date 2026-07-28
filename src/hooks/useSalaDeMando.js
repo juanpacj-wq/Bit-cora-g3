@@ -101,7 +101,7 @@ export function useSalaDeMando() {
       }
       const blob = await res.blob();
       // Click sintético sobre un object URL: es la única forma de que el navegador guarde un blob con
-      // el nombre que queremos. El `revoke` va después del click — antes, Chrome cancela la descarga.
+      // el nombre que queremos.
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -110,7 +110,13 @@ export function useSalaDeMando() {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // **El `revoke` NO puede ir acá mismo.** `a.click()` solo AGENDA la descarga: el navegador lee
+      // el blob después, ya fuera de este tick. Revocarlo en la misma vuelta del event loop es una
+      // carrera — el archivo se guarda igual (con su nombre y un tamaño plausible) pero puede quedar
+      // truncado o vacío, y el síntoma que ve el operador es "se descargó pero Excel no lo abre",
+      // sin ningún error en pantalla ni en el servidor. Se difiere; el navegador libera la memoria
+      // igual al cerrar la pestaña, así que el costo de esperar es cero.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
       return true;
     } finally {
       setLoading(false);

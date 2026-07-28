@@ -7,18 +7,15 @@
 // Por qué escrito a mano y no `exceljs`/`xlsx`: REQ-01 §5.1 ya lo decidió — el backend tiene seis
 // dependencias y así se queda. Todo lo que hace falta sale de `node:zlib` (nativo).
 //
-// El reparto lector/escritor no es simetría, es una restricción real:
-//   - un `.xlsx` que sale de Excel viene en DEFLATE, así que hay que INFLAR para leerlo;
-//   - este escritor solo emite STORED (sin comprimir), que es ZIP perfectamente válido.
-// De ahí que inflar ocurra UNA vez, OFFLINE, en `scripts/derivar-plantilla-f03.mjs`: la plantilla
-// commiteada ya es stored, y en runtime el generador solo clona bytes e inyecta los `sheetN.xml`.
-// Cero inflate y cero deps en el camino caliente.
+// El lector soporta STORED y DEFLATE (un `.xlsx` que sale de Excel viene deflate). El escritor
+// **emite DEFLATE**, igual que Excel y que cualquier otra herramienta: ver la nota de `escribirZip`
+// sobre por qué se abandonó el `stored` original. Todo sale de `node:zlib`, que es nativo.
 //
 // Alcance deliberado: sin ZIP64, sin cifrado, sin data descriptors leídos del stream (los tamaños
 // salen del central directory, que siempre los trae). Un `.xlsx` de Excel de este tamaño nunca
 // necesita nada de eso; si algún día lo necesitara, `leerZip` lanza en vez de devolver basura.
 
-import { inflateRawSync } from 'node:zlib';
+import { inflateRawSync, deflateRawSync } from 'node:zlib';
 
 const FIRMA_LOCAL = 0x04034b50;
 const FIRMA_CENTRAL = 0x02014b50;
@@ -104,9 +101,19 @@ export function leerZip(buffer) {
 // `entradas`: `[{ name, data: Buffer }]` **o** un `Map<nombre, Buffer>` (lo que devuelve `leerZip`,
 // para poder re-emitir un paquete leído sin traducirlo).
 //
-// Emite todo STORED: sin `deflate`, el paquete pesa más pero se produce sin dependencias y Excel lo
-// abre igual. La plantilla F03 stored pesa ~370 KB contra los 221 KB del original comprimido, y es
-// un artefacto que se sirve una vez por descarga: no vale una dependencia.
+// **Emite DEFLATE** (con `stored` como respaldo por entrada cuando comprimir no achica: PNG, ya
+// comprimido). El escritor original —heredado de `js-scraper-carbon-g32`— emitía TODO `stored`, que
+// es ZIP válido y que Excel abre; se cambió igual, por dos razones que pesan más que la simetría con
+// el original:
+//   1. **Ningún `.xlsx` del mundo real viene sin comprimir.** Un paquete OOXML `stored` es una forma
+//      legal pero exótica, y en el camino de una descarga corporativa hay antivirus, DLP y proxies
+//      que inspeccionan el archivo: cuanto más se parezca a lo que produce Excel, menos superficie
+//      hay para que algo en ese camino lo rechace o lo reescriba.
+//   2. **Pesa 2,5× menos** (el libro de un mes pasa de ~550 KB a ~215 KB). Es tráfico que viaja por
+//      la red de planta en cada descarga.
+// El costo es nulo: `deflateRawSync` es de `node:zlib`, nativo — **sigue sin dependencias nuevas**,
+// que es lo que REQ-01 §5.1 protege. El CRC32 se calcula SIEMPRE sobre el dato crudo (lo que exige
+// el formato), y `leerZip` ya soportaba el método 8 desde el primer día.
 //
 // A diferencia del original, NO escribe a disco — devuelve el `Buffer`. Por eso tampoco lleva el
 // `assertWithinDir` de AUD-28: acá no hay ruta que validar. El script offline sí escribe, y ahí sí
@@ -125,36 +132,45 @@ export function escribirZip(entradas) {
     const crc = crc32(datos);
     const size = datos.length;
 
+    // Nivel 6 (el default de zlib): el punto de equilibrio habitual. El 9 gana un ~1 % a costa de
+    // bastante CPU por libro, y esto se sirve dentro de un request HTTP.
+    const comprimido = size > 0 ? deflateRawSync(datos, { level: 6 }) : Buffer.alloc(0);
+    // Respaldo por entrada: si comprimir no achica (PNG del logo, partes diminutas), se guarda
+    // crudo. Emitir un "comprimido" más grande que el original sería peor que no comprimir.
+    const usaDeflate = comprimido.length < size;
+    const cuerpo = usaDeflate ? comprimido : datos;
+    const metodo = usaDeflate ? 8 : 0;
+
     const lh = Buffer.alloc(30);
     lh.writeUInt32LE(FIRMA_LOCAL, 0);
-    lh.writeUInt16LE(20, 4); // versión necesaria
+    lh.writeUInt16LE(20, 4); // versión necesaria (2.0 cubre deflate)
     lh.writeUInt16LE(0, 6); // flags
-    lh.writeUInt16LE(0, 8); // método = stored
+    lh.writeUInt16LE(metodo, 8); // 8 = deflate · 0 = stored
     lh.writeUInt16LE(0, 10); // hora
     lh.writeUInt16LE(0x21, 12); // fecha (1980-01-01: fija, para que el artefacto sea reproducible)
-    lh.writeUInt32LE(crc, 14);
-    lh.writeUInt32LE(size, 18);
-    lh.writeUInt32LE(size, 22);
+    lh.writeUInt32LE(crc, 14); // CRC32 del dato CRUDO, siempre
+    lh.writeUInt32LE(cuerpo.length, 18); // tamaño comprimido
+    lh.writeUInt32LE(size, 22); // tamaño crudo
     lh.writeUInt16LE(nombreBuf.length, 26);
     lh.writeUInt16LE(0, 28);
-    locales.push(lh, nombreBuf, datos);
+    locales.push(lh, nombreBuf, cuerpo);
 
     const ch = Buffer.alloc(46);
     ch.writeUInt32LE(FIRMA_CENTRAL, 0);
     ch.writeUInt16LE(20, 4);
     ch.writeUInt16LE(20, 6);
     ch.writeUInt16LE(0, 8);
-    ch.writeUInt16LE(0, 10);
+    ch.writeUInt16LE(metodo, 10);
     ch.writeUInt16LE(0, 12);
     ch.writeUInt16LE(0x21, 14);
     ch.writeUInt32LE(crc, 16);
-    ch.writeUInt32LE(size, 20);
+    ch.writeUInt32LE(cuerpo.length, 20);
     ch.writeUInt32LE(size, 24);
     ch.writeUInt16LE(nombreBuf.length, 28);
     ch.writeUInt32LE(offset, 42);
     central.push(ch, nombreBuf);
 
-    offset += lh.length + nombreBuf.length + datos.length;
+    offset += lh.length + nombreBuf.length + cuerpo.length;
   }
   const localBuf = Buffer.concat(locales);
   const centralBuf = Buffer.concat(central);

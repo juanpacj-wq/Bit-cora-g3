@@ -11,10 +11,10 @@
 // REQ-01 §5.1 prohíbe agregar dependencias, así que `exceljs`/`xlsx` quedan fuera. Clonar una
 // plantilla real es la única forma de tener las dos cosas.
 //
-// El reparto lector/escritor lo impone una restricción física: el `.xlsx` que sale de Excel viene
-// en DEFLATE y el escritor propio solo emite STORED. Entonces inflar ocurre UNA vez, acá, offline;
-// la plantilla se re-emite como stored y en runtime el generador solo clona bytes. Cero `inflate`
-// y cero dependencias en producción.
+// Inflar el F03 real ocurre UNA vez, acá, offline: la plantilla queda derivada y commiteada, y en
+// runtime el generador solo clona sus partes. Todo con `node:zlib` (nativo), así que producción
+// sigue sin dependencias. La plantilla puede quedar `stored` o `deflate` indistintamente —`leerZip`
+// soporta los dos—; desde 2026-07-27 `escribirZip` emite DEFLATE, que es como se ve un `.xlsx` real.
 //
 // Qué conserva la plantilla:
 //   - el encabezado GENE-F03 (filas 1..5 y 7..8) VERBATIM, incluidos sus `t="s"` contra el
@@ -126,8 +126,8 @@ function main() {
   const buf = escribirZip(entradas.map(([name, data]) => ({ name, data })));
   mkdirSync(dirname(destino), { recursive: true });
   writeFileSync(destino, buf);
-  console.log(`\nEscrito   ${SALIDA}  (${buf.length} bytes, ${entradas.length} entradas, ZIP stored)`);
-  console.log('Recordá commitear el artefacto: en runtime nadie lo regenera.');
+  console.log(`\nEscrito   ${SALIDA}  (${buf.length} bytes, ${entradas.length} entradas)`);
+  console.log('Recuerda commitear el artefacto: en runtime nadie lo regenera.');
 }
 
 // El script SÍ escribe a disco, así que valida su ruta (el criterio de AUD-28). `escribirZip` no lo

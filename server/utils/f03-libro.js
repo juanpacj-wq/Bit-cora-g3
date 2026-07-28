@@ -5,9 +5,10 @@
 // `'HH:MM'` en hora Bogotá: la zona horaria es problema de quien consulta, no de quien escribe
 // (mismo criterio que el motor de asientos, D-058 E1).
 //
-// Qué NO hace y por qué: no infla nada. La plantilla de `server/assets/` ya viene como ZIP
-// `stored` desde `scripts/derivar-plantilla-f03.mjs`, así que acá se clonan bytes y se inyectan los
-// `sheetN.xml`. Es lo que permite cumplir REQ-01 §5.1 (cero dependencias nuevas) sin `exceljs`.
+// Qué NO hace y por qué: no reconstruye el formato. Clona las partes de la plantilla de
+// `server/assets/` (leída una vez por proceso) e inyecta los `sheetN.xml`, así que el encabezado, el
+// logo, los estilos y el área de impresión son los del formato controlado, no una imitación. Es lo
+// que permite cumplir REQ-01 §5.1 (cero dependencias nuevas) sin `exceljs`: todo sale de `node:zlib`.
 //
 // Layout de cada hoja (§7 del insumo de formato):
 //
@@ -100,7 +101,7 @@ export function construirLibroF03(dias, plantilla = cargarPlantillaF03()) {
       nombre: dia.fecha,
       indice: i + 1,
       ultimaFila,
-      xml: componerHoja(modelo, { sheetData, ultimaFila, merges, primera: i === 0 }),
+      xml: componerHoja(modelo, { sheetData, ultimaFila, merges, primera: i === 0, indice: i + 1 }),
     };
   });
 
@@ -140,7 +141,36 @@ export function construirLibroF03(dias, plantilla = cargarPlantillaF03()) {
     { name: 'docProps/app.xml', data: Buffer.from(appDelLibro(hojas), 'utf8') },
   );
 
-  return escribirZip(entradas);
+  const libro = escribirZip(entradas);
+  verificarPaquete(libro, entradas, hojas.length);
+  return libro;
+}
+
+// Relectura del paquete recién emitido, antes de devolverlo. `leerZip` recorre el central directory
+// y compara el tamaño declarado de CADA entrada contra lo que descomprime, así que un paquete mal
+// armado (offset corrido, tamaño mentido, entrada perdida) revienta acá y no en la máquina del
+// operador. Es barato —el propio inflado de lo que acabamos de generar— y convierte la peor falla
+// posible de este endpoint ("descarga bien pero Excel no lo abre", sin rastro en el servidor) en un
+// error ruidoso y diagnosticable. NUNCA lo quites para "ahorrar tiempo": lo que ahorra es una
+// llamada del jefe de turno a las 18:00 con un archivo que nadie puede abrir.
+function verificarPaquete(libro, entradas, cantidadHojas) {
+  let leido;
+  try {
+    leido = leerZip(libro);
+  } catch (e) {
+    throw new Error(`construirLibroF03: el paquete emitido no se puede releer (${e.message})`);
+  }
+  if (leido.size !== entradas.length) {
+    throw new Error(`construirLibroF03: se emitieron ${entradas.length} partes y el paquete trae ${leido.size}`);
+  }
+  const imprescindibles = ['[Content_Types].xml', '_rels/.rels', 'xl/workbook.xml', 'xl/styles.xml'];
+  for (let n = 1; n <= cantidadHojas; n++) imprescindibles.push(`xl/worksheets/sheet${n}.xml`);
+  for (const parte of imprescindibles) {
+    const datos = leido.get(parte);
+    if (!datos || datos.length === 0) {
+      throw new Error(`construirLibroF03: falta o va vacía la parte "${parte}" en el paquete emitido`);
+    }
+  }
 }
 
 // ── Render de una hoja ───────────────────────────────────────────────────────────────────────
@@ -304,9 +334,14 @@ function extraerEncabezado(modelo) {
   };
 }
 
-function componerHoja(modelo, { sheetData, ultimaFila, merges, primera }) {
+function componerHoja(modelo, { sheetData, ultimaFila, merges, primera, indice }) {
   let xml = modelo.replace(/<sheetData>[\s\S]*?<\/sheetData>/, `<sheetData>${sheetData}</sheetData>`);
   xml = xml.replace(/<dimension ref="[^"]*"\/>/, `<dimension ref="A1:${ULTIMA_COLUMNA}${ultimaFila}"/>`);
+  // `sheetPr/@codeName` es el nombre de la hoja para VBA y tiene que ser ÚNICO en el libro. Como
+  // las 31 hojas se clonan del MISMO modelo, todas heredaban `codeName="Hoja1"` — 31 hojas con la
+  // misma identidad interna es una incoherencia que Excel puede reportar como archivo que necesita
+  // reparación. Se renumera por hoja (el F03 original trae 19 distintos, y su primera hoja ninguno).
+  xml = xml.replace(/(<sheetPr\b[^>]*?)\scodeName="[^"]*"/, `$1 codeName="Hoja${indice}"`);
   const total = merges.join('').match(/<mergeCell /g)?.length ?? 0;
   xml = xml.replace(
     /<mergeCells count="\d+">[\s\S]*?<\/mergeCells>/,

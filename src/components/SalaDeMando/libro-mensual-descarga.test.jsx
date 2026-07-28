@@ -124,8 +124,27 @@ describe('SalaDeMandoGrid · libro mensual F03 (D-058 E9)', () => {
     expect(descarga.url).toContain('mes=2026-06');
     expect(descarga.opciones?.credentials).toBe('include');
     expect(descargas).toEqual([{ href: 'blob:libro', nombre: NOMBRE_ARCHIVO }]);
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:libro');
     teardown();
+  });
+
+  it('el object URL NO se revoca en el mismo tick del click: eso trunca el archivo', async () => {
+    // Regresión de "se descarga pero Excel no lo abre". `a.click()` solo AGENDA la descarga; el
+    // navegador lee el blob después. Revocarlo en la misma vuelta del event loop es una carrera que
+    // guarda un archivo con nombre y tamaño plausibles pero con el contenido truncado — sin error
+    // visible ni en el navegador ni en el servidor. El revoke tiene que quedar diferido.
+    vi.useFakeTimers();
+    try {
+      const { container, click, teardown } = await render({ puedeCrear: true, mes: '2026-06' });
+      const boton = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('Descargar'));
+      await click(boton);
+      expect(descargas.length).toBe(1);
+      expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:libro');
+      teardown();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('cambiar el mes avisa al dashboard, que es quien lo escribe en el hash', async () => {

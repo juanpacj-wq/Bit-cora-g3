@@ -269,3 +269,43 @@ test('construirLibroF03 rechaza un mes sin días y una fecha con formato inváli
   assert.throws(() => construirLibroF03([]), /al menos un día/);
   assert.throws(() => construirLibroF03([{ fecha: '15/07/2026', bloques: [] }]), /fecha inválida/);
 });
+
+// ─────────────────────────────────────────────── empaquetado (regresión del "no abre en Excel")
+
+test('el paquete sale COMPRIMIDO (deflate), no crudo: es la forma en que Excel emite un .xlsx', () => {
+  // El escritor heredado emitía todo `stored`. Es ZIP válido, pero ningún .xlsx real viene así: en
+  // el camino de una descarga corporativa (antivirus, DLP, proxy) cuanto más se parezca al archivo
+  // que produce Excel, menos superficie hay para que algo lo rechace. Y pesa ~3× menos.
+  const libro = construirLibroF03(mesSintetico(2026, 7, 31));
+  const z = leerZip(libro);
+  // Método 8 = deflate en la cabecera central de la PRIMERA entrada.
+  const eocd = libro.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  const inicioCentral = libro.readUInt32LE(eocd + 16);
+  assert.equal(libro.readUInt16LE(inicioCentral + 10), 8, '[Content_Types].xml debería ir deflate');
+  // Y el contenido sigue siendo el mismo tras inflar: comprimir no puede alterar una sola parte.
+  assert.ok(textoDe(z, 'xl/workbook.xml').startsWith('<?xml'));
+  assert.ok(z.get('xl/media/image1.png').equals(cargarPlantillaF03().get('xl/media/image1.png')));
+  // El libro completo de un mes tiene que caber holgado en una descarga de red de planta.
+  assert.ok(libro.length < 400_000, `el libro pesa ${libro.length} bytes: la compresión no se aplicó`);
+});
+
+test('cada hoja lleva su propio codeName: 31 hojas no pueden compartir la identidad VBA', () => {
+  // Las hojas se clonan del MISMO modelo, así que sin renumerar todas heredan `codeName="Hoja1"`.
+  // `sheetPr/@codeName` identifica la hoja para VBA y debe ser único en el libro; repetirlo es una
+  // incoherencia que Excel puede reportar como archivo dañado.
+  const z = leerZip(construirLibroF03(mesSintetico(2026, 7, 31)));
+  const codigos = hojasDe(z).map((n) => /codeName="([^"]+)"/.exec(textoDe(z, n))?.[1]);
+  assert.equal(codigos.length, 31);
+  assert.equal(new Set(codigos).size, 31, `codeNames repetidos: ${codigos.join(',')}`);
+});
+
+test('el paquete se RELEE antes de devolverse: una parte vacía o perdida no sale del servidor', () => {
+  // Guardia de última línea: si el escritor emitiera un paquete inconsistente, el operador vería
+  // "el archivo no abre" sin un solo rastro en el servidor. Se comprueba con una plantilla mutilada.
+  const rota = new Map(cargarPlantillaF03());
+  rota.set('xl/styles.xml', Buffer.alloc(0));
+  assert.throws(
+    () => construirLibroF03([diaSintetico('2026-07-15')], rota),
+    /falta o va vacía la parte "xl\/styles\.xml"/,
+  );
+});

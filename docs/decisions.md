@@ -1454,9 +1454,10 @@ el gate `puede_crear` de su endpoint por lote (D-057 (c)).
 **(8) El `.xlsx` clona la plantilla REAL, no la reconstruye.**
 `scripts/derivar-plantilla-f03.mjs` corre **offline** y deriva `server/assets/f03-plantilla.xlsx`
 (artefacto binario commiteado) del F03 de enero: conserva el logo, los estilos, el tema, el
-`sharedStrings` y el encabezado GENE-F03, y se re-emite como ZIP **stored** para que en runtime solo
-haya que clonar bytes. `server/utils/xlsx.js` es el port ESM del escritor propio del repo — **cero
-dependencias nuevas** (REQ-01 §5.1). Tres invariantes: **`inlineStr` para todo lo que escribimos**
+`sharedStrings` y el encabezado GENE-F03, y en runtime solo hay que clonar sus partes.
+`server/utils/xlsx.js` es el port ESM del escritor propio del repo — **cero dependencias nuevas**
+(REQ-01 §5.1), todo con `node:zlib`. El paquete se emite **DEFLATE**, como cualquier `.xlsx` real
+(ver la corrección de 2026-07-28 al pie). Tres invariantes: **`inlineStr` para todo lo que escribimos**
 (agregar a `sharedStrings` obligaría a reindexar la tabla que sostiene los `t="s"` del encabezado
 clonado); **`Print_Area` por hoja con su rango recalculado** (el original trae 32 `definedName` con
 rangos distintos: clonar el bloque imprime rangos vacíos en los días cortos y corta los largos); y
@@ -1516,6 +1517,36 @@ produce XML partido que pasa todos los conteos (hermana del `stripComments` iner
 sostiene tres consultas. Cross-ref: [[D-057]], [[D-056]], [[D-055]], [[D-053]], [[D-049]],
 [[D-046]], [[D-045]], [[D-044]], [[D-035]], [[D-032]], [[D-030]], [[D-020]], y REQ-02 / REQ-04 /
 REQ-06 + `FORMATO-ASIENTOS-OPERACION.md`.
+
+**Addendum 2026-07-28 — "se descarga pero no abre": tres correcciones al empaquetado.** El primer
+uso real reportó que el libro descargaba bien pero no abría. Auditado el artefacto de punta a punta
+—ZIP, paquete OPC, orden de elementos de cada hoja, merges, estilos, `dimension`, `Print_Area`— con
+cuatro validadores independientes (el lector propio, `System.IO.Packaging`, `System.IO.Compression` y
+Excel real, en modo normal y en Vista Protegida): **el archivo servido era válido y abría**, así que
+la causa no se pudo reproducir desde el artefacto. Igual salieron tres defectos reales, y los tres
+quedaron corregidos:
+
+1. **El paquete se emitía sin comprimir** (`stored`, heredado del escritor de
+   `js-scraper-carbon-g32`). Es ZIP legal, pero **ningún `.xlsx` del mundo real viene así**, y en el
+   camino de una descarga corporativa hay antivirus, DLP y proxies que lo inspeccionan: cuanto más se
+   parezca a lo que produce Excel, menos superficie hay para que algo lo rechace. Ahora va **DEFLATE**
+   (`node:zlib`, sigue sin dependencias), con `stored` como respaldo por entrada cuando comprimir no
+   achica. El libro de un mes pasó de **550 KB a 181 KB**.
+2. **Las 31 hojas compartían `sheetPr/@codeName="Hoja1"`**, porque todas se clonan del mismo modelo.
+   Ese atributo identifica la hoja para VBA y **debe ser único en el libro**; repetirlo es la clase de
+   incoherencia que Excel reporta como archivo a reparar. Se renumera por hoja.
+3. **El front revocaba el object URL en el MISMO tick del `click()`.** `a.click()` solo *agenda* la
+   descarga —el navegador lee el blob después—, así que revocar ahí es una **carrera**: el archivo se
+   guarda con su nombre y un tamaño plausible pero puede quedar **truncado**, y el síntoma es
+   exactamente "se descargó pero Excel no lo abre", sin error ni en el navegador ni en el servidor.
+   El revoke quedó diferido. **Es la causa más probable del reporte**, y la única de las tres que
+   produce un archivo realmente dañado.
+
+Además, `construirLibroF03` ahora **relee el paquete que acaba de emitir** antes de devolverlo
+(`leerZip` valida el central directory y el tamaño de cada entrada) y lanza si falta una parte: la
+peor falla posible de este endpoint —servir un archivo roto sin dejar rastro— pasa a ser un error
+ruidoso del servidor. Tres tests nuevos fijan las tres cosas (`f03_libro.test.js` ×2 y
+`libro-mensual-descarga.test.jsx` ×1).
 
 ---
 
