@@ -69,12 +69,24 @@ export async function establecerContextoSesion(db, { usuario_id, planta_id, carg
   // mismo turno (re-login / volver a la unidad) y limpiarla solo si es de un turno pasado.
   const { inicio: ventanaInicio, fin: ventanaFin } = ventanaActual();
 
+  // D-059: un cargo observador (solo consulta) NO deja huella de turno: su login no abre cabeceras,
+  // su sesión queda con turno_id=NULL y nunca se marca como participante — por construcción no
+  // existe en turno_participante ni en la conformación. El flag se consulta ACÁ (chokepoint único
+  // de contexto) y no en los callers, para que select-context y cambiar-unidad no puedan divergir.
+  // Sin try/catch a propósito: si esta consulta falla, falla el login completo (nunca degradar a
+  // "tratarlo como operador" en silencio).
+  const rc = await db.request()
+    .input('cargo_id', sql.Int, cargo_id)
+    .query(`SELECT CAST(es_observador AS BIT) AS es_observador FROM lov_bit.cargo WHERE cargo_id = @cargo_id`);
+  const cargoObservador = rc.recordset[0]?.es_observador === true;
+
   // D-045 E4 (participación viva): resolver la cabecera del turno ABIERTO de la unidad para vincularla
   // a la sesión y marcar participación. Si aún no existe (borde de ventana, antes del tick del sweeper)
   // se crea acá (idempotente). Nunca reabre un turno CERRADO: abrirTurnoSiFalta devuelve la fila
   // existente tal cual, así que resolverTurnoAbierto sigue dando null → se entra sin turno_id.
+  // D-059: para un observador NO se resuelve ni se abre nada — turnoId queda NULL.
   let turnoId = null;
-  try {
+  if (!cargoObservador) try {
     let turnoAbierto = await resolverTurnoAbierto(db, planta_id);
     if (!turnoAbierto) {
       await abrirTurnoSiFalta(db, planta_id, turno, fechaBogotaStr(ventanaInicio));
@@ -156,12 +168,14 @@ export async function establecerContextoSesion(db, { usuario_id, planta_id, carg
           SET @sesion_id = SCOPE_IDENTITY();
         END
 
+        -- ESPEJO de SELECT_SESION (middleware/auth.js): mismo shape de sesión — cambiar juntos (D-059).
         SELECT s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
                s.inicio_sesion, s.ultima_actividad, s.turno_finalizado_en,
                u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
                c.nombre AS cargo_nombre, c.solo_lectura,
                CAST(c.puede_cerrar_turno   AS BIT) AS puede_cerrar_turno,
-               CAST(c.puede_cambiar_unidad AS BIT) AS puede_cambiar_unidad
+               CAST(c.puede_cambiar_unidad AS BIT) AS puede_cambiar_unidad,
+               CAST(c.es_observador        AS BIT) AS es_observador
         FROM bitacora.sesion_activa s
         INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
         INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id
@@ -175,6 +189,8 @@ export async function establecerContextoSesion(db, { usuario_id, planta_id, carg
 
   // D-045 E4 (participación viva): tras crear/reactivar la sesión, marcar al usuario como participante
   // del turno vigente (UPSERT idempotente, no pisa primer_ingreso). Best-effort: no debe tumbar el login.
+  // D-059: para un observador turnoId quedó NULL arriba → el guard de marcarParticipante lo vuelve
+  // no-op (nunca entra a turno_participante).
   try {
     await marcarParticipante(db, {
       turno_id: turnoId,

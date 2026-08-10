@@ -62,6 +62,8 @@ router.get('/preview-masivo', asyncH(async (req, res) => {
   // (fuente única), NO sesion_bitacora.finalizada_en — que /abrir reseteaba en cada apertura, haciendo
   // reaparecer al ingeniero como pendiente con solo VER una bitácora. bitacoras_abiertas sigue siendo
   // informativo (lo pinta el modal) vía OUTER APPLY a la presencia por-bitácora.
+  // D-059: los observadores nunca finalizan turno (turno_finalizado_en siempre NULL) — sin este
+  // filtro figurarían ETERNAMENTE como pendientes y bloquearían visualmente el cierre del JdT.
   const usersRes = await db.request()
     .input('planta_id', sql.VarChar(10), planta_id)
     .query(`
@@ -69,6 +71,7 @@ router.get('/preview-masivo', asyncH(async (req, res) => {
              COALESCE(pres.bitacoras, '') AS bitacoras_csv
       FROM bitacora.sesion_activa sa
       INNER JOIN lov_bit.usuario u ON u.usuario_id = sa.usuario_id
+      INNER JOIN lov_bit.cargo   c ON c.cargo_id   = sa.cargo_id
       OUTER APPLY (
         SELECT STRING_AGG(CONVERT(VARCHAR(10), sb.bitacora_id), ',') AS bitacoras
         FROM bitacora.sesion_bitacora sb
@@ -77,6 +80,7 @@ router.get('/preview-masivo', asyncH(async (req, res) => {
       WHERE sa.planta_id = @planta_id
         AND sa.activa = 1
         AND sa.turno_finalizado_en IS NULL
+        AND c.es_observador = 0
       ORDER BY u.nombre_completo
     `);
 

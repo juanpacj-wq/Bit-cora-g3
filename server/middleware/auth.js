@@ -25,13 +25,17 @@ if (process.env.AUTH_TEST_BYPASS === '1' && process.env.NODE_ENV === 'production
 // D-054: `puede_cambiar_unidad` viaja en la sesión (no en un endpoint aparte) por la misma razón
 // que `puede_cerrar_turno`: así el gate del server (routes/sesion.js) y la affordance del front
 // (el botón del navbar, vía /api/me) leen EL MISMO objeto y no pueden divergir.
+// D-059: `es_observador` viaja en la sesión por la misma razón — el gate del server
+// (esObservador en permissions.js) y las affordances del front (/api/me) leen EL MISMO objeto.
+// ESPEJO: el SELECT final de utils/sesion-contexto.js devuelve este mismo shape — cambiar juntos.
 const SELECT_SESION = `
   s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
   s.turno_finalizado_en,
   u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
   c.nombre AS cargo_nombre, c.solo_lectura,
   CAST(c.puede_cerrar_turno   AS BIT) AS puede_cerrar_turno,
-  CAST(c.puede_cambiar_unidad AS BIT) AS puede_cambiar_unidad
+  CAST(c.puede_cambiar_unidad AS BIT) AS puede_cambiar_unidad,
+  CAST(c.es_observador        AS BIT) AS es_observador
   FROM bitacora.sesion_activa s
   INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
   INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id`;

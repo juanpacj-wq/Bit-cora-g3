@@ -8,6 +8,7 @@ import { sendJSON } from '../utils/http.js';
 import { responderError, ETIQUETAS } from '../utils/errores.js';
 import { asyncH, loadAppSession } from './_middleware.js';
 import { aplicarRateLimit, aplicarRateLimitGlobal } from './_shared.js';
+import { esObservador } from '../middleware/permissions.js';
 import { iaConfigurada, mejorarTexto, MAX_TEXTO_CHARS } from '../utils/ia/gemini-client.js';
 
 const router = express.Router();
@@ -21,6 +22,14 @@ router.post('/mejorar-texto', asyncH(async (req, res) => {
   if (!aplicarRateLimit(req, res, 'ia-mejorar', { max: 10, windowMs: 60_000 })) return;
   if (!aplicarRateLimitGlobal(req, res, 'ia-global-min', { max: 14, windowMs: 60_000 })) return;
   if (!aplicarRateLimitGlobal(req, res, 'ia-global-dia', { max: 400, windowMs: 86_400_000 })) return;
+
+  // D-059: el observador no escribe en ninguna bitácora — la mejora de texto es una utilidad de
+  // escritura, así que se cierra también (y no gasta cuota de Gemini). Va ANTES del check de
+  // configuración para que el 403 sea estable con o sin GEMINI_API_KEY.
+  if (esObservador(req.sesion)) {
+    const msg = 'Tu perfil es de solo consulta: la mejora de texto con IA no está disponible.';
+    return sendJSON(res, 403, { error: msg, codigo: 'observador_solo_lectura', mensaje: msg });
+  }
 
   const { texto, bitacora_codigo } = req.body || {};
   if (typeof texto !== 'string' || !texto.trim()) {

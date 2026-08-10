@@ -68,7 +68,10 @@ export function originPermitido(origin, host, allowEnv = process.env.WS_ALLOWED_
 
 // F2: sin TTL — sesion_activa.activa=1 es la única señal de presencia.
 // AUD-42: acotado a la planta del cliente; el snapshot ya NO es cross-planta.
-async function fetchSnapshot(planta_id) {
+// D-059: los cargos observadores (es_observador=1) NO se listan — invisibles para la operación.
+// ESPEJO del filtro de GET /api/auth/usuarios-activos (routes/sesion.js): cambiar juntos.
+// Exportada para que el test de invisibilidad cubra este espejo directamente.
+export async function fetchSnapshot(planta_id) {
   const db = await getDB();
   const r = await db.request()
     .input('planta', sql.VarChar(10), planta_id)
@@ -83,7 +86,7 @@ async function fetchSnapshot(planta_id) {
       INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
       INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id
       INNER JOIN lov_bit.planta  p ON p.planta_id  = s.planta_id
-      WHERE s.activa = 1 AND s.planta_id = @planta
+      WHERE s.activa = 1 AND s.planta_id = @planta AND c.es_observador = 0
       ORDER BY s.inicio_sesion DESC
     `);
   return { type: 'snapshot', usuarios: r.recordset, ts: Date.now() };

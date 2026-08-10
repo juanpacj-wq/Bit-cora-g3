@@ -47,6 +47,9 @@ export async function snapshotJefes(reqFactory) {
 }
 
 export async function snapshotIngenieros(reqFactory, { planta_id }) {
+  // D-059: el NOT IN excluye por IDENTIDAD (JdT/Gerente van en otros snapshots); es_observador=0
+  // excluye por INVISIBILIDAD (el observador no debe quedar en ningún snapshot). Semánticas
+  // distintas — se mantienen las dos, no reemplazar una por la otra.
   const r = await reqFactory()
     .input('planta_id', sql.VarChar(10), planta_id)
     .query(`
@@ -57,6 +60,7 @@ export async function snapshotIngenieros(reqFactory, { planta_id }) {
       WHERE s.planta_id = @planta_id AND s.activa = 1
         AND u.activo = 1
         AND c.nombre NOT IN ('Ingeniero Jefe de Turno', 'Gerente de Producción')
+        AND c.es_observador = 0
     `);
   return toJSON(r.recordset);
 }
@@ -101,6 +105,7 @@ export async function snapshotJefesDelDia(reqFactory) {
 
 // IngOp + operadores que rotaron en planta_id durante el día Bogotá @fecha.
 // Excluye JdT y Gerente de Producción (capturados en otros snapshots).
+// D-059: excluye además a los observadores (es_observador=1) — invisibilidad, ver snapshotIngenieros.
 export async function snapshotIngenierosDelDia(reqFactory, { planta_id, fecha }) {
   const r = await reqFactory()
     .input('planta_id', sql.VarChar(10), planta_id)
@@ -113,6 +118,7 @@ export async function snapshotIngenierosDelDia(reqFactory, { planta_id, fecha })
       WHERE s.planta_id = @planta_id
         AND u.activo = 1
         AND c.nombre NOT IN ('Ingeniero Jefe de Turno', 'Gerente de Producción')
+        AND c.es_observador = 0
         AND (
           CAST(DATEADD(HOUR, -5, s.inicio_sesion) AS DATE) = @fecha
           OR CAST(DATEADD(HOUR, -5, s.ultima_actividad) AS DATE) = @fecha

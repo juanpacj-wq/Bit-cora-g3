@@ -303,6 +303,9 @@ export async function cerrarTurno(pool, turno_id, {
     // 3) Congelar conformación desde turno_participante (inmutable, idempotente por la PK natural).
     //    Mapea primer_ingreso→inicio_sesion, COALESCE(ultimo_egreso, ahora)→fin_sesion,
     //    presencia_acumulada_min→duracion_min. Excluye sintéticos salvo en unit tests (D-044).
+    //    D-059: excluye también a los cargos observadores (defensa en profundidad: por construcción
+    //    no tienen fila en turno_participante — sesion-contexto no los marca — pero si una fila
+    //    llegara a existir, NO se congela; sin escape hatch, la invisibilidad no tiene excepción).
     const conf = await new sql.Request(tx)
       .input('id', sql.Int, turno_id)
       .input('fecha_op', sql.Date, fecha_operativa)
@@ -318,8 +321,10 @@ export async function cerrarTurno(pool, turno_id, {
                tp.primer_ingreso, COALESCE(tp.ultimo_egreso, @ahora), tp.presencia_acumulada_min, 0, @id
         FROM bitacora.turno_participante tp
         INNER JOIN lov_bit.usuario u ON u.usuario_id = tp.usuario_id
+        INNER JOIN lov_bit.cargo   cg ON cg.cargo_id = tp.cargo_id
         WHERE tp.turno_id = @id
           AND (@incluir_sinteticos = 1 OR u.es_sintetico = 0)
+          AND cg.es_observador = 0
           AND NOT EXISTS (
             SELECT 1 FROM bitacora.conformacion_turno ct
             WHERE ct.fecha_operativa = @fecha_op AND ct.planta_id = @planta
@@ -663,9 +668,16 @@ export async function transicionarTurnosVencidos(pool, { ahora = new Date(), pla
   for (const row of abiertos) {
     if (!estadoBloqueo(row, ahora)) continue; // aún dentro de su ventana (o extendido) → nada
     try {
+      // D-059: un observador conectado NO cuenta como personal — sin este filtro, su sola
+      // presencia impediría el AUTO_SIN_PERSONAL de una unidad realmente vacía (la haría esperar
+      // la gracia completa como si hubiera operadores).
       const hay = await pool.request()
         .input('p', sql.VarChar(10), row.planta_id)
-        .query(`SELECT TOP 1 1 AS x FROM bitacora.sesion_activa WHERE planta_id = @p AND activa = 1`);
+        .query(`
+          SELECT TOP 1 1 AS x FROM bitacora.sesion_activa sa
+          INNER JOIN lov_bit.cargo c ON c.cargo_id = sa.cargo_id
+          WHERE sa.planta_id = @p AND sa.activa = 1 AND c.es_observador = 0
+        `);
       const hayPersonal = !!hay.recordset[0];
       const minutosDesdeUmbral = Math.floor((ahora.getTime() - new Date(row.fin_nominal).getTime()) / 60000);
       const motivo = motivoAutoCierre({ hayPersonal, minutosDesdeUmbral });

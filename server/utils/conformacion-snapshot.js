@@ -65,7 +65,10 @@ export async function buildConformacionSnapshot(pool, { fecha_operativa, planta_
       -- fotografiaba en el histórico inmutable de GEC3/GEC32. Excluye es_sintetico=1 SIEMPRE en
       -- producción (@incluir_sinteticos=0), independiente de la planta. Solo los unit tests del
       -- agregado puro pasan @incluir_sinteticos=1. NUNCA quitar este predicado.
+      -- D-059: los observadores quedan fuera de la conformación SIN escape hatch — la
+      -- invisibilidad no tiene excepción ni en unit tests. NUNCA quitar este predicado tampoco.
       WHERE (@incluir_sinteticos = 1 OR u.es_sintetico = 0)
+        AND c.es_observador = 0
       GROUP BY st.usuario_id, u.nombre_completo, st.cargo_id, c.nombre
     `);
 

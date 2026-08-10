@@ -6,7 +6,7 @@ import express from 'express';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
-import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch } from '../middleware/permissions.js';
+import { hasPermisoBitacora, puedeCerrarTurno, plantaMatch, esObservador } from '../middleware/permissions.js';
 import { registrarEventoCierre } from '../utils/ciet.js';
 import { ventanaActual } from '../utils/turno.js';
 import { asyncH, loadAppSession } from './_middleware.js';
@@ -29,6 +29,12 @@ router.post('/abrir', asyncH(async (req, res) => {
   }
   if (!(await hasPermisoBitacora(sesion, bitacora_id, 'puede_ver'))) {
     return sendJSON(res, 403, { error: 'Sin permiso para abrir esta bitácora' });
+  }
+  // D-059: un observador NO registra presencia por-bitácora — 200 no-op SIN fila en
+  // sesion_bitacora (así jamás aparece en usuarios-en-bitacora ni recibe CIET de finalización
+  // forzada del sweeper). El front no lo llama para observadores, pero el server no confía en eso.
+  if (esObservador(sesion)) {
+    return sendJSON(res, 200, { sesion_bitacora: null });
   }
   const result = await db.request()
     .input('sesion_id', sql.Int, sesion.sesion_id)
@@ -53,6 +59,13 @@ router.post('/abrir', asyncH(async (req, res) => {
 // reaparición). CIET 'finalizacion' solo si hubo cambio (idempotente: doble finalizar no re-emite).
 router.post('/finalizar', asyncH(async (req, res) => {
   const sesion = req.sesion;
+  // D-059: el observador no participa del turno — no tiene finalización que marcar.
+  if (esObservador(sesion)) {
+    return sendJSON(res, 403, {
+      error: 'Tu perfil es de solo consulta: no participas en la finalización del turno.',
+      codigo: 'observador_sin_finalizacion',
+    });
+  }
   const pool = await getDB();
   // D-040 (persistencia por ventana): la finalización se marca en fresco si NO hay una vigente en la
   // ventana del turno actual (NULL o de un turno pasado). Si ya hay una vigente → no-op idempotente.
@@ -112,6 +125,13 @@ router.post('/finalizar', asyncH(async (req, res) => {
 // 'reapertura' solo si hubo cambio (idempotente: doble revertir no re-emite).
 router.post('/revertir-turno', asyncH(async (req, res) => {
   const sesion = req.sesion;
+  // D-059: el observador no participa del turno — no tiene finalización que revertir.
+  if (esObservador(sesion)) {
+    return sendJSON(res, 403, {
+      error: 'Tu perfil es de solo consulta: no participas en la finalización del turno.',
+      codigo: 'observador_sin_finalizacion',
+    });
+  }
   const pool = await getDB();
   // D-040 (persistencia por ventana): solo se revierte una finalización VIGENTE (dentro de la ventana
   // del turno actual). Un valor de un turno pasado ya cuenta como "abierto" → no-op (no re-emite CIET).
@@ -183,10 +203,13 @@ router.post('/finalizar-forzado', asyncH(async (req, res) => {
         .input('usuario_id', sql.Int, usuario_id)
         .input('planta_id', sql.VarChar(10), sesion.planta_id)
         .query(`
+          -- D-059: un observador no es finalizable — si su id llegara en el array (no debería:
+          -- el preview ya lo excluye), se salta sin marcar nada ni fabricar CIET.
           SELECT TOP 1 sa.usuario_id, sa.planta_id, sa.turno, c.nombre AS cargo_nombre
           FROM bitacora.sesion_activa sa
           INNER JOIN lov_bit.cargo c ON c.cargo_id = sa.cargo_id
           WHERE sa.usuario_id = @usuario_id AND sa.planta_id = @planta_id AND sa.activa = 1
+            AND c.es_observador = 0
           ORDER BY sa.inicio_sesion DESC
         `);
       const targetSesion = userSesRes.recordset[0];
@@ -260,6 +283,7 @@ router.get('/usuarios-en-bitacora', asyncH(async (req, res) => {
         AND sa.planta_id = @planta_id
         AND sa.activa = 1
         AND sb.finalizada_en IS NULL
+        AND c.es_observador = 0  -- D-059: los observadores no figuran (y /abrir tampoco les crea fila)
       ORDER BY u.nombre_completo
     `);
   return sendJSON(res, 200, { usuarios: result.recordset });

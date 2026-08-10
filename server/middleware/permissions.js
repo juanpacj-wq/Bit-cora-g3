@@ -50,6 +50,16 @@ export function puedeCambiarUnidad(sesion) {
   return !!sesion && sesion.puede_cambiar_unidad === true;
 }
 
+// D-059: ¿la sesión es de un cargo OBSERVADOR (solo consulta, invisible para la operación)?
+// Gobierna los cortes de invisibilidad (sin turno/presencia/conformación, fuera de los paneles de
+// usuarios activos) y los 403 de finalización e IA. El flag vive en lov_bit.cargo.es_observador
+// (reconstruido en CADA arranque por el MERGE de cargos de db.js, matcheando por nombre) y
+// loadSession() lo trae en la sesión — NUNCA comparar por nombre de cargo acá ni en ninguna query:
+// agregar o quitar un cargo observador es editar el seed y redesplegar.
+export function esObservador(sesion) {
+  return !!sesion && sesion.es_observador === true;
+}
+
 // D-040: ¿la sesión de app tiene el turno finalizado y VIGENTE? Fuente única =
 // sesion_activa.turno_finalizado_en (NULL = turno vivo), pero acotada a la ventana del turno actual
 // (persistencia por ventana): una finalización de un turno pasado ya no bloquea — expira sola al

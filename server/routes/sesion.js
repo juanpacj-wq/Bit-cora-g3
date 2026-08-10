@@ -176,6 +176,8 @@ router.post('/cerrar-app', asyncH(async (req, res) => {
 
 // GET /api/auth/usuarios-activos (todas las plantas, requiere sesión de app)
 // F2: sin filtro TTL — refleja sesion_activa.activa=1 hasta logout o cierre por sweeper de F4.
+// D-059: los cargos observadores (es_observador=1) NO se listan — invisibles para la operación.
+// ESPEJO del filtro de fetchSnapshot en utils/ws-usuarios-activos.js: cambiar juntos.
 router.get('/usuarios-activos', loadAppSession, asyncH(async (req, res) => {
   const db = await getDB();
   const result = await db.request().query(`
@@ -189,7 +191,7 @@ router.get('/usuarios-activos', loadAppSession, asyncH(async (req, res) => {
     INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
     INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id
     INNER JOIN lov_bit.planta  p ON p.planta_id  = s.planta_id
-    WHERE s.activa = 1
+    WHERE s.activa = 1 AND c.es_observador = 0
     ORDER BY p.planta_id, s.inicio_sesion DESC
   `);
   return sendJSON(res, 200, { usuarios: result.recordset });
