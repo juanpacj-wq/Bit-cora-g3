@@ -2,13 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveCargo, ROLE_TO_CARGO, PRECEDENCE } from '../utils/entra-roles.js';
 
-// Mapeo 1:1 — los 13 App Roles deben mapear a los 13 cargos sembrados en db.js (D-038: +admin).
-test('ROLE_TO_CARGO cubre los 13 App Roles y todos están en PRECEDENCE', () => {
-  assert.equal(Object.keys(ROLE_TO_CARGO).length, 13);
+// Mapeo 1:1 — los 14 App Roles deben mapear a los 14 cargos sembrados en db.js
+// (D-038: +admin; D-059: +USUARIO_CONSULTA).
+test('ROLE_TO_CARGO cubre los 14 App Roles y todos están en PRECEDENCE', () => {
+  assert.equal(Object.keys(ROLE_TO_CARGO).length, 14);
   for (const role of Object.keys(ROLE_TO_CARGO)) {
     assert.ok(PRECEDENCE.includes(role), `${role} debe estar en PRECEDENCE`);
   }
-  assert.equal(PRECEDENCE.length, 13);
+  assert.equal(PRECEDENCE.length, 14);
 });
 
 // D-038: rol ADMIN.
@@ -39,6 +40,17 @@ test('multi-rol → gana el de mayor precedencia (JdT sobre operador)', () => {
 test('multi-rol → un rol operativo gana sobre Gerente (solo lectura)', () => {
   const r = resolveCargo(['GERENTE_PRODUCCION', 'INGENIERO_OPERACION']);
   assert.equal(r.role, 'INGENIERO_OPERACION');
+});
+
+// D-059: USUARIO_CONSULTA es la MÍNIMA precedencia — cualquier otro rol (incluso Gerente,
+// también solo-lectura) gana si coexisten.
+test('USUARIO_CONSULTA → cargo USUARIO DE CONSULTA, y pierde ante cualquier otro rol', () => {
+  const solo = resolveCargo(['USUARIO_CONSULTA']);
+  assert.equal(solo.role, 'USUARIO_CONSULTA');
+  assert.equal(solo.cargoNombre, 'USUARIO DE CONSULTA');
+  assert.equal(resolveCargo(['USUARIO_CONSULTA', 'GERENTE_PRODUCCION']).role, 'GERENTE_PRODUCCION');
+  assert.equal(resolveCargo(['USUARIO_CONSULTA', 'OPERADOR_PLANTA_TURBOGRUPO']).role, 'OPERADOR_PLANTA_TURBOGRUPO');
+  assert.equal(PRECEDENCE[PRECEDENCE.length - 1], 'USUARIO_CONSULTA', 'debe ser el ÚLTIMO en PRECEDENCE');
 });
 
 test('orden de precedencia: IngOp sobre IngQuímico sobre Coordinador', () => {

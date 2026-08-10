@@ -29,6 +29,8 @@ const ESPERADO = {
   'Operador Maquinaria Pesada':           { SALAJDT: [0, 0], SALAING: [0, 0], SALAOP: [0, 0] },
   'Operador de Planta - Carbón y Caliza': { SALAJDT: [0, 0], SALAING: [0, 0], SALAOP: [0, 0] },
   'Coordinador de carbón y maquinaria':   { SALAJDT: [0, 0], SALAING: [0, 0], SALAOP: [0, 0] },
+  // D-059: el observador ve TODO en solo-lectura, también las tres Salas.
+  'USUARIO DE CONSULTA':                  { SALAJDT: [1, 0], SALAING: [1, 0], SALAOP: [1, 0] },
 };
 
 let matriz;  // { [cargo]: { [codigo]: [ver, crear] } }

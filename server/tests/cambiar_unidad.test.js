@@ -37,8 +37,10 @@ import {
   deactivateSyntheticSessions,
 } from './helpers.js';
 
-// Los dos cargos que, por definición de negocio (D-054), operan ambas unidades de forma rutinaria.
-const CARGOS_CON_PERMISO = ['Ingeniero Jefe de Turno', 'Operador de Planta - Analista'];
+// Los cargos con el atajo de cambio de unidad: los dos que por definición de negocio (D-054)
+// operan ambas unidades de forma rutinaria, más el observador (D-059 — rol 100 % lectura que
+// supervisa las dos plantas sin riesgo de escritura).
+const CARGOS_CON_PERMISO = ['Ingeniero Jefe de Turno', 'Operador de Planta - Analista', 'USUARIO DE CONSULTA'];
 
 const PLANTA_DESTINO = 'GEC32'; // la otra unidad real; PLANTA_ID es 'GEC3'
 
@@ -74,7 +76,7 @@ after(async () => {
 // El permiso es DATO, no código
 // ---------------------------------------------------------------------------
 
-test('1. el permiso vive en lov_bit.cargo y lo tienen EXACTAMENTE los dos cargos de D-054', async () => {
+test('1. el permiso vive en lov_bit.cargo y lo tienen EXACTAMENTE los cargos de D-054 + D-059', async () => {
   // setupSessions() corre initDB(), así que el MERGE de cargos acaba de reconstruir la matriz: este
   // test verifica el estado tras un arranque real, no un seed one-shot.
   const db = await getDB();
