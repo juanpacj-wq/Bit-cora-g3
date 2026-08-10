@@ -1,7 +1,7 @@
 /**
  * Mapeo App Role de Entra ID → cargo local (lov_bit.cargo.nombre) + resolución por precedencia.
  *
- * Los 13 App Roles (claim `roles`, por su `value`) calzan 1:1 con los 13 cargos sembrados en
+ * Los 14 App Roles (claim `roles`, por su `value`) calzan 1:1 con los 14 cargos sembrados en
  * db.js. Como la selección manual de cargo se ELIMINÓ, cuando el token trae varios roles (un
  * usuario en varios grupos) elegimos UNO por jerarquía fija (PRECEDENCE): gana la mayor
  * capacidad. El set completo de roles se registra aparte para auditoría.
@@ -27,12 +27,15 @@ export const ROLE_TO_CARGO = {
   OPERADOR_PLANTA_MAQUINARIA:    'Operador Maquinaria Pesada',
   OPERADOR_PLANTA_CYC:           'Operador de Planta - Carbón y Caliza',
   COORDINADOR_CARBON_MAQUINARIA: 'Coordinador de carbón y maquinaria',
+  USUARIO_CONSULTA:              'USUARIO DE CONSULTA',
 };
 
 // Jerarquía: a mayor capacidad, mayor precedencia. Admin (acceso total) va PRIMERO para que gane
 // si coexiste con cualquier otro rol. Gerente (solo lectura) queda al final para que cualquier rol
 // operativo gane si coexisten. Entre operadores el orden es indistinto (un usuario rara vez tiene
 // dos roles de operador), pero se fija para que la elección sea determinista.
+// D-059: USUARIO_CONSULTA (observador invisible, aún menos capacidad que Gerente) va ÚLTIMO —
+// cualquier otro rol gana si coexisten.
 export const PRECEDENCE = [
   'ADMINISTRADOR_DEBUGGING',
   'JEFE_DE_TURNO',
@@ -47,6 +50,7 @@ export const PRECEDENCE = [
   'OPERADOR_PLANTA_TURBOGRUPO',
   'OPERADOR_PLANTA_MAQUINARIA',
   'GERENTE_PRODUCCION',
+  'USUARIO_CONSULTA',
 ];
 
 /**

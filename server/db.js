@@ -387,7 +387,8 @@ export async function initDB() {
       nombre              VARCHAR(100) NOT NULL,
       solo_lectura        BIT          NOT NULL DEFAULT 0,
       puede_cerrar_turno  BIT          NOT NULL DEFAULT 0,
-      puede_cambiar_unidad BIT         NOT NULL DEFAULT 0
+      puede_cambiar_unidad BIT         NOT NULL DEFAULT 0,
+      es_observador       BIT          NOT NULL DEFAULT 0
     );
   `);
 
@@ -400,6 +401,17 @@ export async function initDB() {
     IF COL_LENGTH('lov_bit.cargo','puede_cambiar_unidad') IS NULL
       ALTER TABLE lov_bit.cargo ADD puede_cambiar_unidad BIT NOT NULL
         CONSTRAINT DF_cargo_puede_cambiar_unidad DEFAULT 0;
+  `);
+
+  // D-059: cargo.es_observador — cargo de SOLO CONSULTA e invisible para la operación: no
+  // participa en turno/presencia/conformación ni aparece en paneles de usuarios activos. El flag
+  // gobierna los cortes de invisibilidad (sesion-contexto, snapshots, usuarios-activos, cierre) y
+  // los 403 de finalización — SIEMPRE por este flag, NUNCA por nombre de cargo. El VALOR lo fija
+  // el MERGE de cargos en CADA arranque; este ALTER solo garantiza que la columna exista.
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.cargo','es_observador') IS NULL
+      ALTER TABLE lov_bit.cargo ADD es_observador BIT NOT NULL
+        CONSTRAINT DF_cargo_es_observador DEFAULT 0;
   `);
 
   await db.request().batch(`
@@ -739,30 +751,36 @@ export async function initDB() {
   // edita ESTA tabla de valores y se redespliega — nunca se hardcodea el cargo_id en un endpoint ni
   // en el front (convención 12 de CLAUDE.md). La rama WHEN MATCHED lo baja a 0 en los demás cargos
   // aunque una corrida previa los hubiera dejado en 1 (auto-correctora).
+  // D-059: 'USUARIO DE CONSULTA' (App Role USUARIO_CONSULTA) — solo lectura total e invisible:
+  // es_observador=1 activa los cortes de invisibilidad; puede_cambiar_unidad=1 porque un rol de
+  // consulta salta entre unidades sin riesgo de escritura. Sus permisos de bitácora los da la
+  // matriz de abajo (puede_ver=1 y puede_crear=0 en todas).
   await db.request().batch(`
     MERGE lov_bit.cargo AS t
     USING (VALUES
-      ('Administrador y Debugging',            0, 1, 0),
-      ('Gerente de Producción',                1, 0, 0),
-      ('Ingeniero Jefe de Turno',              0, 1, 1),
-      ('Ingeniero de Operación',               0, 1, 0),
-      ('Ingeniero Químico',                    0, 0, 0),
-      ('Operador de Planta - Caldera',         0, 0, 0),
-      ('Operador de Planta - Analista',        0, 0, 1),
-      ('Operador de Planta - Sala de Mando',   0, 0, 0),
-      ('Operador de Planta - Planta de Agua',  0, 0, 0),
-      ('Operador de Planta - Turbogrupo',      0, 0, 0),
-      ('Operador Maquinaria Pesada',           0, 0, 0),
-      ('Operador de Planta - Carbón y Caliza', 0, 0, 0),
-      ('Coordinador de carbón y maquinaria',   0, 0, 0)
-    ) AS s(nombre, solo_lectura, puede_cerrar_turno, puede_cambiar_unidad)
+      ('Administrador y Debugging',            0, 1, 0, 0),
+      ('Gerente de Producción',                1, 0, 0, 0),
+      ('Ingeniero Jefe de Turno',              0, 1, 1, 0),
+      ('Ingeniero de Operación',               0, 1, 0, 0),
+      ('Ingeniero Químico',                    0, 0, 0, 0),
+      ('Operador de Planta - Caldera',         0, 0, 0, 0),
+      ('Operador de Planta - Analista',        0, 0, 1, 0),
+      ('Operador de Planta - Sala de Mando',   0, 0, 0, 0),
+      ('Operador de Planta - Planta de Agua',  0, 0, 0, 0),
+      ('Operador de Planta - Turbogrupo',      0, 0, 0, 0),
+      ('Operador Maquinaria Pesada',           0, 0, 0, 0),
+      ('Operador de Planta - Carbón y Caliza', 0, 0, 0, 0),
+      ('Coordinador de carbón y maquinaria',   0, 0, 0, 0),
+      ('USUARIO DE CONSULTA',                  1, 0, 1, 1)
+    ) AS s(nombre, solo_lectura, puede_cerrar_turno, puede_cambiar_unidad, es_observador)
       ON t.nombre = s.nombre
     WHEN MATCHED THEN UPDATE SET
       solo_lectura         = s.solo_lectura,
       puede_cerrar_turno   = s.puede_cerrar_turno,
-      puede_cambiar_unidad = s.puede_cambiar_unidad
-    WHEN NOT MATCHED THEN INSERT (nombre, solo_lectura, puede_cerrar_turno, puede_cambiar_unidad)
-      VALUES (s.nombre, s.solo_lectura, s.puede_cerrar_turno, s.puede_cambiar_unidad);
+      puede_cambiar_unidad = s.puede_cambiar_unidad,
+      es_observador        = s.es_observador
+    WHEN NOT MATCHED THEN INSERT (nombre, solo_lectura, puede_cerrar_turno, puede_cambiar_unidad, es_observador)
+      VALUES (s.nombre, s.solo_lectura, s.puede_cerrar_turno, s.puede_cambiar_unidad, s.es_observador);
   `);
 
   // Eliminar cargo obsoleto 'Ingeniero de Planta de Agua' (no existe en el Excel 2026).
@@ -976,6 +994,8 @@ export async function initDB() {
           WHEN b.codigo = 'COMB' THEN 1
           -- Gerente de Producción ve todo
           WHEN c.nombre = 'Gerente de Producción'                THEN 1
+          -- D-059: USUARIO DE CONSULTA (observador) ve todo, en solo-lectura
+          WHEN c.nombre = 'USUARIO DE CONSULTA'                  THEN 1
           -- Ingeniero Jefe de Turno / Ingeniero de Operación ven todo
           WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN 1
           -- Ingeniero Químico ve todo
@@ -1011,6 +1031,8 @@ export async function initDB() {
             CASE WHEN c.nombre IN ('Ingeniero Jefe de Turno','Ingeniero de Operación') THEN 1 ELSE 0 END
           -- Gerente no crea en nada
           WHEN c.nombre = 'Gerente de Producción'                THEN 0
+          -- D-059: USUARIO DE CONSULTA no crea en nada (cero escritura)
+          WHEN c.nombre = 'USUARIO DE CONSULTA'                  THEN 0
           -- D-053: JdT e IngOp dejan de compartir cláusula. Cada uno crea en DISP + SU bitácora de
           -- Sala de Mando; en la del otro queda en solo-lectura (puede_ver=1 por su WHEN global).
           -- Se retiró 'AUTH' del IN: es código muerto — AUTH se siembra activa=0 y esta matriz filtra
@@ -1336,7 +1358,7 @@ export async function initDB() {
     FROM bitacora.sesion_activa s
     JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
     JOIN lov_bit.cargo c ON c.cargo_id = s.cargo_id
-    WHERE s.activa = 1;
+    WHERE s.activa = 1 AND c.es_observador = 0; -- D-059: los observadores no figuran
   `);
 
   await db.request().batch(`
