@@ -1157,6 +1157,47 @@ mismo, pero exige sembrar el catálogo de combustibles para TST. Cross-ref: [[D-
 
 ---
 
+## D-059 — Rol "USUARIO DE CONSULTA": observador solo-lectura e invisible (`cargo.es_observador`)
+
+**Fecha:** 2026-08-10
+
+**Contexto:** se necesita un rol de supervisión que vea TODO (bitácoras, históricos, Op24h, COMB,
+DISP) sin interactuar: no participa en conformaciones de turno, no finaliza turno y no aparece como
+usuario activo para los operadores. El Gerente de Producción (solo-lectura por matriz) no basta:
+su sesión deja huella en 7 superficies genéricas (`WHERE activa=1` sin mirar cargo) — panel
+CONECTADOS (HTTP+WS), `preview-masivo` (figuraría pendiente ETERNAMENTE al nunca finalizar),
+`usuarios-en-bitacora`, `ingenieros_snapshot` (histórico inmutable), `turno_participante` →
+conformación, y el `hayPersonal` del auto-cierre (su presencia impediría `AUTO_SIN_PERSONAL`).
+
+**Decisión:** flag data-driven **`lov_bit.cargo.es_observador`** (MERGE auto-corrector en cada
+arranque; NUNCA se filtra por nombre de cargo), expuesto en el objeto-sesión por los DOS espejos
+(`SELECT_SESION` de `middleware/auth.js` ↔ SELECT final de `utils/sesion-contexto.js`) y evaluado
+por el helper `esObservador()` (`middleware/permissions.js`). Invisibilidad en dos capas:
+**(1) prevención** — `establecerContextoSesion` (chokepoint único de contexto, cubre select-context
+y cambiar-unidad) no resuelve ni abre turno para el observador: sesión con `turno_id=NULL`, sin
+`marcarParticipante`, y `POST /api/bitacora/abrir` responde 200 no-op sin fila `sesion_bitacora`;
+**(2) defensa en profundidad** — `AND c.es_observador = 0` en usuarios-activos (HTTP y WS, espejos
+comentados), `preview-masivo`, `usuarios-en-bitacora`, `snapshotIngenieros(DelDia)` (se SUMA al
+`NOT IN` de identidad, no lo reemplaza), el INSERT de conformación de `cerrarTurno` (junto al
+filtro `es_sintetico` de [[D-044]], sin escape hatch), `buildConformacionSnapshot`, `hayPersonal`
+de `transicionarTurnosVencidos` y la vista `v_ingenieros_en_turno`. Gates 403 estables:
+`observador_sin_finalizacion` (finalizar/revertir) y `observador_solo_lectura` (IA). La escritura ya
+la niega la matriz (`[puede_ver=1, puede_crear=0]` en toda bitácora, cláusulas junto al Gerente).
+Entra: App Role `USUARIO_CONSULTA` → cargo homónimo, ÚLTIMO en `PRECEDENCE`. `puede_cambiar_unidad=1`
+(atajo GEC3↔GEC32: rol 100 % lectura, sin riesgo). Front: `esObservador` deriva de la sesión —
+oculta Finalizar/Revertir, no finaliza al salir, no llama `/abrir`, queda EXENTO del modal
+bloqueante de transición ([[D-046]] no le aplica: no escribe) y muestra chip "Solo consulta".
+
+**Consecuencias:** el observador es invisible para la operación y neutro para el ciclo de turnos
+(su login no abre cabeceras y no bloquea auto-cierres). Pendiente al reconciliar con main (D-056/58):
+permitirle la descarga del libro F03 (`puede_crear OR es_observador` en el gate de
+`reporte-mensual`) — decidido que SÍ descarga, la feature no existe en esta base. Los dos pares de
+espejos (sesión y HTTP/WS) deben cambiar JUNTOS. Tests: `rol_usuario_consulta.test.js` fija flags,
+matriz, gates e invisibilidad (con controles positivos); `entra_roles` pasa a 14 roles. Cross-ref:
+[[D-039]] (mismo principio data-driven, sin bypass), [[D-040]], [[D-044]], [[D-045]], [[D-054]].
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

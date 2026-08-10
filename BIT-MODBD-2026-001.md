@@ -146,14 +146,20 @@ INSERT INTO lov_bit.planta (planta_id, nombre) VALUES
 
 ```sql
 -- Roles seleccionables tras login.
--- solo_lectura       = 1 para Gerente de Producción (solo consulta, no escribe).
+-- solo_lectura       = 1 para Gerente de Producción y USUARIO DE CONSULTA (solo consulta, no escriben).
 -- puede_cerrar_turno = 1 para Ingeniero Jefe de Turno e Ingeniero de Operación
 --                      (mismo poder operativo, roles distintos en UI y snapshots).
+-- es_observador      = 1 SOLO para USUARIO DE CONSULTA (D-059): cargo invisible para la operación —
+--                      su sesión no abre turno ni participa (turno_id NULL), no figura en paneles de
+--                      usuarios activos ni snapshots, y no cuenta como personal para el auto-cierre.
+--                      Todo filtro de invisibilidad va por ESTE flag, nunca por nombre de cargo.
 CREATE TABLE lov_bit.cargo (
-    cargo_id           INT           IDENTITY(1,1) PRIMARY KEY,
-    nombre             VARCHAR(100)  NOT NULL,
-    solo_lectura       BIT           NOT NULL DEFAULT 0,
-    puede_cerrar_turno BIT           NOT NULL DEFAULT 0
+    cargo_id             INT           IDENTITY(1,1) PRIMARY KEY,
+    nombre               VARCHAR(100)  NOT NULL,
+    solo_lectura         BIT           NOT NULL DEFAULT 0,
+    puede_cerrar_turno   BIT           NOT NULL DEFAULT 0,
+    puede_cambiar_unidad BIT           NOT NULL DEFAULT 0,  -- D-054
+    es_observador        BIT           NOT NULL DEFAULT 0   -- D-059
 );
 
 -- Cargos definitivos según LISTADO DE PERSONAL 2026 (migración v2 hizo el rename
@@ -385,6 +391,8 @@ SELECT 4, bitacora_id, 1, 0 FROM lov_bit.bitacora;
 
 > **Nota D-039 (rol ADMIN):** se sembró el cargo `Administrador y Debugging` (App Role `ADMINISTRADOR_DEBUGGING`) con `solo_lectura=0`, `puede_cerrar_turno=1`. En la matriz canónica se agregó `WHEN c.nombre = 'Administrador y Debugging' THEN 1` como **primer WHEN** de `puede_ver` y `puede_crear` → ve+crea en TODAS las bitácoras activas. Acceso total data-driven, sin superusuario por código (toda acción atribuida). **Gotcha:** el override defensivo DISP (`db.js` F12.A6) recomputa `puede_crear` de toda fila DISP con un `CASE ... IN (...)`; el admin también se agregó a ese `IN` o quedaría en `puede_crear=0` en DISP. NO se añadió capacidad de hard-delete de registros cerrados/históricos (el modelo sigue append-only). Ver D-039.
 
+> **Nota D-059 (rol USUARIO DE CONSULTA, observador):** se sembró el cargo `USUARIO DE CONSULTA` (App Role `USUARIO_CONSULTA`, ÚLTIMO en `PRECEDENCE`) con `solo_lectura=1`, `puede_cerrar_turno=0`, `puede_cambiar_unidad=1`, `es_observador=1`. En la matriz canónica se agregaron `WHEN c.nombre = 'USUARIO DE CONSULTA' THEN 1` en `puede_ver` y `THEN 0` en `puede_crear` (junto a las cláusulas del Gerente) → **ve TODAS las bitácoras activas, no crea en ninguna** (el override DISP F12.A6 le da DISP `[1,0]` sin cambios). La INVISIBILIDAD no vive en esta matriz sino en `cargo.es_observador` (§2.2): la sesión del observador nace con `turno_id=NULL` (sin `turno_participante` → sin conformación), `/abrir` no crea `sesion_bitacora`, y todas las queries que enumeran usuarios activos (usuarios-activos HTTP/WS, preview-masivo, usuarios-en-bitacora, `snapshotIngenieros*`, conformación, `hayPersonal`, `v_ingenieros_en_turno`) filtran `c.es_observador = 0`. Ver D-059.
+
 > **Nota D-053 (split de Sala de Mando) — rompe una simetría histórica:** hasta D-053, `Ingeniero Jefe de Turno` e `Ingeniero de Operación` tenían **filas idénticas** en esta matriz (mismo poder operativo; la distinción solo vivía en `cargo.nombre` para UI y snapshots). **Ya no.** `SALA` era la única bitácora con `puede_crear` compartido por varios cargos y se partió en una por rol:
 >
 > | Cargo | SALAJDT | SALAING | SALAOP |
@@ -584,7 +592,7 @@ Si no hay usuarios para un rol, se escribe la cadena `"[]"` — **nunca `NULL`**
 |---|---|
 | `jdts_snapshot` | `sesion_activa.activa=1`, `cargo.nombre='Ingeniero Jefe de Turno'`, `u.activo=1`. Si la lista queda vacía, fallback a `usuario.es_jdt_default=1 AND activo=1` |
 | `jefes_snapshot` | `usuario.es_jefe_planta=1 AND activo=1` (lista estable independiente de sesión) |
-| `ingenieros_snapshot` | `sesion_activa.activa=1`, cuyo cargo tenga `cargo_bitacora_permiso.puede_crear=1` para la `bitacora_id`, excluyendo los cargos "Ingeniero Jefe de Turno" y "Gerente de Producción" |
+| `ingenieros_snapshot` | `sesion_activa.activa=1`, cuyo cargo tenga `cargo_bitacora_permiso.puede_crear=1` para la `bitacora_id`, excluyendo los cargos "Ingeniero Jefe de Turno" y "Gerente de Producción" y todo cargo con `es_observador=1` (D-059 — invisibilidad, distinta de la exclusión por identidad) |
 
 **Columna `fecha_fin_estado` (F12, DISP only):**
 
@@ -1477,6 +1485,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 | 1.8 | 2026-05-21 | Consumos de Combustibles (D-027). **Nueva §2.7** `lov_bit.combustible` (catálogo por planta, 18 seeds: 8 GEC3 + 10 GEC32 con tipos `ALIMENTADOR/CALIZA/ACPM`). **Nueva §4.9** `bitacora.consumo_combustible` (long-format transaccional, `cantidad DECIMAL(12,3)`, UQ compuesto, columnas Bogotá) + vista `v_consumo_periodo` (pivot con `total_carbon_ton = SUM(tipo='ALIMENTADOR')`, `caliza_ton`, `acpm_gal`). §2.4 gana fila `COMB` (formulario_especial=1, icono Flame). §2.6 matriz extendida con CASE para COMB. Permisos: `Operador de Planta - Carbón y Caliza` + JdT crean; resto ven. Migración idempotente F26.B1 (ortogonal a F26.A1). Endpoints `GET /api/combustibles/catalogo`, `GET /api/combustibles/consumos`, `POST /api/combustibles/consumos` (batch atómico, regla D-019 paridad `modificado_por` solo si cantidad cambió). Frontend bajo `src/components/Combustibles/` integrado a categoría jerárquica nueva "Combustibles". 12 tests en `consumos_combustible.test.js`. |
 | 2.0 | 2026-07-14 | **Split de Sala de Mando por rol (D-053).** §2.4: la fila `SALA` ("Sala de Mando Operativa") se vuelve tres — `SALAJDT` (Sala de Mando - Jefe de Turno), `SALAING` (- Ing. de Operación), `SALAOP` (- Operador). **`SALA` NO se borró: se renombró a `SALAJDT`** conservando `bitacora_id=14`, `orden=3` y su `tipo_evento` (misma fila → su histórico no se movió); el rename va en el `UPDATE` del "Paso 1" de `db.js`, nunca dentro del `MERGE` (matchea por `codigo` → habría dejado la vieja huérfana). `orden` renumerado (AGUA 4→6 … MAND 12→14) para dejar las tres contiguas; el orden relativo se preserva. §2.6: **se rompe la simetría JdT/IngOp** (ya no tienen filas idénticas) — el `IN ('DISP','AUTH','SALA')` de `puede_crear` se parte en `JdT → IN ('DISP','SALAJDT')` e `IngOp → IN ('DISP','SALAING')`, preservando DISP para ambos; el `Operador de Planta - Sala de Mando` pasa a `SALAOP` y **no ve** las otras dos; `'AUTH'` retirado (código muerto: `activa=0` + la matriz filtra `activa=1`). **Nueva §4.11** `bitacora.registro_historico_backup_D053` (respaldo residente, excepción explícita a RF-032). Migración **F30.A1**: reparte `registro_activo`/`registro_historico` por el cargo del autor reconstruido por evidencia (`turno_participante`/`conformacion_turno` por `turno_id` → `sesion_activa` con cargo único), move-out por atribución positiva (lo no atribuible no se toca y se loguea), con remapeo **acoplado** de `tipo_evento_id` y validación `THROW` de integridad. Pre-flight de prod: `sql/snippets/reporte-split-sala-D053.sql` (solo lectura + guardrail). Tests: `split_sala_permisos.test.js` (matriz + regresión DISP), `guard_tipo_evento_coherente.test.js` (drift `tipo_evento_id` ↔ `bitacora_id`, el riesgo que ninguna FK ni lectura cubre), `registros_solo_autor` reescrito con ADMIN como no-autor. |
 | 1.9 | 2026-07-03 | Rol ADMIN (D-039). Cargo 13 `Administrador y Debugging` (App Role `ADMINISTRADOR_DEBUGGING`), `solo_lectura=0`, `puede_cerrar_turno=1`. §2.6 matriz extendida: cláusula `WHEN c.nombre='Administrador y Debugging' THEN 1` como primer WHEN de `puede_ver` y `puede_crear` → acceso total data-driven (ve+crea en toda bitácora activa), sin superusuario por código. Override defensivo DISP (F12.A6) incluye al admin en su `CASE ... IN (...)`. Sin hard-delete de históricos (append-only intacto). `entra-roles.js` mapea el App Role→cargo (1:1, 13 roles) y lo pone primero en `PRECEDENCE`. Tests: `entra_roles.test.js` (13 roles + precedencia) y `rol_admin_debugging.test.js` (matriz completa + regresión override DISP + idempotencia). |
+| 2.1 | 2026-08-10 | **Rol observador "USUARIO DE CONSULTA" (D-059).** §2.2: columna nueva `lov_bit.cargo.es_observador BIT NOT NULL DEFAULT 0` (ALTER idempotente + 5ª columna del MERGE auto-corrector) y cargo 14 `USUARIO DE CONSULTA` (App Role `USUARIO_CONSULTA`, ÚLTIMO en `PRECEDENCE`) con `solo_lectura=1`, `puede_cerrar_turno=0`, `puede_cambiar_unidad=1`, `es_observador=1`. §2.6: cláusulas `THEN 1`/`THEN 0` junto a las del Gerente → ve todo, no crea nada. Invisibilidad (dos capas): la sesión del observador nace con `turno_id=NULL` (sin `turno_participante` → sin `conformacion_turno`; su login no abre `turno_unidad`), `/abrir` no crea `sesion_bitacora`, y filtro `c.es_observador = 0` en usuarios-activos (HTTP/WS), preview-masivo, usuarios-en-bitacora, `snapshotIngenieros(DelDia)`, el INSERT de conformación de `cerrarTurno` (junto al `es_sintetico` D-044), `buildConformacionSnapshot`, el `hayPersonal` del auto-cierre y la vista `v_ingenieros_en_turno`. Gates 403 estables `observador_sin_finalizacion` (finalizar/revertir) y `observador_solo_lectura` (IA). Tests: `rol_usuario_consulta.test.js` (16 tests) + `entra_roles` a 14 roles + fila en `split_sala_permisos`. |
 
 ---
 
