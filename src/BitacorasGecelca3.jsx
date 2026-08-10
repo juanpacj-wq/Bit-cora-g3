@@ -760,7 +760,15 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
 
         <div className="text-right hidden sm:block">
           <div className="text-sm font-semibold">{user.nombre_completo}</div>
-          <div className={`text-xs ${tema.textoSuave}`}>{cargoNombre} — {plantaNombre}</div>
+          <div className={`text-xs ${tema.textoSuave} flex items-center justify-end gap-1.5`}>
+            {/* D-059: el observador no se ve ni a sí mismo en CONECTADOS — este chip explica su modo. */}
+            {sesion?.es_observador && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 border border-slate-300 rounded-full px-2 py-0.5 whitespace-nowrap">
+                <Eye size={11} /> Solo consulta
+              </span>
+            )}
+            <span>{cargoNombre} — {plantaNombre}</span>
+          </div>
         </div>
         <div className="w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold"
           style={{ backgroundColor: tema.avatarBg }}>
@@ -1845,7 +1853,9 @@ export default function App() {
   // finalizar el turno crea una nueva ventana de participación sin requerir re-login.
   // D-054: la sesión entra como parte de la clave — al cambiar de unidad en caliente sin cambiar de
   // pestaña hay que re-marcar la participación en la fila `sesion_activa` de la unidad nueva.
-  useBitacoraSesion(activeBitacora, auth.sesion?.sesion_id);
+  // D-059: un observador NO marca presencia por-bitácora — id null vuelve el hook no-op (el backend
+  // además responde no-op si igual le llegara el POST).
+  useBitacoraSesion(auth.sesion?.es_observador ? null : activeBitacora, auth.sesion?.sesion_id);
 
   // F4/D-040: hooks para "Finalizar Turno" / "Revertir finalización" del header.
   const { finalizar: finalizarTurno, loading: finalizandoTurno } = useFinalizarTurno();
@@ -1931,6 +1941,12 @@ export default function App() {
   // cargo). D-049: ya NO implica editar/borrar registros ajenos — eso lo decide el backend por fila
   // (`registro.puede_editar`: solo el autor con puede_crear vigente).
   const esJefeTurno = !!sesion?.puede_cerrar_turno;
+
+  // D-059: cargo observador (solo consulta, invisible). Deriva del MISMO objeto-sesión que evalúa
+  // el backend (lov_bit.cargo.es_observador vía loadSession) — UI y enforcement no pueden divergir.
+  // Gobierna: ocultar Finalizar/Revertir turno, no finalizar al salir, no marcar presencia por
+  // bitácora y quedar exento del modal bloqueante de transición (sigue leyendo).
+  const esObservador = !!sesion?.es_observador;
 
   const permisoActivo = catalogos.permisos.find((p) => p.bitacora_id === activeBitacora);
   const puedeCrear = !!permisoActivo?.puede_crear;
@@ -2391,12 +2407,15 @@ export default function App() {
   }, []);
 
   const handleLogoutConfirm = useCallback(async () => {
-    try { await finalizarTurno(); } catch {}
+    // D-059: el observador no tiene finalización de turno (el backend respondería 403).
+    if (!esObservador) {
+      try { await finalizarTurno(); } catch {}
+    }
     await auth.logout(); // navega fuera (window.location); el desmontaje limpia el resto
     setLogoutOpen(false);
     setActiveBitacora(null);
     setDraftLocal(null);
-  }, [auth, finalizarTurno]);
+  }, [auth, finalizarTurno, esObservador]);
 
   // ==================== RENDER ====================
   if (!auth.ready) {
@@ -2467,7 +2486,7 @@ export default function App() {
               esJefeTurno={esJefeTurno}
               onCerrarTurno={handleCerrarTurno}
               onReabrirTurno={handleReabrirTurno}
-              onFinalizarTurno={handleFinalizarTurno}
+              onFinalizarTurno={esObservador ? null : handleFinalizarTurno} /* D-059: sin Finalizar/Revertir para el observador */
               finalizandoTurno={finalizandoTurno}
               turnoFinalizado={turnoFinalizado}
               turnoUnidadCerrado={turnoUnidadCerrado}
@@ -2586,9 +2605,11 @@ export default function App() {
 
       {/* D-045 E8: modal BLOQUEANTE al cambio de turno (z-50, inhabilita la unidad). Accionable para
           JdT/IngOp (extender/cerrar), informativo para el resto. Se muestra cuando el backend marca
-          bloqueo=true (via WS turno-transicion o /api/me al recargar). */}
+          bloqueo=true (via WS turno-transicion o /api/me al recargar).
+          D-059: el observador queda EXENTO — no escribe (write-gate D-046 no le aplica) y su lectura
+          no debe congelarse durante la transición. */}
       <TurnoTransicionModal
-        open={turnoHook.bloqueo}
+        open={turnoHook.bloqueo && !esObservador}
         puedeDecidir={turnoHook.puedeDecidir}
         accionando={turnoHook.accionando}
         plantaNombre={plantaNombre}
