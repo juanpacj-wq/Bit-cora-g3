@@ -16,7 +16,7 @@ export const withBase = (p) => `${P}${p}`;
 export const wsUrl = (p) =>
   `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${P}${p}`;
 
-// Asset estático de public/ bajo el sub-path, ej. asset('/gecelca3-logo.png').
+// Asset estático de public/ bajo el sub-path, ej. asset('/logo-gecelca3-color.png').
 // Necesario porque Vite NO reescribe con `base` los string literals de src= en JSX
 // (solo imports y URLs de index.html); respeta URLs externas http(s).
 export const asset = (p) => (/^https?:\/\//.test(p) ? p : `${P}${p.startsWith('/') ? p : `/${p}`}`);
