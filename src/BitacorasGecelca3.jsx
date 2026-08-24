@@ -315,7 +315,7 @@ function LoginScreen({ auth, plantas, onReady, showToast }) {
         {/* PANEL IZQUIERDO — Form */}
         <div className="flex-1 flex flex-col justify-center px-8 py-7 lg:px-12 lg:py-9">
           <div className="text-center mb-5">
-            <img src={asset("/gecelca3-logo.png")} alt="Gecelca3" className="h-11 mx-auto mb-3"
+            <img src={asset("/logo-gecelca3-color.png")} alt="Gecelca3" className="h-11 mx-auto mb-3"
               onError={(e) => { e.target.style.display = "none"; }} />
             {paso === "microsoft" ? (
               <>
@@ -623,7 +623,7 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
     <header className="text-white px-6 py-3 flex items-center justify-between shadow-lg relative z-10"
       style={{ background: tema.gradiente }}>
       <div className="flex items-center gap-4">
-        <img src={asset("/G3 blanco.png")} alt="Gecelca3" className="h-10" onError={(e) => { e.target.style.display = "none"; }} />
+        <img src={asset("/logo-gecelca3-blanco.png")} alt="Gecelca3" className="h-10" onError={(e) => { e.target.style.display = "none"; }} />
         <div>
           <h1 className="text-lg font-bold tracking-tight">Bitácoras de Planta</h1>
           <p className={`text-xs ${tema.textoSuave} opacity-80`}>Sistema de Registro Operativo</p>
