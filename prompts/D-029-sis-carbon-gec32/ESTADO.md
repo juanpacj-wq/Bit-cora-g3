@@ -34,6 +34,7 @@ Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloquea
 
 ## Datos descubiertos en ejecución (rellenar a medida)
 - Fecha de inicio GEC32 (descubierta por sondeo SIS): _por determinar en E7_.
+- **[OBSOLETO desde 2026-08-25 / D-060]** el SIS HTTP SÍ responde desde el equipo de desarrollo (~13 s por periodo, ~830 KB por `.xls`); el backfill de D-060 se corrió desde acá contra dev y prod. Se conserva la nota original como historia:
 - **Conectividad SIS desde el equipo de ejecución (E4)**: el host `192.168.18.201` **acepta TCP**
   (connect a `:80` OK en <1s), pero el endpoint HTTP `ExportDialog.aspx` **NO responde** desde este
   equipo: `fetchPeriod` se cuelga hasta el `timeoutMs` y aborta con `AbortError`. Es decir, el SIS
