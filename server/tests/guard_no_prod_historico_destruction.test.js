@@ -43,12 +43,17 @@ const TABLAS_PROTEGIDAS = [
 
 // Marcadores que prueban que el statement está acotado a datos de test. Basta uno.
 //  - TEST_PLANTA / TEST_PLANTA_ID / 'TST' → planta-fixture (D-030)
+//  - TEST_PLANTA_REFLEJO / 'TSR'          → segunda planta-fixture, la que SÍ refleja (D-058 E4).
+//                                           Vive solo en tests/helpers.js y se siembra con activa=0;
+//                                           acota igual de fuerte que 'TST' porque tampoco es real.
 //  - TEST_TAG / @tag                      → tag único por corrida
 //  - es_sintetico                         → fixtures de usuario (D-044)
 //  - test_%                               → usernames sintéticos
 const ACOTADORES = [
   /\bTEST_PLANTA(_ID)?\b/,
+  /\bTEST_PLANTA_REFLEJO\b/,
   /'TST'/,
+  /'TSR'/,
   /\bTEST_TAG\b/,
   /@tag\b/,
   /\bes_sintetico\b/,

@@ -33,7 +33,7 @@ import { useBitacoraSesion, useFinalizarTurno, useRevertirTurno } from "./hooks/
 import { useAppRoute } from "./hooks/useAppRoute";
 import { useMejorarTexto, MAX_TEXTO_IA } from "./hooks/useMejorarTexto";
 import { buildHash } from "./routing/appRoute";
-import { getTodayBogota, shiftDate, horaBogota } from "./utils/fecha";
+import { getTodayBogota, getCurrentMonthBogota, shiftDate, horaBogota } from "./utils/fecha";
 import { resolverOtraUnidad } from "./utils/unidades";
 import { FILTROS_VACIOS } from "./utils/filtros";
 import { asset } from "./config/paths";
@@ -1537,6 +1537,13 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
     && Number(reg.turno) !== turnoFromFechaLocal(toBogotaLocal(reg.fecha_evento));
   const hasExtras = camposExtraDef.length > 0;
   const camposExtraValores = parseCamposExtra(reg.campos_extra);
+  // D-058 (RQ-02.5): asiento REFLEJADO desde Operación 24h. Se identifica por el vínculo con su lote
+  // de origen (`origen_lote_id`, dato — no etiqueta) y se rotula con el nombre que el backend resuelve
+  // del catálogo (D-052: el nombre visible de una bitácora vive SOLO en el seed, nunca acá).
+  // Que no muestre lápiz ni basurero NO se decide en esta línea: eso lo manda `puede_editar`, el
+  // espejo por fila de canEditarRegistro (D-049), que ya llega en 0 para estas filas.
+  const esReflejado = !!camposExtraValores.origen_lote_id;
+  const origenNombre = reg.origen_bitacora_nombre || "su bitácora de origen";
   const updateCampoExtra = (campo, valorRaw, tipo) => {
     let v = valorRaw;
     if (valorRaw === "" || valorRaw === null || valorRaw === undefined) {
@@ -1745,6 +1752,16 @@ function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre
             </>
           ) : (
             <>
+              {/* D-058 (RQ-02.5): el asiento reflejado se identifica por su ORIGEN y no ofrece
+                  edición — se corrige en Operación 24h y la corrección reescribe esta copia. Mismo
+                  patrón de chip que "Bloqueado"; el ojo de lectura sigue disponible al lado. */}
+              {esReflejado && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 bg-gray-50"
+                  title={`Asiento generado en ${origenNombre}. Corrígelo allá y esta copia se actualiza sola.`}>
+                  <Lock size={14} />
+                  <span className="hidden sm:inline">{origenNombre}</span>
+                </span>
+              )}
               {puedeEditar ? (
                 <button onClick={onStartEdit} className="p-2 rounded-lg text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors" title="Editar">
                   <Edit3 size={16} />
@@ -1841,10 +1858,13 @@ export default function App() {
   const [vista, setVista] = useState('bitacoras');
 
   // D-035: subestado de las secciones con UI propia, lifted al dashboard para que la URL pueda
-  // deep-linkearlo (DISP=planta, COMB=fecha). La URL es la fuente única de verdad; estos states
-  // son su espejo en React. COMB arranca en hoy (Bogotá); DISP se siembra al entrar (ver derive).
+  // deep-linkearlo (DISP=planta, COMB=fecha, MAND=mes del libro F03). La URL es la fuente única de
+  // verdad; estos states son su espejo en React. COMB arranca en hoy (Bogotá) y MAND en el mes en
+  // curso; DISP se siembra al entrar (ver derive).
   const [dispPlanta, setDispPlanta] = useState(null);
   const [combFecha, setCombFecha] = useState(() => getTodayBogota());
+  // D-058: el mes del LIBRO mensual, no el día de la grilla (que es siempre hoy, D-017/D-056).
+  const [mandMes, setMandMes] = useState(() => getCurrentMonthBogota());
 
   // D-035: routing por hash. `route` (parseado) es la lectura; `navigate` empuja estado→URL.
   const { route, navigate } = useAppRoute();
@@ -1958,9 +1978,11 @@ export default function App() {
   const activeBitacoraRef = useRef(activeBitacora);
   const dispPlantaRef = useRef(dispPlanta);
   const combFechaRef = useRef(combFecha);
+  const mandMesRef = useRef(mandMes);
   activeBitacoraRef.current = activeBitacora;
   dispPlantaRef.current = dispPlanta;
   combFechaRef.current = combFecha;
+  mandMesRef.current = mandMes;
 
   const codigoActivo = useMemo(
     () => bitacorasPermitidas.find((b) => b.bitacora_id === activeBitacora)?.codigo || null,
@@ -1998,6 +2020,12 @@ export default function App() {
     if (target.codigo === 'COMB' && route.params.fecha && route.params.fecha !== combFechaRef.current) {
       setCombFecha(route.params.fecha);
     }
+    // D-058: el mes del libro F03 viene del hash si se deep-linkeó; si no, se queda el que ya había
+    // (por defecto, el mes en curso). Nunca se resetea al entrar: cambiar de pestaña y volver no
+    // debería devolverte a julio cuando estabas consolidando junio.
+    if (target.codigo === 'MAND' && route.params.mes && route.params.mes !== mandMesRef.current) {
+      setMandMes(route.params.mes);
+    }
   }, [route, sesion, bitacorasPermitidas]);
 
   // (b) Escribir estado HACIA la ruta. Subestado (planta/fecha) y el primer write canónico usan
@@ -2010,6 +2038,7 @@ export default function App() {
     if (vista === 'historicos') desired = { vista: 'historicos', codigo: null, params: {} };
     else if (codigoActivo === 'DISP') desired = { vista: 'bitacoras', codigo: 'DISP', params: { planta: dispPlanta } };
     else if (codigoActivo === 'COMB') desired = { vista: 'bitacoras', codigo: 'COMB', params: { fecha: combFecha } };
+    else if (codigoActivo === 'MAND') desired = { vista: 'bitacoras', codigo: 'MAND', params: { mes: mandMes } };
     else if (codigoActivo) desired = { vista: 'bitacoras', codigo: codigoActivo, params: {} };
     if (!desired) return;
     const sectionKey = `${desired.vista}:${desired.codigo}`;
@@ -2017,7 +2046,7 @@ export default function App() {
     prevSectionKey.current = sectionKey;
     if (buildHash(desired) === window.location.hash) return;
     navigate(desired, { replace });
-  }, [sesion, bitacorasPermitidas, vista, codigoActivo, dispPlanta, combFecha, navigate]);
+  }, [sesion, bitacorasPermitidas, vista, codigoActivo, dispPlanta, combFecha, mandMes, navigate]);
 
   // Carga tipos evento cuando cambia la bitácora
   useEffect(() => {
@@ -2536,6 +2565,8 @@ export default function App() {
               onDirtyChange={setMandDirty}
               onGuardandoChange={setMandGuardando}
               registerSaveHandler={registerMandSave}
+              mes={mandMes}
+              onMesChange={setMandMes}
             />
           ) : bitacoraActiva?.codigo === 'DISP' ? (
             <DisponibilidadDashboard

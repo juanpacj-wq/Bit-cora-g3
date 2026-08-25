@@ -4,6 +4,7 @@ import sql from 'mssql';
 import { getDB } from '../db.js';
 import { hashPassword } from '../utils/password.js';
 import { setupSessions, call, PLANTA_ID, deactivateSyntheticSessions } from './helpers.js';
+import { getTurnoColombia } from '../utils/turno.js';
 
 // D-029: rol "Coordinador de carbón y maquinaria".
 // Lectura + llenado de Carbón y Caliza (CYC) y Maquinaria (MAQU). Ve Consumos de Combustible
@@ -45,11 +46,14 @@ async function setupCoordinador() {
   await db.request()
     .input('usuario_id', sql.Int, u.usuario_id)
     .query(`UPDATE bitacora.sesion_activa SET activa = 0 WHERE usuario_id = @usuario_id`);
+  // Turno ACTUAL, nunca un 1 hardcodeado: en T2 la ventana [06:00,18:00) de una sesión turno=1 ya
+  // venció y el turno-sweeper la expulsa (activa=0) a los ≤60s → 401 a mitad de corrida. Mismo
+  // landmine que `consumos_combustible` y que `helpers.js` ya había resuelto para el resto.
   const ins = await db.request()
     .input('usuario_id', sql.Int, u.usuario_id)
     .input('planta_id', sql.VarChar(10), PLANTA_ID)
     .input('cargo_id', sql.Int, c.cargo_id)
-    .input('turno', sql.TinyInt, 1)
+    .input('turno', sql.TinyInt, getTurnoColombia())
     .query(`
       INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno)
       OUTPUT INSERTED.sesion_id

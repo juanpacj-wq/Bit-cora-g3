@@ -177,7 +177,8 @@ test('3. Lectura: los GET responden 200 (registros/activos, históricos, COMB, D
     // D-055) y NO hace plantaMatch: es un catálogo de solo lectura, pedir GEC3 es seguro.
     `/api/combustibles/catalogo?planta_id=GEC3`,
     `/api/disponibilidad?planta_id=${TEST_PLANTA}`,
-    `/api/sala-de-mando?planta_id=${TEST_PLANTA}&fecha=${hoyBogota()}`,
+    // D-056: el pivote GET /api/sala-de-mando ya no existe (404); el listado del día es /lotes.
+    `/api/sala-de-mando/lotes?planta_id=${TEST_PLANTA}&fecha=${hoyBogota()}`,
     `/api/turno/actual`,
   ];
   for (const path of gets) {

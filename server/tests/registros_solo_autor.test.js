@@ -3,6 +3,9 @@
 // puede_cerrar_turno con el que JdT/IngOp editaban/borraban registros ajenos en bitácoras donde solo
 // tienen puede_ver (el caso del hallazgo: JdT borrando el registro de un operador en su bitácora).
 // También cubre el espejo advisory `puede_editar` del GET /activos (lo que pinta la grilla).
+// D-058 E6 (tests 6-7) suma la cara opuesta: el asiento REFLEJADO desde Operación 24h no se edita ni
+// se borra en su destino NI SIQUIERA por su autor — que es el mismo del origen (RN-02.c), justo a
+// quien esta política autoriza. Es una RESTRICCIÓN sobre D-049, nunca un bypass.
 // Corre contra la BD productiva → SOLO TEST_PLANTA ('TST', D-030) y usuarios test_* (es_sintetico=1).
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -177,4 +180,71 @@ test('5. GET /activos espeja la política por fila (`puede_editar`): true para e
   const filaJdt = comoJdt.data.registros.find((r) => r.registro_id === id);
   assert.ok(filaJdt, 'el JdT sigue VIENDO el registro (puede_ver intacto)');
   assert.equal(filaJdt.puede_editar, false, 'no-autor → puede_editar=false');
+});
+
+// ── D-058 E6 — el asiento REFLEJADO es de solo lectura en su destino (RQ-02.5/6) ────────────────
+//
+// La copia se marca acá a mano (UPDATE del `campos_extra`, acotado por PK) en vez de generarla con
+// el reflejo real: 'TST' NO refleja por RN-02.e, y el reflejo de verdad ya está cubierto por E4/E5
+// sobre la planta-fixture 'TSR'. Lo que estos dos tests prueban es el GATE, que lo único que mira es
+// `campos_extra.origen_lote_id` — así que la marca es fixture suficiente y el test no depende de que
+// MAND corra en esta planta.
+//
+// El caso es el que SIN el cambio pasaba: quien edita es el AUTOR, y el autor de la copia es el
+// autor del origen (RN-02.c), justo a quien D-049 autoriza.
+async function marcarComoReflejado(registro_id, lote_id) {
+  const db = await getDB();
+  const campos = JSON.stringify({ origen_bitacora: 'MAND', origen_lote_id: lote_id });
+  await db.request()
+    .input('id', sql.Int, registro_id)
+    .input('ce', sql.NVarChar(sql.MAX), campos)
+    .query(`UPDATE bitacora.registro_activo SET campos_extra = @ce WHERE registro_id = @id`);
+}
+
+test('6. D-058 E6: el AUTOR de un asiento reflejado NO puede editarlo ni borrarlo en su destino → 403 asiento_reflejado', async () => {
+  const id = await crearRegistro(ctx.sesiones.ingOp, BIT_SALAING, TIPO_SALAING);
+  await marcarComoReflejado(id, `${TEST_TAG}-lote-e6`);
+
+  const put = await call('PUT', `/api/registros/${id}`, {
+    sesion_id: ctx.sesiones.ingOp,
+    body: { detalle: `${TEST_TAG} el autor intenta reescribir su copia` },
+  });
+  assert.equal(put.status, 403, `PUT esperaba 403, fue ${put.status} ${JSON.stringify(put.data)}`);
+  assert.equal(put.data.codigo, 'asiento_reflejado',
+    'el motivo NO puede ser solo_autor: quien pide ES el autor, y el mensaje tiene que decirle dónde corregirlo');
+
+  const del = await call('DELETE', `/api/registros/${id}`, { sesion_id: ctx.sesiones.ingOp });
+  assert.equal(del.status, 403, `DELETE esperaba 403, fue ${del.status} ${JSON.stringify(del.data)}`);
+  assert.equal(del.data.codigo, 'asiento_reflejado');
+
+  assert.equal(await detalleActual(id), `${TEST_TAG} solo-autor`,
+    'la copia queda intacta: solo la mueve la corrección del lote de origen');
+});
+
+test('7. D-058 E6: GET /activos da puede_editar=false al asiento reflejado y true al tecleado a mano por el MISMO usuario', async () => {
+  const idReflejado = await crearRegistro(ctx.sesiones.ingOp, BIT_SALAING, TIPO_SALAING);
+  await marcarComoReflejado(idReflejado, `${TEST_TAG}-lote-e6b`);
+  const idPropio = await crearRegistro(ctx.sesiones.ingOp, BIT_SALAING, TIPO_SALAING);
+
+  const r = await call('GET',
+    `/api/registros/activos?planta_id=${TEST_PLANTA}&bitacora_id=${BIT_SALAING}`,
+    { sesion_id: ctx.sesiones.ingOp });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+
+  const filaReflejada = r.data.registros.find((x) => x.registro_id === idReflejado);
+  const filaPropia = r.data.registros.find((x) => x.registro_id === idPropio);
+  assert.ok(filaReflejada && filaPropia, 'el usuario ve las dos filas');
+  // El contraste ES el test: mismo autor, misma bitácora, misma planta, mismo cargo — lo único que
+  // cambia es el origen. Si el espejo SQL se desalineara del helper, esto se pondría rojo antes de
+  // que la grilla ofreciera un lápiz que el PUT rechaza.
+  assert.equal(filaReflejada.puede_editar, false, 'asiento reflejado → puede_editar=false');
+  assert.equal(filaPropia.puede_editar, true, 'registro tecleado a mano por su autor → puede_editar=true');
+
+  // El rótulo del chip sale del catálogo por `codigo`, no de un literal del front (D-052).
+  const db = await getDB();
+  const nombreMand = (await db.request()
+    .query(`SELECT nombre FROM lov_bit.bitacora WHERE codigo = 'MAND'`)).recordset[0]?.nombre;
+  assert.equal(filaReflejada.origen_bitacora_nombre, nombreMand,
+    'el origen se rotula con el nombre vigente del catálogo');
+  assert.equal(filaPropia.origen_bitacora_nombre, null, 'una fila sin origen no trae rótulo');
 });

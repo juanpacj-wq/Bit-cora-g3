@@ -69,6 +69,27 @@ export function turnoFinalizado(sesion) {
   return !!sesion && finalizacionVigente(sesion.turno_finalizado_en);
 }
 
+// D-058 (RQ-02.5/6): marca del ASIENTO REFLEJADO desde Operación 24h. El vínculo con el lote de
+// origen vive en `campos_extra.origen_lote_id` — por LOTE y no por registro, porque la copia también
+// migra al histórico y no hay FK posible (mismo argumento que `evento_dashboard.registro_origen_id`,
+// D-055 (c)). Lo escribe SOLO `utils/reflejo-sala.js`, por SQL directo: el POST/PUT genérico no
+// puede fabricarlo ni por devtools — `validateCamposExtra` (AUD-39) arma `campos_extra` únicamente
+// con los campos declarados en `definicion_campos`, y las bitácoras de Sala la tienen en NULL.
+// Por eso `campos_extra` es siempre JSON.stringify(objeto) o NULL, y el espejo SQL del GET /activos
+// puede usar JSON_VALUE sin ISJSON (JSON_VALUE LANZA ante texto no-JSON).
+export const CLAVE_ORIGEN_REFLEJO = 'origen_lote_id';
+
+export function esAsientoReflejado(registro) {
+  if (!registro) return false;
+  const raw = registro.campos_extra;
+  if (!raw) return false;
+  let extra = raw;
+  if (typeof raw === 'string') {
+    try { extra = JSON.parse(raw); } catch { return false; }
+  }
+  return !!(extra && typeof extra === 'object' && extra[CLAVE_ORIGEN_REFLEJO]);
+}
+
 // D-049: política "solo el autor" para bitácoras GENÉRICAS. Editar o eliminar un registro exige,
 // todas a la vez: (1) misma planta que la sesión, (2) ser el AUTOR (`creado_por`) y (3) conservar
 // permiso de creación vigente (`puede_crear`) en esa bitácora. Se ELIMINÓ el bypass histórico de
@@ -80,6 +101,14 @@ export function turnoFinalizado(sesion) {
 // expone su espejo por fila (`puede_editar`) solo como affordance de UI — mantener ambos alineados.
 export async function canEditarRegistro(sesion, registro) {
   if (!sesion || !registro) return false;
+  // D-058 (RQ-02.5/6): el asiento REFLEJADO no se edita ni se borra en su destino — se corrige en su
+  // ORIGEN (el lote de Operación 24h), que reescribe las dos copias en la misma transacción (E5).
+  // La trampa está en la condición de abajo: el autor de la copia ES el autor del origen (RN-02.c),
+  // así que sin esta línea la autoría lo autorizaría y la copia quedaría desincronizada del lote en
+  // silencio. NO es reintroducir un bypass por cargo: D-049/D-039 prohíben AMPLIAR quién edita y acá
+  // se RESTRINGE, sin excepción para nadie (tampoco el ADMIN). Quien llame a este helper debe traer
+  // `campos_extra` en el registro; el espejo SQL del GET /activos aplica la MISMA condición.
+  if (esAsientoReflejado(registro)) return false;
   if (registro.planta_id && registro.planta_id !== sesion.planta_id) return false;
   if (registro.creado_por !== sesion.usuario_id) return false;
   return hasPermisoBitacora(sesion, registro.bitacora_id, 'puede_crear');

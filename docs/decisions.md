@@ -1157,6 +1157,399 @@ mismo, pero exige sembrar el catálogo de combustibles para TST. Cross-ref: [[D-
 
 ---
 
+## D-056 — Operación 24h append-only: la grilla registra, no edita
+
+**Fecha:** 2026-07-22
+
+**Contexto:** la grilla de MAND era una **hoja de cálculo persistente**: un registro por
+`(tipo, periodo, día, planta)`, editable volviendo a entrar, con `detalle`/`funcionariocnd`
+compartidos por toda la fila. Eso no representa la operación real: un mismo periodo recibe **varias
+llamadas del CND en el mismo día** (140 MW a las 09:12, 155 MW a las 09:40, con funcionarios y
+motivos distintos) y la segunda **pisaba** a la primera. Además no existía el dato más pedido: **a
+qué hora se hizo la llamada** — `fecha_evento` es el momento de guardado, no el del evento. REQ-03
+(16 criterios de aceptación) fijó el rediseño; se ejecutó en seis etapas sobre
+`feat/mand-append-only-2026-07`.
+
+**Decisión:**
+
+**(1) La grilla es un formulario de captura.** Nace vacía, cada Guardar **inserta siempre** (nunca
+UPDATE ni DELETE), y se vacía tras la confirmación — pero **NO se vacía ante un 400**: el operador no
+puede perder lo escrito por un error de validación (RN-03.b). Con el modelo viejo se fueron la
+máquina de 4 casos por celda, el `SELECT` de "¿ya existe esta celda?", el par `snapshot`/`diffBuffer`
+del front y el pivote `GET /api/sala-de-mando` (ahora 404). El `modificado_por` selectivo de
+[[D-019]] pierde sentido acá —nada se modifica al registrar— y vuelve a tenerlo en la corrección por
+lote de D-057.
+
+**(2) Revierte deliberadamente [[D-055]] (2): la metadata pasa de la FILA al LOTE.** Un **lote** es
+el conjunto de registros nacidos de una fila/tipo en un mismo Guardar, identificado por
+`campos_extra.lote_id` (GUID que genera el **servidor**, sin DDL: `campos_extra` viaja tal cual al
+histórico). D-055 (2) no estaba equivocado: **era correcto para el modelo de entonces**, donde la
+fila era la unidad de captura y el `detalle` se perdía en silencio si no había celdas donde anclarlo.
+Lo que cambia no es la regla sino el modelo — la unidad de captura ya no es la fila del día sino el
+lote. Lo que **sobrevive intacto** de aquella corrección es su principio: el lock de REDESP protege
+el **valor**, nunca el comentario ni la hora, y **nunca un 200 mentiroso** (metadata sin celdas →
+`400 lote_sin_celdas`, heredero directo de `detalle_sin_celdas`). La metadata sigue **replicada en
+cada celda** y ningún constraint la mantiene coherente: la sostiene un **guard de coherencia de
+lote** (test), que es la red que va a hacer falta cuando D-057 introduzca la edición por lote.
+
+**(3) Hora de la llamada: `campos_extra.hora_llamada`, ISO UTC, compuesta server-side.** El front
+manda `HH:mm` Bogotá y el servidor la compone contra la fecha de la grilla y la valida **con su
+propio reloj** (tolerancia de 5 min; `hora_requerida`/`hora_invalida`/`hora_futura`, errores de
+**fila**, sin `periodo`). `fecha_evento` **no cambia** — sigue siendo el instante de guardado, que es
+lo que acota el día en el cierre diario y el archivo. En los registros migrados la clave queda
+**AUSENTE**, ni `null` ni `""`: hay que poder distinguir "no existe" de "vacío" (nunca se adivina).
+
+**(4) Lo publicado al dashboard se resuelve por CELDA, no por lote** — corrección explícita a la
+redacción de RQ-03.22. Los lotes se solapan **parcialmente**: si A cubre P14–P18 a las 09:12 y B
+cubre P16–P20 a las 09:40, **P14–P15 publican A y P16–P20 publican B**; leído "por lote", el
+implementador publica mal los periodos solapados. `recalcularEventoDashboard(t, {planta_id, fecha,
+periodo, tipo})` (`utils/notificador.js`) resuelve **desde cero**, no es un upsert ciego:
+`ORDER BY CASE WHEN hora IS NULL THEN 1 ELSE 0 END, hora DESC, creado_en DESC, registro_id DESC`.
+Los **sin hora van últimos y jamás ganan por hora** — no es teórico: los registros del día en curso
+al momento del despliegue compiten sin tenerla. `upsertEventoDashboard` queda intacto sirviendo a
+`registros.js`.
+
+**(5) `turno_id` se sigue resolviendo con `fechaOperativaDePeriodo`, JAMÁS por `hora_llamada`.** Los
+periodos 1..6 de la grilla del día F son del **T2 que arrancó a las 18:00 de F-1** ([[D-055]] (3),
+caso real: registro 4722). Tampoco por `inicio_nominal`/`fin_nominal`: `extenderTurno` ([[D-046]])
+los muta y las ventanas se solapan. Que nadie lo "mejore" ahora que hay una hora a mano.
+
+**(6) `evento_dashboard` se BORRA cuando no queda ningún registro para la celda** (RQ-03.23), no
+`activa=0`: el origen dejó de existir y el puntero quedaría huérfano ([[D-055]] (4) — 35 filas reales
+en prod). El **soft-delete sigue siendo lo correcto en `cerrarDiaMand`**, donde el origen no
+desaparece sino que migra al histórico. Las dos reglas conviven y ninguna sustituye a la otra.
+
+**(7) Listado del día, solo lectura.** `GET /api/sala-de-mando/lotes?planta_id=&fecha=` agrupa por
+`lote_id` sobre **solo `registro_activo`** (el día en curso), deriva la metadata **asumiendo
+coherencia** —prohibido el desempate ad-hoc "el primero gana" del pivote viejo: si diverge, que se
+note— y expone `publicado` **por celda** como **indicador derivado, no un control**. Lo ve cualquier
+cargo con `puede_ver` (no exige `puede_crear`, RN-04.f). Debajo de la grilla, `LotesDelDia.jsx` lo
+pinta sin acciones y se refresca **en el mismo tick de 60s que ya existía** — no hay segundo
+temporizador.
+
+**Migración `F32.A1` (excepción a RF-032, mismas garantías que [[D-053]]/[[D-055]]):** respaldos
+**residentes** `registro_{historico,activo}_backup_D056` (**no se borran nunca**) +
+`JSON_MODIFY('$.lote_id', CONVERT(varchar(36), NEWID()))` sobre MAND, con `NEWID()` evaluado por fila
+→ cada registro previo queda como **un lote de un solo periodo** conservando su `detalle` y
+`funcionariocnd`. Gated por `ISJSON=1 AND JSON_VALUE('$.lote_id') IS NULL` (idempotente por partida
+doble); lo que tenga `campos_extra` NULL o no-JSON **no se toca y se loguea**. `hora_llamada` **no se
+agrega**. **Verificado en prod:** `0 históricos, 7 activos` con `lote_id`, 0 filas sin JSON, 0
+diferencias de valores/autores/fechas contra el respaldo, y el segundo arranque no reimprime la línea.
+
+**Consecuencias:** (a) El dashboard sigue viendo **un solo valor** por `(planta, fecha, periodo,
+tipo)`: `UQ_evento_planta_fecha_periodo_tipo` intacto, contrato cross-repo sin cambios de shape — lo
+que cambió es **cómo se decide** ese valor. (b) **Corregir y borrar lo registrado NO existe todavía**:
+el listado es solo lectura y la grilla ya no edita, así que hasta D-057 (REQ-04) un error de
+digitación solo se puede tapar registrando encima con hora posterior. Es el precio consciente de
+partir el trabajo; D-057 trae `PUT`/`DELETE` por lote, el formato de mensaje y la excepción a
+[[D-049]]. (c) Quedó documentado como **landmine de fixture, ajeno a este flujo**: tres etapas
+seguidas vieron `finalizar_turno` fallar con `409 turno_cerrado` en la primera corrida y pasar en la
+segunda sin tocar código — el disparador es el estado de `turno_unidad` para `'TST'` con el que
+arranca la suite (una suite que cierra el turno de la fixture sin dejar sucesor `PROGRAMADO`), no
+MAND. (d) Las tres preguntas abiertas de REQ-03 §8 quedaron resueltas: lote en `campos_extra`,
+empate → el creado más reciente (**decidido por celda**), y **sin tope** de superposición.
+Cross-ref: [[D-055]] (metadata de fila, `turno_id`, huérfanos), [[D-019]], [[D-020]] (TZ),
+[[D-030]] (planta de test), [[D-040]]/[[D-045]]/[[D-046]] (exención de turno de MAND, intacta),
+[[D-049]] (no se toca acá).
+
+---
+
+## D-057 — Corrección y borrado por lote en Operación 24h (el diff quirúrgico)
+
+**Fecha:** 2026-07-26
+
+**Contexto:** [[D-056]] dejó la grilla de MAND append-only y **sin forma de corregir**: el listado del
+día nacía en solo lectura y la grilla dejó de editar, así que un error de digitación solo se podía
+**tapar registrando encima con hora posterior** — y mientras tanto seguía publicado al dashboard de
+generación. Era la consecuencia (b) de D-056, asumida a conciencia al partir el trabajo. REQ-04
+(14 criterios de aceptación) fija la corrección; se ejecutó en cinco etapas sobre
+`feat/mand-correccion-lote-2026-07`, que además arrastra D-056 (nunca llegó a `main` por su cuenta).
+Alcance: `PUT`/`DELETE` sobre `/api/sala-de-mando/lotes/:lote_id` + los controles del listado.
+**Sin DDL, sin migración.**
+
+**Decisión:**
+
+**(1) El `PUT` es un diff quirúrgico, no un reemplazo.** Las celdas que sobreviven conservan
+`registro_id`, `creado_por` y `creado_en`; solo se `UPDATE`an las que cambian de `valor_mw`, se
+`DELETE`an las que ya no vienen y se `INSERT`an las nuevas **con el mismo `lote_id`**. **Por qué no
+DELETE+INSERT del lote entero:** dejaría huérfano `evento_dashboard.registro_origen_id`, que **no
+tiene FK posible** — el origen migra entre `registro_activo` y `registro_historico`, dos padres
+([[D-055]] (c), 35 filas reales de prod). Cada celda tocada se recalcula con
+`recalcularEventoDashboard` (por CELDA, [[D-056]] (4)); si cambia la **hora**, se recalculan **todas**
+las del lote, porque la hora es el criterio de desempate de la publicación. Todo en una transacción
+(criterio 14); `broadcastConteoBitacoras` y `notifyDashboard` van post-commit.
+
+**(2) Corrige el enunciado de REQ-04 §5.3: la excepción a [[D-049]] NO vive en `canEditarRegistro`.**
+MAND nunca pasa por ese helper — D-049 lo excluye explícitamente, igual que a DISP y COMB. La
+excepción vive en que el gate del `PUT`/`DELETE` es **`puede_crear` en MAND** (matriz data-driven,
+colaborativa por diseño), no `creado_por`. `permissions.js` **no se tocó**, y el par de tests prueba
+las dos caras: un no-autor **sí** corrige en MAND (`sala_de_mando_batch`), **no** en una bitácora
+genérica (`registros_solo_autor`). Es lo contrario de un bypass por cargo: el rol nunca se nombra.
+
+**(3) Auditoría: [[D-019]] se levanta en la corrección.** Cualquier cambio —valor, hora, funcionario
+o descripción— sella `modificado_por`/`modificado_en` en las celdas afectadas. D-019 sigue vigente
+**solo en la captura** (donde ya no hay nada que modificar): acá corregir es un acto deliberado, y
+**la hora decide qué se publica**, así que no es metadata cosmética. Resuelve REQ-04 §8.2.
+
+**(4) El lock de REDESP actúa sobre el DELTA.** Rebota `periodo_bloqueado` si un periodo pasado
+**cambia de valor**, **se agrega** o **se quita** (quitarlo retira el publicado = cambio de valor);
+deja pasar hora, funcionario, descripción y los periodos pasados **idénticos**. **Y no aplica al
+`DELETE` del lote completo**, decisión comentada en el código: borrar es corregir un registro
+ERRADO, no reescribir un valor pasado — si aplicara, un redespacho mal digitado quedaría publicado
+para siempre en cuanto pasara su hora, justo lo que REQ-04 vino a resolver.
+
+**(5) `fecha_evento` se HEREDA en las celdas insertadas.** Todas las celdas de un lote la comparten
+para que el lote **no se parta entre dos días Bogotá** (un lote de las 23:58 corregido a las 00:02).
+La fila insertada queda con un `fecha_evento` anterior a su propio `INSERT` y **es correcto**:
+`fecha_evento` identifica el **día del lote**, no el instante de escritura — esa atribución vive en
+`modificado_por`/`modificado_en`. El `turno_id` sale de `fechaOperativaDePeriodo` ([[D-055]] (b)),
+**jamás** del instante de la corrección: los periodos 1..6 son del T2 que arrancó a las 18:00 de F-1.
+
+**(6) El TIPO es inmutable.** No se acepta en el body; corregirlo es `DELETE` + volver a registrar.
+Moverlo tocaría **dos** claves del dashboard y arrastraría el remapeo de `tipo_evento_id` que vigila
+`guard_tipo_evento_coherente.test.js` ([[D-053]]).
+
+**(7) Vaciar ≠ borrar.** Un `PUT` que deja el lote sin ninguna celda → **`400 lote_sin_celdas`**
+(heredero de `detalle_sin_celdas`, [[D-055]]), nada se escribe; borrar es el `DELETE` explícito y
+confirmado (RN-04.c: en MAND **no hay anulación visible** — un renglón tachado en la lista de
+llamadas al CND confunde en vez de informar). **Nunca un 200 mentiroso.** Corolario del mismo
+principio: `valor_mw` ausente o nulo en el body **no es error, es ausencia** — la celda se borra,
+igual que en el `POST`; y dos veces el mismo periodo es `periodo_duplicado` (`400`) en vez de
+adivinar cuál gana.
+
+**(8) Última escritura gana, pero el diff se calcula DENTRO de la transacción** contra el estado real
+de la BD, nunca contra el snapshot que vio el modal: así una edición concurrente no revive una celda
+que el otro borró. Los cuatro desenlaces de `resolverLoteParaEscritura` los comparten `PUT` y
+`DELETE`: filas vivas → se opera · `lote_id` ya en `registro_historico` → **`409 lote_cerrado`**
+(familia de [[D-046]]; RF-032 intacto, el histórico no se toca) · sin filas → `404 lote_inexistente`
+· otra planta → `403 lote_de_otra_planta` (nunca se revela el contenido de otra unidad). El front
+ramifica por `codigo` ([[D-032]]) y los tres refrescan el listado.
+
+**(9) `campos_extra` se recompone entero en Node, no con `JSON_MODIFY`.** En modo lax
+`JSON_MODIFY(col, '$.k', NULL)` **borra la clave**, así que `funcionariocnd: null` (PRUEBA/REDESP)
+habría desaparecido del JSON y el shape divergiría del que escribe el `POST`. Efecto de segundo
+orden: la metadata del lote se aplica **recorriendo sus celdas vivas** (N updates por PK) en vez de
+un único `UPDATE` set-based — la exigencia de [[D-055]] (a) se conserva íntegra, porque el recorrido
+es por celda viva y **no** por el delta de periodos: la metadata aterriza aunque ningún valor cambie
+y aunque el lock deje todos los periodos intactos.
+
+**(10) Front: corregir y capturar son dos planos separados.** La grilla **no se tocó** (sigue
+naciendo vacía, [[D-056]] (1)) y `dirty` sigue derivando solo del buffer de captura, así que corregir
+no ensucia la grilla ni bloquea la finalización de turno. El listado suma lápiz y basurero **solo con
+`puede_crear`** (RN-04.f: sin permiso se ve idéntico, sin controles); `LoteEditorModal` precarga el
+lote, muestra el tipo **con candado**, deshabilita Guardar si no queda ningún valor —señalando
+Eliminar— y **deshabilita también quitar un periodo pasado en REDESP** (el lock rebota las tres
+ramas: ofrecer un control que siempre va a dar `400` le miente al operador). `LoteBorrarModal`
+confirma con el lote completo y **advierte el retroceso de lo publicado**. Todo se refresca con el
+tick de 60s que ya existía — **sin segundo temporizador**.
+
+**Consecuencias:** (a) Contrato cross-repo **sin cambios de shape**: `UQ_evento_planta_fecha_periodo_tipo`
+intacto, el dashboard sigue viendo un solo valor por `(planta, fecha, periodo, tipo)` — lo que cambia
+es **cuándo** se recalcula el vigente; `../docs/interfaces-cross-repo.md` no requiere edición.
+(b) **Sin DDL ni migración**: todo opera sobre `registro_activo` + `evento_dashboard`. (c) Queda
+**fuera** el **formato de mensaje de WhatsApp** (REQ-04 §8.1: falta la plantilla literal → D-058) y
+la **cascada a SALAJDT/SALAING** (REQ-02, esas copias todavía no existen): su punto de enganche quedó
+**anotado con un comentario en el lugar exacto de la transacción**, sin código muerto ni feature
+flag. (d) El **guard de coherencia de lote** que [[D-056]] pidió "para cuando D-057 traiga la
+edición" se extrajo a `verificarCoherenciaDeLotes()` y ahora corre en dos escenarios (tras capturar y
+tras corregir) — es lo único que sostiene la metadata replicada por celda; no lo borres. (e) De paso
+se corrigieron tres bombas de tiempo ajenas al alcance: `D-056 E1.4` afirmaba
+`COUNT(*) == COUNT(DISTINCT lote_id)` sobre planta real —cierto solo en el instante de la migración,
+falsificado por el primer lote multi-celda real (acotado a `hora_llamada IS NULL`, + `E1.4b` como
+contracara); cinco tests de REDESP elegían su periodo con `Math.min(P_ACTUAL, 24)`, **justo sobre el
+umbral** y congelado al cargar el módulo, así que la suite se caía al cruzar **cualquier hora en
+punto** (helper `periodoRedespLibre()`); y `consumos_combustible`/`rol_coordinador_carbon_maquinaria`
+sembraban `sesion_activa.turno = 1` **literal**, de modo que el sweeper expulsaba sus sesiones al
+correr en T2 (ahora `getTurnoColombia()`). (f) REQ-04 §8.2 y §8.4 quedan resueltas —auditoría en la
+decisión (3); rango de periodos **como lista cuando no son contiguos**, y los lotes no contiguos se
+permiten. Cross-ref: [[D-056]], [[D-055]], [[D-049]], [[D-019]], [[D-046]], [[D-032]], [[D-020]],
+[[D-030]], [[D-053]].
+
+---
+
+## D-058 — Asientos normalizados de operación: un motor, tres salidas
+
+**Fecha:** 2026-07-27
+
+**Contexto:** tres requerimientos distintos estaban bloqueados por **la misma pregunta**: con qué
+texto se narra un evento de operación. REQ-04 §8.1 pedía el "formato de WhatsApp" del listado del
+día, REQ-02 §8.1 la plantilla del asiento que se copia a las bitácoras de Sala, y REQ-06 §8.1 el
+layout del libro mensual — y los tres bloqueos se cerraron de una vez en
+`docs/requerimientos/FORMATO-ASIENTOS-OPERACION.md`, analizando el formato controlado **GENE-F03**
+real (32 hojas de enero 2026, 342 eventos escritos a mano). Hoy ese texto lo redacta cada ingeniero
+a mano, tres veces: en el chat, en su bitácora de Sala y en el F03 del mes. D-058 lo genera **una
+vez, server-side**, y lo entrega a los tres lugares. Se ejecutó en diez etapas sobre
+`feat/asientos-operacion-2026-07`. **Un solo cambio de DDL** (`F34.A1`) y **cero dependencias
+nuevas**.
+
+**Decisión:**
+
+**(1) Un motor puro y server-side es la fuente única de las tres salidas.**
+`server/utils/asientos/` (sin BD, sin reloj, sin `fetch`) implementa las plantillas de §5 del insumo
+y las convenciones canónicas de §4: unidad `GEC3`/`GEC32`, potencia entera con `MW` (**no `MWh`**:
+es potencia por periodo), periodos compactados a `del P17 al P19` cuando el lote comparte valor y
+desplegados a `P17: 109 MW; P18: 134 MW` cuando difieren, `detalle` al final tras punto. **El front
+no conoce ninguna plantilla** — recibe el texto ya armado. Si el motor viviera en el cliente, las
+tres salidas divergirían el día que alguien toque una de ellas, que es exactamente lo que este ADR
+existe para impedir. La hora **nunca** va dentro del asiento: es la columna A del F03 y una columna
+propia del listado.
+
+**(2) Un tipo desconocido LANZA donde el texto se persiste y DEGRADA donde solo se muestra.** El
+motor lanza ante un tipo/estado fuera de su enum (viene de una columna con `CHECK`: es bug del
+llamador, y un renglón mudo en el histórico es peor que un error), y el reflejo hereda ese contrato.
+Pero `GET /lotes` y el armado del libro **degradan a "sin renglón" + log**: son vistas de un día y de
+un mes enteros, y `notificar_dashboard_tipo` es NULLABLE — un tipo MAND nuevo dejaría la jornada
+entera en 500. Se pierde un renglón, no la jornada.
+
+**(3) El asiento de MAND se copia a `SALAJDT` y `SALAING` dentro de la transacción del origen.**
+`server/utils/reflejo-sala.js` (`crearReflejoLote` / `actualizarReflejoLote` / `borrarReflejoLote`)
+se engancha en el `POST /guardar`, el `PUT` y el `DELETE` por lote de D-057, **sin `try/catch`**: si
+el reflejo falla, se revierte también el lote (RQ-02.9). El vínculo es
+`campos_extra.origen_lote_id` (+ `origen_bitacora`) — **por lote, jamás por `registro_id`**, porque
+la copia también migra al histórico y no hay FK posible (mismo argumento de [[D-055]] (c)). El
+`tipo_evento_id` se resuelve por `(bitacora_id, nombre)` **en cada llamada, nunca cacheado**
+([[D-053]]). `SALAOP` no recibe copia (RQ-02.3) y `TEST_PLANTA` no refleja (RN-02.e), con ese guard
+**dentro del módulo** y no replicado en cada enganche.
+
+**(4) `fecha_evento` y `turno_id` de la copia van por criterios DISTINTOS.** `fecha_evento` = la
+`hora_llamada` del lote, porque es **narrativo**: el asiento se lee donde el operador lo espera y
+coincide con el listado y con el F03. `turno_id` = el turno **ABIERTO** de la unidad al insertar,
+porque **no** es narrativo: es el **puntero de archivado** ([[D-045]]). Una copia apuntando a un
+turno ya `CERRADO` **no la archiva nadie** y queda viva en `registro_activo` para siempre, y el
+rescate de huérfanos de D-045 tampoco la alcanza (solo levanta `turno_id IS NULL`) — por eso `NULL`
+cuando no hay turno abierto. No contradice a [[D-055]] (b): allá la celda pertenece a **un** periodo;
+acá el asiento es del **lote**, cuyos periodos pueden caer en dos turnos.
+
+**(5) `rowsAffected = 0` en la cascada NO es error, y quedó comentado en el código para que nadie lo
+"arregle".** Es el caso **esperado** tras el cierre de turno de Sala, que ya archivó las copias. El
+histórico no se reescribe (RF-032) y la corrección del origen **procede igual**: un `409` volvería
+incorregible un lote a las 18:01 **por el estado de su reflejo** — invierte la jerarquía y
+contradice el criterio 12 de REQ-04, ya probado en D-057 (MAND es exenta de los gates de turno). El
+`UPDATE`/`DELETE` va acotado por `origen_lote_id` **+ `planta_id` + `bitacora_id IN (…)`**: sin el
+`IN`, el DML alcanzaría cualquier fila que mañana reuse la clave — el reflejo de DISP, por ejemplo.
+El sello de auditoría de la copia va por `CASE` contra el valor anterior, igual que el origen: un
+`PUT` que no mueve nada no dice que alguien corrigió.
+
+**(6) `lov_bit.tipo_evento.seleccionable` (`F34.A1`) existe porque sembrar un tipo lo vuelve
+tecleable.** Los 8 tipos espejo (`Autorización` · `Pruebas` · `Redespacho` · `Cambio de
+Disponibilidad` × `SALAJDT`/`SALAING`, con los nombres **literales** del catálogo de origen) se
+siembran con `seleccionable = 0`. Sin esa columna, el JdT vería `Autorización` en el selector de
+`SALAJDT` y podría crear un asiento **sin `origen_lote_id`**: indistinguible de un reflejo real para
+el libro e imposible de rastrear al origen — la doble digitación que REQ-02 elimina. Se llama
+`seleccionable` y no `activo` (que se confunde con "bitácora activa"). **Y esconder no es impedir**
+(lección de [[D-046]]): el filtro no vive solo en `GET /bitacoras/:id/tipos-evento`, sino también en
+los dos lookups `(tipo_evento_id, bitacora_id)` del `POST`/`PUT` genérico de `registros.js`, que ya
+rechazaban con el mismo 400.
+
+**(7) El asiento reflejado es de solo lectura en su destino, también para su autor.** Como la copia
+nace con `creado_por` = el autor del origen, la regla "solo el autor" de [[D-049]] **le habría dado
+permiso**. `canEditarRegistro` suma el predicado `esAsientoReflejado` y el `GET /activos` la MISMA
+condición en su espejo SQL (los dos **siempre juntos**, regla de D-049), y el `PUT`/`DELETE`
+responden `403` con `codigo` propio **`asiento_reflejado`** en vez de `solo_autor`: responderle "solo
+el autor puede editarlo" a quien **es** el autor es una explicación falsa y lo deja sin saber que la
+corrección va por Operación 24h. **Es una restricción, no un bypass** — recorta quién edita, no lo
+amplía, y no exceptúa a nadie (tampoco al ADMIN). La excepción de MAND no se toca: sigue viviendo en
+el gate `puede_crear` de su endpoint por lote (D-057 (c)).
+
+**(8) El `.xlsx` clona la plantilla REAL, no la reconstruye.**
+`scripts/derivar-plantilla-f03.mjs` corre **offline** y deriva `server/assets/f03-plantilla.xlsx`
+(artefacto binario commiteado) del F03 de enero: conserva el logo, los estilos, el tema, el
+`sharedStrings` y el encabezado GENE-F03, y en runtime solo hay que clonar sus partes.
+`server/utils/xlsx.js` es el port ESM del escritor propio del repo — **cero dependencias nuevas**
+(REQ-01 §5.1), todo con `node:zlib`. El paquete se emite **DEFLATE**, como cualquier `.xlsx` real
+(ver la corrección de 2026-07-28 al pie). Tres invariantes: **`inlineStr` para todo lo que escribimos**
+(agregar a `sharedStrings` obligaría a reindexar la tabla que sostiene los `t="s"` del encabezado
+clonado); **`Print_Area` por hoja con su rango recalculado** (el original trae 32 `definedName` con
+rangos distintos: clonar el bloque imprime rangos vacíos en los días cortos y corta los largos); y
+`dimension`/`mergeCells` recalculados al alto real, con el alto de fila estimado porque **Excel no
+autoajusta una celda combinada con `wrapText`**. D-058 **calca** el formato: la celda `FECHA:` se
+queda en fecha larga porque su estilo real (`numFmtId=164`) es fecha larga, no `dd/mm/aaaa`.
+
+**(9) El libro lee los ORIGINALES y excluye las copias.** `armarMes` consulta las cuatro fuentes de
+las dos unidades —MAND (`registro_activo` ∪ `registro_historico`, agrupado por `lote_id`), DISP
+(tabla base, por `fecha_inicio_estado`), las dos bitácoras de Sala **con
+`origen_lote_id IS NULL`**— y el encabezado por `conformacion_turno` ∪ `turno_participante`. Sin esa
+exclusión un evento de MAND saldría **tres veces** en la misma hoja. Cada evento se ubica por su
+**hora canónica** (MAND: `hora_llamada`, **nunca** `fecha_evento`; ausente en los migrados por
+`F32.A1` → derivada del primer periodo) y cae en el bloque **por hora de calendario**, no por
+`turno_id`: **el T2 se parte por medianoche** y cada evento aparece **exactamente una vez** en todo
+el libro. Orden **ascendente** dentro del bloque — deliberadamente distinto al descendente del
+listado (RN-04.a). El alcance es la constante inyectable `PLANTAS_F03 = ['GEC3','GEC32']`, que hace
+cumplir RN-06.g y deja fuera a las dos plantas-fixture **sin que producción las nombre**; no
+contradice a [[D-055]] (ahí se prohibió una allowlist en un endpoint de **escritura**), y no se ató a
+`planta.activa = 1` porque apagar una unidad borraría retroactivamente sus meses ya emitidos.
+
+**(10) `GET /api/sala-de-mando/reporte-mensual?mes=YYYY-MM` es solo lectura y gatea por
+`puede_crear`.** No puede gatear por `puede_ver`: la matriz le da `puede_ver` en MAND a **todos** los
+cargos, así que exigirlo sería no exigir nada — y el mismo cargo que recibe 403 acá sigue obteniendo
+200 en `GET /lotes` (consultar no es descargar). `mes` es **opcional** (sin él, el mes Bogotá en
+curso, por paridad con `GET /lotes`); formato inválido → `400 mes_invalido`, futuro → `400
+mes_futuro`, mes sin eventos → libro con hojas vacías. El front descarga por **`fetch` + blob**,
+nunca por `window.open`: el endpoint vive tras `requireEntra` y sin cookie el operador vería un JSON
+401 en una pestaña. El mes viaja en el hash (`#/op24h?mes=YYYY-MM`, `replaceState`) como DISP lleva
+`planta` y COMB `fecha` ([[D-035]]); **el día de la grilla no se tocó** — sigue siendo siempre hoy.
+
+**Consecuencias:** (a) **El reflejo de DISP queda FUERA** y merece su propio ADR: sus 4 tipos espejo
+ya están sembrados, pero crear/editar/**deshacer con copia anulada** (RQ-02.12) suma un estado visual
+nuevo a la grilla de Sala y tres enganches más, y no comparte casi nada con el generador del libro.
+Con él quedan abiertas REQ-02 §3.4 y REQ-06 §8.3. (b) **DDL mínimo:** una sola columna
+(`F34.A1`, idempotente, `DEFAULT 1 WITH VALUES` → ni una fila de datos tocada) y **ninguna migración
+de datos**; el `UPDATE` complementario reafirma el `0` de las 8 filas espejo en cada arranque, y no
+fuerza `1` en el resto (afirmaría que ningún otro tipo puede ocultarse jamás). (c) **Contrato
+cross-repo intacto:** D-058 no toca `evento_dashboard` ni `disponibilidad_dashboard`; nada que
+coordinar con `dashboard-gen-gec3/`. (d) **La adopción es real y baja, y el generador no la
+compensa:** julio 2026 rinde 31 hojas y **20 renglones** (15 lotes de MAND + 5 registros de Sala), la
+mayoría de hojas sale vacía y el encabezado `JEFE`/`INGENIERO DE TURNO` queda en blanco casi todo el
+mes porque la única presencia registrada es de un cargo que el F03 no nombra. **Es correcto**: el F03
+se llena hoy a mano y las bitácoras de Sala todavía no se usan — es adopción, no software, y es la
+razón por la que **no** hay que autogenerar texto para tapar el hueco. (e) Los registros migrados por
+`F32.A1` traen un `lote_id` **por fila**, así que no compactan: una autorización de 90 MW en P1..P5
+rinde cinco renglones en vez de uno con `del P1 al P5`. No es defecto del motor —solo puede agrupar
+lo que el dato ya trae junto— pero se ve así en el listado y en el libro. (f) Quedan **resueltas**:
+REQ-02 §8.1 y §8.2, REQ-04 §8.1 y §8.3 (con lo que REQ-04 se queda **sin bloqueante vivo**), y
+REQ-06 §8.1 a §8.4 — las tres últimas **por construcción**: el estado DISP se asienta una vez en su
+instante de inicio, un evento deshecho no existe en la tabla, y el libro refleja el estado final del
+lote (decisión H del insumo). (g) Dos trampas que se pagaron en esta ronda y valen para la próxima:
+una regex de `<row>` con `[\s\S]*?(?:<\/row>|\/>)` **corta en la primera celda auto-cerrada** y
+produce XML partido que pasa todos los conteos (hermana del `stripComments` inerte de [[D-055]]), y
+`JSON_VALUE` **lanza** ante texto no-JSON en vez de devolver `NULL`, así que el espejo del
+`GET /activos` depende de que `campos_extra` sea siempre JSON o `NULL` — hoy lo es, y esa premisa
+sostiene tres consultas. Cross-ref: [[D-057]], [[D-056]], [[D-055]], [[D-053]], [[D-049]],
+[[D-046]], [[D-045]], [[D-044]], [[D-035]], [[D-032]], [[D-030]], [[D-020]], y REQ-02 / REQ-04 /
+REQ-06 + `FORMATO-ASIENTOS-OPERACION.md`.
+
+**Addendum 2026-07-28 — "se descarga pero no abre": tres correcciones al empaquetado.** El primer
+uso real reportó que el libro descargaba bien pero no abría. Auditado el artefacto de punta a punta
+—ZIP, paquete OPC, orden de elementos de cada hoja, merges, estilos, `dimension`, `Print_Area`— con
+cuatro validadores independientes (el lector propio, `System.IO.Packaging`, `System.IO.Compression` y
+Excel real, en modo normal y en Vista Protegida): **el archivo servido era válido y abría**, así que
+la causa no se pudo reproducir desde el artefacto. Igual salieron tres defectos reales, y los tres
+quedaron corregidos:
+
+1. **El paquete se emitía sin comprimir** (`stored`, heredado del escritor de
+   `js-scraper-carbon-g32`). Es ZIP legal, pero **ningún `.xlsx` del mundo real viene así**, y en el
+   camino de una descarga corporativa hay antivirus, DLP y proxies que lo inspeccionan: cuanto más se
+   parezca a lo que produce Excel, menos superficie hay para que algo lo rechace. Ahora va **DEFLATE**
+   (`node:zlib`, sigue sin dependencias), con `stored` como respaldo por entrada cuando comprimir no
+   achica. El libro de un mes pasó de **550 KB a 181 KB**.
+2. **Las 31 hojas compartían `sheetPr/@codeName="Hoja1"`**, porque todas se clonan del mismo modelo.
+   Ese atributo identifica la hoja para VBA y **debe ser único en el libro**; repetirlo es la clase de
+   incoherencia que Excel reporta como archivo a reparar. Se renumera por hoja.
+3. **El front revocaba el object URL en el MISMO tick del `click()`.** `a.click()` solo *agenda* la
+   descarga —el navegador lee el blob después—, así que revocar ahí es una **carrera**: el archivo se
+   guarda con su nombre y un tamaño plausible pero puede quedar **truncado**, y el síntoma es
+   exactamente "se descargó pero Excel no lo abre", sin error ni en el navegador ni en el servidor.
+   El revoke quedó diferido. **Es la causa más probable del reporte**, y la única de las tres que
+   produce un archivo realmente dañado.
+
+Además, `construirLibroF03` ahora **relee el paquete que acaba de emitir** antes de devolverlo
+(`leerZip` valida el central directory y el tamaño de cada entrada) y lanza si falta una parte: la
+peor falla posible de este endpoint —servir un archivo roto sin dejar rastro— pasa a ser un error
+ruidoso del servidor. Tres tests nuevos fijan las tres cosas (`f03_libro.test.js` ×2 y
+`libro-mensual-descarga.test.jsx` ×1).
+
+---
+
 ## D-059 — Rol "USUARIO DE CONSULTA": observador solo-lectura e invisible (`cargo.es_observador`)
 
 **Fecha:** 2026-08-10

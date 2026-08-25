@@ -98,6 +98,135 @@ export const findAutorizacion = (transaction, args) =>
 export const upsertAutorizacion = (transaction, args) =>
   upsertEventoDashboard(transaction, { ...args, tipo: 'AUTH' });
 
+// D-056 (E2): resuelve DESDE CERO qué registro publica una CELDA `(planta, fecha, periodo, tipo)`
+// en `bitacora.evento_dashboard`. No es un upsert ciego — recomputa el vigente cada vez.
+//
+// (a) POR CELDA, no por lote. Con el modelo append-only de D-056 varios registros compiten por el
+//     mismo `(planta, fecha, periodo, tipo)`, y los lotes pueden solaparse PARCIALMENTE: si el lote
+//     A cubre P14–P18 a las 09:12 y el B cubre P16–P20 a las 09:40, entonces P14–P15 publican A y
+//     P16–P20 publican B. Resolver "por lote" (lectura literal de RQ-03.22) publicaría mal los
+//     periodos compartidos — la unidad de decisión es la celda.
+// (b) Ganador = mayor `hora_llamada`. Los registros SIN hora (clave AUSENTE: los migrados por
+//     F32.A1 y los del día en curso al momento del despliegue) NUNCA ganan por hora — el
+//     `CASE … IS NULL → 1` los manda al final y caen al desempate por `creado_en`/`registro_id`.
+//     `TRY_CAST` devuelve NULL para el ausente sin reventar; verificado contra la BD que un ISO UTC
+//     con sufijo 'Z' castea a `datetime2` (no cae a NULL) y compara wall-clock UTC entre todos.
+// (c) Si NO queda ningún registro vivo → `DELETE` de la fila (RQ-03.23), NO `activa=0`: el origen
+//     dejó de existir y el puntero quedaría HUÉRFANO (D-055 (4): 35 filas reales en prod). El
+//     soft-delete (`activa=0`) sigue siendo lo correcto en `cerrarDiaMand` (mand-sweeper.js:104-116),
+//     donde el origen NO desaparece — migra al histórico y el puntero sigue resolviendo.
+//
+// Autocontenida: `valor_mw` y los snapshots salen del PROPIO registro ganador (columnas de
+// `registro_activo`), no se reciben por parámetro. Todo el DML va acotado por las cuatro claves de
+// la celda `(planta_id, fecha, periodo, tipo)`, nunca por planta sola. Adicional a
+// `upsertEventoDashboard` (que sigue sirviendo a la rama genérica de registros.js), no lo reemplaza.
+export async function recalcularEventoDashboard(transaction, { planta_id, fecha, periodo, tipo }) {
+  assertTipo(tipo);
+
+  // 1. Ganador de la celda entre los registros MAND vivos (borradores del día Bogotá).
+  const win = await new sql.Request(transaction)
+    .input('planta_id', sql.VarChar(10), planta_id)
+    .input('fecha', sql.Date, fecha)
+    .input('periodo', sql.Int, periodo)
+    .input('tipo', sql.VarChar(10), tipo)
+    .query(`
+      SELECT TOP 1
+        ra.registro_id,
+        TRY_CAST(JSON_VALUE(ra.campos_extra, '$.valor_mw') AS FLOAT) AS valor_mw,
+        ra.jdts_snapshot, ra.jefes_snapshot
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+      INNER JOIN lov_bit.tipo_evento te ON te.tipo_evento_id = ra.tipo_evento_id
+      WHERE b.codigo = 'MAND'
+        AND ra.planta_id = @planta_id
+        AND CAST(DATEADD(HOUR, -5, ra.fecha_evento) AS DATE) = @fecha
+        AND ra.estado = 'borrador'
+        AND te.notificar_dashboard_tipo = @tipo
+        AND TRY_CAST(JSON_VALUE(ra.campos_extra, '$.periodo') AS INT) = @periodo
+      ORDER BY
+        CASE WHEN TRY_CAST(JSON_VALUE(ra.campos_extra, '$.hora_llamada') AS datetime2) IS NULL
+             THEN 1 ELSE 0 END,                                              -- los sin hora, ÚLTIMOS
+        TRY_CAST(JSON_VALUE(ra.campos_extra, '$.hora_llamada') AS datetime2) DESC,
+        ra.creado_en DESC,
+        ra.registro_id DESC
+    `);
+  const ganador = win.recordset[0] || null;
+
+  // 2. Fila actual de evento_dashboard para esta celda (exista o no, activa o no).
+  const cur = await new sql.Request(transaction)
+    .input('planta_id', sql.VarChar(10), planta_id)
+    .input('fecha', sql.Date, fecha)
+    .input('periodo', sql.TinyInt, periodo)
+    .input('tipo', sql.VarChar(10), tipo)
+    .query(`
+      SELECT evento_id, activa, valor_mw, registro_origen_id
+      FROM bitacora.evento_dashboard
+      WHERE planta_id = @planta_id AND fecha = @fecha AND periodo = @periodo AND tipo = @tipo
+    `);
+  const fila = cur.recordset[0] || null;
+
+  // 3a. No queda ganador → la celda deja de publicar. DELETE (no activa=0), acotado por las 4 claves.
+  if (!ganador) {
+    if (!fila) return { accion: 'sin_cambio', evento_id: null, registro_origen_id: null };
+    await new sql.Request(transaction)
+      .input('planta_id', sql.VarChar(10), planta_id)
+      .input('fecha', sql.Date, fecha)
+      .input('periodo', sql.TinyInt, periodo)
+      .input('tipo', sql.VarChar(10), tipo)
+      .query(`
+        DELETE FROM bitacora.evento_dashboard
+        WHERE planta_id = @planta_id AND fecha = @fecha AND periodo = @periodo AND tipo = @tipo
+      `);
+    return { accion: 'eliminado', evento_id: fila.evento_id, registro_origen_id: null };
+  }
+
+  // 3b. Hay ganador y no había fila → INSERT.
+  if (!fila) {
+    const ins = await new sql.Request(transaction)
+      .input('origen', sql.Int, ganador.registro_id)
+      .input('planta_id', sql.VarChar(10), planta_id)
+      .input('fecha', sql.Date, fecha)
+      .input('periodo', sql.TinyInt, periodo)
+      .input('valor', sql.Float, ganador.valor_mw)
+      .input('tipo', sql.VarChar(10), tipo)
+      .input('jdts_snapshot', sql.NVarChar(sql.MAX), ganador.jdts_snapshot)
+      .input('jefes_snapshot', sql.NVarChar(sql.MAX), ganador.jefes_snapshot)
+      .query(`
+        INSERT INTO bitacora.evento_dashboard
+          (registro_origen_id, planta_id, fecha, periodo, valor_mw, tipo, jdts_snapshot, jefes_snapshot)
+        OUTPUT INSERTED.evento_id
+        VALUES (@origen, @planta_id, @fecha, @periodo, @valor, @tipo, @jdts_snapshot, @jefes_snapshot)
+      `);
+    return { accion: 'insertado', evento_id: ins.recordset[0].evento_id, registro_origen_id: ganador.registro_id };
+  }
+
+  // 3c. Hay ganador y había fila. Si ya apunta al mismo origen y valor y está activa → no-op (evita
+  //     churn de creado_en). Si cambió (o estaba activa=0) → UPDATE con reactivación, por las 4 claves.
+  if (fila.activa && fila.registro_origen_id === ganador.registro_id && fila.valor_mw === ganador.valor_mw) {
+    return { accion: 'sin_cambio', evento_id: fila.evento_id, registro_origen_id: ganador.registro_id };
+  }
+  await new sql.Request(transaction)
+    .input('planta_id', sql.VarChar(10), planta_id)
+    .input('fecha', sql.Date, fecha)
+    .input('periodo', sql.TinyInt, periodo)
+    .input('tipo', sql.VarChar(10), tipo)
+    .input('origen', sql.Int, ganador.registro_id)
+    .input('valor', sql.Float, ganador.valor_mw)
+    .input('jdts_snapshot', sql.NVarChar(sql.MAX), ganador.jdts_snapshot)
+    .input('jefes_snapshot', sql.NVarChar(sql.MAX), ganador.jefes_snapshot)
+    .query(`
+      UPDATE bitacora.evento_dashboard
+      SET registro_origen_id = @origen,
+          valor_mw = @valor,
+          jdts_snapshot = @jdts_snapshot,
+          jefes_snapshot = @jefes_snapshot,
+          activa = 1,
+          creado_en = SYSUTCDATETIME()
+      WHERE planta_id = @planta_id AND fecha = @fecha AND periodo = @periodo AND tipo = @tipo
+    `);
+  return { accion: 'actualizado', evento_id: fila.evento_id, registro_origen_id: ganador.registro_id };
+}
+
 // D-026: DISP migró a `bitacora.disponibilidad_estado` (tabla dedicada, ER nativo). La
 // vieja `disponibilidad_dashboard` ahora es VIEW de solo-lectura sobre el vigente — los
 // helpers de write (upsert/delete) se reemplazaron por los siguientes, que operan

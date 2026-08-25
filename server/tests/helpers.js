@@ -11,6 +11,96 @@ export const PLANTA_ID = 'GEC3';
 // Los tests que tocan disponibilidad operan sobre esta planta — nunca sobre GEC3/GEC32 reales.
 export const TEST_PLANTA = TEST_PLANTA_ID;
 
+// D-058 E4 — SEGUNDA planta-fixture: la única que SÍ refleja a las bitácoras de Sala.
+//
+// `TEST_PLANTA` no puede cubrir el camino feliz del reflejo (REQ-02) porque RN-02.e la excluye a
+// propósito: si reflejara, cada `npm test` sembraría asientos de prueba en SALAJDT/SALAING sobre la
+// BD productiva (D-030). Y usar GEC3/GEC32 está prohibido — sería escribir en planta REAL (D-055).
+//
+// Dos diferencias deliberadas con 'TST':
+//   1. **No vive en `db.js`.** Producción no debe conocerla: para el código de producto es una
+//      planta cualquiera, que es justamente lo que la vuelve útil acá. Si mañana alguien la agregara
+//      al guard de RN-02.e, esta suite dejaría de probar lo que dice probar.
+//   2. **Se siembra con `activa = 0`**, y eso es lo que la mantiene invisible fuera de los tests:
+//      `GET /api/catalogos/plantas` y `validarPlantaOperable` (select-context / cambiar-unidad)
+//      filtran por `activa = 1`, así que ningún operador puede verla en el selector ni entrar a
+//      ella. La sesión de test se inserta directo en `sesion_activa`, que no valida la planta más
+//      allá de la FK.
+export const TEST_PLANTA_REFLEJO = 'TSR';
+
+// Usuario propio de la fixture del reflejo (prefijo `test_` → `es_sintetico`, D-044). Es un usuario
+// APARTE de los de `setupSessions` a propósito: `ensureSesion` desactiva las otras sesiones del mismo
+// usuario (sesión única, D-035), así que reusar `test_jdt` mataría la sesión sobre 'TST' y el resto
+// de la suite de MAND empezaría a recibir 401 (la lección de D-055 sobre partir los tests de MAND en
+// dos archivos, acá en versión "dos plantas").
+const TEST_USER_REFLEJO = { nombre: 'Test JdT Reflejo', username: 'test_reflejo_jdt' };
+
+/**
+ * Siembra la planta-fixture del reflejo, su usuario sintético y una sesión de app sobre ella.
+ * Idempotente. Devuelve `{ sesion_id, usuario_id, planta_id }`.
+ *
+ * El cargo por defecto es `Ingeniero Jefe de Turno`: tiene `puede_crear` en MAND por la matriz
+ * data-driven, que es el gate real del endpoint (nunca se hardcodea el cargo, D-027/D-048).
+ */
+export async function setupSesionReflejo({ cargo = 'Ingeniero Jefe de Turno' } = {}) {
+  const db = await getDB();
+  const password_hash = await hashPassword(randomBytes(24).toString('hex'));
+
+  await db.request()
+    .input('planta', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+    .query(`
+      MERGE lov_bit.planta AS t
+      USING (SELECT @planta AS planta_id) AS s ON t.planta_id = s.planta_id
+      -- activa = 0 en los dos lados: si alguien la activó a mano, cada corrida la vuelve a apagar.
+      WHEN MATCHED THEN UPDATE SET activa = 0
+      WHEN NOT MATCHED THEN INSERT (planta_id, nombre, activa)
+        VALUES (@planta, 'Test Synthetic Reflejo', 0);
+    `);
+
+  // `es_sintetico = 1` explícito, no heredado del barrido de arranque de `db.js` (que solo corre en
+  // initDB): un usuario creado a mitad de corrida quedaría en 0 hasta el próximo restart y
+  // `deactivateSyntheticSessions()` no lo alcanzaría → sesión colgada y `zzz_session_leak_guard` rojo.
+  await db.request()
+    .input('nombre', sql.VarChar(200), TEST_USER_REFLEJO.nombre)
+    .input('username', sql.VarChar(50), TEST_USER_REFLEJO.username)
+    .input('pwd', sql.VarChar(200), password_hash)
+    .query(`
+      MERGE lov_bit.usuario AS t
+      USING (SELECT @username AS username) AS s ON t.username = s.username
+      WHEN MATCHED THEN UPDATE SET activo = 1, nombre_completo = @nombre, es_sintetico = 1
+      WHEN NOT MATCHED THEN INSERT
+        (nombre_completo, username, email, password_hash, es_jefe_planta, es_jdt_default, activo, es_sintetico)
+        VALUES (@nombre, @username, NULL, @pwd, 0, 0, 1, 1);
+    `);
+
+  const { recordset: [usuario] } = await db.request()
+    .input('username', sql.VarChar(50), TEST_USER_REFLEJO.username)
+    .query(`SELECT usuario_id FROM lov_bit.usuario WHERE username = @username`);
+  const { recordset: [cargoRow] } = await db.request()
+    .input('cargo', sql.VarChar(100), cargo)
+    .query(`SELECT cargo_id FROM lov_bit.cargo WHERE nombre = @cargo`);
+
+  await db.request()
+    .input('usuario_id', sql.Int, usuario.usuario_id)
+    .query(`UPDATE bitacora.sesion_activa SET activa = 0 WHERE usuario_id = @usuario_id`);
+  const ins = await db.request()
+    .input('usuario_id', sql.Int, usuario.usuario_id)
+    .input('planta_id', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+    .input('cargo_id', sql.Int, cargoRow.cargo_id)
+    .input('turno', sql.TinyInt, getTurnoColombia())
+    .query(`
+      INSERT INTO bitacora.sesion_activa (usuario_id, planta_id, cargo_id, turno)
+      OUTPUT INSERTED.sesion_id
+      VALUES (@usuario_id, @planta_id, @cargo_id, @turno)
+    `);
+
+  return {
+    sesion_id: ins.recordset[0].sesion_id,
+    usuario_id: usuario.usuario_id,
+    planta_id: TEST_PLANTA_REFLEJO,
+  };
+}
+
 // D5: sin corchetes [...]. SQL Server interpreta [ y ] como wildcards de conjunto en LIKE,
 // con corchetes el patrón '%[TEST-RUN-N]%' NO matchea el literal '[TEST-RUN-N]' — el
 // cleanup quedaba inerte y los asserts con LIKE TEST_TAG fallaban silenciosamente.
@@ -43,6 +133,19 @@ export async function deactivateSyntheticSessions() {
       AND usuario_id IN (SELECT usuario_id FROM lov_bit.usuario WHERE es_sintetico = 1)
   `);
   return r.rowsAffected[0];
+}
+
+// D-058 E9: hermano de `call` para endpoints que responden BYTES (el libro mensual F03). No puede
+// reusar `call` porque ese hace `res.json()` y se comería el `.xlsx`. Devuelve también los headers:
+// el `Content-Type` y el `Content-Disposition` son parte del contrato de una descarga.
+// Un error del backend sí viene en JSON, así que el llamador lo parsea del buffer cuando `status`
+// no es 200.
+export async function callBinario(method, path, { sesion_id } = {}) {
+  const headers = {};
+  if (sesion_id != null) headers['X-Sesion-Id'] = String(sesion_id);
+  const res = await fetch(`${BASE_URL}${path}`, { method, headers });
+  const buffer = Buffer.from(await res.arrayBuffer());
+  return { status: res.status, headers: res.headers, buffer };
 }
 
 export async function call(method, path, { body, sesion_id } = {}) {

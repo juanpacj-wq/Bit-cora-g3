@@ -69,6 +69,13 @@ Bit-cora-g3/server/
 │   ├── snapshots.js           snapshotJDTs/Jefes/Ingenieros (JSON agregado)
 │   ├── notificador.js         find/upsert sobre evento_dashboard y disponibilidad_dashboard
 │   ├── ciet.js                registrarEventoCierre (helper compartido)
+│   ├── asientos/              D-058 — motor PURO del texto del evento (index/formato/plantillas).
+│   │                          Fuente única del listado, del reflejo y del libro F03. Sin BD ni reloj.
+│   ├── reflejo-sala.js        D-058 — crear/actualizar/borrar la copia del lote en SALAJDT+SALAING.
+│   │                          Se compone con la transacción de MAND; no abre ni cierra la suya.
+│   ├── f03-datos.js           D-058 — armarMes(): las 4 fuentes de las 2 unidades → días y bloques.
+│   ├── f03-libro.js           D-058 — clona server/assets/f03-plantilla.xlsx → N hojas (PURO).
+│   ├── xlsx.js                D-058 — leerZip/escribirZip OOXML en ESM, sin dependencias.
 │   ├── mand-sweeper.js        Cron interno c/60s, detecta cambio de día Bogotá → cerrarDiaMand()
 │   ├── turno-sweeper.js       (legacy o coexistente — revisar al tocar)
 │   └── ...
@@ -92,8 +99,11 @@ Bit-cora-g3/server/
 | `GET /api/disponibilidad?planta_id=` | Vista mini-dashboard DISP (vigente + historial paginado). |
 | `POST /api/disponibilidad/deshacer` | Borra vigente + restaura último histórico. Emite CIET 'Deshacer disponibilidad' con audit completo. |
 | `GET /api/disponibilidad/metricas?planta_id=&desde=&hasta=` | **D-024/D-026** — tiempo agregado por estado + acumulados (`disponible`, `no_disponible`) en una ventana + `ahora` (reloj UTC del server). Lee directo de `bitacora.disponibilidad_estado` (la vista `v_disp_intervalos` se dropeó en D-026). Consumido por el panel "Acumulado histórico por estado" del mini-dashboard (D-028). |
-| `GET /api/sala-de-mando?planta_id=&fecha=` | Grilla MAND del día (siempre hoy). |
-| `POST /api/sala-de-mando/guardar` | **Batch atómico**. Body `{planta_id, fecha, filas:[{tipo, detalle, funcionariocnd, periodos:[{periodo, valor_mw}]}]}`. Transacción única. (F16) |
+| `GET /api/sala-de-mando/lotes?planta_id=&fecha=` | **Listado del día por lotes** (D-056). Agrupa `registro_activo` por `campos_extra.lote_id`; expone `publicado` **por celda** como indicador derivado. Gated por `puede_ver`. Desde **D-058** cada lote trae su `asiento` ya renderizado (el front no conoce plantillas). |
+| `POST /api/sala-de-mando/guardar` | **Batch atómico append-only** (D-056). Body `{planta_id, fecha, filas:[{tipo, hora, detalle, funcionariocnd, periodos:[{periodo, valor_mw}]}]}`. **Solo INSERT**, un `lote_id` por fila. Transacción única. |
+| `PUT /api/sala-de-mando/lotes/:lote_id` | **Corrección por lote** (D-057). **Diff quirúrgico**: conserva `registro_id`/`creado_por` de las celdas que sobreviven; recalcula la publicación por celda tocada. Gated por `puede_crear`, **no** por autoría. |
+| `DELETE /api/sala-de-mando/lotes/:lote_id?planta_id=` | **Borrado real por lote** (D-057). Recalcula cada celda liberada → lo publicado retrocede al lote anterior vigente, o la fila de `evento_dashboard` se elimina. |
+| `GET /api/sala-de-mando/reporte-mensual?mes=YYYY-MM` | **Libro mensual GENE-F03** (D-058). Responde el `.xlsx` (`Content-Disposition: attachment`), una hoja por día, tres bloques de turno, **las dos unidades mezcladas**. `mes` opcional (default: mes Bogotá en curso); `400 mes_invalido` / `mes_futuro`. **Solo lectura**, gated por `puede_crear` (`puede_ver` lo tienen todos los cargos: no gatearía nada). |
 | `POST /api/sala-de-mando/cierre-diario` | Trigger manual del sweeper (tests, recovery). Requiere `puede_cerrar_turno`. |
 | `GET /api/eventos-dashboard?tipo=&planta_id=` | Endpoint hacia dashboard-gen-gec3. `tipo ∈ {AUTH,REDESP,PRUEBA}` lee de `evento_dashboard`; `tipo=DISP` lee de `disponibilidad_dashboard`. |
 | `GET /api/catalogos/jdt-actual` | Para autocompletado. Lee `sesion_bitacora` con `finalizada_en IS NULL`. |
@@ -102,6 +112,7 @@ Bit-cora-g3/server/
 
 - `POST /api/auth/heartbeat`, `POST /api/auth/resume` (F2/F9): el modelo de sesión persistente reemplaza el heartbeat.
 - `GET /api/sala-de-mando/dias-pendientes` (F17): MAND solo muestra HOY; no hay paginación entre días.
+- `GET /api/sala-de-mando` (D-056): el pivote `{AUTH: {valores: Array(24), detalle, funcionariocnd}, …}` que alimentaba la grilla-espejo. Devuelve **404**; la grilla ya no carga nada del servidor y el listado del día lo reemplaza. No revivirlo.
 
 ---
 
@@ -162,34 +173,44 @@ El popup se cierra con: Esc, click fuera (botón y popup quedan excluidos por `c
 
 ### MAND (Operación 24h)
 
-**Diferenciadora:** grilla 24 periodos × 3 tipos × 2 plantas con batch save atómico. No se cierra por turno — se cierra automáticamente vía sweeper diario.
+**Diferenciadora:** grilla 24 periodos × 3 tipos × 2 plantas con batch save atómico. No se cierra por turno — se cierra automáticamente vía sweeper diario. Desde **D-056** la grilla es un **formulario de captura append-only** (registra, no edita) y desde **D-057** corregir y borrar existen **fuera de la grilla, por lote, desde el listado del día**. Son dos planos separados: capturar nunca lee del servidor; corregir siempre re-lee dentro de la transacción.
 
-**Modelo de guardado (frontend):**
+**Modelo de captura (frontend, D-056):**
 
-1. Al montar: `GET /api/sala-de-mando?planta_id=&fecha=<hoy_Bogota>` → `setSnapshot` + clonar a `buffer`.
+1. Al montar: la grilla nace **vacía**. No hay `GET` que la alimente (el pivote se dio de baja) ni par `snapshot`/`buffer`: `dirty` deriva solo del buffer de captura.
 2. Al editar celda: `setBuffer(...)`. NADA va al backend.
-3. Diff(snapshot, buffer) determina si el botón "Guardar" está habilitado.
-4. Click "Guardar" → `POST /api/sala-de-mando/guardar` con solo el diff → re-fetch → reset snapshot+buffer.
-5. `beforeunload` confirm si hay cambios pendientes.
-6. Tras `guardarBatch` ok, el hook emite `bitacora:counts-refresh` (CustomEvent en `window`). Consumidores: `useBitacoraCounts` refetchea `/api/bitacora/counts` (badge del tab), y `BitacorasGecelca3` refetchea `/api/registros/activos` para la bitácora activa (sincroniza el contador "X registros" de `BarraEstado` con el badge).
+3. Click "Guardar" → `POST /api/sala-de-mando/guardar` → la grilla se vacía **solo tras la confirmación**; ante un `400` **conserva lo capturado** (el operador no pierde lo escrito por un error de validación).
+4. `beforeunload` confirm si hay cambios pendientes.
+5. Tras `guardarBatch` ok, el hook emite `bitacora:counts-refresh` (CustomEvent en `window`). Consumidores: `useBitacoraCounts` refetchea `/api/bitacora/counts` (badge del tab), y `BitacorasGecelca3` refetchea `/api/registros/activos` para la bitácora activa (sincroniza el contador "X registros" de `BarraEstado` con el badge).
+6. Debajo, `LotesDelDia` lista los lotes del día — se refresca al montar, tras cada guardado y en el **mismo tick de 60s** de la grilla (no hay segundo temporizador).
 
-**Backend atómico (`POST /api/sala-de-mando/guardar`):**
+**Backend append-only (`POST /api/sala-de-mando/guardar`, D-056):**
 
-Por cada `(tipo, periodo)` del diff:
-- existe + `valor_mw != null` + `valor_mw` distinto → UPDATE + `modificado_por=sesion.usuario_id` + UPSERT `evento_dashboard`.
-- existe + `valor_mw == null` → DELETE + `evento_dashboard.activa=0`.
-- no existe + `valor_mw != null` → INSERT + UPSERT `evento_dashboard`.
-- `valor_mw` no cambió pero detalle/funcionariocnd sí → UPDATE solo campos compartidos, NO toca `modificado_por`.
+Por cada fila válida el servidor genera un `lote_id` (GUID) y hace **un INSERT por celda con valor** — nunca UPDATE, nunca DELETE. Las celdas vacías se omiten. La metadata del lote (`hora_llamada` ISO UTC compuesta server-side, `funcionariocnd`, `detalle`) viaja **replicada en cada celda** dentro de `campos_extra`. Por cada celda tocada se recalcula el vigente publicado **por celda** (`recalcularEventoDashboard`). Devuelve `{ resumen: { lotes, registros } }` o `400 { errores: [{tipo, periodo?, motivo}] }`.
 
-Todo en una transacción única. Si algo falla, rollback completo. Devuelve `{ resumen: { creados, actualizados, eliminados } }` o `400 { errores: [{tipo, periodo?, motivo}] }`.
+**Corrección por lote (`PUT`/`DELETE /api/sala-de-mando/lotes/:lote_id`, D-057):**
+
+El lote se re-lee **dentro de la transacción** (nunca se confía en el snapshot que vio el modal) y se diffea contra el body:
+
+- periodo en ambos, mismo `valor_mw` → solo metadata; no recalcula.
+- periodo en ambos, valor distinto → `UPDATE` + `modificado_por`/`modificado_en`; recalcula.
+- periodo solo en el body → `INSERT` con el **mismo `lote_id`** y `fecha_evento` **heredado** del lote; recalcula.
+- periodo solo en la BD → `DELETE` de esa fila; recalcula (ahí retrocede lo publicado).
+
+La metadata (hora / funcionario / descripción) se aplica **a nivel de lote**, recorriendo sus celdas vivas fuera del loop de periodos; cambiar la **hora** obliga a recalcular **todas** las celdas (es el criterio de desempate de la publicación). El `DELETE` borra las N filas y recalcula cada celda liberada. Ambos gated por `puede_crear` + planta de la sesión, **no** por autoría (excepción acotada a MAND de D-049). Desenlaces compartidos: `404 lote_inexistente` · `409 lote_cerrado` · `403 lote_de_otra_planta`.
+
+**Reflejo a las bitácoras de Sala (`utils/reflejo-sala.js`, D-058):**
+
+Los tres endpoints de arriba llaman al reflejo **dentro de su misma transacción y sin `try/catch`**: guardar crea la copia del asiento en `SALAJDT` **y** `SALAING`, corregir la regenera en las dos y borrar las borra; si el reflejo falla, se revierte también el lote. La copia es un registro real (cuenta en el contador, cierra por turno, viaja al histórico), se ata al origen por `campos_extra.origen_lote_id` —**por lote, nunca por `registro_id`**: también migra al histórico, así que no hay FK posible— y lleva `fecha_evento` = **hora de la llamada** pero `turno_id` = el turno **ABIERTO** (el puntero de archivado; apuntarlo a uno cerrado la dejaría viva para siempre). `rowsAffected = 0` **no es error**: el cierre de turno de Sala ya archivó las copias, el histórico no se reescribe y la corrección del origen procede igual. En su destino la copia **no se edita ni se borra, tampoco por su autor** (`403 asiento_reflejado`; `canEditarRegistro` + el espejo SQL del `GET /activos`, cambiados juntos).
 
 **Validaciones de negocio (errores específicos):**
 
-- `fecha_no_es_hoy` (solo HOY editable).
-- `periodo_bloqueado` (REDESP requiere `periodo >= floor(hora_bogota) + 1`, "periodo actual o posteriores").
+- `fecha_no_es_hoy` (solo HOY se captura).
+- `periodo_bloqueado` (REDESP requiere `periodo >= floor(hora_bogota) + 1`, "periodo actual o posteriores"). En la corrección se evalúa **sobre el delta**; no aplica al `DELETE` del lote.
+- `hora_requerida` / `hora_invalida` / `hora_futura` (hora de la llamada al CND, validada contra el reloj del **servidor** con 5 min de tolerancia; error de **lote**, sin `periodo`).
 - `funcionariocnd_requerido` (AUTH con al menos un valor exige funcionariocnd).
 - `funcionariocnd` en PRUEBA/REDESP → server lo fuerza a NULL silenciosamente (no es error).
-- `valor_mw_invalido`, `periodo_fuera_rango`, `tipo_invalido`, `periodos_invalido`.
+- `lote_sin_celdas` (metadata sin ninguna celda con valor — nunca un 200 mentiroso), `periodo_duplicado` (solo en el `PUT`), `valor_mw_invalido`, `periodo_fuera_rango`, `tipo_invalido`, `periodos_invalido`.
 
 **Lock REDESP (frontend):**
 
@@ -204,6 +225,10 @@ Todo en una transacción única. Si algo falla, rollback completo. Devuelve `{ r
 - Cross-tipo prohibido: clickear otra fila descarta la selección anterior.
 - Esc o clic fuera de la tabla limpia.
 - Visual: `border 2px solid <color tipo>`.
+
+**Libro mensual GENE-F03 (`GET /api/sala-de-mando/reporte-mensual`, D-058):**
+
+Dos módulos que no se conocen entre sí. `utils/f03-datos.js::armarMes` **consulta** (solo lectura): MAND (`registro_activo` ∪ `registro_historico`, agrupado por lote), DISP (tabla base, por `fecha_inicio_estado`), las dos bitácoras de Sala **excluyendo los reflejados** (`origen_lote_id IS NULL`, o el evento saldría tres veces) y el personal del bloque (`conformacion_turno` ∪ `turno_participante`, sin sintéticos). `utils/f03-libro.js::construirLibroF03` **escribe**: clona `server/assets/f03-plantilla.xlsx` (derivada offline del F03 real) y emite una hoja por día con `inlineStr`, recalculando `dimension`, `mergeCells`, el `codeName` de cada hoja y **un `Print_Area` por hoja**; el paquete sale **DEFLATE** (como cualquier `.xlsx`) y se **relee antes de devolverse**, así un paquete roto nunca llega al operador. Tres reglas del armado: la hora de MAND es `hora_llamada` (**nunca** `fecha_evento`; ausente en los migrados → se deriva del primer periodo), el bloque se elige **por hora de calendario** y no por `turno_id` (el **T2 se parte por medianoche**, cada evento aparece una sola vez en el libro), y el orden dentro del bloque es **ascendente** — al revés del listado, a propósito. El alcance sale de la constante `PLANTAS_F03`, así que las plantas-fixture nunca se exportan sin que producción las nombre.
 
 **Cierre automático (`server/utils/mand-sweeper.js`):**
 

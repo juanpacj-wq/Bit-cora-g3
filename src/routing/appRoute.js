@@ -4,14 +4,14 @@
 // callback OIDC (?auth=…), así que no afecta el redirect de Entra (que aterriza en `/`).
 //
 // Forma canónica de las rutas:
-//   #/op24h                       → MAND (Operación 24h)
+//   #/op24h?mes=YYYY-MM           → MAND (Operación 24h; el mes del libro F03, D-058)
 //   #/disp?planta=GEC3|GEC32      → DISP (tab de planta)
 //   #/comb?fecha=YYYY-MM-DD       → COMB (fecha seleccionada)
 //   #/b/<codigo>                  → bitácora genérica (ej. #/b/AUTOR)
 //   #/historicos                  → vista de históricos
 //   vacío / desconocido           → fallback (vista 'bitacoras', codigo null) → el caller cae a
 //                                    la primera bitácora permitida (comportamiento legacy).
-import { getTodayBogota } from '../utils/fecha';
+import { getTodayBogota, getCurrentMonthBogota } from '../utils/fecha';
 
 // Las 3 bitácoras con UI propia tienen slug corto; el resto usa `b/<codigo>`.
 export const SLUG_BY_CODIGO = { MAND: 'op24h', DISP: 'disp', COMB: 'comb' };
@@ -29,6 +29,8 @@ export const CODIGO_ALIAS = { SALA: 'SALAJDT' };
 // routing a un módulo de componentes (los tabs de DISP exponen ambas, independientes del login).
 const PLANTAS_VALIDAS = ['GEC3', 'GEC32'];
 const FECHA_RE = /^\d{4}-\d{2}-\d{2}$/;
+// D-058: mismo patrón que valida el backend en `GET /reporte-mensual` (mes 01..12, no 00 ni 13).
+const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 // Validadores puros: param inválido → se descarta (no rompe la navegación, cae al default del
 // componente). La fecha futura se rechaza con paridad al 400 `fecha_futura` del backend COMB.
@@ -37,6 +39,12 @@ export function plantaValida(p) {
 }
 export function fechaValida(f) {
   return typeof f === 'string' && FECHA_RE.test(f) && f <= getTodayBogota();
+}
+// D-058: el mes del libro F03. Mismo criterio que la fecha de COMB — el futuro se descarta, con
+// paridad al 400 `mes_futuro` del backend. La comparación de cadenas `YYYY-MM` ordena igual que el
+// calendario, así que no hace falta parsear.
+export function mesValido(m) {
+  return typeof m === 'string' && MES_RE.test(m) && m <= getCurrentMonthBogota();
 }
 
 // parseHash('#/comb?fecha=2026-06-20') → { vista, codigo, params }
@@ -75,6 +83,11 @@ export function parseHash(hashString) {
   } else if (codigo === 'COMB') {
     const fecha = query.get('fecha');
     if (fechaValida(fecha)) params.fecha = fecha;
+  } else if (codigo === 'MAND') {
+    // D-058: el mes del libro F03 es subestado deep-linkeable. NO es el día de la grilla: esa sigue
+    // siendo siempre HOY (D-017/D-056) y no tiene selector de fecha — son cosas distintas.
+    const mes = query.get('mes');
+    if (mesValido(mes)) params.mes = mes;
   }
   return { vista: 'bitacoras', codigo, params };
 }
@@ -93,6 +106,8 @@ export function buildHash({ vista, codigo, params } = {}) {
     query = `?planta=${params.planta}`;
   } else if (codigo === 'COMB' && fechaValida(params?.fecha)) {
     query = `?fecha=${params.fecha}`;
+  } else if (codigo === 'MAND' && mesValido(params?.mes)) {
+    query = `?mes=${params.mes}`;
   }
   return `#/${slug}${query}`;
 }
