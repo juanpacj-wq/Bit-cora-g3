@@ -24,6 +24,7 @@ import { necesitaCatchup, periodoDesdeDe } from '../utils/sis/sis-sweeper-helper
 import { fechaBogotaStr } from '../utils/turno.js';
 
 const RE_FECHA = /^\d{4}-\d{2}-\d{2}$/;
+const BACKOFF_MS = 15_000; // pausa tras un día fallido (hipo de red/BD/SIS) antes de seguir.
 
 function addDays(fecha, n) {
   const d = new Date(fecha + 'T00:00:00Z');
@@ -79,19 +80,24 @@ try {
 
   const tot = { dias: 0, saltados: 0, sinLog: 0, procesados: 0, errores: 0, creados: 0, actualizados: 0, eliminados: 0, incompletos: [] };
   const t0 = Date.now();
+  const dormir = (ms) => new Promise((res) => setTimeout(res, ms));
+  const nDias = Math.round((new Date(to + 'T00:00:00Z') - new Date(from + 'T00:00:00Z')) / 86400000) + 1;
   for (let fecha = from; fecha <= to; fecha = addDays(fecha, 1)) {
     tot.dias++;
-    const row = await leerScrapeLog(pool, fecha);
-    if (!args.full && !necesitaCatchup(row)) { tot.saltados++; continue; }
-    if (!row && args['solo-parciales']) { tot.sinLog++; continue; }
-    const periodoDesde = args.full ? 1 : periodoDesdeDe(row);
-    const estado = row ? `ok=${row.periodos_ok} err=${row.periodos_error} ultimo=${row.ultimo_periodo ?? '-'} completo=${row.completo ? 1 : 0}` : 'sin log';
-    if (args['dry-run']) {
-      console.log(`[backfill] ${fecha}: ${estado} → pediría periodos ${periodoDesde}..24`);
-      tot.procesados++;
-      continue;
-    }
+    // TODO el día va dentro del try (también la lectura del log previo): un hipo de red/BD cuenta
+    // el día como fallido y se sigue con el siguiente tras un backoff — la corrida es resumible,
+    // nunca debe morir con un stack trace a mitad de un rango largo.
     try {
+      const row = await leerScrapeLog(pool, fecha);
+      if (!args.full && !necesitaCatchup(row)) { tot.saltados++; continue; }
+      if (!row && args['solo-parciales']) { tot.sinLog++; continue; }
+      const periodoDesde = args.full ? 1 : periodoDesdeDe(row);
+      const estado = row ? `ok=${row.periodos_ok} err=${row.periodos_error} ultimo=${row.ultimo_periodo ?? '-'} completo=${row.completo ? 1 : 0}` : 'sin log';
+      if (args['dry-run']) {
+        console.log(`[backfill] ${fecha}: ${estado} → pediría periodos ${periodoDesde}..24`);
+        tot.procesados++;
+        continue;
+      }
       const r = await scrapeDia(pool, {
         fecha, scrape_tipo: 'backfill', soloHoy: false, periodoDesde,
         log: (...a) => console.log('[backfill]  ', ...a),
@@ -100,15 +106,17 @@ try {
       tot.creados += r.creados; tot.actualizados += r.actualizados; tot.eliminados += r.eliminados;
       tot.errores += r.periodos_error;
       if (!r.completo) tot.incompletos.push(fecha);
-      const pct = Math.round(100 * tot.dias / (Math.round((new Date(to + 'T00:00:00Z') - new Date(from + 'T00:00:00Z')) / 86400000) + 1));
+      const pct = Math.round(100 * tot.dias / nDias);
       console.log(`[backfill] ${fecha}: ${estado} → desde=${r.desde} ok=${r.periodos_ok} err=${r.periodos_error} ` +
         `ultimo=${r.ultimo_periodo} completo=${r.completo ? 1 : 0} +${r.creados}/~${r.actualizados}/-${r.eliminados} (${pct}%)`);
+      if (r.periodos_error > 0) await dormir(BACKOFF_MS); // el SIS falló en algún periodo: respiro.
     } catch (err) {
       tot.errores++;
       tot.incompletos.push(fecha);
-      console.error(`[backfill] ${fecha}: FALLÓ — ${err.message}`);
+      console.error(`[backfill] ${fecha}: FALLÓ — ${err.message} (sigo en ${BACKOFF_MS / 1000}s)`);
+      await dormir(BACKOFF_MS);
     }
-    if (throttleMs > 0 && fecha < to) await new Promise((res) => setTimeout(res, throttleMs));
+    if (throttleMs > 0 && fecha < to) await dormir(throttleMs);
   }
 
   const seg = Math.round((Date.now() - t0) / 1000);
