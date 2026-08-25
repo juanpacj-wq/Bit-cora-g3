@@ -5,7 +5,7 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 2.1 |
+| Versión | 2.2 |
 | Fecha | 2026-07-05 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
@@ -1067,6 +1067,32 @@ GROUP BY c.planta_id, c.fecha, c.periodo;
 
 **Cross-ref:** ADR [[D-027]] documenta la decisión completa. §2.7 detalla el catálogo. Paridad de `modificado_por` con [[D-019]] (MAND).
 
+#### 4.9.1 Ingesta automática desde el SIS (GEC32) — `valor_sis` + `sis_scrape_log` (D-029, F27.A1; semántica corregida en D-060, F33.A1)
+
+El carbón de GEC32 (`ALIM_1..8`) lo escribe cada hora el sweeper `server/utils/sis/sis-sweeper.js` vía `scrapeDia` (`carbon-scraper.js`) con la **regla de ownership "operador gana"**: una fila es SIS-owned ⇔ `creado_por = SISTEMA AND (modificado_por IS NULL OR = SISTEMA)`; el SIS solo pisa `cantidad` en filas SIS-owned y en las humano-owned escribe únicamente la sombra `valor_sis`.
+
+```sql
+-- F27.A1: sombra del SIS en la tabla de consumos.
+ALTER TABLE bitacora.consumo_combustible ADD valor_sis DECIMAL(12,3) NULL;
+ALTER TABLE bitacora.consumo_combustible ADD sis_actualizado_en DATETIME2 NULL;
+
+-- F27.A1: resumen del ÚLTIMO scrape de cada (planta, día).
+CREATE TABLE bitacora.sis_scrape_log (
+    scrape_log_id  INT IDENTITY(1,1) PRIMARY KEY,
+    planta_id      VARCHAR(10) NOT NULL REFERENCES lov_bit.planta(planta_id),
+    fecha          DATE        NOT NULL,
+    scrape_tipo    VARCHAR(20) NOT NULL CONSTRAINT CK_sis_scrape_tipo CHECK (scrape_tipo IN ('horario','backfill','manual')),
+    periodos_ok    TINYINT     NOT NULL CONSTRAINT DF_sis_scrape_ok DEFAULT 0,
+    periodos_error TINYINT     NOT NULL CONSTRAINT DF_sis_scrape_error DEFAULT 0,
+    ultimo_periodo TINYINT     NULL,
+    completo       BIT         NOT NULL CONSTRAINT DF_sis_scrape_completo DEFAULT 0,
+    scraped_en     DATETIME2   NOT NULL CONSTRAINT DF_sis_scrape_en DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT UQ_sis_scrape_planta_fecha UNIQUE (planta_id, fecha)
+);
+```
+
+**Semántica (D-060):** `completo = 1` ⇔ el día tiene sus **24 periodos sin errores** (`periodos_error = 0 AND ultimo_periodo = 24`). NUNCA significa "scrapeado hasta la hora actual": el periodo 24 (23:00→00:00) solo se puede leer al día siguiente, así que el día en curso queda siempre `completo = 0` y lo cierra la repesca de "ayer" del sweeper (cada tick, a HH:02 Bogotá, pidiendo `ultimo_periodo+1..24`). `periodos_ok`/`ultimo_periodo` acumulan lo previo cuando el scrape arranca en `periodoDesde > 1` (solo si lo previo es contiguo y sin errores; si no, día completo). **F33.A1** recalificó a `completo = 0` toda fila que no cumplía 24/24 (herencia del flag que se calculaba contra el horizonte de "hoy"). Reparación histórica: `server/scripts/backfill-carbon-gec32.js`.
+
 ---
 
 ### 4.10 `turno_unidad` + `turno_participante` — entidad explícita de turno (D-045)
@@ -1486,6 +1512,7 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 | 2.0 | 2026-07-14 | **Split de Sala de Mando por rol (D-053).** §2.4: la fila `SALA` ("Sala de Mando Operativa") se vuelve tres — `SALAJDT` (Sala de Mando - Jefe de Turno), `SALAING` (- Ing. de Operación), `SALAOP` (- Operador). **`SALA` NO se borró: se renombró a `SALAJDT`** conservando `bitacora_id=14`, `orden=3` y su `tipo_evento` (misma fila → su histórico no se movió); el rename va en el `UPDATE` del "Paso 1" de `db.js`, nunca dentro del `MERGE` (matchea por `codigo` → habría dejado la vieja huérfana). `orden` renumerado (AGUA 4→6 … MAND 12→14) para dejar las tres contiguas; el orden relativo se preserva. §2.6: **se rompe la simetría JdT/IngOp** (ya no tienen filas idénticas) — el `IN ('DISP','AUTH','SALA')` de `puede_crear` se parte en `JdT → IN ('DISP','SALAJDT')` e `IngOp → IN ('DISP','SALAING')`, preservando DISP para ambos; el `Operador de Planta - Sala de Mando` pasa a `SALAOP` y **no ve** las otras dos; `'AUTH'` retirado (código muerto: `activa=0` + la matriz filtra `activa=1`). **Nueva §4.11** `bitacora.registro_historico_backup_D053` (respaldo residente, excepción explícita a RF-032). Migración **F30.A1**: reparte `registro_activo`/`registro_historico` por el cargo del autor reconstruido por evidencia (`turno_participante`/`conformacion_turno` por `turno_id` → `sesion_activa` con cargo único), move-out por atribución positiva (lo no atribuible no se toca y se loguea), con remapeo **acoplado** de `tipo_evento_id` y validación `THROW` de integridad. Pre-flight de prod: `sql/snippets/reporte-split-sala-D053.sql` (solo lectura + guardrail). Tests: `split_sala_permisos.test.js` (matriz + regresión DISP), `guard_tipo_evento_coherente.test.js` (drift `tipo_evento_id` ↔ `bitacora_id`, el riesgo que ninguna FK ni lectura cubre), `registros_solo_autor` reescrito con ADMIN como no-autor. |
 | 1.9 | 2026-07-03 | Rol ADMIN (D-039). Cargo 13 `Administrador y Debugging` (App Role `ADMINISTRADOR_DEBUGGING`), `solo_lectura=0`, `puede_cerrar_turno=1`. §2.6 matriz extendida: cláusula `WHEN c.nombre='Administrador y Debugging' THEN 1` como primer WHEN de `puede_ver` y `puede_crear` → acceso total data-driven (ve+crea en toda bitácora activa), sin superusuario por código. Override defensivo DISP (F12.A6) incluye al admin en su `CASE ... IN (...)`. Sin hard-delete de históricos (append-only intacto). `entra-roles.js` mapea el App Role→cargo (1:1, 13 roles) y lo pone primero en `PRECEDENCE`. Tests: `entra_roles.test.js` (13 roles + precedencia) y `rol_admin_debugging.test.js` (matriz completa + regresión override DISP + idempotencia). |
 | 2.1 | 2026-08-10 | **Rol observador "USUARIO DE CONSULTA" (D-059).** §2.2: columna nueva `lov_bit.cargo.es_observador BIT NOT NULL DEFAULT 0` (ALTER idempotente + 5ª columna del MERGE auto-corrector) y cargo 14 `USUARIO DE CONSULTA` (App Role `USUARIO_CONSULTA`, ÚLTIMO en `PRECEDENCE`) con `solo_lectura=1`, `puede_cerrar_turno=0`, `puede_cambiar_unidad=1`, `es_observador=1`. §2.6: cláusulas `THEN 1`/`THEN 0` junto a las del Gerente → ve todo, no crea nada. Invisibilidad (dos capas): la sesión del observador nace con `turno_id=NULL` (sin `turno_participante` → sin `conformacion_turno`; su login no abre `turno_unidad`), `/abrir` no crea `sesion_bitacora`, y filtro `c.es_observador = 0` en usuarios-activos (HTTP/WS), preview-masivo, usuarios-en-bitacora, `snapshotIngenieros(DelDia)`, el INSERT de conformación de `cerrarTurno` (junto al `es_sintetico` D-044), `buildConformacionSnapshot`, el `hayPersonal` del auto-cierre y la vista `v_ingenieros_en_turno`. Gates 403 estables `observador_sin_finalizacion` (finalizar/revertir) y `observador_solo_lectura` (IA). Tests: `rol_usuario_consulta.test.js` (16 tests) + `entra_roles` a 14 roles + fila en `split_sala_permisos`. |
+| 2.2 | 2026-08-25 | **Periodo 24 del carbón GEC32 (D-060).** **Nueva §4.9.1** documenta la ingesta SIS que faltaba en este modelo: columnas `valor_sis`/`sis_actualizado_en` de `consumo_combustible` y la tabla `bitacora.sis_scrape_log` (F27.A1). Semántica corregida: `completo = 1` ⇔ 24 periodos sin errores (antes se calculaba contra el horizonte de "hoy" y dejaba `completo=1, ultimo_periodo=23` → el P24 nunca se cargaba; 41 días en prod). Migración **F33.A1**: `UPDATE sis_scrape_log SET completo=0 WHERE completo=1 AND (ultimo_periodo IS NULL OR ultimo_periodo<>24 OR periodos_error>0)`; no toca `consumo_combustible`. Reparación de datos con `server/scripts/backfill-carbon-gec32.js` (resumible, guardrail `--confirm-db`). Sin cambios de DDL. |
 
 ---
 

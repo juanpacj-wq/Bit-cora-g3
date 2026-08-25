@@ -2636,6 +2636,42 @@ export async function initDB() {
     }
   }
 
+  // ---------- F33.A1 — D-060: recalificar `completo` en sis_scrape_log (semántica 24/24) ----------
+  //
+  // Hasta D-060 `scrapeDia` marcaba `completo=1` cuando había scrapeado "hasta la hora actual", así
+  // que el tick de las 23h dejaba cada día con completo=1 y ultimo_periodo=23 (o menos, si hubo un
+  // reinicio). Ese flag mentiroso inhabilitaba la repesca de "ayer" del sweeper y el salto del
+  // backfill → el periodo 24 nunca se cargó (41 días en prod). Desde D-060 `completo` significa
+  // "los 24 periodos sin errores"; acá se bajan a 0 las filas que no lo cumplen para que el sweeper
+  // (catchup de ayer) y scripts/backfill-carbon-gec32.js las vean como pendientes. No toca
+  // consumo_combustible: los datos existentes son correctos, solo están incompletos.
+  const f33A1Aplicada = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F33.A1'`
+  );
+  if (!f33A1Aplicada.recordset[0]) {
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    try {
+      const recal = await new sql.Request(tx).batch(`
+        UPDATE bitacora.sis_scrape_log
+        SET completo = 0
+        WHERE completo = 1
+          AND (ultimo_periodo IS NULL OR ultimo_periodo <> 24 OR periodos_error > 0);
+      `);
+      await new sql.Request(tx).batch(`
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F33.A1');
+      `);
+      await tx.commit();
+      console.log(
+        `[F33.A1] sis_scrape_log: ${recal.rowsAffected[0] ?? 0} días recalificados a completo=0 ` +
+        `(no tenían 24/24). El sweeper/backfill los completará.`
+      );
+    } catch (err) {
+      try { await tx.rollback(); } catch {}
+      throw err;
+    }
+  }
+
   console.log('[DB] Conexión OK');
 }
 

@@ -1198,6 +1198,54 @@ matriz, gates e invisibilidad (con controles positivos); `entra_roles` pasa a 14
 
 ---
 
+## D-060 — El periodo 24 del carbón GEC32 nunca se cargaba: `completo` pasa a significar 24/24 y el sweeper repesca "ayer" en cada tick
+
+**Fecha:** 2026-08-25
+
+**Contexto:** la grilla COMB de GEC32 mostraba la fila P24 (23h) vacía TODOS los días aunque la
+unidad generara las 24 horas (prod: 08-10→08-20 con despacho P24 = 250 MW y ~241 MWh en la hora 23,
+0 celdas P24). Auditoría en `PortalG3_dev` y `PortalG3`: 41 días de prod (53 de 68 en
+`sis_scrape_log`) terminaban `ultimo_periodo=23, completo=1`; los únicos días con P24 eran los que
+rescató el catchup de "ayer" al reiniciar el server al día siguiente. **No había desfase de hora**:
+el mapeo `periodo p ↔ [p-1, p)` cuadra hora a hora contra `dashboard.generacion_periodos` (bajones
+de MWh y de carbón coinciden; en la parada del 08-21 a las 10:29 la última celda es P10) y el SIS
+sí sirve el P24 (`t2` = 00:00 del día siguiente). Tres defectos encadenados en el scraper: (1) el
+horizonte de "hoy" es `1..horaBogotaActual()` ∈ 0..23, y el P24 (23:00→00:00) solo es legible
+cuando ya es "mañana", momento en que el sweeper solo barre `hoy`; (2) `completo` se calculaba
+contra ese horizonte truncado (`ultimoOk === nEsperado`), así que el tick de las 23h dejaba
+`completo=1` — y un reinicio a las 15h, `completo=1` con `ultimo_periodo=15`; (3) la única repesca
+(catchup de "ayer") corría solo en el primer tick tras un reinicio y gateada por ese flag mentiroso
+→ nunca se disparaba. Además `setTimeout(tick, 1h)` tras cada corrida derivaba ≈ la duración del
+scrape (4-5 min/día) y, al cruzar medianoche, perdía también el P23 (08-10 quedó en 22).
+
+**Decisión:** (a) **`sis_scrape_log.completo` ⇔ 24 periodos sin errores**, nunca "hasta la hora
+actual" (para `hoy` con `soloHoy` queda siempre 0); (b) `scrapeDia` gana `periodoDesde` (solo se
+honra si el log previo es contiguo — `periodos_error=0 && ultimo_periodo=periodoDesde-1` —, si no
+cae a 1; el log acumula `periodos_ok`/`ultimo_periodo`) y un reloj inyectable `ahora` para testear
+el caso "hoy" sin tocar la fecha real; (c) el sweeper (`sis-sweeper.js`) **repesca "ayer" en CADA
+tick** cuando `necesitaCatchup` (sin fila, `completo=0` o `ultimo_periodo≠24`) pidiendo solo
+`ultimo_periodo+1..24` — en operación normal 1 fetch del P24 a las 00:02 — y luego barre `hoy` como
+antes; (d) el tick se alinea a **HH:02 Bogotá** (`msHastaProximaMarca`, helpers puros en
+`sis-sweeper-helpers.js` fijados por `sis_sweeper.test.js`); (e) migración **F33.A1** baja a
+`completo=0` toda fila que no tenga 24/24 (dev 24, prod 62) para que sweeper y backfill las vean
+pendientes; (f) CLI `server/scripts/backfill-carbon-gec32.js` (E7 reducido, resumible, `--dry-run`,
+`--full`, guardrail `--confirm-db` = `DB_NAME`, `--to` ≤ hoy−2 para no competir con el tick) que
+completa los días históricos con los periodos que faltan. **Regla dura:** nunca gatear una repesca
+con un flag que dependa de la hora actual; la hora 24 de un día solo existe al día siguiente.
+
+**Consecuencias:** el P24 aparece ~00:02 del día siguiente en vez de nunca; un reinicio a media
+tarde ya no "cierra" el día (el tick siguiente lo completa desde `ultimo_periodo+1`); el barrido de
+`hoy` sigue re-leyendo `1..H` cada hora (optimizarlo con `periodoDesde` es follow-up, igual que el
+DELETE de celdas SIS-owned cuando la lectura de fin de hora da fuera de servicio — FOLLOW-UP AUD-14
+— y la carga histórica pre-2026-06-02 de E7). `DB_NAME_PROD` del `.env` es una variable **inerte**
+(nadie la lee): prod se selecciona con `DB_NAME`. Tests: `sis_scraper_ownership` +4 (T7 horizonte
+de hoy sin P24 y `completo=false`, T8 `periodoDesde=24` = 1 fetch y 24/24, T9/T10 no contiguo o
+con errores ⇒ día completo), `sis_sweeper.test.js` nuevo (11, puros). Cross-ref: [[D-027]] (COMB),
+[[D-029]] (scraper SIS), [[D-034]] (`cantidad_max`, el scraper clampa), [[D-055]] (misma familia:
+un bug de horizonte temporal que solo se ve auditando datos).
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

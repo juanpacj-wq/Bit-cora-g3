@@ -11,10 +11,10 @@
 | E1 — Migración F27.A1 | ✅ | `valor_sis`+`sis_actualizado_en` en `consumo_combustible` + tabla `sis_scrape_log`. Migración idempotente aplicada y test verde. |
 | E2 — Parser + cliente SIS | ✅ | Port ESM de `parseXls` + `sis-client.js` (buildUrl/fetchPeriod/periodoBounds/extraerCarbonValidado). 8/8 verde; test del parser SKIP (sin fixture `.xls` offline). |
 | E3 — carbon-scraper + ownership | ✅ | `carbon-scraper.js` (`scrapeDia` con tabla de ownership + `discoverEarliestDate`). 6/6 ownership verde (BD real, fetch mockeado). `discoverEarliestDate` pendiente de calibración en E7. |
-| E4 — Sweeper horario + wiring | ✅ | `sis-sweeper.js` (1h, catchup hoy + ayer-si-incompleto) cableado en `server.js`. Server arranca y sobrevive SIS sin respuesta. 136/137 verde (1 skip parser). |
+| E4 — Sweeper horario + wiring | ✅ | `sis-sweeper.js` cableado en `server.js`. **Corregido en D-060 (2026-08-25):** tick alineado a HH:02 Bogotá, repesca de AYER en CADA tick (`ultimo_periodo+1..24`), `completo` ⇔ 24/24 (F33.A1 recalifica). Antes el P24 nunca se cargaba (41 días en prod). |
 | E5 — Endpoints + GET | ⬜ | — |
 | E6 — UI grilla | ⬜ | — |
-| E7 — Backfill (corrida única) | ⬜ | — |
+| E7 — Backfill (corrida única) | 🟡 | **Parcial (D-060):** CLI `server/scripts/backfill-carbon-gec32.js` (resumible, `--dry-run`, `--full`, guardrail `--confirm-db`) usado para completar los P24 faltantes desde 2026-06-02 en dev y prod. Pendiente: `discoverEarliestDate` + carga histórica pre-06-02. |
 | E8 — Docs + cleanup + commit | ⬜ | — |
 
 Leyenda: ⬜ pendiente · 🟡 en progreso · ✅ hecho y probado · ⛔ bloqueado.

@@ -18,12 +18,34 @@ import * as dbBindings from '../../db.js';
 const PLANTA_ID = 'GEC32';
 const TIMEOUT_MS = 30000; // corta el fetch si el SIS no responde (resiliencia del sweeper).
 
-// Hora Bogotá actual (0..23) — el periodo p cubre [p-1 .. p)h, así que con hora=H los
+// Hora Bogotá (0..23) del instante dado — el periodo p cubre [p-1 .. p)h, así que con hora=H los
 // periodos COMPLETADOS hoy son 1..H. Reusa el shift puro -5h de turno.js.
-function horaBogotaActual() {
-  const d = new Date();
+//
+// D-060: H nunca vale 24 → el P24 (23:00→00:00) de un día SOLO es legible cuando ya es "mañana".
+// Por eso el día en curso jamás llega a 24/24 y quien debe completarlo es la repesca de "ayer"
+// del sweeper (sis-sweeper.js), no este horizonte. No "arreglar" esto sumando 1.
+function horaBogotaActual(d = new Date()) {
   const col = new Date(d.getTime() - 5 * 3600 * 1000);
   return col.getUTCHours();
+}
+
+// Resumen previo de (GEC32, fecha) en sis_scrape_log, o null si nunca se scrapeó ese día.
+export async function leerScrapeLog(pool, fecha) {
+  const r = await pool.request()
+    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('f', sql.Date, fecha)
+    .query(`SELECT periodos_ok, periodos_error, ultimo_periodo, completo
+            FROM bitacora.sis_scrape_log WHERE planta_id=@p AND fecha=@f`);
+  return r.recordset[0] ?? null;
+}
+
+// ¿El log previo cubre 1..(periodoDesde-1) sin huecos? Solo entonces es válido scrapear a partir
+// de periodoDesde y acumular sobre lo ya persistido. Un log con errores o con ultimo_periodo
+// distinto no garantiza contigüidad → el llamador cae a 1 (auto-sanador).
+export function logContiguoHasta(row, periodoDesde) {
+  if (periodoDesde <= 1) return true;
+  if (!row) return false;
+  return Number(row.periodos_error) === 0 && Number(row.ultimo_periodo) === periodoDesde - 1;
 }
 
 // Resuelve el id del usuario SISTEMA: prefiere el live binding de db.js (server en marcha);
@@ -179,24 +201,49 @@ async function upsertScrapeLog(tx, { fecha, scrape_tipo, periodos_ok, periodos_e
 //   scrape_tipo:  'horario' | 'backfill' | 'manual' (CHECK en sis_scrape_log).
 //   soloHoy:      si fecha === hoy Bogotá, limita a los periodos ya completados (1..horaActual).
 //                 Para días pasados siempre 1..24. Con soloHoy=false fuerza 1..24 incluso hoy.
+//   periodoDesde: primer periodo a pedir (default 1). >1 solo se honra si sis_scrape_log ya cubre
+//                 1..periodoDesde-1 sin errores (logContiguoHasta); si no, cae a 1. Permite completar
+//                 solo lo que falta (típicamente el P24 de ayer: 1 fetch en vez de 24). D-060.
+//   ahora:        reloj inyectable (tests) del que salen "hoy" y la hora Bogotá.
 //   fetchFn:      inyección de dependencia para tests (default: fetchPeriod real con timeout).
 //   log:          logger opcional (default: console.log con prefijo).
 // Devuelve { fecha, periodos_ok, periodos_error, creados, actualizados, eliminados, completo }.
+//
+// Semántica del log (D-060): `completo` ⇔ el día tiene sus 24 periodos sin errores. NUNCA significa
+// "completo hasta la hora actual": para el día en curso con soloHoy queda siempre 0, y así el
+// sweeper sabe que aún debe repescarlo mañana (P24). `periodos_ok`/`ultimo_periodo` acumulan lo
+// previo cuando se scrapea desde periodoDesde>1.
 export async function scrapeDia(pool, {
   fecha,
   scrape_tipo = 'horario',
   soloHoy = true,
+  periodoDesde = 1,
+  ahora = () => new Date(),
   fetchFn = (f1, h1, f2, h2) => fetchPeriod(f1, h1, f2, h2, { timeoutMs: TIMEOUT_MS }),
   log = (...a) => console.log('[sis-scraper]', ...a),
 } = {}) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha || '')) {
     throw new Error(`scrapeDia: fecha inválida (YYYY-MM-DD): ${fecha}`);
   }
-  const hoy = fechaBogotaStr(new Date());
+  const instante = ahora();
+  const hoy = fechaBogotaStr(instante);
   if (fecha > hoy) throw new Error(`scrapeDia: fecha futura no permitida: ${fecha}`);
+  if (!Number.isInteger(periodoDesde) || periodoDesde < 1 || periodoDesde > 24) {
+    throw new Error(`scrapeDia: periodoDesde fuera de rango 1..24: ${periodoDesde}`);
+  }
 
   // Cuántos periodos esperamos. Hoy: solo los completados (1..horaActual). Pasado: 24.
-  const nEsperado = (fecha === hoy && soloHoy) ? horaBogotaActual() : 24;
+  const nEsperado = (fecha === hoy && soloHoy) ? horaBogotaActual(instante) : 24;
+
+  // Desde dónde. Un arranque parcial solo vale si lo previo es contiguo; si no, día completo.
+  let desde = periodoDesde;
+  if (desde > 1) {
+    const previo = await leerScrapeLog(pool, fecha);
+    if (!logContiguoHasta(previo, desde)) {
+      log(`log previo de ${fecha} no cubre 1..${desde - 1} de forma contigua → scrape completo`);
+      desde = 1;
+    }
+  }
 
   const sistemaId = await resolverSistemaId(pool);
   const alimMap = await resolverAlimMap(pool);
@@ -204,7 +251,7 @@ export async function scrapeDia(pool, {
   // 1) FETCH (sin transacción — es red). Un fetch fallido cuenta error y NO aborta el día.
   const lecturas = []; // { periodo, tolvasVal } solo de periodos OK
   let periodos_ok = 0, periodos_error = 0, ultimoOk = null;
-  for (let periodo = 1; periodo <= nEsperado; periodo++) {
+  for (let periodo = desde; periodo <= nEsperado; periodo++) {
     try {
       const { f1, h1, f2, h2 } = periodoBounds(fecha, periodo);
       const parsed = await fetchFn(f1, h1, f2, h2);
@@ -218,7 +265,11 @@ export async function scrapeDia(pool, {
     }
   }
 
-  const completo = periodos_error === 0 && ultimoOk === nEsperado && nEsperado > 0;
+  // Resumen acumulado: lo previo (1..desde-1, ya verificado contiguo) + lo de esta corrida.
+  // `completo` ⇔ 24/24 sin errores (D-060). Nunca depende de nEsperado ni de la hora actual.
+  const ultimo_periodo = ultimoOk ?? (desde > 1 ? desde - 1 : null);
+  const periodos_ok_total = (desde - 1) + periodos_ok;
+  const completo = periodos_error === 0 && ultimo_periodo === 24;
 
   // 2) WRITE (una transacción para todo el día + el log → rollback ante cualquier error).
   let creados = 0, actualizados = 0, eliminados = 0;
@@ -250,8 +301,8 @@ export async function scrapeDia(pool, {
       }
     }
     await upsertScrapeLog(tx, {
-      fecha, scrape_tipo, periodos_ok, periodos_error,
-      ultimo_periodo: ultimoOk, completo,
+      fecha, scrape_tipo, periodos_ok: periodos_ok_total, periodos_error,
+      ultimo_periodo, completo,
     });
     await tx.commit();
   } catch (err) {
@@ -259,7 +310,10 @@ export async function scrapeDia(pool, {
     throw err;
   }
 
-  const resumen = { fecha, periodos_ok, periodos_error, creados, actualizados, eliminados, completo };
+  const resumen = {
+    fecha, periodos_ok: periodos_ok_total, periodos_error, ultimo_periodo,
+    desde, creados, actualizados, eliminados, completo,
+  };
   log(`día ${fecha} (${scrape_tipo}):`, JSON.stringify(resumen));
   return resumen;
 }

@@ -188,3 +188,93 @@ test('6. sis_scrape_log queda con el resumen correcto', async () => {
   assert.equal(log.ultimo_periodo, 24);
   assert.equal(log.completo, true);
 });
+
+// ---------------------------------------------------------------------------------------------
+// D-060: horizonte de "hoy", periodoDesde y semántica completo=24/24. Sin estos, el P24 de cada
+// día nunca se pedía (el tick de las 23h dejaba completo=1 con ultimo_periodo=23).
+// ---------------------------------------------------------------------------------------------
+
+// Envuelve un fetchFn y registra los límites pedidos, para asertar QUÉ periodos se pidieron.
+function grabar(fetchFn) {
+  const llamadas = [];
+  const fn = async (f1, h1, f2, h2) => { llamadas.push({ f1, h1, f2, h2 }); return fetchFn(f1, h1, f2, h2); };
+  fn.llamadas = llamadas;
+  return fn;
+}
+
+async function setLog({ periodos_ok, periodos_error, ultimo_periodo, completo }) {
+  await db.request()
+    .input('p', sql.VarChar(10), PLANTA)
+    .input('f', sql.Date, FECHA)
+    .input('ok', sql.TinyInt, periodos_ok)
+    .input('err', sql.TinyInt, periodos_error)
+    .input('ult', sql.TinyInt, ultimo_periodo)
+    .input('comp', sql.Bit, completo ? 1 : 0)
+    .query(`
+      IF EXISTS (SELECT 1 FROM bitacora.sis_scrape_log WHERE planta_id=@p AND fecha=@f)
+        UPDATE bitacora.sis_scrape_log SET scrape_tipo='manual', periodos_ok=@ok, periodos_error=@err,
+               ultimo_periodo=@ult, completo=@comp WHERE planta_id=@p AND fecha=@f;
+      ELSE
+        INSERT INTO bitacora.sis_scrape_log (planta_id, fecha, scrape_tipo, periodos_ok, periodos_error, ultimo_periodo, completo)
+        VALUES (@p, @f, 'manual', @ok, @err, @ult, @comp);
+    `);
+}
+
+async function getLog() {
+  return (await db.request()
+    .input('p', sql.VarChar(10), PLANTA)
+    .input('f', sql.Date, FECHA)
+    .query(`SELECT periodos_ok, periodos_error, ultimo_periodo, completo
+            FROM bitacora.sis_scrape_log WHERE planta_id=@p AND fecha=@f`)).recordset[0];
+}
+
+test('7. "hoy" a las 23:30 con soloHoy ⇒ pide 1..23 (nunca el 24) y completo=false', async () => {
+  // 2026-04-16 23:30 Bogotá = 2026-04-17T04:30Z → hoy === FECHA, hora=23.
+  const ahora = () => new Date('2026-04-17T04:30:00Z');
+  const fetchFn = grabar(mockFetch(1, 3.0));
+  const r = await scrapeDia(db, { fecha: FECHA, scrape_tipo: 'horario', soloHoy: true, ahora, fetchFn });
+  assert.equal(fetchFn.llamadas.length, 23, 'hoy a las 23h: periodos cerrados 1..23');
+  assert.ok(!fetchFn.llamadas.some((c) => c.h1 === '23'), 'el P24 (h1=23) NO se pide en el día en curso');
+  assert.equal(r.ultimo_periodo, 23);
+  assert.equal(r.completo, false, 'completo NUNCA significa "hasta la hora actual"');
+  const log = await getLog();
+  assert.equal(log.periodos_ok, 23);
+  assert.equal(log.ultimo_periodo, 23);
+  assert.equal(log.completo, false);
+});
+
+test('8. periodoDesde=24 con log previo contiguo (ultimo=23) ⇒ 1 solo fetch del P24 y 24/24', async () => {
+  await setLog({ periodos_ok: 23, periodos_error: 0, ultimo_periodo: 23, completo: false });
+  const fetchFn = grabar(mockFetch(24, 9.0));
+  const r = await scrapeDia(db, { fecha: FECHA, scrape_tipo: 'backfill', soloHoy: false, periodoDesde: 24, fetchFn });
+  assert.equal(fetchFn.llamadas.length, 1, 'solo el periodo que falta');
+  assert.deepEqual(fetchFn.llamadas[0], { f1: FECHA, h1: '23', f2: '2026-04-17', h2: '00' }, 'P24 cruza al día siguiente');
+  assert.equal(r.desde, 24);
+  assert.equal(r.creados, 1);
+  assert.equal(Number((await getCelda(24)).cantidad), 9.0);
+  const log = await getLog();
+  assert.equal(log.periodos_ok, 24, 'acumula lo previo (23) + 1');
+  assert.equal(log.periodos_error, 0);
+  assert.equal(log.ultimo_periodo, 24);
+  assert.equal(log.completo, true);
+});
+
+test('9. periodoDesde=24 con log previo NO contiguo (ultimo=20) ⇒ cae a 1..24 (auto-sanador)', async () => {
+  await setLog({ periodos_ok: 20, periodos_error: 0, ultimo_periodo: 20, completo: false });
+  const fetchFn = grabar(mockFetch(24, 4.0));
+  const r = await scrapeDia(db, { fecha: FECHA, scrape_tipo: 'backfill', soloHoy: false, periodoDesde: 24, fetchFn });
+  assert.equal(r.desde, 1);
+  assert.equal(fetchFn.llamadas.length, 24);
+  const log = await getLog();
+  assert.equal(log.periodos_ok, 24);
+  assert.equal(log.ultimo_periodo, 24);
+  assert.equal(log.completo, true);
+});
+
+test('10. log previo con errores ⇒ periodoDesde se ignora aunque ultimo=23', async () => {
+  await setLog({ periodos_ok: 23, periodos_error: 1, ultimo_periodo: 23, completo: false });
+  const fetchFn = grabar(mockFetch(24, 4.0));
+  const r = await scrapeDia(db, { fecha: FECHA, scrape_tipo: 'backfill', soloHoy: false, periodoDesde: 24, fetchFn });
+  assert.equal(r.desde, 1);
+  assert.equal(fetchFn.llamadas.length, 24);
+});
