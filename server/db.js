@@ -357,6 +357,15 @@ async function migrateSchemaV2(db) {
 export async function initDB() {
   const db = await getDB();
 
+  // Metodología v2 (olas en paralelo): los backends efímeros de los lotes que NO son dueños de db.js
+  // arrancan con SKIP_INITDB=1 y no ejecutan DDL, seeds ni migraciones (solo abren el pool). Evita que
+  // varios servers apliquen la misma migración a la vez contra la BD dev (el flag de migracion_aplicada
+  // no es atómico entre procesos). Nunca en producción. Ver server/migrations/README.md.
+  if (process.env.SKIP_INITDB === '1') {
+    console.log('[DB] initDB omitido (SKIP_INITDB=1): sin DDL, seeds ni migraciones en este proceso');
+    return;
+  }
+
   // ---------- 1. Esquemas ----------
   await db.request().batch(`
     IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'lov_bit')
