@@ -1,0 +1,252 @@
+{
+  "implementacion": "D-061",
+  "rama": "feat/sis-carbon-cierre-2026-08",
+  "claim_ttl_min": 240,
+  "olas": {
+    "O1": {
+      "estado": "abierta",
+      "gate": null
+    },
+    "O2": {
+      "estado": "pendiente",
+      "gate": null
+    },
+    "O3": {
+      "estado": "pendiente",
+      "gate": null
+    }
+  },
+  "lotes": {
+    "L01": {
+      "ola": "O1",
+      "titulo": "Núcleo SIS: planta_id + concurrencia en scrapeDia, mutex sis-lock, discover.js",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [],
+      "puro": false,
+      "puerto": 3101,
+      "territorio": [
+        "server/utils/sis/carbon-scraper.js",
+        "server/utils/sis/sis-lock.js",
+        "server/utils/sis/discover.js",
+        "server/utils/sis/sis-sweeper.js",
+        "server/tests/sis_lock.test.js",
+        "server/tests/sis_concurrencia.test.js",
+        "prompts/D-061-sis-carbon-cierre/cierres/L01.md"
+      ],
+      "tests": [
+        "tests/sis_lock.test.js",
+        "tests/sis_concurrencia.test.js",
+        "tests/sis_sweeper.test.js",
+        "tests/sis_scraper_ownership.test.js"
+      ],
+      "criterios": [
+        "CA-1",
+        "CA-2",
+        "CA-3",
+        "CA-4"
+      ]
+    },
+    "L02": {
+      "ola": "O1",
+      "titulo": "Backend COMB: catálogo TST, GET con valor_sis, vaciar = override 0, POST revertir",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [],
+      "puro": false,
+      "puerto": 3102,
+      "territorio": [
+        "server/db.js",
+        "server/routes/combustibles.js",
+        "server/tests/sis_endpoints.test.js",
+        "prompts/D-061-sis-carbon-cierre/cierres/L02.md"
+      ],
+      "tests": [
+        "tests/sis_endpoints.test.js",
+        "tests/consumos_combustible.test.js",
+        "tests/sis_schema.test.js"
+      ],
+      "criterios": [
+        "CA-5",
+        "CA-6",
+        "CA-7",
+        "CA-8",
+        "CA-9",
+        "CA-10"
+      ]
+    },
+    "L03": {
+      "ola": "O1",
+      "titulo": "Front: badge de override + tooltip + Revertir + auto-refresco con gavela + chip SIS",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [],
+      "puro": true,
+      "puerto": 3103,
+      "territorio": [
+        "src/hooks/useCombustibles.js",
+        "src/components/Combustibles/ConsumosGrid.jsx",
+        "src/components/Combustibles/combustibles.css",
+        "src/components/Combustibles/override.js",
+        "src/components/Combustibles/override.test.js",
+        "prompts/D-061-sis-carbon-cierre/cierres/L03.md"
+      ],
+      "tests": [
+        "src/components/Combustibles/override.test.js"
+      ],
+      "criterios": [
+        "CA-11",
+        "CA-12",
+        "CA-13",
+        "CA-14",
+        "CA-15"
+      ]
+    },
+    "L04": {
+      "ola": "O2",
+      "titulo": "Scrape manual asíncrono: sis-job + POST /sis/scrape (202/409) + GET /sis/estado",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L01",
+        "L02"
+      ],
+      "puro": false,
+      "puerto": 3104,
+      "territorio": [
+        "server/utils/sis/sis-job.js",
+        "server/routes/combustibles.js",
+        "server/tests/sis_scrape_endpoint.test.js",
+        "prompts/D-061-sis-carbon-cierre/cierres/L04.md"
+      ],
+      "tests": [
+        "tests/sis_scrape_endpoint.test.js",
+        "tests/sis_endpoints.test.js"
+      ],
+      "criterios": [
+        "CA-16",
+        "CA-17",
+        "CA-18",
+        "CA-19"
+      ]
+    },
+    "L05": {
+      "ola": "O2",
+      "titulo": "Backfill histórico: discover v2, CLI --concurrencia, fixture .xls, calibración y corrida dev",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L01"
+      ],
+      "puro": false,
+      "puerto": 3105,
+      "territorio": [
+        "server/utils/sis/discover.js",
+        "server/scripts/backfill-carbon-gec32.js",
+        "server/tests/sis_discover.test.js",
+        "server/tests/fixtures/sis-period.xls",
+        "server/tests/sis_parser.test.js",
+        "prompts/D-061-sis-carbon-cierre/cierres/L05.md"
+      ],
+      "tests": [
+        "tests/sis_discover.test.js",
+        "tests/sis_parser.test.js"
+      ],
+      "criterios": [
+        "CA-20",
+        "CA-21",
+        "CA-22",
+        "CA-23",
+        "CA-24"
+      ]
+    },
+    "L06": {
+      "ola": "O2",
+      "titulo": "Higiene D-055: tests de COMB/SIS a TEST_PLANTA, guard ampliado, residuos",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L01",
+        "L02"
+      ],
+      "puro": false,
+      "puerto": 3106,
+      "territorio": [
+        "server/tests/consumos_combustible.test.js",
+        "server/tests/rol_coordinador_carbon_maquinaria.test.js",
+        "server/tests/sis_scraper_ownership.test.js",
+        "server/tests/guard_no_prod_historico_destruction.test.js",
+        "server/tests/helpers.js",
+        "server/tests/residuos.js",
+        "prompts/D-061-sis-carbon-cierre/cierres/L06.md"
+      ],
+      "tests": [
+        "tests/consumos_combustible.test.js",
+        "tests/rol_coordinador_carbon_maquinaria.test.js",
+        "tests/sis_scraper_ownership.test.js",
+        "tests/guard_no_prod_historico_destruction.test.js"
+      ],
+      "criterios": [
+        "CA-25",
+        "CA-26",
+        "CA-27",
+        "CA-28"
+      ]
+    },
+    "L07": {
+      "ola": "O3",
+      "titulo": "Docs + cleanup: BIT-MODBD 2.5, BIT-RF 1.9, architecture, glosario, DEPLOY, git rm scraper y prompts D-029",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L04",
+        "L05",
+        "L06"
+      ],
+      "puro": true,
+      "puerto": 3107,
+      "territorio": [
+        "BIT-MODBD-2026-001.md",
+        "BIT-RF-2026-001.md",
+        "docs/architecture.md",
+        "docs/domain-glossary.md",
+        "deploy/DEPLOY.md",
+        "js-scraper-carbon-g32/**",
+        "prompts/D-029-sis-carbon-gec32/**",
+        "prompts/D-061-sis-carbon-cierre/cierres/L07.md"
+      ],
+      "tests": [],
+      "criterios": [
+        "CA-29",
+        "CA-30",
+        "CA-31"
+      ]
+    }
+  },
+  "test_lock": {
+    "sesion": null,
+    "ts": null,
+    "ttl_min": 45
+  }
+}

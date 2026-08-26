@@ -1639,6 +1639,18 @@ un bug de horizonte temporal que solo se ve auditando datos).
 
 ---
 
+## D-061 — Ingesta de carbón GEC32 desde el SIS: cierre (override, revertir, scrape manual, backfill histórico) (EN CURSO, ver prompts/D-061-sis-carbon-cierre/)
+
+**Reserva** (2026-08-26): número consumido por la metodología v2. Documentará la ingesta SIS
+**completa** (el flujo v1 `prompts/D-029-sis-carbon-gec32/` nunca tuvo ADR: `D-029` se consumió con
+el rol Coordinador) — ownership "operador gana", sweeper HH:02 (D-060), `valor_sis`/override
+(incluido el override a 0), revertir, scrape manual asíncrono bajo mutex, backfill histórico con
+fecha de inicio descubierta, catálogo de la planta de test y la higiene D-055 de COMB. Sin
+migraciones; sin cambios cross-repo. El cierre reemplaza este stub por el ADR y corrige la
+cross-ref `[[D-029]]` de D-060 a `[[D-061]]`.
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
