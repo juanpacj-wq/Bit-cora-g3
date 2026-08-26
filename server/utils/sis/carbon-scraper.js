@@ -6,15 +6,26 @@
 // Cualquier otra combinación = humano-owned → el SIS NO toca cantidad/modificado_por, solo la
 // sombra valor_sis. Tabla completa en _CONTEXTO-BASE.md.
 //
-// El sweeper horario (E4) y el backfill (E7) consumen scrapeDia(). discoverEarliestDate() es
-// el sondeo para el backfill; su heurística se CALIBRA en E7 (acá queda parametrizable).
-// Solo GEC32. No toca GEC3 ni contratos cross-repo.
+// El sweeper horario (E4), el backfill (E7) y el scrape manual (D-061) consumen scrapeDia().
+// discoverEarliestDate() se mudó a ./discover.js (D-061 / C3) y se re-exporta desde acá para no
+// romper los imports que ya la traían de este módulo.
+//
+// D-061: scrapeDia() dejó de ser "solo GEC32". `planta_id` es un parámetro (default 'GEC32', la
+// única planta con SIS hoy) y `concurrencia` pide hasta 6 periodos en paralelo — el SIS tarda
+// ~13 s por periodo, así que un día pasa de ~5,2 min a ~1,3 min con concurrencia=4. Sigue sin
+// tocar GEC3 por defecto ni contratos cross-repo.
 
 import sql from 'mssql';
 import { fetchPeriod, periodoBounds, extraerCarbonValidado } from './sis-client.js';
 import { fechaBogotaStr } from '../turno.js';
 import * as dbBindings from '../../db.js';
 
+// C3 (D-061): el sondeo del backfill vive en su propio módulo. Se re-exporta acá para que los
+// imports existentes (`from './carbon-scraper.js'`) sigan resolviendo sin cambios.
+export { discoverEarliestDate } from './discover.js';
+
+// Planta por DEFECTO — hoy la única con SIS (GEC3 no tiene). Ya no gobierna las escrituras: todas
+// usan el `planta_id` que llega por parámetro; esta constante solo alimenta los defaults.
 const PLANTA_ID = 'GEC32';
 const TIMEOUT_MS = 30000; // corta el fetch si el SIS no responde (resiliencia del sweeper).
 
@@ -29,10 +40,10 @@ function horaBogotaActual(d = new Date()) {
   return col.getUTCHours();
 }
 
-// Resumen previo de (GEC32, fecha) en sis_scrape_log, o null si nunca se scrapeó ese día.
-export async function leerScrapeLog(pool, fecha) {
+// Resumen previo de (planta, fecha) en sis_scrape_log, o null si nunca se scrapeó ese día.
+export async function leerScrapeLog(pool, fecha, planta_id = PLANTA_ID) {
   const r = await pool.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), planta_id)
     .input('f', sql.Date, fecha)
     .query(`SELECT periodos_ok, periodos_error, ultimo_periodo, completo
             FROM bitacora.sis_scrape_log WHERE planta_id=@p AND fecha=@f`);
@@ -60,12 +71,18 @@ async function resolverSistemaId(pool) {
   return id;
 }
 
-// Mapa { k: { id, max } } para las 8 tolvas (ALIM_1..ALIM_8) de GEC32. Tolva k → ALIM_k.
+// Mapa { k: { id, max } } para las 8 tolvas (ALIM_1..ALIM_8) de la planta pedida. Tolva k → ALIM_k.
 // AUD-14: incluye `cantidad_max` (D-034) para validar el valor del SIS contra el tope físico
 // antes de escribirlo (paridad con el límite que el POST humano ya aplica). `max=null` = sin tope.
-async function resolverAlimMap(pool) {
+//
+// D-061: es además el guard de "esta planta no tiene SIS", y por eso corre ANTES del primer fetch.
+// Matchea por `LIKE 'ALIM[_]%'` + el sufijo NUMÉRICO del código (NO por la columna `orden`, que no
+// interviene): GEC3 usa ALIM_A..ALIM_F, así que no entra ninguno y la corrida se corta acá.
+// Descubrirlo después de los fetch serían ~5 min de red tirados y un sis_scrape_log que afirma
+// haber leído un día de una planta donde no se escribió una sola celda.
+async function resolverAlimMap(pool, plantaId) {
   const r = await pool.request()
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), plantaId)
     .query(`SELECT combustible_id, codigo, cantidad_max FROM lov_bit.combustible
             WHERE planta_id = @p AND codigo LIKE 'ALIM[_]%'`);
   const map = {};
@@ -74,7 +91,7 @@ async function resolverAlimMap(pool) {
     if (m) map[Number(m[1])] = { id: row.combustible_id, max: row.cantidad_max ?? null };
   }
   for (let k = 1; k <= 8; k++) {
-    if (!map[k]) throw new Error(`carbon-scraper: falta combustible ALIM_${k} en GEC32`);
+    if (!map[k]) throw new Error(`scrapeDia: planta sin catálogo ALIM_1..8: ${plantaId}`);
   }
   return map;
 }
@@ -88,9 +105,9 @@ function esSisOwned(row, sistemaId) {
 
 // Aplica la tabla de ownership a UNA celda dentro de una transacción abierta. Devuelve el
 // tipo de escritura para el conteo del resumen: 'insert' | 'update' | 'delete' | 'skip'.
-async function aplicarCelda(tx, { fecha, periodo, combustibleId, valorSis, sistemaId }) {
+async function aplicarCelda(tx, { plantaId, fecha, periodo, combustibleId, valorSis, sistemaId }) {
   const existente = (await new sql.Request(tx)
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), plantaId)
     .input('f', sql.Date, fecha)
     .input('per', sql.TinyInt, periodo)
     .input('cid', sql.Int, combustibleId)
@@ -106,7 +123,7 @@ async function aplicarCelda(tx, { fecha, periodo, combustibleId, valorSis, siste
     if (!existente) {
       // >0, no existe → INSERT (cantidad = sombra, creado_por = SISTEMA).
       await new sql.Request(tx)
-        .input('p', sql.VarChar(10), PLANTA_ID)
+        .input('p', sql.VarChar(10), plantaId)
         .input('f', sql.Date, fecha)
         .input('per', sql.TinyInt, periodo)
         .input('cid', sql.Int, combustibleId)
@@ -174,9 +191,9 @@ async function aplicarCelda(tx, { fecha, periodo, combustibleId, valorSis, siste
 // Upsert del resumen del scrape en bitacora.sis_scrape_log (UNIQUE planta_id, fecha).
 // IF EXISTS UPDATE ELSE INSERT dentro de la misma transacción → la fila refleja siempre el
 // ÚLTIMO scrape de ese (planta, fecha), que es lo que el backfill consulta para resumir.
-async function upsertScrapeLog(tx, { fecha, scrape_tipo, periodos_ok, periodos_error, ultimo_periodo, completo }) {
+async function upsertScrapeLog(tx, { plantaId, fecha, scrape_tipo, periodos_ok, periodos_error, ultimo_periodo, completo }) {
   await new sql.Request(tx)
-    .input('p', sql.VarChar(10), PLANTA_ID)
+    .input('p', sql.VarChar(10), plantaId)
     .input('f', sql.Date, fecha)
     .input('tipo', sql.VarChar(20), scrape_tipo)
     .input('ok', sql.TinyInt, periodos_ok)
@@ -196,14 +213,39 @@ async function upsertScrapeLog(tx, { fecha, scrape_tipo, periodos_ok, periodos_e
     `);
 }
 
-// Extrae un día completo de GEC32 y lo persiste con la regla de ownership.
+// Ejecuta `fn` sobre `items` con un tope de `tope` llamadas en vuelo a la vez y devuelve los
+// resultados EN EL ORDEN DE `items` (resultados[i] ⇔ items[i]), no en el orden en que terminaron.
+// Es un pool de workers que se reparten un índice compartido; sin dependencias ni timers.
+// `fn` NO debe lanzar: un rechazo cortaría a su worker y dejaría el resto del pool a medias, así
+// que el llamador captura por ítem y devuelve un centinela.
+async function mapaConTope(items, tope, fn) {
+  const resultados = new Array(items.length);
+  let siguiente = 0;
+  const trabajador = async () => {
+    for (;;) {
+      const i = siguiente++;
+      if (i >= items.length) return;
+      resultados[i] = await fn(items[i], i);
+    }
+  };
+  const n = Math.max(1, Math.min(tope, items.length));
+  await Promise.all(Array.from({ length: n }, () => trabajador()));
+  return resultados;
+}
+
+// Extrae un día completo de una planta y lo persiste con la regla de ownership.
 //   fecha:        'YYYY-MM-DD' (día Bogotá).
+//   planta_id:    planta destino (default 'GEC32'). Debe tener catálogo ALIM_1..8; si no, lanza
+//                 antes de pedirle nada al SIS.
 //   scrape_tipo:  'horario' | 'backfill' | 'manual' (CHECK en sis_scrape_log).
 //   soloHoy:      si fecha === hoy Bogotá, limita a los periodos ya completados (1..horaActual).
 //                 Para días pasados siempre 1..24. Con soloHoy=false fuerza 1..24 incluso hoy.
 //   periodoDesde: primer periodo a pedir (default 1). >1 solo se honra si sis_scrape_log ya cubre
 //                 1..periodoDesde-1 sin errores (logContiguoHasta); si no, cae a 1. Permite completar
 //                 solo lo que falta (típicamente el P24 de ayer: 1 fetch en vez de 24). D-060.
+//   concurrencia: cuántos periodos se le piden al SIS a la vez (entero 1..6; default 1 = secuencial,
+//                 idéntico al comportamiento previo). Solo afecta la fase de red: la escritura
+//                 sigue siendo una sola transacción, en orden de periodo ascendente.
 //   ahora:        reloj inyectable (tests) del que salen "hoy" y la hora Bogotá.
 //   fetchFn:      inyección de dependencia para tests (default: fetchPeriod real con timeout).
 //   log:          logger opcional (default: console.log con prefijo).
@@ -215,9 +257,11 @@ async function upsertScrapeLog(tx, { fecha, scrape_tipo, periodos_ok, periodos_e
 // previo cuando se scrapea desde periodoDesde>1.
 export async function scrapeDia(pool, {
   fecha,
+  planta_id = PLANTA_ID,
   scrape_tipo = 'horario',
   soloHoy = true,
   periodoDesde = 1,
+  concurrencia = 1,
   ahora = () => new Date(),
   fetchFn = (f1, h1, f2, h2) => fetchPeriod(f1, h1, f2, h2, { timeoutMs: TIMEOUT_MS }),
   log = (...a) => console.log('[sis-scraper]', ...a),
@@ -231,6 +275,10 @@ export async function scrapeDia(pool, {
   if (!Number.isInteger(periodoDesde) || periodoDesde < 1 || periodoDesde > 24) {
     throw new Error(`scrapeDia: periodoDesde fuera de rango 1..24: ${periodoDesde}`);
   }
+  // Tope duro en 6: más paralelismo no acelera (el cuello es el SIS) y sí lo castiga.
+  if (!Number.isInteger(concurrencia) || concurrencia < 1 || concurrencia > 6) {
+    throw new Error(`scrapeDia: concurrencia fuera de rango 1..6: ${concurrencia}`);
+  }
 
   // Cuántos periodos esperamos. Hoy: solo los completados (1..horaActual). Pasado: 24.
   const nEsperado = (fecha === hoy && soloHoy) ? horaBogotaActual(instante) : 24;
@@ -238,7 +286,7 @@ export async function scrapeDia(pool, {
   // Desde dónde. Un arranque parcial solo vale si lo previo es contiguo; si no, día completo.
   let desde = periodoDesde;
   if (desde > 1) {
-    const previo = await leerScrapeLog(pool, fecha);
+    const previo = await leerScrapeLog(pool, fecha, planta_id);
     if (!logContiguoHasta(previo, desde)) {
       log(`log previo de ${fecha} no cubre 1..${desde - 1} de forma contigua → scrape completo`);
       desde = 1;
@@ -246,24 +294,33 @@ export async function scrapeDia(pool, {
   }
 
   const sistemaId = await resolverSistemaId(pool);
-  const alimMap = await resolverAlimMap(pool);
+  // ANTES de cualquier fetch: sin catálogo ALIM_1..8 esta planta no tiene dónde escribir (C1).
+  const alimMap = await resolverAlimMap(pool, planta_id);
 
   // 1) FETCH (sin transacción — es red). Un fetch fallido cuenta error y NO aborta el día.
-  const lecturas = []; // { periodo, tolvasVal } solo de periodos OK
-  let periodos_ok = 0, periodos_error = 0, ultimoOk = null;
-  for (let periodo = desde; periodo <= nEsperado; periodo++) {
+  // Con concurrencia>1 los periodos salen en paralelo con tope, pero las lecturas se ORDENAN por
+  // periodo antes de escribir: ni el orden de escritura ni `ultimo_periodo` pueden depender de en
+  // qué orden contestó el SIS — si dependieran, dos corridas idénticas dejarían resultados
+  // distintos y el "≡ concurrencia=1" del contrato sería falso.
+  const periodos = [];
+  for (let periodo = desde; periodo <= nEsperado; periodo++) periodos.push(periodo);
+
+  const salidas = await mapaConTope(periodos, concurrencia, async (periodo) => {
     try {
       const { f1, h1, f2, h2 } = periodoBounds(fecha, periodo);
       const parsed = await fetchFn(f1, h1, f2, h2);
       const { tolvasVal } = extraerCarbonValidado(parsed.lastRow);
-      lecturas.push({ periodo, tolvasVal });
-      periodos_ok++;
-      ultimoOk = periodo;
+      return { periodo, tolvasVal };
     } catch (err) {
-      periodos_error++;
       log(`fetch falló ${fecha} p${periodo}: ${err.message}`);
+      return null; // centinela: periodo con error. Cuenta y NO aborta el día.
     }
-  }
+  });
+
+  const lecturas = salidas.filter(Boolean).sort((a, b) => a.periodo - b.periodo);
+  const periodos_ok = lecturas.length;
+  const periodos_error = salidas.length - periodos_ok;
+  const ultimoOk = periodos_ok ? lecturas[periodos_ok - 1].periodo : null;
 
   // Resumen acumulado: lo previo (1..desde-1, ya verificado contiguo) + lo de esta corrida.
   // `completo` ⇔ 24/24 sin errores (D-060). Nunca depende de nEsperado ni de la hora actual.
@@ -293,7 +350,7 @@ export async function scrapeDia(pool, {
           valorSis = Number(max);
         }
         const accion = await aplicarCelda(tx, {
-          fecha, periodo, combustibleId, valorSis, sistemaId,
+          plantaId: planta_id, fecha, periodo, combustibleId, valorSis, sistemaId,
         });
         if (accion === 'insert') creados++;
         else if (accion === 'update') actualizados++;
@@ -301,7 +358,7 @@ export async function scrapeDia(pool, {
       }
     }
     await upsertScrapeLog(tx, {
-      fecha, scrape_tipo, periodos_ok: periodos_ok_total, periodos_error,
+      plantaId: planta_id, fecha, scrape_tipo, periodos_ok: periodos_ok_total, periodos_error,
       ultimo_periodo, completo,
     });
     await tx.commit();
@@ -314,79 +371,6 @@ export async function scrapeDia(pool, {
     fecha, periodos_ok: periodos_ok_total, periodos_error, ultimo_periodo,
     desde, creados, actualizados, eliminados, completo,
   };
-  log(`día ${fecha} (${scrape_tipo}):`, JSON.stringify(resumen));
+  log(`día ${fecha} · ${planta_id} (${scrape_tipo}):`, JSON.stringify(resumen));
   return resumen;
-}
-
-// Sondea el SIS hacia atrás para hallar la PRIMERA fecha con datos de GEC32 (la unidad existía
-// / reportó sensores ese día). Estrategia coarse→fine: (1) retrocede año a año desde un techo
-// hasta encontrar un año SIN datos, (2) búsqueda binaria por día entre el último día CON datos
-// conocido y el primer día SIN datos. "Hay datos" ⇔ fetch OK y algún sensor de servicio o
-// energía != 0 en el periodo de sondeo.
-//
-// HEURÍSTICA PENDIENTE DE CALIBRACIÓN EN E7 con sondeos reales: los umbrales (periodoProbe,
-// maxYearsBack, techo) quedan parametrizables y todo el recorrido logueado para ajustarlos.
-export async function discoverEarliestDate(pool, {
-  hint = null,               // 'YYYY-MM-DD' fecha conocida con datos (acota la búsqueda).
-  periodoProbe = 12,         // periodo medio del día a sondear (mediodía).
-  techo = fechaBogotaStr(new Date()), // fecha tope (no se sondea más reciente que esto).
-  maxYearsBack = 10,         // límite duro de retroceso para no colgar el sondeo.
-  fetchFn = (f1, h1, f2, h2) => fetchPeriod(f1, h1, f2, h2, { timeoutMs: TIMEOUT_MS }),
-  log = (...a) => console.log('[sis-discover]', ...a),
-} = {}) {
-  const sondear = async (fecha) => {
-    try {
-      const { f1, h1, f2, h2 } = periodoBounds(fecha, periodoProbe);
-      const parsed = await fetchFn(f1, h1, f2, h2);
-      const { lastRow, ncols } = parsed;
-      if (!lastRow || (ncols !== undefined && ncols < 12)) return false;
-      const v = extraerCarbonValidado(lastRow);
-      const algunSensor = v.energiaMw > 0 || v.tolvasVal.some((t) => t > 0) || v.enServicio;
-      return algunSensor;
-    } catch (err) {
-      log(`sondeo ${fecha} falló: ${err.message}`);
-      return false;
-    }
-  };
-
-  const addDays = (fecha, n) => {
-    const d = new Date(fecha + 'T00:00:00Z');
-    d.setUTCDate(d.getUTCDate() + n);
-    return d.toISOString().slice(0, 10);
-  };
-  const diffDays = (a, b) => Math.round(
-    (new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000
-  );
-
-  // Ancla CON datos: el hint si lo dieron y verifica, si no el techo.
-  let conDatos = null;
-  if (hint && await sondear(hint)) conDatos = hint;
-  if (!conDatos && await sondear(techo)) conDatos = techo;
-  if (!conDatos) {
-    log('ni hint ni techo tienen datos — no se puede anclar el sondeo');
-    return null;
-  }
-
-  // (1) Coarse: retroceder año a año hasta un año SIN datos.
-  let sinDatos = null;
-  for (let y = 1; y <= maxYearsBack; y++) {
-    const cand = addDays(conDatos, -365 * y);
-    log(`coarse: probando ${cand} (-${y}a)`);
-    if (await sondear(cand)) conDatos = cand;
-    else { sinDatos = cand; break; }
-  }
-  if (!sinDatos) {
-    log(`alcanzado maxYearsBack=${maxYearsBack}; earliest conocido = ${conDatos}`);
-    return conDatos;
-  }
-
-  // (2) Fine: binaria por día entre sinDatos (excl.) y conDatos (incl.).
-  while (diffDays(sinDatos, conDatos) > 1) {
-    const mid = addDays(sinDatos, Math.floor(diffDays(sinDatos, conDatos) / 2));
-    log(`fine: probando ${mid} (gap ${diffDays(sinDatos, conDatos)}d)`);
-    if (await sondear(mid)) conDatos = mid;
-    else sinDatos = mid;
-  }
-  log(`earliest con datos = ${conDatos}`);
-  return conDatos;
 }
