@@ -1,5 +1,6 @@
 // Router de Combustibles → Consumos (E7, AUD-34/35; D-027/D-034). Montado bajo /api/combustibles
-// tras requireEntra. catálogo (read) + consumos GET (pivot planta×fecha) + consumos POST (batch).
+// tras requireEntra. catálogo (read) + consumos GET (pivot planta×fecha) + consumos POST (batch)
+// + revertir al valor del SIS (D-061).
 // COMB_BITACORA_ID se resuelve vía dbBindings (live binding, asignado al final de initDB).
 
 import express from 'express';
@@ -14,15 +15,88 @@ import { asyncH, loadAppSession } from './_middleware.js';
 const router = express.Router();
 router.use(loadAppSession);
 
-// GET /api/combustibles/catalogo?planta_id=GEC3|GEC32
+// D-061 (L02): plantas válidas en TODOS los endpoints del router. TEST_PLANTA_ID entra para que las
+// suites de COMB/SIS operen fuera de GEC3/GEC32 (higiene D-055: la suite corre contra la BD
+// productiva). Helper ÚNICO: antes el literal ['GEC3','GEC32'] estaba repetido en tres endpoints y
+// esa duplicación fue la raíz del pendiente D-055 en COMB. Sale del live binding de db.js, nunca
+// del literal 'TST'.
+function plantaCombValida(planta_id) {
+  return ['GEC3', 'GEC32', dbBindings.TEST_PLANTA_ID].includes(planta_id);
+}
+
+// Respuesta única para planta inválida — el front ramifica por `codigo`, nunca por texto (D-032).
+const ERR_PLANTA = {
+  error: 'planta_id inválido',
+  codigo: 'planta_invalida',
+  mensaje: 'La planta indicada no maneja consumos de combustible.',
+};
+
+// Id del usuario SISTEMA (dueño de las celdas que escribe el scraper del SIS). Prefiere el live
+// binding de db.js; si el proceso arrancó con SKIP_INITDB=1 (backends efímeros de la metodología
+// v2) el binding queda en null, así que cae a la consulta y la cachea. Mismo patrón que
+// `resolverSistemaId` de utils/sis/carbon-scraper.js.
+let sistemaIdCache = null;
+async function resolverSistemaId(db) {
+  if (dbBindings.USUARIO_SISTEMA_ID) return dbBindings.USUARIO_SISTEMA_ID;
+  if (sistemaIdCache) return sistemaIdCache;
+  const r = await db.request().query(
+    `SELECT usuario_id FROM lov_bit.usuario WHERE username = 'SISTEMA'`
+  );
+  sistemaIdCache = r.recordset[0]?.usuario_id ?? null;
+  return sistemaIdCache;
+}
+
+// Columnas que alimentan el shape de celda del GET. Se comparte con revertir (C5) para que la celda
+// que este devuelve sea LITERALMENTE la misma forma que la del pivot: si divergieran, el front
+// pintaría el badge de override con datos de otra forma justo después de revertir.
+// `sis_owned` se calcula en SQL: la celda es del SIS si la creó SISTEMA y ningún humano la tocó
+// después (ownership de D-029, intacta). Requiere el parámetro @sis en el request.
+const SELECT_CELDA = `
+        c.consumo_id, c.periodo, c.combustible_id, c.cantidad, c.detalle,
+        c.creado_por, c.creado_en, c.modificado_por, c.modificado_en,
+        c.valor_sis, c.sis_actualizado_en,
+        CAST(CASE WHEN c.creado_por = @sis
+                   AND (c.modificado_por IS NULL OR c.modificado_por = @sis)
+                  THEN 1 ELSE 0 END AS BIT) AS sis_owned,
+        uc.nombre_completo AS creado_por_nombre,
+        um.nombre_completo AS modificado_por_nombre
+      FROM bitacora.consumo_combustible c
+      LEFT JOIN lov_bit.usuario uc ON uc.usuario_id = c.creado_por
+      LEFT JOIN lov_bit.usuario um ON um.usuario_id = c.modificado_por`;
+
+// Fila → celda del contrato C4. `es_override` se deriva acá y no en SQL porque compara dos DECIMAL
+// que el driver puede entregar como string: pasar ambos lados por Number una sola vez evita el
+// falso positivo '12.500' !== '12.5'.
+function mapCelda(row) {
+  const cantidad = Number(row.cantidad);
+  const valor_sis = row.valor_sis === null || row.valor_sis === undefined ? null : Number(row.valor_sis);
+  const sis_owned = !!row.sis_owned;
+  return {
+    consumo_id: row.consumo_id,
+    cantidad,
+    detalle: row.detalle,
+    creado_por: { usuario_id: row.creado_por, nombre_completo: row.creado_por_nombre },
+    creado_en: row.creado_en,
+    modificado_por: row.modificado_por
+      ? { usuario_id: row.modificado_por, nombre_completo: row.modificado_por_nombre }
+      : null,
+    modificado_en: row.modificado_en,
+    valor_sis,
+    sis_actualizado_en: row.sis_actualizado_en,
+    sis_owned,
+    es_override: !sis_owned && valor_sis !== null && cantidad !== valor_sis,
+  };
+}
+
+// GET /api/combustibles/catalogo?planta_id=GEC3|GEC32|TST
 router.get('/catalogo', asyncH(async (req, res) => {
   const sesion = req.sesion;
   if (!(await hasPermisoBitacora(sesion, dbBindings.COMB_BITACORA_ID, 'puede_ver'))) {
     return sendJSON(res, 403, { error: 'Sin permiso para ver Combustibles' });
   }
   const planta_id = req.query.planta_id;
-  if (!['GEC3', 'GEC32'].includes(planta_id)) {
-    return sendJSON(res, 400, { error: 'planta_id requerido (GEC3 | GEC32)' });
+  if (!plantaCombValida(planta_id)) {
+    return sendJSON(res, 400, ERR_PLANTA);
   }
   const db = await getDB();
   const r = await db.request()
@@ -37,7 +111,8 @@ router.get('/catalogo', asyncH(async (req, res) => {
 }));
 
 // GET /api/combustibles/consumos?planta_id=&fecha=YYYY-MM-DD
-// Devuelve catálogo (siempre) + pivot de celdas keyed por periodo→combustible_id.
+// Devuelve catálogo (siempre) + pivot de celdas keyed por periodo→combustible_id + el estado del
+// scrape del SIS de ese día (D-061 C4).
 router.get('/consumos', asyncH(async (req, res) => {
   const sesion = req.sesion;
   if (!(await hasPermisoBitacora(sesion, dbBindings.COMB_BITACORA_ID, 'puede_ver'))) {
@@ -45,14 +120,15 @@ router.get('/consumos', asyncH(async (req, res) => {
   }
   const planta_id = req.query.planta_id;
   const fechaStr = req.query.fecha;
-  if (!['GEC3', 'GEC32'].includes(planta_id)) {
-    return sendJSON(res, 400, { error: 'planta_id requerido (GEC3 | GEC32)' });
+  if (!plantaCombValida(planta_id)) {
+    return sendJSON(res, 400, ERR_PLANTA);
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaStr || '')) {
-    return sendJSON(res, 400, { error: 'fecha requerida (YYYY-MM-DD)' });
+    return sendJSON(res, 400, { error: 'fecha requerida (YYYY-MM-DD)', codigo: 'fecha_invalida' });
   }
 
   const db = await getDB();
+  const sistemaId = await resolverSistemaId(db);
 
   const catRes = await db.request()
     .input('p', sql.VarChar(10), planta_id)
@@ -66,15 +142,9 @@ router.get('/consumos', asyncH(async (req, res) => {
   const conRes = await db.request()
     .input('p', sql.VarChar(10), planta_id)
     .input('f', sql.Date, fechaStr)
+    .input('sis', sql.Int, sistemaId)
     .query(`
-      SELECT
-        c.consumo_id, c.periodo, c.combustible_id, c.cantidad, c.detalle,
-        c.creado_por, c.creado_en, c.modificado_por, c.modificado_en,
-        uc.nombre_completo AS creado_por_nombre,
-        um.nombre_completo AS modificado_por_nombre
-      FROM bitacora.consumo_combustible c
-      LEFT JOIN lov_bit.usuario uc ON uc.usuario_id = c.creado_por
-      LEFT JOIN lov_bit.usuario um ON um.usuario_id = c.modificado_por
+      SELECT ${SELECT_CELDA}
       WHERE c.planta_id = @p AND c.fecha = @f
       ORDER BY c.periodo, c.combustible_id
     `);
@@ -84,30 +154,44 @@ router.get('/consumos', asyncH(async (req, res) => {
   for (const row of conRes.recordset) {
     const p = String(row.periodo);
     if (!celdas[p]) celdas[p] = {};
-    celdas[p][String(row.combustible_id)] = {
-      consumo_id: row.consumo_id,
-      cantidad: Number(row.cantidad),
-      detalle: row.detalle,
-      creado_por: { usuario_id: row.creado_por, nombre_completo: row.creado_por_nombre },
-      creado_en: row.creado_en,
-      modificado_por: row.modificado_por
-        ? { usuario_id: row.modificado_por, nombre_completo: row.modificado_por_nombre }
-        : null,
-      modificado_en: row.modificado_en,
-    };
+    celdas[p][String(row.combustible_id)] = mapCelda(row);
   }
+
+  // Estado del scrape del SIS de (planta, fecha). `null` cuando no hay lectura registrada — el
+  // front lo distingue de "hay lectura pero incompleta" (D-060: completo ⇔ 24/24 sin errores).
+  const logRes = await db.request()
+    .input('p', sql.VarChar(10), planta_id)
+    .input('f', sql.Date, fechaStr)
+    .query(`
+      SELECT scrape_tipo, periodos_ok, periodos_error, ultimo_periodo, completo, scraped_en
+      FROM bitacora.sis_scrape_log
+      WHERE planta_id = @p AND fecha = @f
+    `);
+  const logRow = logRes.recordset[0];
+  const sisEstado = logRow
+    ? {
+      scrape_tipo: logRow.scrape_tipo,
+      periodos_ok: Number(logRow.periodos_ok),
+      periodos_error: Number(logRow.periodos_error),
+      ultimo_periodo: logRow.ultimo_periodo === null ? null : Number(logRow.ultimo_periodo),
+      completo: !!logRow.completo,
+      scraped_en: logRow.scraped_en,
+    }
+    : null;
 
   return sendJSON(res, 200, {
     planta_id,
     fecha: fechaStr,
     catalogo: catRes.recordset,
     celdas,
+    sis: sisEstado,
   });
 }));
 
 // POST /api/combustibles/consumos — batch atómico (patrón MAND).
 // Body: { planta_id, fecha, celdas: [{ periodo, combustible_id, cantidad, detalle? }] }
-// cantidad=null o 0 ⇒ DELETE de la celda si existía; existente ⇒ UPDATE; nueva ⇒ INSERT.
+// cantidad=null o 0 ⇒ override a 0 si la celda tiene lectura del SIS, DELETE si no (D-061 C6);
+// existente ⇒ UPDATE; nueva ⇒ INSERT.
 // modificado_por solo se setea si cantidad cambió (paridad D-019 con MAND).
 router.post('/consumos', asyncH(async (req, res) => {
   const sesion = req.sesion;
@@ -116,11 +200,11 @@ router.post('/consumos', asyncH(async (req, res) => {
   }
 
   const { planta_id, fecha, celdas } = req.body || {};
-  if (!['GEC3', 'GEC32'].includes(planta_id)) {
-    return sendJSON(res, 400, { error: 'planta_id inválido' });
+  if (!plantaCombValida(planta_id)) {
+    return sendJSON(res, 400, ERR_PLANTA);
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha || '')) {
-    return sendJSON(res, 400, { error: 'fecha inválida (YYYY-MM-DD)' });
+    return sendJSON(res, 400, { error: 'fecha inválida (YYYY-MM-DD)', codigo: 'fecha_invalida' });
   }
   if (!Array.isArray(celdas)) {
     return sendJSON(res, 400, { error: 'celdas debe ser un array' });
@@ -183,7 +267,7 @@ router.post('/consumos', asyncH(async (req, res) => {
         .input('per', sql.TinyInt, c.periodo)
         .input('cid', sql.Int, c.combustible_id)
         .query(`
-          SELECT consumo_id, cantidad, detalle
+          SELECT consumo_id, cantidad, detalle, valor_sis
           FROM bitacora.consumo_combustible
           WHERE planta_id=@p AND fecha=@f AND periodo=@per AND combustible_id=@cid
         `)).recordset[0];
@@ -191,12 +275,44 @@ router.post('/consumos', asyncH(async (req, res) => {
       const esVacio = c.cantidad === null || c.cantidad === 0 || c.cantidad === undefined;
 
       if (esVacio) {
-        if (existente) {
-          await new sql.Request(tx)
-            .input('id', sql.Int, existente.consumo_id)
-            .query(`DELETE FROM bitacora.consumo_combustible WHERE consumo_id=@id`);
-          eliminados++;
+        if (!existente) continue;
+
+        // D-061 (C6): vaciar una celda que TIENE lectura del SIS no la borra — la deja en 0 como
+        // OVERRIDE humano. Borrarla la dejaría sin dueño humano y el próximo scrape la repondría
+        // con el valor del SIS: el operador vería revivir lo que acaba de vaciar. Con la fila viva
+        // en 0 y `modificado_por` humano, la ownership (D-029) protege el override y `valor_sis`
+        // se conserva como sombra para poder revertir.
+        if (existente.valor_sis !== null && existente.valor_sis !== undefined) {
+          if (Number(existente.cantidad) !== 0) {
+            await new sql.Request(tx)
+              .input('id', sql.Int, existente.consumo_id)
+              .input('det', sql.NVarChar(sql.MAX), c.detalle ?? null)
+              .input('u', sql.Int, sesion.usuario_id)
+              .query(`
+                UPDATE bitacora.consumo_combustible
+                SET cantidad=0, detalle=@det,
+                    modificado_por=@u, modificado_en=SYSUTCDATETIME()
+                WHERE consumo_id=@id
+              `);
+            actualizados++;
+          } else if ((existente.detalle ?? null) !== (c.detalle ?? null)) {
+            // Ya estaba en 0 y solo cambió el comentario: mismo trato que la rama con valor
+            // (paridad D-019). Ignorarlo devolvería un 200 que dice "guardado" y perdería el
+            // comentario en silencio (lección D-055: nunca un 200 mentiroso).
+            await new sql.Request(tx)
+              .input('id', sql.Int, existente.consumo_id)
+              .input('det', sql.NVarChar(sql.MAX), c.detalle ?? null)
+              .query(`UPDATE bitacora.consumo_combustible SET detalle=@det WHERE consumo_id=@id`);
+            actualizados++;
+          }
+          continue;
         }
+
+        // Sin lectura del SIS: comportamiento histórico (D-027) — la celda se borra.
+        await new sql.Request(tx)
+          .input('id', sql.Int, existente.consumo_id)
+          .query(`DELETE FROM bitacora.consumo_combustible WHERE consumo_id=@id`);
+        eliminados++;
         continue;
       }
 
@@ -243,6 +359,138 @@ router.post('/consumos', asyncH(async (req, res) => {
     }
     await tx.commit();
     return sendJSON(res, 200, { resumen: { creados, actualizados, eliminados } });
+  } catch (err) {
+    try { await tx.rollback(); } catch {}
+    throw err;
+  }
+}));
+
+// POST /api/combustibles/consumos/revertir — D-061 (C5). Deshace un override humano devolviendo la
+// celda al valor que trajo el SIS. Gate `puede_crear`: revertir ESCRIBE, y va por la misma matriz
+// data-driven que el batch (nunca una allowlist de cargos, D-054/D-059).
+// Body: { planta_id, fecha, periodo, combustible_id }
+// Tabla de decisión, toda dentro de una transacción:
+//   ya SIS-owned y cantidad = valor_sis > 0  → 'sin_cambios' (no toca nada)
+//   valor_sis > 0                            → UPDATE al valor del SIS → 'restaurado'
+//   valor_sis = 0                            → DELETE → 'eliminado' (el estado canónico del SIS
+//                                              para un cero es "sin fila", igual que el scraper)
+router.post('/consumos/revertir', asyncH(async (req, res) => {
+  const sesion = req.sesion;
+  if (!(await hasPermisoBitacora(sesion, dbBindings.COMB_BITACORA_ID, 'puede_crear'))) {
+    return sendJSON(res, 403, { error: 'Sin permiso para crear Consumos' });
+  }
+
+  const { planta_id, fecha, periodo, combustible_id } = req.body || {};
+  if (!plantaCombValida(planta_id)) {
+    return sendJSON(res, 400, ERR_PLANTA);
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha || '')) {
+    return sendJSON(res, 400, {
+      error: 'fecha inválida (YYYY-MM-DD)',
+      codigo: 'fecha_invalida',
+      mensaje: 'La fecha no es válida.',
+    });
+  }
+  if (!Number.isInteger(periodo) || periodo < 1 || periodo > 24) {
+    return sendJSON(res, 400, {
+      error: 'periodo fuera de rango',
+      codigo: 'periodo_fuera_rango',
+      mensaje: 'El periodo debe estar entre 1 y 24.',
+    });
+  }
+
+  const db = await getDB();
+  const sistemaId = await resolverSistemaId(db);
+
+  const pertenece = (await db.request()
+    .input('p', sql.VarChar(10), planta_id)
+    .input('cid', sql.Int, Number.isInteger(combustible_id) ? combustible_id : null)
+    .query(`
+      SELECT 1 AS x FROM lov_bit.combustible
+      WHERE combustible_id = @cid AND planta_id = @p AND activo = 1
+    `)).recordset[0];
+  if (!pertenece) {
+    return sendJSON(res, 400, {
+      error: 'combustible no pertenece a la planta',
+      codigo: 'combustible_no_pertenece_planta',
+      mensaje: 'El combustible no pertenece a esta planta.',
+    });
+  }
+
+  const tx = new sql.Transaction(db);
+  await tx.begin();
+  try {
+    const fila = (await new sql.Request(tx)
+      .input('p', sql.VarChar(10), planta_id)
+      .input('f', sql.Date, fecha)
+      .input('per', sql.TinyInt, periodo)
+      .input('cid', sql.Int, combustible_id)
+      .input('sis', sql.Int, sistemaId)
+      .query(`
+        SELECT ${SELECT_CELDA}
+        WHERE c.planta_id=@p AND c.fecha=@f AND c.periodo=@per AND c.combustible_id=@cid
+      `)).recordset[0];
+
+    if (!fila) {
+      await tx.commit();
+      return sendJSON(res, 404, {
+        error: 'la celda no existe',
+        codigo: 'celda_no_existe',
+        mensaje: 'Esa celda ya no existe.',
+      });
+    }
+
+    const celdaActual = mapCelda(fila);
+    if (celdaActual.valor_sis === null) {
+      await tx.commit();
+      return sendJSON(res, 400, {
+        error: 'la celda no tiene valor del SIS',
+        codigo: 'sin_valor_sis',
+        mensaje: 'Esta celda no tiene lectura del SIS para restaurar.',
+      });
+    }
+
+    // Nada que hacer: la celda ya es del SIS y coincide con su lectura. Igual devuelve el shape
+    // completo (mismo que 'restaurado') para que el front no ramifique el refresco.
+    if (celdaActual.sis_owned && celdaActual.valor_sis > 0 && celdaActual.cantidad === celdaActual.valor_sis) {
+      await tx.commit();
+      return sendJSON(res, 200, { accion: 'sin_cambios', celda: celdaActual });
+    }
+
+    if (celdaActual.valor_sis > 0) {
+      // Devolver la propiedad al SISTEMA es parte de restaurar: si `modificado_por` se quedara con
+      // el humano, la celda seguiría contando como override (ownership D-029) y el próximo scrape
+      // la respetaría en vez de actualizarla.
+      await new sql.Request(tx)
+        .input('id', sql.Int, fila.consumo_id)
+        .input('sis', sql.Int, sistemaId)
+        .query(`
+          UPDATE bitacora.consumo_combustible
+          SET cantidad = valor_sis,
+              creado_por = @sis,
+              modificado_por = NULL,
+              modificado_en = NULL,
+              sis_actualizado_en = SYSUTCDATETIME()
+          WHERE consumo_id = @id
+        `);
+
+      const releida = (await new sql.Request(tx)
+        .input('id', sql.Int, fila.consumo_id)
+        .input('sis', sql.Int, sistemaId)
+        .query(`SELECT ${SELECT_CELDA} WHERE c.consumo_id = @id`)).recordset[0];
+
+      await tx.commit();
+      return sendJSON(res, 200, { accion: 'restaurado', celda: mapCelda(releida) });
+    }
+
+    // valor_sis = 0: el SIS no reporta consumo en ese periodo y su representación canónica es la
+    // ausencia de fila (el scraper elimina las celdas que caen a cero). Dejarla viva en 0 y
+    // SIS-owned sería un estado que el scraper nunca produce.
+    await new sql.Request(tx)
+      .input('id', sql.Int, fila.consumo_id)
+      .query(`DELETE FROM bitacora.consumo_combustible WHERE consumo_id = @id`);
+    await tx.commit();
+    return sendJSON(res, 200, { accion: 'eliminado', celda: null });
   } catch (err) {
     try { await tx.rollback(); } catch {}
     throw err;

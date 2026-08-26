@@ -2282,6 +2282,56 @@ export async function initDB() {
     }
   }
 
+  // ---------- D-061 (L02): catálogo de combustibles de la planta de test ----------
+  // Espejo de las 10 filas de GEC32 sobre TEST_PLANTA_ID ('TST', D-030) para que las suites de
+  // COMB/SIS operen fuera de GEC3/GEC32 (higiene D-055: la suite corre contra la BD productiva).
+  //
+  // NO es una migración y NO va dentro del gate F26.B1: ese MERGE solo tiene `WHEN NOT MATCHED`
+  // y ya está flageado como aplicado en dev y prod, así que jamás alcanzaría filas nuevas. Este
+  // bloque corre en CADA arranque y es idempotente por la UQ (planta_id, codigo). Va DESPUÉS de
+  // F28.A1 porque escribe `cantidad_max`, columna que esa migración es quien crea.
+  //
+  // La fila 'TST' de lov_bit.planta es un fixture RESIDENTE (D-030): la siembra
+  // `setupSessions({ planta })` del harness de tests, no initDB. Si todavía no está (BD virgen),
+  // se omite el catálogo en vez de intentar el MERGE: la FK planta_id tumbaría el arranque
+  // entero del server por una fixture que solo le sirve a los tests.
+  const tstPlantaRes = await db.request()
+    .input('tst', sql.VarChar(10), TEST_PLANTA_ID)
+    .query(`SELECT 1 AS x FROM lov_bit.planta WHERE planta_id = @tst`);
+  if (!tstPlantaRes.recordset[0]) {
+    console.warn(`  ⚠  catálogo COMB de ${TEST_PLANTA_ID}: omitido (la planta de test aún no existe; la siembra el harness)`);
+  } else {
+    const seedTst = await db.request()
+      .input('tst', sql.VarChar(10), TEST_PLANTA_ID)
+      .query(`
+        MERGE lov_bit.combustible AS t
+        USING (VALUES
+          ('ALIM_1', 'Alimentador 1', 'Ton', 'ALIMENTADOR',  1,    25),
+          ('ALIM_2', 'Alimentador 2', 'Ton', 'ALIMENTADOR',  2,    25),
+          ('ALIM_3', 'Alimentador 3', 'Ton', 'ALIMENTADOR',  3,    25),
+          ('ALIM_4', 'Alimentador 4', 'Ton', 'ALIMENTADOR',  4,    25),
+          ('ALIM_5', 'Alimentador 5', 'Ton', 'ALIMENTADOR',  5,    25),
+          ('ALIM_6', 'Alimentador 6', 'Ton', 'ALIMENTADOR',  6,    25),
+          ('ALIM_7', 'Alimentador 7', 'Ton', 'ALIMENTADOR',  7,    25),
+          ('ALIM_8', 'Alimentador 8', 'Ton', 'ALIMENTADOR',  8,    25),
+          ('CALIZA', 'Caliza',        'Ton', 'CALIZA',       9,    40),
+          ('ACPM',   'ACPM',          'Gal', 'ACPM',        10, 25000)
+        ) AS s(codigo, nombre, unidad, tipo, orden, cantidad_max)
+          ON t.planta_id = @tst AND t.codigo = s.codigo
+        WHEN MATCHED THEN UPDATE SET
+          nombre = s.nombre, unidad = s.unidad, tipo = s.tipo,
+          orden = s.orden, activo = 1, cantidad_max = s.cantidad_max
+        WHEN NOT MATCHED BY TARGET THEN
+          INSERT (planta_id, codigo, nombre, unidad, tipo, orden, activo, cantidad_max)
+          VALUES (@tst, s.codigo, s.nombre, s.unidad, s.tipo, s.orden, 1, s.cantidad_max)
+        OUTPUT $action AS accion;
+      `);
+    const insertadas = seedTst.recordset.filter((r) => r.accion === 'INSERT').length;
+    if (insertadas > 0) {
+      console.log(`[DB] catálogo COMB de ${TEST_PLANTA_ID}: ${insertadas} filas`);
+    }
+  }
+
   // ---------- F29 — D-045: entidad explícita de turno (cabecera + participante + FK) ----------
   // Solo DDL idempotente; ninguna otra capa lee/escribe estas tablas todavía (llega en E2+).
   // Convención TZ: BD UTC (SYSUTCDATETIME()), presentación Bogotá via columnas calculadas *_bogota.
