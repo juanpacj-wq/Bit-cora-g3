@@ -51,7 +51,7 @@ TZ=UTC npm test
 
 ## Aislamiento de sesiones contra producción (D-030) — regla dura
 
-La suite corre contra la **BD de producción** (D-030), así que una sesión de test dejada `activa=1` en una planta real (GEC3/GEC32) **aparece en el panel CONECTADOS real de los operadores**. Pasó el 2026-07-05: `test_opcarbon` y `test_coord_cym` quedaban colgadas en GEC3 tras cada corrida porque el cleanup de sesiones era una **whitelist de 4 usernames** que no las contemplaba.
+La suite corre contra la BD que indique `DB_NAME` en `.env` (hoy `PortalG3_dev`; hasta julio de 2026 corría contra producción, D-030), y las reglas de aislamiento se mantienen **como si fuera producción**: la BD es compartida con el server de dev y con otros chats, así que una sesión de test dejada `activa=1` en una planta real (GEC3/GEC32) **aparece en el panel CONECTADOS real de los operadores**. Pasó el 2026-07-05: `test_opcarbon` y `test_coord_cym` quedaban colgadas en GEC3 tras cada corrida porque el cleanup de sesiones era una **whitelist de 4 usernames** que no las contemplaba.
 
 **Invariante:** toda limpieza de sesiones de test se hace por `es_sintetico=1` (el discriminador que el seed de `initDB` garantiza SOLO sobre fixtures `test_*` y NUNCA sobre un operador real — verificado en `conformacion_turno.test.js`), nunca por una lista de usernames.
 
