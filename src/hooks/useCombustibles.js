@@ -36,5 +36,20 @@ export function useCombustibles() {
     } finally { setLoading(false); }
   }, []);
 
-  return { loading, error, getCatalogo, getConsumos, guardarBatch };
+  // D-061 (C5): devuelve una celda al valor que leyó el SIS. Quién decide qué pasa es el backend
+  // (restaura si `valor_sis > 0`, borra la fila si es 0, no hace nada si ya estaba en el valor);
+  // el front solo manda la coordenada y reporta la `accion` que le contesten.
+  const revertirCelda = useCallback(async ({ planta_id, fecha, periodo, combustible_id }) => {
+    setLoading(true); setError(null);
+    try {
+      return await api.post('/api/combustibles/consumos/revertir', {
+        planta_id, fecha, periodo, combustible_id,
+      });
+    } catch (e) {
+      setError(e.message);
+      throw e;
+    } finally { setLoading(false); }
+  }, []);
+
+  return { loading, error, getCatalogo, getConsumos, guardarBatch, revertirCelda };
 }

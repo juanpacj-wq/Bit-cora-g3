@@ -177,3 +177,60 @@
   padding:11px 8px;text-align:right;border-bottom:1px solid var(--line-soft);
   font-variant-numeric:tabular-nums;white-space:nowrap;
 }
+
+/* ── D-061: override sobre la lectura del SIS ────────────────────────────────────────────────
+   Ámbar y NO rojo a propósito: la celda editada a mano no es un error (el rojo de .invalid ya
+   significa "esto no se puede guardar"), es un dato que alguien decidió corregir y que conviene
+   poder rastrear. La marca va en la esquina del <td>, nunca dentro del <input>: el campo es
+   numérico y con texto seleccionable, y cualquier cosa encima estorbaría al teclear. */
+.comb-root td.comb-cell.override{position:relative}
+.comb-root .comb-override-wrap{position:absolute;top:0;left:0;z-index:1}
+/* Banderín triangular en la esquina: caja de 14px (área de click cómoda) con el triángulo
+   pintado por gradiente, en vez de un punto de 6px imposible de acertar con el mouse. */
+.comb-root .comb-override{
+  display:block;width:14px;height:14px;padding:0;border:none;cursor:pointer;
+  background:linear-gradient(135deg,#d97706 0 50%,transparent 50% 100%);
+  border-radius:3px 0 0 0;
+}
+.comb-root .comb-override:hover{background:linear-gradient(135deg,#b45309 0 50%,transparent 50% 100%)}
+.comb-root .comb-override:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* Popover del override. Se abre con hover Y con click (`.open`): el hover lo hace descubrible y
+   el click lo fija para poder llegar hasta "Revertir" sin que se cierre en el camino. Arranca
+   pegado al banderín (top:13px, 1px de solape) porque un hueco de 1px entre los dos alcanza para
+   que el puntero salga del :hover y el popover se desvanezca antes de que lo alcancen. */
+.comb-root .comb-tip{
+  display:none;position:absolute;top:13px;left:0;z-index:5;
+  min-width:230px;max-width:280px;padding:10px 12px;
+  background:#fff;border:1px solid #f0d9a8;border-radius:8px;
+  box-shadow:0 6px 18px rgba(22,50,79,.16);
+  font-family:var(--font-sans);font-size:11.5px;line-height:1.45;color:var(--ink);
+  text-align:left;white-space:normal;
+}
+.comb-root .comb-override-wrap:hover .comb-tip,
+.comb-root .comb-tip.open{display:block}
+.comb-root .comb-tip-texto{display:block;margin-bottom:9px;color:var(--muted)}
+.comb-root .comb-tip-revertir{
+  background:var(--ink);color:#fff;border:none;border-radius:6px;
+  padding:5px 12px;font-family:var(--font-sans);font-size:11px;font-weight:600;cursor:pointer;
+}
+.comb-root .comb-tip-revertir:disabled{opacity:.45;cursor:not-allowed}
+
+/* Chip del estado del scrape SIS del día (solo GEC32). */
+.comb-root .comb-sis-chip{
+  display:inline-flex;align-items:center;
+  padding:5px 11px;border:1px solid #d8e0e8;border-radius:999px;background:#fff;
+  font-family:var(--font-mono);font-size:11px;color:var(--muted);white-space:nowrap;
+}
+
+/* Gavela: cuenta regresiva de los cambios sin guardar mientras GEC32 está en vivo. */
+.comb-root .comb-gavela{
+  display:inline-flex;align-items:center;gap:10px;
+  padding:4px 6px 4px 12px;border:1px solid #f0d9a8;border-radius:999px;background:#fffaf0;
+  font-family:var(--font-sans);font-size:11.5px;font-weight:600;color:#92400e;white-space:nowrap;
+}
+.comb-root .comb-gavela button{
+  background:#fff;color:#92400e;border:1px solid #e0c188;border-radius:999px;
+  padding:4px 11px;font-family:var(--font-sans);font-size:11px;font-weight:600;cursor:pointer;
+}
+.comb-root .comb-gavela button:hover{background:#fdf3e2}

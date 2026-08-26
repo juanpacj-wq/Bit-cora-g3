@@ -15,6 +15,10 @@ import '@fontsource/jetbrains-mono/700.css';
 import { useCombustibles } from '../../hooks/useCombustibles';
 import { SelectorFecha } from './SelectorFecha';
 import { HEATMAP_MAX_TON, HEATMAP_MAX_FALLBACK, temaHeatmap, tint } from './colores';
+import {
+  esOverride, textoOverride, politicaRefresco, restanteGavela, formatoMMSS, textoChipSis, GAVELA_MS,
+} from './override';
+import { getTodayBogota } from '../../utils/fecha';
 import './combustibles.css';
 
 // D-027: grilla de Consumos de Combustibles. Patrón paralelo a SalaDeMandoGrid:
@@ -28,6 +32,11 @@ import './combustibles.css';
 // `bitacora:counts-refresh`).
 const PERIODOS = Array.from({ length: 24 }, (_, i) => i + 1);
 
+// D-061: cada cuánto relee la grilla cuando GEC32 está "en vivo" (viendo hoy, sin edición a
+// medias). 5 min es holgado frente al sweeper del SIS —que escribe la hora cerrada— y no convierte
+// una pestaña abierta todo el turno en polling agresivo contra el server.
+const AUTO_REFRESCO_MS = 5 * 60 * 1000;
+
 // D-034: motivos estructurados del backend → texto amigable es-CO para los toasts.
 const MOTIVO_TEXTO = {
   cantidad_excede_max: 'una o más cantidades superan el máximo permitido',
@@ -40,12 +49,21 @@ const MOTIVO_TEXTO = {
 // para deep-link/F5). El resto de la lógica (snapshot/buffer, diff, validaciones D-034,
 // beforeunload) queda intacta.
 export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast, fecha, onFechaChange }) {
-  const { loading, getConsumos, guardarBatch } = useCombustibles();
+  const { loading, getConsumos, guardarBatch, revertirCelda } = useCombustibles();
 
   const [catalogo, setCatalogo] = useState([]);
   const [snapshot, setSnapshot] = useState({});  // shape: { "<periodo>": { "<combustible_id>": { cantidad, detalle, ... } } }
   const [buffer, setBuffer] = useState({});
   const [error, setError] = useState(null);
+  // D-061: estado del scrape SIS del día (`sis_scrape_log`, C4) para el chip de la topbar. Hasta
+  // que L02 lo exponga llega `undefined` → el chip dice "sin lectura", que es la verdad.
+  const [sis, setSis] = useState(null);
+  // Celda cuyo popover de override está abierto por click ('<periodo>:<combustible_id>'). El hover
+  // lo maneja el CSS; este estado es el que deja el popover fijo para poder llegar a "Revertir".
+  const [tipAbierto, setTipAbierto] = useState(null);
+  // Gavela (D-061): instante en que empezó a correr la ventana de 10 min, y lo que le queda.
+  const [gavelaInicio, setGavelaInicio] = useState(null);
+  const [restanteMs, setRestanteMs] = useState(GAVELA_MS);
 
   // showToast estable a través de re-renders (mismo patrón que SalaDeMandoGrid).
   const showToastRef = useRef(showToast);
@@ -61,6 +79,7 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
       setCatalogo(r.catalogo || []);
       setSnapshot(r.celdas || {});
       setBuffer(deepClone(r.celdas || {}));
+      setSis(r.sis ?? null);
     } catch (e) {
       setError(e);
     }
@@ -72,6 +91,75 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     () => JSON.stringify(buffer) !== JSON.stringify(snapshot),
     [buffer, snapshot]
   );
+
+  // D-061 — refs para lo que corre FUERA del render (intervalos y el listener de `focus`): un
+  // `setInterval` montado una vez se queda con el `refetch`/`hayCambios` del render en que nació y
+  // seguiría releyendo la fecha vieja, o pisaría una edición empezada después. Con refs, el timer
+  // siempre ve el valor de ahora sin tener que re-montarse en cada tecla.
+  const refetchRef = useRef(refetch);
+  const hayCambiosRef = useRef(hayCambios);
+  const snapshotRef = useRef(snapshot);
+  useEffect(() => { refetchRef.current = refetch; }, [refetch]);
+  useEffect(() => { hayCambiosRef.current = hayCambios; }, [hayCambios]);
+  useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
+
+  // El día Bogotá se pregunta acá y NO en cada render (la grilla re-renderiza con cada tecla y
+  // `getTodayBogota` arma un Intl.DateTimeFormat nuevo cada vez). El cruce de medianoche con la
+  // pestaña quieta lo cubre el guardia de `tick` más abajo, que vuelve a preguntar el día.
+  const politica = useMemo(
+    () => politicaRefresco({ plantaId, fecha, hoy: getTodayBogota(), hayCambios }),
+    [plantaId, fecha, hayCambios]
+  );
+
+  // Auto-refresco (CA-13): solo GEC32 viendo hoy y sin cambios locales. Se desmonta solo cuando
+  // aparece el primer cambio en el buffer (`politica.autoRefresco` pasa a false), que es lo que
+  // garantiza que jamás se le borre a alguien lo que está escribiendo.
+  useEffect(() => {
+    if (!politica.autoRefresco) return;
+    const tick = () => {
+      if (hayCambiosRef.current) return;              // empezó a editar entre latidos
+      if (fecha !== getTodayBogota()) return;         // la pestaña cruzó la medianoche: ya no es hoy
+      refetchRef.current();
+    };
+    const id = setInterval(tick, AUTO_REFRESCO_MS);
+    window.addEventListener('focus', tick);           // volver a la pestaña trae el dato fresco ya
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', tick);
+    };
+  }, [politica.autoRefresco, fecha]);
+
+  // Descartar el buffer y volver al último snapshot del server. Lo usan el botón "Descartar" y el
+  // vencimiento de la gavela.
+  const descartar = useCallback(() => {
+    setBuffer(deepClone(snapshotRef.current));
+    setGavelaInicio(null);
+  }, []);
+
+  // Arranque/apagado de la gavela: nace con el primer cambio en modo "en vivo" y muere cuando ya
+  // no hay cambios (guardar o descartar) o cuando se sale de GEC32/hoy.
+  useEffect(() => {
+    if (!politica.gavela) { setGavelaInicio(null); return; }
+    setGavelaInicio((prev) => (prev == null ? Date.now() : prev));
+  }, [politica.gavela]);
+
+  // Cuenta regresiva de 1 s (CA-14). Al llegar a 0: descarta, relee y avisa — el operador se entera
+  // de que perdió una edición a medias, en vez de seguir mirando una grilla congelada.
+  useEffect(() => {
+    if (gavelaInicio == null) { setRestanteMs(GAVELA_MS); return; }
+    const tick = () => {
+      const r = restanteGavela(gavelaInicio, Date.now());
+      setRestanteMs(r);
+      if (r === 0) {
+        descartar();
+        refetchRef.current();
+        showToastRef.current?.('Se descartaron cambios sin guardar (10 min)', 'info');
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [gavelaInicio, descartar]);
 
   // Advertencia al cerrar la pestaña con cambios sin guardar (igual que SalaDeMando).
   useEffect(() => {
@@ -162,6 +250,46 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     }
   };
 
+  // ¿Esta celda tiene una edición sin guardar encima? Se pregunta solo de celdas que en el
+  // SNAPSHOT son override, así que `s` siempre existe; la ausencia de `b` significa "la vaciaron".
+  const celdaConCambios = useCallback((periodo, combustibleId) => {
+    const b = buffer[String(periodo)]?.[String(combustibleId)];
+    const s = snapshot[String(periodo)]?.[String(combustibleId)];
+    if (!b && !s) return false;
+    if (!b || !s) return true;
+    return Number(b.cantidad) !== Number(s.cantidad) || (b.detalle ?? null) !== (s.detalle ?? null);
+  }, [buffer, snapshot]);
+
+  // D-061 (CA-12): devolver la celda al valor del SIS. El refetch posterior es el que hace
+  // desaparecer el badge —el estado de override lo dicta el backend, no el front—.
+  const onRevertir = async (periodo, combustibleId) => {
+    try {
+      const r = await revertirCelda({
+        planta_id: plantaId, fecha, periodo, combustible_id: combustibleId,
+      });
+      setTipAbierto(null);
+      await refetch();
+      showToastRef.current?.(
+        r?.accion === 'eliminado' ? 'Celda eliminada (valor SIS = 0)' : 'Revertido al valor SIS',
+        'success'
+      );
+    } catch (e) {
+      // `e.message` ya viene saneado por el backend (D-032); `body.mensaje` es el texto largo
+      // cuando el endpoint lo manda. Nunca se arma el texto a partir de un `codigo` crudo.
+      showToastRef.current?.(e.body?.mensaje ?? e.message ?? 'No se pudo revertir', 'error');
+    }
+  };
+
+  // El popover no debe sobrevivir a un cambio de planta/fecha (quedaría describiendo una celda
+  // que ya no está en pantalla) ni a un Escape.
+  useEffect(() => { setTipAbierto(null); }, [plantaId, fecha]);
+  useEffect(() => {
+    if (!tipAbierto) return;
+    const h = (e) => { if (e.key === 'Escape') setTipAbierto(null); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [tipAbierto]);
+
   // Reorden de columnas: alimentadores → Total Carbón (virtual) → Caliza → ACPM.
   // La columna virtual lleva `virtual: true` y un id 'TOTAL' que no se confunde con ningún
   // combustible_id real (entero positivo de la BD).
@@ -239,6 +367,21 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
               </span>
               alto
             </div>
+            {/* D-061 (CA-15): estado de la ingesta del SIS del día que se está viendo. Solo GEC32
+                tiene SIS; en GEC3 el chip no existe (no hay nada que informar). */}
+            {plantaId === 'GEC32' && (
+              <span className="comb-sis-chip" title="Lecturas del SIS para esta fecha">
+                {textoChipSis(sis)}
+              </span>
+            )}
+            {/* D-061 (CA-14): con GEC32 en vivo, una edición sin guardar congela el auto-refresco.
+                La cuenta regresiva lo dice de frente y da salida: guardar o descartar. */}
+            {politica.gavela && (
+              <span className="comb-gavela">
+                ⏱ Cambios sin guardar · se descartan en {formatoMMSS(restanteMs)}
+                <button type="button" onClick={descartar}>Descartar</button>
+              </span>
+            )}
             {/* D-048: el permiso de escritura en COMB es data-driven (matriz → puede_crear). Si el
                 cargo no puede crear (p. ej. Operador de Carbón y Caliza, ahora solo-lectura), se
                 oculta Guardar y se muestra un chip explícito. Los inputs ya van disabled abajo, y el
@@ -314,12 +457,49 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                       // Límite físico por combustible (D-034): celda fuera de rango se marca y bloquea.
                       const max = maxPorId.get(String(c.combustible_id));
                       const invalida = max != null && v !== '' && Number(v) > max;
+                      // D-061 (CA-12): el badge sale del SNAPSHOT, no del buffer. Lo que marca es
+                      // "el server tiene acá un valor manual distinto al del SIS"; mientras el
+                      // usuario teclea, esa verdad no cambia hasta que guarde y se relea.
+                      const celdaSnap = snapshot[String(p)]?.[String(c.combustible_id)];
+                      const marcada = c.tipo === 'ALIMENTADOR' && esOverride(celdaSnap);
+                      const claveTip = `${p}:${c.combustible_id}`;
+                      const idTip = `comb-tip-${p}-${c.combustible_id}`;
+                      const sucia = marcada && celdaConCambios(p, c.combustible_id);
                       return (
                         <td
                           key={c.combustible_id}
-                          className={`comb-cell${invalida ? ' invalid' : ''}`}
+                          className={`comb-cell${invalida ? ' invalid' : ''}${marcada ? ' override' : ''}`}
                           style={{ background: bg }}
                         >
+                          {marcada && (
+                            <span className="comb-override-wrap">
+                              <button
+                                type="button"
+                                className="comb-override"
+                                aria-label="Valor editado a mano sobre la lectura del SIS"
+                                aria-expanded={tipAbierto === claveTip}
+                                aria-describedby={idTip}
+                                onClick={() => setTipAbierto((k) => (k === claveTip ? null : claveTip))}
+                              />
+                              {/* Sin `title` nativo: el popover ya dice lo mismo y el navegador lo
+                                  repetiría encima un segundo después. El texto llega al lector de
+                                  pantalla por `aria-describedby`. */}
+                              <span className={`comb-tip${tipAbierto === claveTip ? ' open' : ''}`}>
+                                <span className="comb-tip-texto" id={idTip}>{textoOverride(celdaSnap)}</span>
+                                {puedeCrear && (
+                                  <button
+                                    type="button"
+                                    className="comb-tip-revertir"
+                                    disabled={sucia || loading}
+                                    title={sucia ? 'Guarda o descarta primero' : 'Volver al valor del SIS'}
+                                    onClick={() => onRevertir(p, c.combustible_id)}
+                                  >
+                                    Revertir
+                                  </button>
+                                )}
+                              </span>
+                            </span>
+                          )}
                           <input
                             type="number"
                             step="0.001"
