@@ -16,7 +16,7 @@ import { getTurnoColombia } from '../utils/turno.js';
 const NOMBRE_CARGO = 'Coordinador de carbón y maquinaria';
 const TEST_FECHA = '2026-04-16';   // fecha fija pasada, distinta de la del test de consumos
 
-let ctx;            // setupSessions(): { sesiones, usuarios, bitByCodigo }
+let _ctx;            // setupSessions(): { sesiones, usuarios, bitByCodigo }
 let sesionCoord;    // sesion_id del Coordinador
 let cargoIdCoord;
 
@@ -77,7 +77,7 @@ async function permiso(codigoBitacora) {
 }
 
 before(async () => {
-  ctx = await setupSessions();
+  _ctx = await setupSessions();
   const coord = await setupCoordinador();
   sesionCoord = coord.sesion_id;
 });

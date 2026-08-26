@@ -95,7 +95,7 @@ export async function sweepTurnosVencidos(pool) {
   // finalización global por agotamiento de turno).
   const porSesion = new Map();
   for (const row of r.recordset) {
-    const { inicio, fin } = ventanaTurno(row.turno, row.abierta_en);
+    const { fin } = ventanaTurno(row.turno, row.abierta_en);
     if (ahora < fin) continue; // ventana aún no termina
     if (!porSesion.has(row.sesion_id)) porSesion.set(row.sesion_id, { row, ids: [] });
     porSesion.get(row.sesion_id).ids.push(row.sesion_bitacora_id);

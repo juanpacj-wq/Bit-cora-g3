@@ -8,7 +8,6 @@
 // Estático contra BD (no levanta el server, no crea sesiones): mismo estilo que rol_admin_debugging.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import sql from 'mssql';
 import { initDB, getDB } from '../db.js';
 
 const SALAS = ['SALAJDT', 'SALAING', 'SALAOP'];

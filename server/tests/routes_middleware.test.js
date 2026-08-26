@@ -32,7 +32,7 @@ test('esRutaPublica: rutas de datos/PII NO son públicas', () => {
 });
 
 // ── requireEntra (integración con Express real) ─────────────────────────────────────────────────
-function appConGate({ user, bypassHeader } = {}) {
+function appConGate({ user, _bypassHeader } = {}) {
   const app = express();
   // Simula express-session: inyecta req.session según el caso.
   app.use((req, _res, next) => { req.session = user ? { user } : {}; next(); });

@@ -1481,7 +1481,7 @@ function AutoGrowTextarea({ value, className, ...props }) {
   );
 }
 
-function RegistroRow({ numero, registro: reg, tiposEvento, jefeNombre, jdtNombre, camposExtraDef = [], isEditing, onStartEdit, onCancelEdit, onUpdate, onSave, onDelete, puedeEditar, bloqueado = false, bitacoraCodigo, showToast = () => {} }) {
+function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], isEditing, onStartEdit, onCancelEdit, onUpdate, onSave, onDelete, puedeEditar, bloqueado = false, bitacoraCodigo, showToast = () => {} }) {
   // D-047: mejora con IA del campo detalle. textoPrevio guarda el original para "Deshacer";
   // se invalida si el usuario edita a mano o sale del modo edición.
   const { mejorar, mejorando } = useMejorarTexto();
@@ -2148,7 +2148,7 @@ export default function App() {
       const fechaEventoIso = bogotaLocalToIso(reg.fecha_evento);
       if (!reg.registro_id) {
         // Crear
-        const creado = await registrosHook.crear({
+        await registrosHook.crear({
           bitacora_id: reg.bitacora_id,
           planta_id: reg.planta_id,
           fecha_evento: fechaEventoIso,

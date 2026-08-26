@@ -1,6 +1,6 @@
 import { useRef, useLayoutEffect, useCallback } from 'react';
 
-export function useFlipReorder(items, idKey = 'id', duration = 220) {
+export function useFlipReorder(items, _idKey = 'id', duration = 220) {
   const nodesRef = useRef(new Map());
   const prevRectsRef = useRef(new Map());
 

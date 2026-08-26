@@ -187,7 +187,7 @@ function decodeRK(rk) {
 export function parseXls(inputBuf) {
   let wb;
   try { wb = readCFBStream(inputBuf, "Workbook"); }
-  catch (e) { wb = readCFBStream(inputBuf, "Book"); }
+  catch { wb = readCFBStream(inputBuf, "Book"); }
 
   // Índice de todos los registros para asociar CONTINUE con su registro previo.
   let pos = 0;

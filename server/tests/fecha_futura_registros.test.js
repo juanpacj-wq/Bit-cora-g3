@@ -3,7 +3,6 @@
 // INSERT, así que este test NO escribe registros en la BD (D-030: la suite corre contra prod).
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import sql from 'mssql';
 import { getDB } from '../db.js';
 import { setupSessions, cleanupTestRegistros, call, PLANTA_ID, TEST_TAG } from './helpers.js';
 
