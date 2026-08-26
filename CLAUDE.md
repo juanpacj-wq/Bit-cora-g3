@@ -160,3 +160,12 @@ Bitácora escribe `bitacora.evento_dashboard` (AUTH/REDESP/PRUEBA por periodo) y
 - Si este archivo supera ~250 líneas, hacé una pasada de consolidación.
 
 **Para decisiones grandes**: `docs/decisions.md` con formato ADR-lite. Numerá la decisión (D-NNN siguiendo la secuencia).
+
+## Herramientas de la metodología v2 (olas de lotes en chats paralelos)
+
+- Metodología y comandos (`/nueva-implementacion`, `/ejecutar-lote`, `/cerrar-ola`, `/cerrar-implementacion`): `../metodología de implementación/README.md` y `02-paralelismo.md`.
+- Hooks versionados: `git config core.hooksPath .githooks` (una vez por clon). `commit-msg` rechaza firmas de IA y, con `LOTE_SESION`, exige el scope `(D-NNN LNN)`; `pre-commit` corre `node --check`, bloquea `.env`/binarios sueltos y archivos fuera del territorio del lote.
+- `SKIP_INITDB=1` (backend efímero de un lote que no es dueño de `db.js`): abre el pool sin DDL, seeds ni migraciones. Nunca en producción. Migraciones nuevas en `server/migrations/` (una por código; ver su README).
+- `npm run test:residuos` (en `server/`): cuenta filas de `'TST'`/`'TSR'`, `TEST_TAG` y sesiones sintéticas activas; exit 2 si hay residuos. Lo cita el gate de cada ola.
+- `tests/contrato_eventos_dashboard.test.js` fija el shape de `GET /api/eventos-dashboard` que documenta `../docs/interfaces-cross-repo.md`: cambian juntos.
+- `deploy/update.sh` rechaza desplegar desde otra rama, con cambios locales o sin tag `deploy/YYYY-MM-DD` (`FORCE_SIN_TAG=1` deja constancia).
