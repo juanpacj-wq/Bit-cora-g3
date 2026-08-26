@@ -78,7 +78,8 @@ async function main() {
     .input('tag', sql.NVarChar(200), `%${TAG_LIKE}%`)
     .query(`
       DELETE FROM bitacora.registro_activo
-      WHERE creado_por IN (${idList}) OR detalle LIKE @tag;
+      WHERE creado_por IN (${idList}) OR detalle LIKE @tag
+        OR planta_id IN ('${TEST_PLANTA_ID}', 'TSR');   -- plantas de test (D-030/D-058): todo lo que haya ahí es residuo, incluidos los CIET del sweeper
     `);
   counts.registro_activo = r.rowsAffected[0];
 
@@ -87,7 +88,8 @@ async function main() {
     .input('tag', sql.NVarChar(200), `%${TAG_LIKE}%`)
     .query(`
       DELETE FROM bitacora.registro_historico
-      WHERE creado_por IN (${idList}) OR detalle LIKE @tag;
+      WHERE creado_por IN (${idList}) OR detalle LIKE @tag
+        OR planta_id IN ('${TEST_PLANTA_ID}', 'TSR');   -- plantas de test (D-030/D-058): todo lo que haya ahí es residuo, incluidos los CIET del sweeper
     `);
   counts.registro_historico = r.rowsAffected[0];
 
