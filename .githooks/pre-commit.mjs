@@ -65,7 +65,7 @@ if (sesion) {
 // 4. Lint por repo, solo sobre lo que entra (si el repo tiene la herramienta).
 const js = staged.filter((s) => /\.m?jsx?$/.test(s) && !s.includes('node_modules') && !s.startsWith('.githooks/'));
 if (js.length && fs.existsSync(path.join(root, 'eslint.config.js'))) {
-  const r = spawnSync('npx', ['eslint', ...js], { cwd: root, encoding: 'utf8', shell: true });
+  const r = spawnSync(process.execPath, [path.join(root, 'node_modules', 'eslint', 'bin', 'eslint.js'), ...js], { cwd: root, encoding: 'utf8' });
   if (r.status !== 0) fallos.push('eslint:\n' + (r.stdout || r.stderr).trim().split('\n').slice(-12).join('\n'));
 }
 const py = staged.filter((s) => /\.py$/.test(s) && s.startsWith('fabric-meter-sink/'));
