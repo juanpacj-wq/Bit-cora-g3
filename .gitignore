@@ -3,9 +3,9 @@ dist/
 .env
 server/.env
 
-CLAUDE.md
-BIT-MODBD-2026-001.md
-BIT-AUDSEG-2026-001.md
-docs
+# Archivos sueltos en la raíz (insumos van a docs/requerimientos/formatos/)
+/*.xlsx
+/*.png
 
-deploy
+# Ajustes locales de Claude Code (settings.json con el deny de git SÍ se versiona)
+.claude/settings.local.json
