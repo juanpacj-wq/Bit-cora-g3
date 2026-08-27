@@ -74,14 +74,24 @@ test('extraerCarbonValidado — valores no numéricos cuentan como 0', () => {
   assert.equal(r.energiaMw, 0); // lastRow[9]='x' → 0
 });
 
-// Parser .xls: requiere un fixture binario real del SIS (server/tests/fixtures/sis-period.xls).
-// Sin acceso al SIS offline no se puede generar; el test se valida contra el SIS real en E3/E7.
-test('parseXls — fixture real devuelve lastRow con 12 valores', { skip: !existsSync(FIXTURE) }, () => {
+// Parser .xls contra un fixture binario REAL del SIS, versionado desde D-061 / L05 (CA-22):
+// `server/tests/fixtures/sis-period.xls`, capturado el 2026-08-15 con una ventana de UN MINUTO
+// (12:00→12:01, 61 filas, 19 KB) porque una hora entera pesa ~830 KB. Ya no lleva `skip`: el
+// fixture está en el repo, así que su ausencia es una regresión (alguien lo borró), no un entorno
+// sin SIS. Las tolvas del fixture son > 0,5 t/h y la unidad está en servicio a propósito — con
+// lecturas más bajas `extraerCarbonValidado` las lee como 0 y el fixture no probaría nada.
+test('parseXls — fixture real devuelve lastRow con 12 valores', () => {
+  assert.ok(existsSync(FIXTURE), `falta el fixture versionado ${FIXTURE}`);
   const buf = readFileSync(FIXTURE);
   const parsed = parseXls(buf);
   assert.ok(parsed.lastRow, 'parseXls no devolvió lastRow');
   assert.ok(parsed.ncols >= 12, `se esperaban >=12 columnas, hay ${parsed.ncols}`);
+  assert.ok(parsed.maxRow >= 2, `se esperaban >=2 filas (encabezado + muestras), hay ${parsed.maxRow}`);
   for (let c = 1; c <= 12; c++) {
     assert.equal(typeof parsed.lastRow[c], 'number', `lastRow[${c}] no es numérico`);
   }
+  // El fixture tiene que servir para el camino completo, no solo para el parser.
+  const v = extraerCarbonValidado(parsed.lastRow);
+  assert.equal(v.enServicio, true, 'el fixture debe estar en servicio');
+  assert.ok(v.totalCarbon > 0, `el fixture debe traer tolvas > 0,5 t/h; totalCarbon=${v.totalCarbon}`);
 });
