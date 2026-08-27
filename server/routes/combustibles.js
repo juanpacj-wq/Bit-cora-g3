@@ -223,7 +223,9 @@ router.post('/consumos', asyncH(async (req, res) => {
   // funciona porque ambos están en YYYY-MM-DD padded.
   const hoyBogota = fechaBogotaStr(new Date());
   if (fecha > hoyBogota) {
-    return sendJSON(res, 400, { error: 'fecha_futura', mensaje: 'La fecha no puede ser futura' });
+    // GATE-O2 (H-L04-2): el front ramifica por `codigo` (D-032) y este 400 salía sin él, así que
+    // caía al mensaje genérico. `error` se conserva tal cual por paridad con `registros.js`.
+    return sendJSON(res, 400, { error: 'fecha_futura', codigo: 'fecha_futura', mensaje: 'La fecha no puede ser futura' });
   }
 
   const db = await getDB();

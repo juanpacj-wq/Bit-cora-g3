@@ -16,6 +16,16 @@ import { buildAuthApp, setBroadcastUsuariosActivos } from './auth/app.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
 
+// D-061 (GATE-O2, hallazgos H-L04-1 y H-L06-3): todo backend efímero de test arranca el sweeper del
+// SIS a los 10 s y sale a la red con el `SIS_HOST` que tenga configurado. Con `SIS_HOST` apuntando a
+// un stub, el tick deja la fila de HOY de GEC32 en `sis_scrape_log` con 24 periodos en error; con
+// varios backends de lote vivos, son varios scrapes simultáneos del mismo día contra el SIS real
+// (el mutex `sis-lock` es de proceso, no excluye entre procesos). `SIS_SWEEPER_ENABLED=0` lo apaga.
+// Solo ese valor exacto apaga: la ausencia de la variable —o cualquier otro valor— lo deja
+// encendido, para que ningún despliegue pierda la ingesta por omisión. El apagado se anuncia en el
+// log de arranque, porque un sweeper mudo es indistinguible de uno roto.
+const SIS_SWEEPER_ENABLED = process.env.SIS_SWEEPER_ENABLED !== '0';
+
 initDB()
   .then(async () => {
     // Inyecta el broadcaster al surface de auth (logout dispara refresh de usuarios activos).
@@ -29,7 +39,8 @@ initDB()
     const db = await getDB();
     startTurnoSweeper(db);
     startMandSweeper(db);
-    startSisSweeper(db);
+    if (SIS_SWEEPER_ENABLED) startSisSweeper(db);
+    else console.log('[SIS] sweeper DESHABILITADO (SIS_SWEEPER_ENABLED=0)');
     server.listen(PORT, () => {
       console.log(`[SERVER] Escuchando en puerto ${PORT}`);
     });

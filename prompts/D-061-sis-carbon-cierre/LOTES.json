@@ -8,10 +8,14 @@
       "gate": "GATE-O1.md"
     },
     "O2": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O2.md"
     },
     "O3": {
+      "estado": "pendiente",
+      "gate": null
+    },
+    "O4": {
       "estado": "pendiente",
       "gate": null
     }
@@ -114,10 +118,10 @@
     "L04": {
       "ola": "O2",
       "titulo": "Scrape manual asíncrono: sis-job + POST /sis/scrape (202/409) + GET /sis/estado",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L04-1938",
+      "claim_ts": "2026-08-27T00:38:34.417Z",
+      "done_ts": "2026-08-27T01:10:41.836Z",
       "motivo": null,
       "depende_de": [
         "L01",
@@ -147,10 +151,10 @@
     "L05": {
       "ola": "O2",
       "titulo": "Backfill histórico: discover v2, CLI --concurrencia, fixture .xls, calibración y corrida dev",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L05-1938",
+      "claim_ts": "2026-08-27T00:38:50.924Z",
+      "done_ts": "2026-08-27T01:46:01.229Z",
       "motivo": null,
       "depende_de": [
         "L01"
@@ -180,10 +184,10 @@
     "L06": {
       "ola": "O2",
       "titulo": "Higiene D-055: tests de COMB/SIS a TEST_PLANTA, guard ampliado, residuos",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L06-1938",
+      "claim_ts": "2026-08-27T00:39:01.790Z",
+      "done_ts": "2026-08-27T01:34:01.482Z",
       "motivo": null,
       "depende_de": [
         "L01",
@@ -218,10 +222,10 @@
     "L08": {
       "ola": "O2",
       "titulo": "Correcciones del front COMB tras el code-review de la O1 (revertir, refetch seguro, override 0, popover)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L08-1939",
+      "claim_ts": "2026-08-27T00:39:31.641Z",
+      "done_ts": "2026-08-27T01:07:23.699Z",
       "motivo": null,
       "depende_de": [
         "L03"
@@ -248,7 +252,7 @@
       ]
     },
     "L07": {
-      "ola": "O3",
+      "ola": "O4",
       "titulo": "Docs + cleanup: BIT-MODBD 2.5, BIT-RF 1.9, architecture, glosario, DEPLOY, git rm scraper y prompts D-029",
       "estado": "pending",
       "sesion": null,
@@ -259,7 +263,9 @@
         "L04",
         "L05",
         "L06",
-        "L08"
+        "L08",
+        "L09",
+        "L10"
       ],
       "puro": true,
       "puerto": 3107,
@@ -278,6 +284,76 @@
         "CA-29",
         "CA-30",
         "CA-31"
+      ]
+    },
+    "L09": {
+      "ola": "O3",
+      "titulo": "El refetch preservado no puede convertirse en un borrado al guardar (front COMB)",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L08"
+      ],
+      "puro": true,
+      "puerto": 3109,
+      "territorio": [
+        "src/components/Combustibles/ConsumosGrid.jsx",
+        "src/components/Combustibles/combustibles.css",
+        "src/components/Combustibles/override.js",
+        "src/components/Combustibles/override.test.js",
+        "src/components/Combustibles/ConsumosGrid.test.jsx",
+        "prompts/D-061-sis-carbon-cierre/cierres/L09.md"
+      ],
+      "tests": [
+        "src/components/Combustibles/override.test.js",
+        "src/components/Combustibles/ConsumosGrid.test.jsx"
+      ],
+      "criterios": [
+        "CA-37",
+        "CA-38",
+        "CA-39",
+        "CA-40"
+      ]
+    },
+    "L10": {
+      "ola": "O3",
+      "titulo": "Endurecer el descubrimiento del SIS y hacer honesta la cobertura del scrape manual",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L04",
+        "L05"
+      ],
+      "puro": false,
+      "puerto": 3110,
+      "territorio": [
+        "server/utils/sis/discover.js",
+        "server/scripts/backfill-carbon-gec32.js",
+        "server/routes/combustibles.js",
+        "server/tests/sis_discover.test.js",
+        "server/tests/sis_scrape_endpoint.test.js",
+        "server/tests/sis_endpoints.test.js",
+        "prompts/D-061-sis-carbon-cierre/cierres/L10.md"
+      ],
+      "tests": [
+        "tests/sis_discover.test.js",
+        "tests/sis_scrape_endpoint.test.js",
+        "tests/sis_endpoints.test.js"
+      ],
+      "criterios": [
+        "CA-41",
+        "CA-42",
+        "CA-43",
+        "CA-44",
+        "CA-45",
+        "CA-46",
+        "CA-47"
       ]
     }
   },

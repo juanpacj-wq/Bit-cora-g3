@@ -6,7 +6,106 @@
 > cabecera) por el gate de la O2 si hizo falta.
 
 ## ENMIENDAS Y HECHOS QUE CAMBIAN — léelo antes que el resto
-- {{El gate O2 rellena esto. Si está vacío, lee `GATE-O1.md` §6 y `GATE-O2.md` §6.}}
+
+> **ENMIENDA G1 (gate O2, 2026-08-26)** — léela antes que el resto del prompt.
+>
+> 1. **Las cifras del backfill cambiaron y son las que tienes que documentar.** La fecha de inicio
+>    de GEC32 en el SIS es **`2018-06-13`** (no "fines de 2016"): 58 sondeos literales en
+>    `cierres/L05.md` §CA-23. El histórico completo son **2.996 días**, no ~1.100. El primer día
+>    trae 0,13 MW y **cero carbón**; el primer carbón medido es del **2018-07-15**. La concurrencia
+>    verificada contra el SIS es **6** (no 4) y un día completo cuesta **~95 s**.
+> 2. **`deploy/DEPLOY.md` (tu punto §4.5): el runbook va con el comando exacto de `GATE-O2.md` §5.**
+>    Si al abrir tu chat la corrida de prod todavía está en vuelo (dura ~3,3 días), documentas el
+>    runbook y el **estado de arranque** que registra `GATE-O2.md`/`ESTADO.md` (comando, PID, fecha
+>    y rango), no conteos finales inventados. Los conteos finales los cierra
+>    `/cerrar-implementacion`. Si la corrida de prod **no se autorizó**, el runbook igual se
+>    escribe: es el procedimiento, no el registro.
+> 3. **Variable de entorno nueva que documentar: `SIS_SWEEPER_ENABLED`** (`server/server.js`,
+>    edición del gate O2). `=0` apaga el sweeper del SIS; cualquier otro valor —o su ausencia— lo
+>    deja encendido; el apagado se anuncia en el log de arranque. Va en `deploy/DEPLOY.md` (y en
+>    `docs/architecture.md` junto al sweeper). **No es para producción**: existe para los backends
+>    efímeros de test. Documéntalo diciendo eso.
+> 4. **`js-scraper-carbon-g32/scrape.js` no acepta argumentos: siempre raspa HOY, y no tiene
+>    README** (hallazgo H-L05-1). Cuando lo retires (CA-31), la verificación independiente del
+>    parser deja de poder repetirse. El spot-check de D-061 dio **576/576 celdas idénticas** en tres
+>    días históricos, hecho con un arnés externo que hacía `require` de su parser CommonJS: dilo en
+>    tu cierre para que el ADR lo recoja.
+> 5. **`architecture.md` y el glosario:** el módulo `server/utils/sis/` quedó con seis archivos
+>    (`carbon-scraper.js`, `sis-client.js`, `sis-lock.js`, `sis-job.js`, `sis-sweeper.js` +
+>    `sis-sweeper-helpers.js`, `discover.js`, `xls-parser.js`). Documenta también el **job manual**
+>    (`POST /api/combustibles/sis/scrape`, 202/409, estado volátil en memoria) y el **mutex de
+>    proceso** `sis-lock`.
+> 6. Todo lo demás del prompt sigue en pie. Los hechos completos están en **`GATE-O2.md` §6**,
+>    copiados abajo.
+
+### Hechos que cambian (copia literal de `GATE-O2.md` §6)
+
+- **La fecha de inicio de GEC32 en el SIS es `2018-06-13`**, no "fines de 2016": 58 sondeos
+  literales, 14 min de red, 0 errores (`cierres/L05.md` §CA-23). Ese primer día trae 0,13 MW, fuera
+  de servicio y las 8 tolvas en 0; **el primer carbón medido es del 2018-07-15**. El histórico
+  completo son **2.996 días**, casi el triple de los ~1.100 que estimaba la planeación.
+- **La concurrencia tolerada por el SIS es 6** (el tope de C1), no 4: 24 periodos en 78,6 s con
+  cero errores y RSS plano en 132 MB — 4,2× sobre secuencial. Un día completo (red + transacción +
+  throttle) cuesta **~95 s**, no ~5,2 min. **Queda descartada** la sospecha del GATE-O1 sobre el RSS
+  con `concurrencia=6`.
+- **El histórico real de GEC32 tiene huecos de más de 60 días** (agosto–octubre de 2018,
+  confirmado por sondeo) que la ventana por defecto de `discover` v2 (K=6, W=60) **no distingue**
+  del pre-inicio. Por eso `--from auto` es una **calibración de una sola vez** cuyo resultado se fija
+  a mano en el comando; dev y prod corren con `--from 2018-06-13`. El CLI no expone
+  `--ventana-dias`/`--sondeos-ventana`; el módulo sí los acepta.
+- `server/utils/sis/discover.js` exporta ahora también `addDays`, `diffDays` y `offsetsVentana`
+  (aditivo). `discoverEarliestDate` conserva nombre y firma **hasta L10**, que enmienda C3 para que
+  devuelva `{ fecha, motivo, sondeos }` — su único llamador es el CLI de backfill.
+- El CLI de backfill acepta `--concurrencia 1..6`, `--from auto`, `--confirm-from` y `--log`,
+  imprime **conteo por año** al final de toda corrida (incluido `--dry-run`) y **aborta con exit 2
+  si `--confirm-from` no coincide con un `--from` explícito** (chequeo aditivo de L05, no estaba
+  en C10). Su mensaje de `--from auto` ya está en tuteo ("repite", no "repetí").
+- `POST /api/combustibles/sis/scrape` y `GET /api/combustibles/sis/estado` existen tal cual C7/C8,
+  con dos aditivos: los 400/409 llevan también `error` y `mensaje` (paridad D-032 con el resto del
+  router) e `iniciarScrapeJob` acepta un `log` opcional. **`plantaConSis()` es un helper nuevo**, no
+  `plantaCombValida`: `GEC3` es planta válida para registrar consumos a mano pero da
+  `planta_sin_sis` en el scrape.
+- **El estado del job es volátil** (memoria de proceso): un reinicio lo borra aunque el scrape haya
+  terminado bien. La verdad persistente de qué se scrapeó sigue siendo `bitacora.sis_scrape_log`.
+  La rama `estado='error'` de C9 es hoy **inalcanzable** desde el endpoint (la guarda del lock es
+  síncrona dentro de la misma llamada) y queda como código defensivo sin test.
+- `resolverSistemaId` y `sistemaIdCache` **ya no existen** en `routes/combustibles.js`: los dos usos
+  pasaron a `dbBindings.USUARIO_SISTEMA_ID` tras la decisión D2 del gate O1.
+- **`POST /api/combustibles/consumos` ahora sí responde `codigo: 'fecha_futura'`** (D8). El §6 del
+  GATE-O1 afirmaba que todos los 400 del router traían `codigo` y era falso justo ahí.
+  `registros.js` sigue con el slug solo en `error`: queda fuera de alcance de D-061.
+- **`server.js` acepta `SIS_SWEEPER_ENABLED=0`** (D7): apaga el sweeper del SIS. **Solo ese valor
+  exacto apaga**; la ausencia de la variable lo deja encendido y el apagado se anuncia en el log de
+  arranque. Es un flag **para backends efímeros de test, no para producción**, y así hay que
+  documentarlo. **L10** lo expone en `GET /sis/estado` para que "apagado" no se vea como "roto".
+- **Los tests de COMB/SIS ya no escriben en GEC3/GEC32.** Los cuatro archivos migrados operan sobre
+  `TEST_PLANTA` (`'TST'`); lo que queda de plantas reales son **lecturas** de catálogo, a propósito.
+  `cleanupTestRegistros()` borra ahora también `consumo_combustible` y `sis_scrape_log` de
+  `TST`/`TSR` (**sin cota de fecha**: un suite que escriba celdas en la fixture y lo llame a mitad de
+  camino se queda sin ellas), `npm run test:residuos` los cuenta (10 checks) y
+  `guard_no_prod_historico_destruction` protege las dos tablas, con un meta-test que fija que
+  **acotar por fecha fija NO acota**.
+- `helpers.js` gana `ensurePlantaCombTest()` (aditivo, no estaba en C13), para las suites que no
+  abren sesión de app y por eso no pasan por `setupSessions`.
+- El catálogo de `'TST'` (10 filas de `lov_bit.combustible`) es un **fixture residente, no residuo**,
+  y el propio `residuos.js` lo dice por escrito para que nadie agregue un check ingenuo que lo
+  cuente.
+- `src/components/Combustibles/override.js` exporta **10 funciones**, no 7: L08 agregó
+  `claveRefetch`, `esVacioCantidad` y `esCeroNoOp` (C11 solo creció).
+- **El fixture `server/tests/fixtures/sis-period.xls` está versionado** (19.481 bytes, capturado del
+  SIS el 2026-08-15) y su ausencia es ahora un **rojo**, no un `skip` silencioso. La suite pasó a
+  `skipped 0`.
+- **`js-scraper-carbon-g32/scrape.js` no acepta argumentos: siempre raspa HOY, y no tiene README.**
+  El spot-check de D-061 (**576/576 celdas idénticas** en tres días históricos) se hizo con un arnés
+  externo que hacía `require` de su parser CommonJS. Cuando **L07** lo retire, esa verificación
+  independiente no se puede repetir: el ADR tiene que dejar constancia del resultado.
+- **El orden de los archivos en el script `test` no es el orden en que `node --test` los corre.** El
+  log de esta suite lo muestra sin lugar a duda. "Enganchar X después de Y" es una convención de
+  lectura del `package.json`, no una garantía de ejecución; ningún test puede depender de correr
+  antes o después de otro (`zzz_session_leak_guard` es una red de seguridad, no una secuencia).
+- **La suite tarda ~58 min si hay un backfill escribiendo en la misma BD** (30 min sin esa
+  competencia). Los gates de O3 y O4 deben presupuestar con el número alto mientras la corrida esté
+  viva.
 
 ## 0. Puerta de arranque (obligatorio, primero)
 ```bash

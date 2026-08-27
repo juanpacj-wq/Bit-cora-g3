@@ -141,7 +141,7 @@ try {
     if (!inicio) salir('el sondeo no encontró ninguna fecha con datos (ni el hint ni el techo respondieron).');
     linea(`[backfill] fecha de inicio = ${inicio}`);
     if (args['confirm-from'] !== inicio) {
-      lineaErr(`[backfill] no escribo nada: para correr el backfill desde esa fecha repetí el comando con --from auto --confirm-from ${inicio}`);
+      lineaErr(`[backfill] no escribo nada: para correr el backfill desde esa fecha repite el comando con --from auto --confirm-from ${inicio}`);
       salida = 3;
     } else {
       from = inicio;

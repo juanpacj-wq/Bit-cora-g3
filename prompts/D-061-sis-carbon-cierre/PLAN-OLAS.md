@@ -6,15 +6,16 @@
 
 ## Grafo de dependencias
 ```
-L01 (núcleo SIS: planta_id + concurrencia + sis-lock + discover.js) ──┬─> L04 (scrape manual asíncrono) ─┐
-L02 (backend COMB: seed TST + GET + vaciar + revertir) ───────────────┤                                  ├─> L07 (docs + cleanup) ─> cierre
-                                                                      ├─> L06 (higiene D-055) ────────────┤
-L01 ──────────────────────────────────────────────────────────────────┴─> L05 (backfill histórico) ───────┘
-L03 (front override; consume C4/C5 fijados) ──> L08 (correcciones front, GATE-O1) ─────────────────────────────┘
+L01 (núcleo SIS: planta_id + concurrencia + sis-lock + discover.js) ──┬─> L04 (scrape manual asíncrono) ─┬─> L10 (endurecer SIS, GATE-O2) ─┐
+L02 (backend COMB: seed TST + GET + vaciar + revertir) ───────────────┤                                  │                                 ├─> L07 (docs + cleanup) ─> cierre
+                                                                      ├─> L06 (higiene D-055) ───────────┤                                 │
+L01 ──────────────────────────────────────────────────────────────────┴─> L05 (backfill histórico) ──────┘                                 │
+L03 (front override; consume C4/C5 fijados) ──> L08 (correcciones front, GATE-O1) ──> L09 (refetch vs Guardar, GATE-O2) ───────────────────┘
 ```
-Camino crítico: **L02 → L04 → L07 → cierre** (y la corrida prod del backfill, que depende de L05 y
-del visto bueno tras GATE-O2). Fuera del camino crítico: L03, L06. **L05 arranca una corrida de
-días** (backfill dev) que sigue viva durante el gate O2 y la O3: no bloquea nada, se reporta.
+Camino crítico: **L02 → L04 → {L09, L10} → L07 → cierre** (y la corrida prod del backfill, que
+depende de L05 y del visto bueno tras GATE-O2). Fuera del camino crítico: L06. **L05 arrancó una
+corrida de días** (backfill dev) que sigue viva durante los gates O2/O3/O4: no bloquea nada, se
+reporta — solo obliga a presupuestar ~58 min de suite en vez de ~30 mientras esté escribiendo.
 
 ## Olas
 | Ola | Lotes | Por qué pueden ir juntos | Compartidos y su escritor |
@@ -22,7 +23,8 @@ días** (backfill dev) que sigue viva durante el gate O2 y la O3: no bloquea nad
 | O1 | L01, L02, L03 | Raíces del grafo. Territorios disjuntos (`utils/sis/*` + tests SIS / `db.js` + `routes/combustibles.js` + test HTTP / `src/components/Combustibles/*` + hook). L03 construye contra los contratos C4/C5/C11 ya fijados; la integración real la ve el gate. | `db.js` → L02 · `combustibles.js` → L02 · `carbon-scraper.js` → L01 |
 | O2 | L04, L05, L06, **L08** | Consumen C1/C2/C12 verificados en GATE-O1. L08 (corrección front, puro) se añadió en GATE-O1 §7. Disjuntos: L04 (`sis-job.js` + `combustibles.js` + su test) / L05 (`discover.js` + CLI + fixture + `sis_parser.test.js` + su test) / L06 (solo archivos de test + helpers + residuos). | `combustibles.js` → L04 · `discover.js` → L05 · `helpers.js` → L06 |
 | Tarea del integrador tras GATE-O2 | Corrida del backfill contra **prod** (`DB_NAME=PortalG3 … --confirm-db PortalG3`) | Requiere visto bueno explícito del usuario (PREGUNTAS #11). Se registra en `GATE-O2.md` §5 y en `ESTADO.md`. | — |
-| O3 | L07 | Docs permanentes + cleanup del scaffolding v1 y del scraper standalone, con toda la funcionalidad ya verificada. | `BIT-*`, `docs/architecture.md`, `docs/domain-glossary.md`, `deploy/DEPLOY.md` → L07 |
+| O3 | **L09, L10** | Lotes de corrección abiertos por el `/code-review` de la O2 (`GATE-O2.md` §5 D9). Disjuntos por completo: L09 vive en `src/components/Combustibles/**` y L10 en `server/utils/sis/discover.js` + el CLI + `routes/combustibles.js` + tres archivos de test. | `combustibles.js` → L10 · `discover.js` → L10 |
+| O4 | L07 | Docs permanentes + cleanup del scaffolding v1 y del scraper standalone, con toda la funcionalidad ya verificada **incluidas las correcciones de O3** (L10 enmienda C3 y hace crecer C8: L07 documentaría un blanco móvil si fueran en la misma ola). | `BIT-*`, `docs/architecture.md`, `docs/domain-glossary.md`, `deploy/DEPLOY.md` → L07 |
 | Cierre | `/cerrar-implementacion D-061` | ADR D-061 completo (desde los aportes), `CLAUDE.md` conv. 35, corregir la cross-ref `[[D-029]]` de D-060 → `[[D-061]]`, `git rm` de `prompts/D-061-*`, smoke + suite final. | `decisions.md`, `CLAUDE.md` → integrador |
 
 ## Lotes
@@ -83,8 +85,32 @@ días** (backfill dev) que sigue viva durante el gate O2 y la O3: no bloquea nad
 - **Tests que corre:** `npx vitest run src/components/Combustibles`, `npm run build`
 - **Riesgo / nota:** creado por el gate O1 con los 8 hallazgos front del `/code-review` (H2, H3, H5, H6, H10, H11, H13, H14 en `GATE-O1.md` §7): Revertir pisaba ediciones ajenas, refetch en vuelo, override 0 encendía Guardar, medianoche, apilamiento y recorte del popover, toast en `sin_cambios`, banderín tabulable. Disjunto de L04/L05/L06 (solo `src/components/Combustibles/**`). No bloquea a L07 más que por el gate O2.
 
+### L09 — El refetch preservado no puede convertirse en un borrado al guardar (front COMB)
+- **Ola:** O3 · **Depende de:** L08 · **Puro:** sí (vitest + build) · **Puerto de test:** 3109 (reservado; no levanta backend)
+- **Territorio:** `src/components/Combustibles/{ConsumosGrid.jsx,combustibles.css,override.js,override.test.js,ConsumosGrid.test.jsx}`
+- **Contratos:** — (consume C4/C5/C6/C11 sin cambiarlos; C11 puede crecer)
+- **Criterios:** CA-37, CA-38, CA-39, CA-40
+- **Tests que corre:** `npx vitest run src/components/Combustibles`, `npm run build`
+- **Riesgo / nota:** creado por el gate O2 con cuatro hallazgos del `/code-review` (`GATE-O2.md` §7:
+  H24, H25, H26, H27). **H24 es pérdida de datos sobre planta real** y es lo primero que se arregla:
+  el arreglo de L08 al latido (CA-33) dejó el buffer viejo contra un snapshot nuevo, así que el
+  Guardar siguiente manda como cambios celdas que el operador nunca tocó. Disjunto de L10 (solo
+  `src/**`). El smoke visual pendiente de CA-12/CA-35 conviene hacerlo **después** de este lote.
+
+### L10 — Endurecer el descubrimiento del SIS y hacer honesta la cobertura del scrape manual
+- **Ola:** O3 · **Depende de:** L04, L05 · **Puro:** no (la parte HTTP levanta efímero y toma el test-lock) · **Puerto de test:** 3110 (+ stub del SIS en 3154)
+- **Territorio:** `server/utils/sis/discover.js`, `server/scripts/backfill-carbon-gec32.js`, `server/routes/combustibles.js`, `server/tests/{sis_discover,sis_scrape_endpoint,sis_endpoints}.test.js`
+- **Contratos que produce:** **C3 v3** (`discoverEarliestDate` → `{ fecha, motivo, sondeos }`; único llamador, el CLI de su propio territorio) y **C8 +1** (`sweeper: { habilitado }`, aditivo) · **que consume:** C1, C7, C9, C10
+- **Criterios:** CA-41 … CA-47
+- **Tests que corre:** `tests/sis_discover.test.js` (puro) + `tests/sis_scrape_endpoint.test.js` y `tests/sis_endpoints.test.js` (HTTP, con el stub y el sweeper **encendido**)
+- **Riesgo / nota:** creado por el gate O2 con seis hallazgos del `/code-review` (`GATE-O2.md` §7:
+  H28–H33) más la simetría de `detalle` que quedó a medias en CA-36 (H25). **No corre el CLI contra
+  ninguna BD** y **no toca el proceso del backfill**, que sigue vivo. La fecha `2018-06-13` ya
+  descubierta **no está en duda** (esa corrida tuvo 0 errores de red): lo que se arregla es que la
+  próxima no pueda mentir en silencio.
+
 ### L07 — Docs + cleanup
-- **Ola:** O3 · **Depende de:** L04, L05, L06 · **Puro:** sí · **Puerto de test:** 3107 (no aplica)
+- **Ola:** **O4** (movida por `GATE-O2.md` §5 D9) · **Depende de:** L04, L05, L06, L08, **L09, L10** · **Puro:** sí · **Puerto de test:** 3107 (no aplica)
 - **Territorio:** `BIT-MODBD-2026-001.md`, `BIT-RF-2026-001.md`, `docs/architecture.md`, `docs/domain-glossary.md`, `deploy/DEPLOY.md`, `js-scraper-carbon-g32/**` (git rm + sueltos), `prompts/D-029-sis-carbon-gec32/**` (git rm)
 - **Contratos:** — · **consume:** todos (documenta)
 - **Criterios:** CA-29, CA-30, CA-31
@@ -111,3 +137,16 @@ días** (backfill dev) que sigue viva durante el gate O2 y la O3: no bloquea nad
 - **L04 gana `server/tests/sis_endpoints.test.js`** y CA-36 (conservar `detalle` al vaciar sin la
   clave; retirar `resolverSistemaId` del router, muerto tras D2).
 - Reparto y camino crítico sin cambios (`L02 → L04 → L07 → cierre`). O2 queda con 4 lotes.
+
+## Enmiendas del gate O2 (2026-08-26)
+- **L09 y L10 nuevos en O3** (`GATE-O2.md` §5 D9). Los 15 hallazgos del `/code-review` de la O2 no
+  caían en ningún archivo compartido sin dueño, salvo el voseo del CLI (arreglado en el gate), así
+  que van en lotes propios y no en el gate.
+- **L07 pasa a una ola O4** y gana dos dependencias (L09, L10). Su prompt dice "documenta lo real,
+  no el plan": con L10 enmendando C3 y haciendo crecer C8 en la misma ola, documentaría un blanco
+  móvil.
+- **Camino crítico revisado:** `L02 → L04 → {L09, L10} → L07 → cierre`.
+- **La corrida del backfill contra prod** sigue siendo tarea del integrador con visto bueno
+  explícito (`GATE-O2.md` §5 D10), con la foto de prod ya tomada: 74 días de log, todos completos.
+- Puertos de test reservados: **L09 → 3109**, **L10 → 3110** (más el stub del SIS en **3154**, que
+  no estaba en la tabla de reservas de `_CONTEXTO-BASE.md §7`).
