@@ -35,7 +35,7 @@ async function limpiar() {
 
 // Siembra una celda por SQL (no por el endpoint) para poder controlar quién la creó y qué valor
 // trajo el SIS — el POST siempre escribe con el usuario de la sesión y nunca toca `valor_sis`.
-async function sembrarCelda({ periodo, combustible_id, cantidad, valor_sis = null, creado_por, modificado_por = null }) {
+async function sembrarCelda({ periodo, combustible_id, cantidad, valor_sis = null, creado_por, modificado_por = null, detalle = null }) {
   const db = await getDB();
   await db.request()
     .input('tp', sql.VarChar(10), TEST_PLANTA)
@@ -46,11 +46,12 @@ async function sembrarCelda({ periodo, combustible_id, cantidad, valor_sis = nul
     .input('vs', sql.Decimal(12, 3), valor_sis)
     .input('u', sql.Int, creado_por)
     .input('m', sql.Int, modificado_por)
+    .input('det', sql.NVarChar(sql.MAX), detalle)
     .query(`
       INSERT INTO bitacora.consumo_combustible
-        (planta_id, fecha, periodo, combustible_id, cantidad, creado_por, modificado_por,
+        (planta_id, fecha, periodo, combustible_id, cantidad, detalle, creado_por, modificado_por,
          modificado_en, valor_sis, sis_actualizado_en)
-      VALUES (@tp, @f, @per, @cid, @cant, @u, @m,
+      VALUES (@tp, @f, @per, @cid, @cant, @det, @u, @m,
               CASE WHEN @m IS NULL THEN NULL ELSE SYSUTCDATETIME() END,
               @vs,
               CASE WHEN @vs IS NULL THEN NULL ELSE SYSUTCDATETIME() END)
@@ -270,6 +271,47 @@ test('CA-8. vaciar una celda SIN valor_sis la borra (comportamiento histórico D
   assert.equal(data.resumen.eliminados, 1);
   assert.equal(data.resumen.actualizados, 0);
   assert.equal(await leerCelda(4, caliza), undefined, 'la celda debe desaparecer del pivot');
+
+  await limpiar();
+});
+
+test('CA-36. vaciar sin la clave detalle conserva el comentario; con la clave manda el body', async () => {
+  await limpiar();
+  await sembrarCelda({
+    periodo: 11, combustible_id: alim1, cantidad: 12.5, valor_sis: 12.5,
+    creado_por: sistemaId, detalle: 'Tolva atascada',
+  });
+
+  const vaciar = (celda) => call('POST', '/api/combustibles/consumos', {
+    sesion_id: ctx.sesiones.jdt,
+    body: { planta_id: TEST_PLANTA, fecha: FECHA, celdas: [celda] },
+  });
+
+  // 1. Lo que manda el front cuando el operador solo borra el número: `{ cantidad: null }` SIN la
+  //    clave `detalle`. Tomar esa ausencia como "detalle = null" borraba en silencio la nota que
+  //    explicaba por qué la celda está vacía (H9 del code-review de la O1).
+  const sinClave = await vaciar({ periodo: 11, combustible_id: alim1, cantidad: null });
+  assert.equal(sinClave.status, 200, JSON.stringify(sinClave.data));
+  assert.equal(sinClave.data.resumen.actualizados, 1);
+  const vaciada = await leerCelda(11, alim1);
+  assert.equal(vaciada.cantidad, 0, 'sigue siendo el override a 0 de C6');
+  assert.equal(vaciada.detalle, 'Tolva atascada', 'vaciar el número no borra la nota que lo explica');
+  assert.equal(vaciada.es_override, true);
+
+  // 2. Repetir el mismo vaciado no escribe nada: sin la clave no hay comentario que cambiar.
+  const repetido = await vaciar({ periodo: 11, combustible_id: alim1, cantidad: null });
+  assert.equal(repetido.data.resumen.actualizados, 0, 'un no-op no puede contar como actualización');
+  assert.equal((await leerCelda(11, alim1)).detalle, 'Tolva atascada');
+
+  // 3. Con la clave presente manda el body, como hasta ahora.
+  const conTexto = await vaciar({ periodo: 11, combustible_id: alim1, cantidad: null, detalle: 'Vaciada en revisión' });
+  assert.equal(conTexto.data.resumen.actualizados, 1);
+  assert.equal((await leerCelda(11, alim1)).detalle, 'Vaciada en revisión');
+
+  // 4. ...incluido el null explícito, que es como se borra un comentario a propósito.
+  const conNull = await vaciar({ periodo: 11, combustible_id: alim1, cantidad: null, detalle: null });
+  assert.equal(conNull.data.resumen.actualizados, 1);
+  assert.equal((await leerCelda(11, alim1)).detalle, null, 'la clave en null sí borra el comentario');
 
   await limpiar();
 });

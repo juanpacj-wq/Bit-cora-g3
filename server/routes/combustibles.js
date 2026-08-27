@@ -1,6 +1,6 @@
 // Router de Combustibles → Consumos (E7, AUD-34/35; D-027/D-034). Montado bajo /api/combustibles
 // tras requireEntra. catálogo (read) + consumos GET (pivot planta×fecha) + consumos POST (batch)
-// + revertir al valor del SIS (D-061).
+// + revertir al valor del SIS + scrape manual del SIS y su estado (D-061).
 // COMB_BITACORA_ID se resuelve vía dbBindings (live binding, asignado al final de initDB).
 
 import express from 'express';
@@ -10,6 +10,8 @@ import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
 import { hasPermisoBitacora } from '../middleware/permissions.js';
 import { fechaBogotaStr } from '../utils/turno.js';
+import { estadoSisLock } from '../utils/sis/sis-lock.js';
+import { estadoScrapeJob, iniciarScrapeJob } from '../utils/sis/sis-job.js';
 import { asyncH, loadAppSession } from './_middleware.js';
 
 const router = express.Router();
@@ -31,19 +33,25 @@ const ERR_PLANTA = {
   mensaje: 'La planta indicada no maneja consumos de combustible.',
 };
 
-// Id del usuario SISTEMA (dueño de las celdas que escribe el scraper del SIS). Prefiere el live
-// binding de db.js; si el proceso arrancó con SKIP_INITDB=1 (backends efímeros de la metodología
-// v2) el binding queda en null, así que cae a la consulta y la cachea. Mismo patrón que
-// `resolverSistemaId` de utils/sis/carbon-scraper.js.
-let sistemaIdCache = null;
-async function resolverSistemaId(db) {
-  if (dbBindings.USUARIO_SISTEMA_ID) return dbBindings.USUARIO_SISTEMA_ID;
-  if (sistemaIdCache) return sistemaIdCache;
-  const r = await db.request().query(
-    `SELECT usuario_id FROM lov_bit.usuario WHERE username = 'SISTEMA'`
-  );
-  sistemaIdCache = r.recordset[0]?.usuario_id ?? null;
-  return sistemaIdCache;
+// Plantas con lecturas del SIS. Predicado MÁS ESTRICTO que `plantaCombValida`: GEC3 es una planta
+// válida de COMB (se le registran consumos a mano) pero NO tiene SIS, así que pedirle un scrape es
+// un 400 `planta_sin_sis`, no un 404 mudo ni un job que no traería nada. La planta-fixture entra
+// porque el seed C12 le dio el catálogo espejo ALIM_1..8 justo para poder ejercer el scrape en las
+// suites sin tocar una planta real (D-055).
+function plantaConSis(planta_id) {
+  return planta_id === 'GEC32' || planta_id === dbBindings.TEST_PLANTA_ID;
+}
+
+// Tope del rango de un scrape manual: 31 días (inclusive). Un día cuesta ~5 min contra el SIS real,
+// así que un mes ya son ~2,5 h de job; más que eso es trabajo de backfill (CLI, D-060), no de un
+// botón. Rangos históricos grandes van por server/scripts/backfill-carbon-gec32.js.
+const MAX_DIAS_RANGO = 31;
+const MS_DIA = 86400000;
+
+// Días de [from, to] inclusive, con aritmética UTC pura (nunca hora local: convención de TZ).
+function diasDeRango(from, to) {
+  const aUTC = (f) => { const [y, m, d] = f.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+  return Math.round((aUTC(to) - aUTC(from)) / MS_DIA) + 1;
 }
 
 // Columnas que alimentan el shape de celda del GET. Se comparte con revertir (C5) para que la celda
@@ -128,7 +136,8 @@ router.get('/consumos', asyncH(async (req, res) => {
   }
 
   const db = await getDB();
-  const sistemaId = await resolverSistemaId(db);
+  // Live binding de db.js: initDB lo resuelve SIEMPRE, también con SKIP_INITDB=1 (GATE-O1 D2).
+  const sistemaId = dbBindings.USUARIO_SISTEMA_ID;
 
   const catRes = await db.request()
     .input('p', sql.VarChar(10), planta_id)
@@ -283,10 +292,18 @@ router.post('/consumos', asyncH(async (req, res) => {
         // en 0 y `modificado_por` humano, la ownership (D-029) protege el override y `valor_sis`
         // se conserva como sombra para poder revertir.
         if (existente.valor_sis !== null && existente.valor_sis !== undefined) {
+          // D-061 (CA-36): vaciar NO es editar el comentario. El diff del front manda `{ cantidad:
+          // null }` SIN la clave `detalle` cuando el operador solo borra el número, y tomar eso
+          // como "detalle = null" le borraba en silencio la nota que explicaba la celda. Con la
+          // clave ausente se conserva el `detalle` que ya estaba; con la clave presente (aunque
+          // venga en null) manda el body, que es la forma de borrar el comentario a propósito.
+          const traeDetalle = Object.prototype.hasOwnProperty.call(c, 'detalle');
+          const detalleVaciado = traeDetalle ? (c.detalle ?? null) : (existente.detalle ?? null);
+
           if (Number(existente.cantidad) !== 0) {
             await new sql.Request(tx)
               .input('id', sql.Int, existente.consumo_id)
-              .input('det', sql.NVarChar(sql.MAX), c.detalle ?? null)
+              .input('det', sql.NVarChar(sql.MAX), detalleVaciado)
               .input('u', sql.Int, sesion.usuario_id)
               .query(`
                 UPDATE bitacora.consumo_combustible
@@ -295,13 +312,13 @@ router.post('/consumos', asyncH(async (req, res) => {
                 WHERE consumo_id=@id
               `);
             actualizados++;
-          } else if ((existente.detalle ?? null) !== (c.detalle ?? null)) {
+          } else if ((existente.detalle ?? null) !== detalleVaciado) {
             // Ya estaba en 0 y solo cambió el comentario: mismo trato que la rama con valor
             // (paridad D-019). Ignorarlo devolvería un 200 que dice "guardado" y perdería el
             // comentario en silencio (lección D-055: nunca un 200 mentiroso).
             await new sql.Request(tx)
               .input('id', sql.Int, existente.consumo_id)
-              .input('det', sql.NVarChar(sql.MAX), c.detalle ?? null)
+              .input('det', sql.NVarChar(sql.MAX), detalleVaciado)
               .query(`UPDATE bitacora.consumo_combustible SET detalle=@det WHERE consumo_id=@id`);
             actualizados++;
           }
@@ -400,7 +417,7 @@ router.post('/consumos/revertir', asyncH(async (req, res) => {
   }
 
   const db = await getDB();
-  const sistemaId = await resolverSistemaId(db);
+  const sistemaId = dbBindings.USUARIO_SISTEMA_ID;
 
   const pertenece = (await db.request()
     .input('p', sql.VarChar(10), planta_id)
@@ -495,6 +512,104 @@ router.post('/consumos/revertir', asyncH(async (req, res) => {
     try { await tx.rollback(); } catch {}
     throw err;
   }
+}));
+
+// POST /api/combustibles/sis/scrape — D-061 (C7). Dispara el scrape manual del SIS y responde
+// **202 sin esperarlo**: un día son 24 periodos a ~13 s cada uno (~5 min), y nginx corta a los
+// 60 s. El trabajo vive en sis-job.js bajo el mutex de proceso; el avance se consulta en
+// GET /sis/estado. Gate `puede_crear`: dispara una escritura masiva de celdas.
+// Body: { planta_id?, fecha } o { planta_id?, from, to }.
+router.post('/sis/scrape', asyncH(async (req, res) => {
+  const sesion = req.sesion;
+  if (!(await hasPermisoBitacora(sesion, dbBindings.COMB_BITACORA_ID, 'puede_crear'))) {
+    return sendJSON(res, 403, { error: 'Sin permiso para lanzar el scrape del SIS' });
+  }
+
+  const { planta_id = 'GEC32', fecha, from, to } = req.body || {};
+  if (!plantaConSis(planta_id)) {
+    return sendJSON(res, 400, {
+      error: 'la planta no tiene SIS',
+      codigo: 'planta_sin_sis',
+      mensaje: 'Esta planta no tiene lecturas del SIS.',
+    });
+  }
+
+  // Las dos formas del body colapsan en una: un día suelto es el rango degenerado from=to=fecha.
+  // De acá para abajo hay UN solo camino, así que las validaciones no pueden divergir entre ambas.
+  const unDia = fecha !== undefined && fecha !== null;
+  const desde = unDia ? fecha : from;
+  const hasta = unDia ? fecha : to;
+
+  const FORMATO = /^\d{4}-\d{2}-\d{2}$/;
+  if (!FORMATO.test(desde || '') || !FORMATO.test(hasta || '')) {
+    return sendJSON(res, 400, {
+      error: 'fecha inválida (YYYY-MM-DD)',
+      codigo: 'fecha_invalida',
+      mensaje: 'Indica la fecha o el rango en formato AAAA-MM-DD.',
+    });
+  }
+
+  // Ventana: hoy o pasado en TZ Bogotá. Comparación lexicográfica: ambos en YYYY-MM-DD con padding.
+  const hoyBogota = fechaBogotaStr(new Date());
+  if (desde > hoyBogota || hasta > hoyBogota) {
+    return sendJSON(res, 400, {
+      error: 'fecha futura',
+      codigo: 'fecha_futura',
+      mensaje: 'No se puede pedirle al SIS una fecha futura.',
+    });
+  }
+  if (desde > hasta) {
+    return sendJSON(res, 400, {
+      error: 'rango inválido',
+      codigo: 'rango_invalido',
+      mensaje: 'La fecha inicial no puede ser posterior a la final.',
+    });
+  }
+  if (diasDeRango(desde, hasta) > MAX_DIAS_RANGO) {
+    return sendJSON(res, 400, {
+      error: 'rango demasiado grande',
+      codigo: 'rango_excede_max',
+      mensaje: `El rango no puede superar ${MAX_DIAS_RANGO} días. Para un histórico largo se usa el backfill.`,
+    });
+  }
+
+  const db = await getDB();
+  try {
+    const job = iniciarScrapeJob({
+      pool: db,
+      planta_id,
+      from: desde,
+      to: hasta,
+      usuario: { usuario_id: sesion.usuario_id, nombre_completo: sesion.nombre_completo },
+    });
+    return sendJSON(res, 202, { job });
+  } catch (err) {
+    // 409 y no 500: no es una falla, es que el SIS ya está ocupado (otro job manual o el tick del
+    // sweeper). El cuerpo lleva `job` y `lock` para que quien lo reciba sepa CUÁL de los dos es y
+    // desde cuándo, en vez de un "reintenta" a ciegas.
+    if (err?.codigo === 'scrape_en_curso') {
+      return sendJSON(res, 409, {
+        error: 'ya hay un scrape en curso',
+        codigo: 'scrape_en_curso',
+        mensaje: 'Ya hay un scrape del SIS en curso. Espera a que termine e intenta de nuevo.',
+        job: estadoScrapeJob(),
+        lock: estadoSisLock(),
+      });
+    }
+    throw err;
+  }
+}));
+
+// GET /api/combustibles/sis/estado — D-061 (C8). Avance del scrape manual + foto del mutex.
+// Gate `puede_ver`: es información de lectura (quién está hablando con el SIS y cómo va).
+// `job` es null si este proceso nunca corrió ninguno — incluido el caso "corrió y se reinició":
+// el estado vive en memoria y la verdad persistente es bitacora.sis_scrape_log.
+router.get('/sis/estado', asyncH(async (req, res) => {
+  const sesion = req.sesion;
+  if (!(await hasPermisoBitacora(sesion, dbBindings.COMB_BITACORA_ID, 'puede_ver'))) {
+    return sendJSON(res, 403, { error: 'Sin permiso para ver Combustibles' });
+  }
+  return sendJSON(res, 200, { job: estadoScrapeJob(), lock: estadoSisLock() });
 }));
 
 export default router;
