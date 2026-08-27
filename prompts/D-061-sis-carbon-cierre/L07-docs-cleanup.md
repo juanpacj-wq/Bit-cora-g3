@@ -107,6 +107,78 @@
   competencia). Los gates de O3 y O4 deben presupuestar con el número alto mientras la corrida esté
   viva.
 
+> **ENMIENDA G2 (gate O3, 2026-08-27)** — se suma a la G1, no la reemplaza.
+>
+> 1. **El runbook del backfill son DOS pasadas, no una** (`GATE-O3.md` §5 D13). Con
+>    `concurrencia 6` sostenida el SIS falla en ~7–10 % de los días (medido por el gate: 22 de 331
+>    en dev, 23 de 235 en prod). Esos días quedan `completo=0` y **una segunda pasada del mismo
+>    comando con `--solo-parciales` los re-pide enteros** (porque `periodos_error != 0` hace que
+>    `periodoDesdeDe` devuelva 1). El criterio de "terminado" que va en `DEPLOY.md` es
+>    `SELECT COUNT(*) FROM bitacora.sis_scrape_log WHERE planta_id='GEC32' AND completo=0` **en
+>    cero**, NO que el proceso haya salido.
+> 2. **El CLI tiene un código de salida nuevo en `--from auto`: `4` = tope alcanzado** (la fecha que
+>    muestra es el día con datos más antiguo que vio; puede haber historia más atrás). Los otros dos
+>    son `3` (inicio hallado, falta `--confirm-from`) y `2` (el sondeo no sirve). Van los tres en el
+>    runbook.
+> 3. **`GET /api/combustibles/sis/estado` devuelve `sweeper: { habilitado }`, pero ninguna pantalla
+>    lo consume** (`grep -rn "sis/estado" src/` sale vacío). Documéntalo como lo que es: superficie
+>    de API sin consumidor de UI todavía, y `SIS_SWEEPER_ENABLED` como **flag de test, no de
+>    producción**. No lo presentes como que el operador ya puede distinguir un sweeper apagado de
+>    uno roto: no puede.
+> 4. **`L11` corre en paralelo contigo en esta misma ola** y toca `discover.js`, `carbon-scraper.js`
+>    y el front de COMB. **No mueve ningún contrato** (C3 y C8 quedan como los dejó L10), así que lo
+>    que documentes sigue siendo cierto. Dos cosas suyas sí te tocan: si retira o renombra el
+>    re-export de `discoverEarliestDate` en `carbon-scraper.js` (H55) y qué queda de la superficie
+>    de `override.js`. **Lee `cierres/L11.md` si ya existe cuando escribas**; si no existe todavía,
+>    documenta el estado de L10 y anótalo como pendiente en tu cierre para que lo cierre el ADR.
+> 5. `override.js` tiene **16 exports** (13 funciones + `GAVELA_MS`, `ALTO_TIP`, `ANCHO_TIP`), no 10
+>    ni 7: C11 tiene que reflejar `claveCelda`, `reconciliarBuffer`, `calcularDiff` y `ladoPopover`.
+
+### Hechos que cambian (copia literal de `GATE-O3.md` §6)
+
+- **`discoverEarliestDate` devuelve `{ fecha, motivo, sondeos }`** (C3 enmendado por L10). `motivo` ∈
+  `hallada | tope-alcanzado | sin-datos | error-de-sondeo`; `fecha` es `null` en los dos últimos y
+  **nunca** se devuelve una fecha después de un error de red. `discover.js` exporta además `MOTIVOS`
+  y `explicarDescubrimiento` (la función pura de la que salen el texto del CLI y su código de
+  salida). **Ojo:** `carbon-scraper.js` sigue re-exportando el símbolo con el nombre viejo y la
+  forma nueva — hoy nadie lo consume por ahí, pero es una trampa (H55).
+- **El CLI tiene tres códigos de salida en `--from auto`:** `3` (inicio hallado, falta
+  `--confirm-from`), **`4` (tope alcanzado**: la fecha que muestra es el día con datos más antiguo
+  que vio, puede haber historia más atrás), `2` (el sondeo no sirve). El `4` es nuevo.
+- **`GET /api/combustibles/sis/estado` responde `{ job, lock, sweeper: { habilitado } }`** (C8
+  creció, aditivo). **Ninguna pantalla lo consume todavía** (`grep sis/estado src/` → vacío), así
+  que el objetivo de H33 —distinguir un sweeper apagado de uno roto desde la UI— **no está
+  entregado**; y el campo reporta la variable de entorno, no si el tick está vivo.
+- **`POST /api/combustibles/consumos` ya no se contradice:** la clave `detalle` ausente conserva el
+  comentario en **las dos** ramas (vaciar y cambiar la cantidad); presente —aunque venga `null`—
+  manda el body.
+- `src/components/Combustibles/override.js` tiene **16 exports** (13 funciones + `GAVELA_MS`,
+  `ALTO_TIP`, `ANCHO_TIP`), no 10: L09 agregó `claveCelda`, `reconciliarBuffer`, `calcularDiff` y
+  `ladoPopover`. C11 tiene que reflejarlo.
+- **El diff que la grilla manda al server ya no sale de comparar buffer contra snapshot**, sino del
+  conjunto explícito de coordenadas que el operador tocó; y cuando vuelve una lectura con una
+  edición viva, el buffer se reconcilia celda por celda contra el snapshot nuevo. `setCelda` es la
+  **única** puerta de escritura del buffer y tiene que seguir siéndolo.
+- **El lado del popover se decide midiendo** (`ladoPopover`, función pura que recibe los dos rects),
+  no por número de periodo ni por índice de columna. La regla vieja (`p >= 19`, `idx >= nAlim - 2`)
+  ya no existe y sus dos tests se reescribieron.
+- **La corrida del backfill son DOS pasadas.** Con `concurrencia 6` sostenida el SIS falla en ~7–10 %
+  de los días (medido: 22/331 en dev, 23/235 en prod, con las dos corridas simultáneas). Esos días
+  quedan `completo=0` y una segunda pasada del mismo comando con **`--solo-parciales`** los re-pide
+  enteros. El criterio de "terminado" es `COUNT(*) WHERE completo = 0` en cero, **no** que el
+  proceso haya salido. **L07 lo escribe en el runbook** (D13).
+- **La suite completa son ~38 min** con los dos backfills vivos (58 min en la O2 con uno solo; el
+  número no escala con la carga porque depende de qué años esté escribiendo el backfill).
+- **`npm test` a secas queda ROJO** desde L10 (H51): la guarda de CA-44 exige
+  `SIS_HOST=http://localhost:3154` y el `.env` no la trae. Hasta que L11 lo arregle, toda corrida
+  honesta de la suite tiene que exportar esa variable **en el proceso de tests y en el efímero**,
+  y el efímero además `SIS_SWEEPER_ENABLED=0` (D7) salvo que se esté probando CA-45.
+- **CA-45 y D7 no caben en el mismo backend:** CA-45 exige el sweeper encendido y D7 lo apaga. Se
+  corren aparte, y la pasada con el sweeper encendido **ensucia la fila de hoy de GEC32** (medido:
+  `ok=3` → `ok=0/err=8`). Se auto-sana en el siguiente tick del backend real.
+- **Dos cierres de este flujo se han equivocado sumando su propio aporte de tests** (L08 dijo 148
+  donde eran 160; L10 dijo 634 donde eran 637). El conteo que vale es el de la suite del gate.
+
 ## 0. Puerta de arranque (obligatorio, primero)
 ```bash
 node "../metodología de implementación/herramientas/lotes.mjs" --impl D-061 claim L07 --sesion L07-HHMM

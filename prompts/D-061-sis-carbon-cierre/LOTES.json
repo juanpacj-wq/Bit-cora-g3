@@ -12,8 +12,8 @@
       "gate": "GATE-O2.md"
     },
     "O3": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O3.md"
     },
     "O4": {
       "estado": "pendiente",
@@ -289,10 +289,10 @@
     "L09": {
       "ola": "O3",
       "titulo": "El refetch preservado no puede convertirse en un borrado al guardar (front COMB)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L09-2344",
+      "claim_ts": "2026-08-27T04:44:58.779Z",
+      "done_ts": "2026-08-27T05:13:37.081Z",
       "motivo": null,
       "depende_de": [
         "L08"
@@ -321,10 +321,10 @@
     "L10": {
       "ola": "O3",
       "titulo": "Endurecer el descubrimiento del SIS y hacer honesta la cobertura del scrape manual",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L10-2345",
+      "claim_ts": "2026-08-27T04:45:07.433Z",
+      "done_ts": "2026-08-27T05:17:08.135Z",
       "motivo": null,
       "depende_de": [
         "L04",
@@ -354,6 +354,48 @@
         "CA-45",
         "CA-46",
         "CA-47"
+      ]
+    },
+    "L11": {
+      "ola": "O4",
+      "titulo": "Cerrar las fronteras que dejaron abiertas L09 y L10 (editadas, ancla del hint, guarda de CA-44, popover)",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L09",
+        "L10"
+      ],
+      "puro": false,
+      "puerto": 3111,
+      "territorio": [
+        "src/components/Combustibles/ConsumosGrid.jsx",
+        "src/components/Combustibles/combustibles.css",
+        "src/components/Combustibles/override.js",
+        "src/components/Combustibles/override.test.js",
+        "src/components/Combustibles/ConsumosGrid.test.jsx",
+        "server/utils/sis/discover.js",
+        "server/utils/sis/carbon-scraper.js",
+        "server/tests/sis_discover.test.js",
+        "server/tests/sis_scrape_endpoint.test.js",
+        "prompts/D-061-sis-carbon-cierre/cierres/L11.md"
+      ],
+      "tests": [
+        "src/components/Combustibles/override.test.js",
+        "src/components/Combustibles/ConsumosGrid.test.jsx",
+        "tests/sis_discover.test.js",
+        "tests/sis_scrape_endpoint.test.js"
+      ],
+      "criterios": [
+        "CA-48",
+        "CA-49",
+        "CA-50",
+        "CA-51",
+        "CA-52",
+        "CA-53",
+        "CA-54"
       ]
     }
   },

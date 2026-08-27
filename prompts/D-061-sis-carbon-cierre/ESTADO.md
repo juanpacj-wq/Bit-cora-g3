@@ -17,9 +17,10 @@
 | O2 | L08 | Correcciones del front COMB tras el code-review de la O1 | ✅ (CA-33/35 parciales → L09) | `cierres/L08.md` (`f14918b`, `9da067f`) | GATE-O2 |
 | — | GATE-O2 | 632/632 en verde y 0 skips, 0 violaciones, D7–D10, L09 y L10 nuevos | ✅ (visto bueno 2026-08-26 23:11) | | `GATE-O2.md` (`eb9d00e`) |
 | — | Backfill prod | Corrida contra `PortalG3` (2.996 días desde `2018-06-13`) | 🟡 en curso (PID 23504, arranque 2026-08-26 23:35, ETA ~3,3 días) | | `GATE-O2.md` §5 D10 |
-| O3 | L09 | El refetch preservado no puede convertirse en un borrado al guardar (front) | ⬜ (O3 abierta) | — | — |
-| O3 | L10 | Endurecer el descubrimiento del SIS y la cobertura del scrape manual | ⬜ (O3 abierta) | — | — |
-| — | GATE-O3 | | ⬜ | | `GATE-O3.md` |
+| O3 | L09 | El refetch preservado no puede convertirse en un borrado al guardar (front) | ✅ (CA-37/39 parciales → L11) | `cierres/L09.md` (`2520640`, `fa25807`) | GATE-O3 |
+| O3 | L10 | Endurecer el descubrimiento del SIS y la cobertura del scrape manual | ✅ (CA-42/44/46 parciales → L11) | `cierres/L10.md` (`2805869`, `8cf415c`) | GATE-O3 |
+| — | GATE-O3 | 637/637 en verde, 0 violaciones, D11–D13, L11 nuevo con 3 altos | ✅ (visto bueno pendiente) | | `GATE-O3.md` |
+| O4 | L11 | Cerrar las fronteras que dejaron abiertas L09 y L10 | ⬜ | — | — |
 | O4 | L07 | Docs + cleanup (BIT-MODBD 2.5, BIT-RF 1.9, architecture, glosario, DEPLOY, git rm) | ⬜ | — | — |
 | — | GATE-O4 | | ⬜ | | `GATE-O4.md` |
 | Cierre | — | ADR D-061 + CLAUDE.md conv. 35 + cross-ref D-060 + git rm scaffolding | ⬜ | | |
@@ -34,7 +35,7 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
 | Referencia previa (merge `0a7015f`, 2026-08-25) | backend 572 en verde · vitest front 98/98 | |
 | GATE-O1 (2026-08-26, rama @ `c69f791` + ediciones del gate, server efímero `:3199` sin `SKIP_INITDB`) | `ℹ tests 608 · suites 31 · pass 607 · fail 0 · skipped 1` (+31 = los enganchados) · vitest front **126/126** · `npm run build` ✓ · residuos cero | 30,3 min (1.816 s) |
 | **GATE-O2** (2026-08-26, rama @ `3c173fb` + ediciones del gate; efímero `:3199` con `SIS_HOST` al stub y `SIS_SWEEPER_ENABLED=0`) | **`ℹ tests 632 · suites 31 · pass 632 · fail 0 · cancelled 0 · skipped 0 · todo 0`** (+24 y el único skip cerrado) · vitest front **160/160** · `npm run build` ✓ · residuos cero (script de 10 checks + query directa) | **58,0 min** (3.480 s — el backfill de dev escribía en la misma BD; sin esa competencia son ~30 min) |
-| GATE-O3 | | |
+| **GATE-O3** (2026-08-27, rama @ `8cf415c`; efímero `:3199` con `SIS_HOST` al stub y `SIS_SWEEPER_ENABLED=0`) | **`ℹ tests 637 · suites 31 · pass 637 · fail 0 · skipped 0`** (+5) · CA-45 aparte: 10/10 × 3 con el sweeper **encendido** · vitest front **201/201** · `npm run build` ✓ · residuos cero | **38,0 min** (2.277 s, con los **dos** backfills escribiendo: van por 2018–2019, días sin carbón y baratos de escribir) |
 | GATE-O4 | | |
 
 ## Hechos descubiertos (acumulado, breve)
@@ -59,6 +60,15 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   ausencia ya es un rojo (la suite quedó en `skipped 0`); **el orden de los archivos en el script
   `test` no es el orden de ejecución de `node --test`**; y la suite tarda ~58 min mientras el
   backfill escriba en la misma BD.
+- 2026-08-27 (GATE-O3, detalle en `GATE-O3.md` §6): **`concurrencia 6` sostenida SÍ produce errores**
+  (22 días de 331 en dev, 23 de 235 en prod) — no se pierde nada, pero **la corrida del backfill son
+  DOS pasadas**, la segunda con `--solo-parciales`, y el criterio de terminado es
+  `COUNT(*) WHERE completo=0` en cero, no que el proceso haya salido. **`npm test` a secas quedó
+  ROJO** desde L10 (la guarda de CA-44 exige un `SIS_HOST` que el `.env` no trae). **CA-45 y
+  `SIS_SWEEPER_ENABLED=0` no caben en el mismo backend**, y la pasada con el sweeper encendido
+  ensucia la fila de hoy de GEC32 (medido: `ok=3` → `ok=0/err=8`; se auto-sana). El CLI tiene un
+  código de salida nuevo (`4` = tope alcanzado) y `/sis/estado` devuelve `sweeper.habilitado`, que
+  **ninguna pantalla consume**. Dos cierres seguidos sumaron mal su propio aporte de tests.
 - 2026-08-26 (GATE-O2, code-review): el arreglo de L08 al latido dejó abierto el camino de vuelta
   —el snapshot se actualiza y el buffer no, así que el Guardar siguiente manda celdas que el
   operador nunca tocó— y `discover` v2 puede devolver una fecha de inicio equivocada sin decirlo
@@ -80,8 +90,14 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   **O4 = L07** (docs, que ahora depende también de ellos). Única enmienda de contrato autorizada:
   **C3** (`discoverEarliestDate` devuelve `{ fecha, motivo, sondeos }`) y el crecimiento aditivo de
   **C8** (`sweeper: { habilitado }`), ambas en L10.
+- **D11 (gate O3):** el gate **no arregló nada de código** pese a tres hallazgos altos: los tres viven
+  en territorio de lote y ninguno se cierra bien sin un test que lo fije.
+- **D12 (gate O3):** **O4 = L11 + L07 en paralelo**. L11 no mueve ningún contrato (C3 y C8 quedan
+  como los dejó L10), por eso L07 puede documentar al mismo tiempo.
+- **D13 (gate O3):** el backfill son dos pasadas; los días con `err>0` se recuperan con
+  `--solo-parciales`. Va al runbook de `DEPLOY.md` (L07).
 - **Reparto acumulado:** O2 ganó **L08** (gate O1); L04 ganó `sis_endpoints.test.js` + CA-36; L06
-  ganó `sis_concurrencia.test.js`; O3 gana L09 y L10 (gate O2).
+  ganó `sis_concurrencia.test.js`; O3 ganó L09 y L10 (gate O2); O4 gana **L11** (gate O3).
 - `db.js` exporta `seedCatalogoCombTest(db)` (gate O1) y el `MERGE` del seed TST lleva `HOLDLOCK`.
 - Desviaciones aditivas de la O2 (ningún contrato roto): `plantaConSis()` es un helper nuevo y no un
   reúso de `plantaCombValida`; `iniciarScrapeJob` acepta un `log` opcional; los 400/409 del scrape
@@ -111,3 +127,9 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   `%LOCALAPPDATA%\Temp\bitacora-backfill\prod-2026-08.log`, ETA ~3,3 días. Arranque limpio
   (2018-06-13 en 24/24, 0 errores). Los dry-run previos confirmaron que el CLI **no reescribe** los
   74 días que prod ya tenía completos. Conteos finales: `/cerrar-implementacion`.
+- 2026-08-27 · O3 ejecutada en dos chats paralelos (L09-2344, L10-2345), 23:44–00:20.
+- 2026-08-27 · GATE-O3 (08:05–09:05, test-lock `GATE-O3`): suite **637/637 con 0 skips** (38 min) +
+  CA-45 aparte con el sweeper encendido (10/10 × 3) + vitest **201/201** + build; residuos cero;
+  `/code-review` (13 hallazgos, **3 altos** verificados dos veces: por el revisor y por el
+  integrador); `/security-review` **no** se corrió y el gate deja escrito por qué (§3). D11–D13;
+  **L11 creado** para O4, junto a L07; prompt de L07 enmendado (G2).

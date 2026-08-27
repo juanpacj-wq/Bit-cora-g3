@@ -24,7 +24,7 @@ reporta — solo obliga a presupuestar ~58 min de suite en vez de ~30 mientras e
 | O2 | L04, L05, L06, **L08** | Consumen C1/C2/C12 verificados en GATE-O1. L08 (corrección front, puro) se añadió en GATE-O1 §7. Disjuntos: L04 (`sis-job.js` + `combustibles.js` + su test) / L05 (`discover.js` + CLI + fixture + `sis_parser.test.js` + su test) / L06 (solo archivos de test + helpers + residuos). | `combustibles.js` → L04 · `discover.js` → L05 · `helpers.js` → L06 |
 | Tarea del integrador tras GATE-O2 | Corrida del backfill contra **prod** (`DB_NAME=PortalG3 … --confirm-db PortalG3`) | Requiere visto bueno explícito del usuario (PREGUNTAS #11). Se registra en `GATE-O2.md` §5 y en `ESTADO.md`. | — |
 | O3 | **L09, L10** | Lotes de corrección abiertos por el `/code-review` de la O2 (`GATE-O2.md` §5 D9). Disjuntos por completo: L09 vive en `src/components/Combustibles/**` y L10 en `server/utils/sis/discover.js` + el CLI + `routes/combustibles.js` + tres archivos de test. | `combustibles.js` → L10 · `discover.js` → L10 |
-| O4 | L07 | Docs permanentes + cleanup del scaffolding v1 y del scraper standalone, con toda la funcionalidad ya verificada **incluidas las correcciones de O3** (L10 enmienda C3 y hace crecer C8: L07 documentaría un blanco móvil si fueran en la misma ola). | `BIT-*`, `docs/architecture.md`, `docs/domain-glossary.md`, `deploy/DEPLOY.md` → L07 |
+| O4 | **L11, L07** | L11 cierra las fronteras que dejaron abiertas L09 y L10 (`GATE-O3.md` §5 D12) y L07 documenta. Van en paralelo porque los territorios son disjuntos (`src/**` + `utils/sis` + tests, contra `BIT-*` + `docs/` + `deploy/`) y **L11 no mueve ningún contrato**: C3 y C8 quedan como los dejó L10, así que lo que L07 escribe no se mueve bajo sus pies. | `discover.js`, `carbon-scraper.js` → L11 · `BIT-*`, `docs/*`, `deploy/DEPLOY.md` → L07 |
 | Cierre | `/cerrar-implementacion D-061` | ADR D-061 completo (desde los aportes), `CLAUDE.md` conv. 35, corregir la cross-ref `[[D-029]]` de D-060 → `[[D-061]]`, `git rm` de `prompts/D-061-*`, smoke + suite final. | `decisions.md`, `CLAUDE.md` → integrador |
 
 ## Lotes
@@ -109,8 +109,21 @@ reporta — solo obliga a presupuestar ~58 min de suite en vez de ~30 mientras e
   descubierta **no está en duda** (esa corrida tuvo 0 errores de red): lo que se arregla es que la
   próxima no pueda mentir en silencio.
 
+### L11 — Cerrar las fronteras que dejaron abiertas L09 y L10
+- **Ola:** O4 · **Depende de:** L09, L10 · **Puro:** no (la parte HTTP de CA-53 levanta efímero) · **Puerto de test:** 3111 (+ stub del SIS en 3154)
+- **Territorio:** `src/components/Combustibles/**` (5 archivos), `server/utils/sis/{discover,carbon-scraper}.js`, `server/tests/{sis_discover,sis_scrape_endpoint}.test.js`
+- **Contratos:** **ninguno** — C3 y C8 quedan como los dejó L10; C11 solo puede crecer. Cambiar uno es un bloqueo.
+- **Criterios:** CA-48 … CA-54
+- **Tests que corre:** `npx vitest run src/components/Combustibles`, `node --test tests/sis_discover.test.js`, `npm test` (para CA-53) y `tests/sis_scrape_endpoint.test.js` con harness
+- **Riesgo / nota:** creado por el gate O3 con tres hallazgos **altos** (`GATE-O3.md` §7: H50 —H24
+  vuelve por la puerta de al lado porque `editadasRef` nunca suelta una coordenada—, H49 —el arreglo
+  de H29 dejó de sondear el día del `hint`, una regresión— y H51 —la guarda de CA-44 dejó `npm test`
+  rojo para siempre—) más cuatro medios y tres de limpieza. Los tres altos son **fronteras de
+  arreglos anteriores**, no defectos independientes: el prompt le pide leer primero el cierre del
+  lote que hizo cada arreglo. Disjunto de L07.
+
 ### L07 — Docs + cleanup
-- **Ola:** **O4** (movida por `GATE-O2.md` §5 D9) · **Depende de:** L04, L05, L06, L08, **L09, L10** · **Puro:** sí · **Puerto de test:** 3107 (no aplica)
+- **Ola:** **O4** (movida por `GATE-O2.md` §5 D9) · **Depende de:** L04, L05, L06, L08, L09, L10 · **Puro:** sí · **Puerto de test:** 3107 (no aplica) · **Comparte ola con L11**, que no mueve contratos
 - **Territorio:** `BIT-MODBD-2026-001.md`, `BIT-RF-2026-001.md`, `docs/architecture.md`, `docs/domain-glossary.md`, `deploy/DEPLOY.md`, `js-scraper-carbon-g32/**` (git rm + sueltos), `prompts/D-029-sis-carbon-gec32/**` (git rm)
 - **Contratos:** — · **consume:** todos (documenta)
 - **Criterios:** CA-29, CA-30, CA-31
@@ -150,3 +163,16 @@ reporta — solo obliga a presupuestar ~58 min de suite en vez de ~30 mientras e
   explícito (`GATE-O2.md` §5 D10), con la foto de prod ya tomada: 74 días de log, todos completos.
 - Puertos de test reservados: **L09 → 3109**, **L10 → 3110** (más el stub del SIS en **3154**, que
   no estaba en la tabla de reservas de `_CONTEXTO-BASE.md §7`).
+
+## Enmiendas del gate O3 (2026-08-27)
+- **L11 nuevo en O4** (`GATE-O3.md` §5 D12), en paralelo con L07. Tercera ola seguida en la que la
+  revisión encuentra defectos en las correcciones de la anterior; la diferencia es que estos tres
+  altos son **fronteras** de arreglos previos (el caso que no se contempló, la regresión en el
+  camino de al lado) y no una lista abierta: cerrarlos agota el trabajo sobre COMB y `discover`.
+- **El gate O3 no arregló nada de código** (D11): los tres altos viven en territorio de lote y
+  ninguno se puede arreglar bien sin un test que lo fije.
+- **Camino crítico revisado:** `L02 → L04 → {L09, L10} → {L11, L07} → cierre`.
+- **La corrida del backfill son dos pasadas** (D13): la segunda con `--solo-parciales`, y el
+  criterio de terminado es `COUNT(*) WHERE completo = 0` en cero. Lo escribe L07 en `DEPLOY.md`.
+- **El smoke visual del front se hace después de L11**, que es la última mano sobre esa pantalla.
+- Puerto de test reservado: **L11 → 3111**.
