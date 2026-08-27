@@ -16,8 +16,8 @@
       "gate": "GATE-O3.md"
     },
     "O4": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O4.md"
     }
   },
   "lotes": {
@@ -254,10 +254,10 @@
     "L07": {
       "ola": "O4",
       "titulo": "Docs + cleanup: BIT-MODBD 2.5, BIT-RF 1.9, architecture, glosario, DEPLOY, git rm scraper y prompts D-029",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L07-1431",
+      "claim_ts": "2026-08-27T14:31:50.691Z",
+      "done_ts": "2026-08-27T14:56:39.424Z",
       "motivo": null,
       "depende_de": [
         "L04",
@@ -359,10 +359,10 @@
     "L11": {
       "ola": "O4",
       "titulo": "Cerrar las fronteras que dejaron abiertas L09 y L10 (editadas, ancla del hint, guarda de CA-44, popover)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L11-1431",
+      "claim_ts": "2026-08-27T14:31:31.153Z",
+      "done_ts": "2026-08-27T15:43:47.707Z",
       "motivo": null,
       "depende_de": [
         "L09",

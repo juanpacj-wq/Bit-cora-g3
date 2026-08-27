@@ -5,7 +5,7 @@ import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
 
 export default [
-  { ignores: ['dist/**', 'node_modules/**', 'server/node_modules/**', 'js-scraper-carbon-g32/**', 'graphify-out/**'] },
+  { ignores: ['dist/**', 'node_modules/**', 'server/node_modules/**', 'graphify-out/**'] },
   {
     files: ['src/**/*.{js,jsx}'],
     ...js.configs.recommended,

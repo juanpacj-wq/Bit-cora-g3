@@ -20,9 +20,9 @@
 | O3 | L09 | El refetch preservado no puede convertirse en un borrado al guardar (front) | ✅ (CA-37/39 parciales → L11) | `cierres/L09.md` (`2520640`, `fa25807`) | GATE-O3 |
 | O3 | L10 | Endurecer el descubrimiento del SIS y la cobertura del scrape manual | ✅ (CA-42/44/46 parciales → L11) | `cierres/L10.md` (`2805869`, `8cf415c`) | GATE-O3 |
 | — | GATE-O3 | 637/637 en verde, 0 violaciones, D11–D13, L11 nuevo con 3 altos | ✅ (visto bueno 2026-08-27 09:14) | | `GATE-O3.md` (`bb70a12`) |
-| O4 | L11 | Cerrar las fronteras que dejaron abiertas L09 y L10 | ⬜ (O4 abierta) | — | — |
-| O4 | L07 | Docs + cleanup (BIT-MODBD 2.5, BIT-RF 1.9, architecture, glosario, DEPLOY, git rm) | ⬜ (O4 abierta) | — | — |
-| — | GATE-O4 | | ⬜ | | `GATE-O4.md` |
+| O4 | L11 | Cerrar las fronteras que dejaron abiertas L09 y L10 | ✅ (CA-48/49/50 parciales → D16) | `cierres/L11.md` (`b30885d`, `f08f1bd`) | GATE-O4 |
+| O4 | L07 | Docs + cleanup (BIT-MODBD **2.5**, BIT-RF **2.1** + RF-076, architecture, glosario, DEPLOY, git rm) | ✅ | `cierres/L07.md` (`7f924f5`, `126f5ba`) | GATE-O4 |
+| — | GATE-O4 | 641/641 en verde, 0 violaciones, D14–D16; **9 de 13 hallazgos en la misma pantalla** | ✅ (decisión D16 + visto bueno pendientes) | | `GATE-O4.md` |
 | Cierre | — | ADR D-061 + CLAUDE.md conv. 35 + cross-ref D-060 + git rm scaffolding | ⬜ | | |
 
 Leyenda: ⬜ pendiente · 🟡 en curso · ✅ done (lote) / cerrada con visto bueno (ola) · ⛔ bloqueado.
@@ -36,7 +36,7 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
 | GATE-O1 (2026-08-26, rama @ `c69f791` + ediciones del gate, server efímero `:3199` sin `SKIP_INITDB`) | `ℹ tests 608 · suites 31 · pass 607 · fail 0 · skipped 1` (+31 = los enganchados) · vitest front **126/126** · `npm run build` ✓ · residuos cero | 30,3 min (1.816 s) |
 | **GATE-O2** (2026-08-26, rama @ `3c173fb` + ediciones del gate; efímero `:3199` con `SIS_HOST` al stub y `SIS_SWEEPER_ENABLED=0`) | **`ℹ tests 632 · suites 31 · pass 632 · fail 0 · cancelled 0 · skipped 0 · todo 0`** (+24 y el único skip cerrado) · vitest front **160/160** · `npm run build` ✓ · residuos cero (script de 10 checks + query directa) | **58,0 min** (3.480 s — el backfill de dev escribía en la misma BD; sin esa competencia son ~30 min) |
 | **GATE-O3** (2026-08-27, rama @ `8cf415c`; efímero `:3199` con `SIS_HOST` al stub y `SIS_SWEEPER_ENABLED=0`) | **`ℹ tests 637 · suites 31 · pass 637 · fail 0 · skipped 0`** (+5) · CA-45 aparte: 10/10 × 3 con el sweeper **encendido** · vitest front **201/201** · `npm run build` ✓ · residuos cero | **38,0 min** (2.277 s, con los **dos** backfills escribiendo: van por 2018–2019, días sin carbón y baratos de escribir) |
-| GATE-O4 | | |
+| **GATE-O4** (2026-08-27, rama @ `f08f1bd` + 2 ediciones del gate; efímero `:3199` igual que O3) | **`ℹ tests 641 · suites 31 · pass 641 · fail 0 · skipped 0`** (+4) · vitest front **223/223** · `npm run build` ✓ · `npm run lint` 0 errores · residuos cero | **32,0 min** (sin backfills compitiendo: estaban muertos) |
 
 ## Hechos descubiertos (acumulado, breve)
 - 2026-08-26 (planeación): el SIS responde desde el equipo de desarrollo (~13 s/periodo, ~830 KB);
@@ -96,8 +96,17 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   como los dejó L10), por eso L07 puede documentar al mismo tiempo.
 - **D13 (gate O3):** el backfill son dos pasadas; los días con `err>0` se recuperan con
   `--solo-parciales`. Va al runbook de `DEPLOY.md` (L07).
+- **D14 (gate O4):** el gate retiró dos referencias colgantes al scraper borrado (`eslint.config.js`
+  y la cabecera de `xls-parser.js`, que ordenaba sincronizar un archivo inexistente).
+- **D15 (gate O4):** **enmienda la D13.** La recuperación de un backfill interrumpido es **relanzar
+  el comando completo**, NO `--solo-parciales`: ese flag salta los días **sin fila**, que son justo
+  los que deja un corte de BD (100 días en cada corrida anoche).
+- **D16 (gate O4):** pendiente del usuario — qué hacer con la grilla COMB, que lleva cuatro olas sin
+  converger (9 de 13 hallazgos, y la **tercera** aparición del mismo modo de pérdida de datos).
+- **La reserva de versiones de la fase 2 era imposible** (H78): BIT-RF 1.9 y RF-071 ya eran de
+  D-057. Lo real es **BIT-RF 2.1 / RF-076**; BIT-MODBD 2.5 sí era correcto.
 - **Reparto acumulado:** O2 ganó **L08** (gate O1); L04 ganó `sis_endpoints.test.js` + CA-36; L06
-  ganó `sis_concurrencia.test.js`; O3 ganó L09 y L10 (gate O2); O4 gana **L11** (gate O3).
+  ganó `sis_concurrencia.test.js`; O3 ganó L09 y L10 (gate O2); O4 ganó **L11** (gate O3).
 - `db.js` exporta `seedCatalogoCombTest(db)` (gate O1) y el `MERGE` del seed TST lleva `HOLDLOCK`.
 - Desviaciones aditivas de la O2 (ningún contrato roto): `plantaConSis()` es un helper nuevo y no un
   reúso de `plantaCombValida`; `iniciarScrapeJob` acepta un `log` opcional; los 400/409 del scrape
@@ -137,3 +146,11 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   cierre (`/cerrar-implementacion D-061`). Pendientes vivos: las dos corridas del backfill (dev PID
   15424, prod PID 23504) con su **segunda pasada** por hacer, y el **smoke visual del front**, que
   ahora sí va después de L11.
+- 2026-08-27 · O4 ejecutada en dos chats paralelos (L07-1431, L11-1431), 14:31–15:10.
+- 2026-08-27 · GATE-O4 (10:55–11:45, test-lock `GATE-O4`): suite **641/641 con 0 skips** (32 min,
+  sin backfills compitiendo) + vitest **223/223** + build + lint 0 errores; residuos cero;
+  `/code-review` (13 hallazgos, **9 en `ConsumosGrid.jsx`/`override.js`**, dos altos verificados por
+  el integrador); `/security-review` no aplica (la ola no tiene superficie HTTP). D14–D16.
+  **La decisión D16 —O5 acotada, rediseño en D-062, o cerrar ya— queda del usuario.**
+- 2026-08-27 · **Los dos backfills murieron** (prod en 246 de 2.996 días). Falta relanzarlos con el
+  comando completo (D15). Conviene correr solo prod.

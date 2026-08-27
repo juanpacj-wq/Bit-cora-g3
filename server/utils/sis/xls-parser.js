@@ -7,8 +7,11 @@
 // lanzar RangeError (spread de String.fromCharCode). Endurecido: detección de ciclos, validación
 // de sectorSize y de todo índice de sector, topes derivados del tamaño real del buffer y
 // construcción incremental de strings. Todo input inválido aborta con un Error ACOTADO en vez de
-// colgar/OOM. AUD-36: este archivo es la implementación canónica; `js-scraper-carbon-g32/xls.js`
-// es un MIRROR CommonJS que debe mantenerse en sync (el split ESM/CJS impide reuso síncrono).
+// colgar/OOM. AUD-36: este archivo es la implementación canónica y, desde D-061 (L07), la ÚNICA:
+// el mirror CommonJS `js-scraper-carbon-g32/xls.js` se retiró junto con el scraper standalone, así
+// que ya no hay nada que mantener en sync. El spot-check de D-061 (576/576 celdas idénticas en tres
+// días históricos) se hizo contra ese mirror antes de retirarlo y quedó en el ADR: es la última
+// verificación independiente que tuvo este parser.
 //
 // El SIS exporta los valores como TEXTO en la Shared String Table (SST),
 // así que hay que reconstruir la SST (incl. strings que cruzan CONTINUE) y
