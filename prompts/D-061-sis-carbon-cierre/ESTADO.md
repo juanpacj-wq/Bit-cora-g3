@@ -19,9 +19,9 @@
 | — | Backfill prod | Corrida contra `PortalG3` (2.996 días desde `2018-06-13`) | 🟡 en curso (PID 23504, arranque 2026-08-26 23:35, ETA ~3,3 días) | | `GATE-O2.md` §5 D10 |
 | O3 | L09 | El refetch preservado no puede convertirse en un borrado al guardar (front) | ✅ (CA-37/39 parciales → L11) | `cierres/L09.md` (`2520640`, `fa25807`) | GATE-O3 |
 | O3 | L10 | Endurecer el descubrimiento del SIS y la cobertura del scrape manual | ✅ (CA-42/44/46 parciales → L11) | `cierres/L10.md` (`2805869`, `8cf415c`) | GATE-O3 |
-| — | GATE-O3 | 637/637 en verde, 0 violaciones, D11–D13, L11 nuevo con 3 altos | ✅ (visto bueno pendiente) | | `GATE-O3.md` |
-| O4 | L11 | Cerrar las fronteras que dejaron abiertas L09 y L10 | ⬜ | — | — |
-| O4 | L07 | Docs + cleanup (BIT-MODBD 2.5, BIT-RF 1.9, architecture, glosario, DEPLOY, git rm) | ⬜ | — | — |
+| — | GATE-O3 | 637/637 en verde, 0 violaciones, D11–D13, L11 nuevo con 3 altos | ✅ (visto bueno 2026-08-27 09:14) | | `GATE-O3.md` (`bb70a12`) |
+| O4 | L11 | Cerrar las fronteras que dejaron abiertas L09 y L10 | ⬜ (O4 abierta) | — | — |
+| O4 | L07 | Docs + cleanup (BIT-MODBD 2.5, BIT-RF 1.9, architecture, glosario, DEPLOY, git rm) | ⬜ (O4 abierta) | — | — |
 | — | GATE-O4 | | ⬜ | | `GATE-O4.md` |
 | Cierre | — | ADR D-061 + CLAUDE.md conv. 35 + cross-ref D-060 + git rm scaffolding | ⬜ | | |
 
@@ -133,3 +133,7 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   `/code-review` (13 hallazgos, **3 altos** verificados dos veces: por el revisor y por el
   integrador); `/security-review` **no** se corrió y el gate deja escrito por qué (§3). D11–D13;
   **L11 creado** para O4, junto a L07; prompt de L07 enmendado (G2).
+- 2026-08-27 09:14 · Visto bueno de GATE-O3. **O4 abierta con L11 y L07 en paralelo**; después va el
+  cierre (`/cerrar-implementacion D-061`). Pendientes vivos: las dos corridas del backfill (dev PID
+  15424, prod PID 23504) con su **segunda pasada** por hacer, y el **smoke visual del front**, que
+  ahora sí va después de L11.

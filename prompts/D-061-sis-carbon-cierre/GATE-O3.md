@@ -163,7 +163,7 @@ en auth, sesiones, matriz de permisos, construcción de SQL o el contrato cross-
   b) O4 = L11 solo, O5 = L07 (un día más de calendario, cero riesgo de que L07 documente algo que
   L11 mueva) · c) cortar: cerrar D-061 con los tres altos como deuda documentada —
   **Recomendada:** a.
-- **Decidido:** **PENDIENTE DEL USUARIO** (§8). Razones para (a): L11 y L07 son territorios
+- **Decidido:** **a — aprobada por el usuario el 2026-08-27 09:14** (§8). Razones para (a): L11 y L07 son territorios
   completamente disjuntos (`src/**` + `utils/sis` + tests, contra `BIT-*` + `docs/` + `deploy/`), y
   **L11 no mueve ningún contrato**: no toca C3 (el valor de retorno queda como lo dejó L10), ni C8,
   ni el vocabulario de `MOTIVOS`, ni los códigos de salida del CLI — arregla el ancla por dentro y
@@ -275,7 +275,9 @@ en auth, sesiones, matriz de permisos, construcción de SQL o el contrato cross-
 - **Pendiente del usuario, además del visto bueno:** el **smoke visual** de CA-12/CA-35. Ya se
   aplazó dos veces por la misma razón y vuelve a pasar: L11 mueve otra vez el popover (H53, H54).
   **Después de L11 es la buena** — ahí se acaba el trabajo sobre esa pantalla.
-- **Visto bueno del usuario:** {{pendiente}}.
+- **Visto bueno del usuario:** dado el **2026-08-27 09:14** (Bogotá) — **O4 abierta** con L11 y L07
+  en paralelo. Con eso queda decidida también la **D12** (un solo lote de corrección, no una ola por
+  hallazgo).
 
 ## 9. Commit del gate
 `gate(D-061): O3 cerrada — 2 lotes, 637/637 en verde, 0 violaciones, 3 altos a L11`
