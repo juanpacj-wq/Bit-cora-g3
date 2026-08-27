@@ -316,6 +316,51 @@ test('CA-36. vaciar sin la clave detalle conserva el comentario; con la clave ma
   await limpiar();
 });
 
+test('CA-47. cambiar la cantidad sin la clave detalle tampoco borra el comentario (simetría con CA-36)', async () => {
+  await limpiar();
+  const humano = ctx.usuarios.jdt.usuario_id;
+  await sembrarCelda({
+    periodo: 12, combustible_id: alim1, cantidad: 10, creado_por: humano, detalle: 'Molino en mantenimiento',
+  });
+
+  const guardar = (celda) => call('POST', '/api/combustibles/consumos', {
+    sesion_id: ctx.sesiones.jdt,
+    body: { planta_id: TEST_PLANTA, fecha: FECHA, celdas: [celda] },
+  });
+
+  // 1. Escribir un número nuevo SIN la clave `detalle`. Hasta L10 esta rama hacía `c.detalle ?? null`
+  //    y borraba la nota en silencio: la MISMA ausencia significaba "conservar" al vaciar (CA-36) y
+  //    "borrar" acá. Una API no puede contradecirse consigo misma en el mismo endpoint (H25).
+  const sinClave = await guardar({ periodo: 12, combustible_id: alim1, cantidad: 15 });
+  assert.equal(sinClave.status, 200, JSON.stringify(sinClave.data));
+  assert.equal(sinClave.data.resumen.actualizados, 1);
+  let celda = await leerCelda(12, alim1);
+  assert.equal(Number(celda.cantidad), 15, 'la cantidad sí es la del body');
+  assert.equal(celda.detalle, 'Molino en mantenimiento', 'cambiar el número no borra la nota que lo explica');
+
+  // 2. Con la clave presente manda el body, igual que en la rama de vaciado.
+  const conTexto = await guardar({ periodo: 12, combustible_id: alim1, cantidad: 16, detalle: 'Molino al 60%' });
+  assert.equal(conTexto.data.resumen.actualizados, 1);
+  celda = await leerCelda(12, alim1);
+  assert.equal(Number(celda.cantidad), 16);
+  assert.equal(celda.detalle, 'Molino al 60%');
+
+  // 3. ...incluido el null explícito, que es como se borra un comentario a propósito.
+  const conNull = await guardar({ periodo: 12, combustible_id: alim1, cantidad: 17, detalle: null });
+  assert.equal(conNull.data.resumen.actualizados, 1);
+  celda = await leerCelda(12, alim1);
+  assert.equal(Number(celda.cantidad), 17);
+  assert.equal(celda.detalle, null, 'la clave en null sí borra el comentario');
+
+  // 4. Misma cantidad y sin la clave: no hay nada que escribir (no puede contarse como actualización).
+  await guardar({ periodo: 12, combustible_id: alim1, cantidad: 18, detalle: 'Nota final' });
+  const noop = await guardar({ periodo: 12, combustible_id: alim1, cantidad: 18 });
+  assert.equal(noop.data.resumen.actualizados, 0, 'un no-op no puede contar como actualización');
+  assert.equal((await leerCelda(12, alim1)).detalle, 'Nota final');
+
+  await limpiar();
+});
+
 // ---------------------------------------------------------------- CA-9 · revertir
 
 test('CA-9. revertir: restaurado devuelve la celda al valor del SIS y le devuelve la propiedad', async () => {

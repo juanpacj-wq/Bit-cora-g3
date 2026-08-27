@@ -21,17 +21,30 @@ import { estadoSisLock, withSisLock, _resetSisLockParaTests } from '../utils/sis
 // TODO lo que escribe va sobre TEST_PLANTA ('TST', catálogo espejo del seed C12): la suite corre
 // contra la BD productiva y ningún test puede escribir en GEC3/GEC32 (D-055).
 //
-// Cubre CA-16 (POST 202/400×5/403/409 y plantas), CA-17 (GET estado + gate puede_ver), CA-18 (job
-// bajo el mutex, día a día 'manual', fila en sis_scrape_log, día fallido que no aborta) y CA-19
-// (segundo POST durante el job → 409).
+// Cubre CA-16 (POST 202/400×6/403/409 y plantas), CA-17 (GET estado + gate puede_ver + sweeper),
+// CA-18 (job bajo el mutex, día a día 'manual', fila en sis_scrape_log, día fallido que no aborta),
+// CA-19 (segundo POST durante el job → 409) y CA-44 (que la mitad HTTP no se saltee en silencio).
+//
+// D-061 / L10 (H31): antes TODO el archivo —los casos de unidad incluidos, que no tocan BD ni red—
+// estaba gateado por SIS_HOST. Un `npm test` con el .env real dejaba los 9 casos en `skipped` y la
+// suite quedaba verde y VACÍA sobre el endpoint nuevo: una regresión en la tabla de validaciones,
+// en el 409 o en el manejo de errores por día no la veía nadie. Ahora:
+//   · los casos de unidad corren SIEMPRE (no necesitan stub, ni BD, ni backend);
+//   · los casos HTTP siguen necesitando el stub, pero su ausencia deja la suite ROJA con el comando
+//     exacto que sí los corre (CA-44), salvo opt-out explícito con SIS_STUB_OPCIONAL=1.
 
 const STUB_URL = 'http://localhost:3154';
-// El server efímero resuelve SIS_HOST al cargar sis-client.js: si no apunta al stub, este archivo
-// pediría de verdad el SIS interno (~5 min por día). Sin stub no hay test, y decirlo es mejor que
-// un verde mentiroso.
-const skip = process.env.SIS_HOST !== STUB_URL
-  ? 'requiere SIS_HOST=http://localhost:3154 en server y tests'
-  : false;
+// El server efímero resuelve SIS_HOST al cargar sis-client.js: si no apunta al stub, los casos HTTP
+// pedirían de verdad el SIS interno (~5 min por día). Sin stub no hay test HTTP, y decirlo en rojo
+// es mejor que un verde mentiroso.
+const hayStub = process.env.SIS_HOST === STUB_URL;
+const skip = hayStub ? false : 'requiere SIS_HOST=http://localhost:3154 en server y tests';
+
+// Cómo se corren de verdad los casos HTTP (el gate levanta el efímero en :3199; un lote, en el suyo).
+const COMO_CORRERLOS = [
+  'SERVER_PORT=3110 AUTH_TEST_BYPASS=1 SKIP_INITDB=1 SIS_HOST=http://localhost:3154 node --env-file=../.env server.js',
+  'TEST_BASE_URL=http://localhost:3110 SIS_HOST=http://localhost:3154 node --env-file=../.env --test --test-concurrency=1 tests/sis_scrape_endpoint.test.js',
+].map((c) => `    ${c}`).join('\n');
 
 const FECHA_A = '2026-04-21';   // fechas fijas pasadas, fuera de todo rango real de la BD
 const FECHA_B = '2026-04-22';
@@ -87,13 +100,14 @@ async function esperarLibre({ timeoutMs = 120000 } = {}) {
 
 // El backend efímero arranca su propio sis-sweeper (server.js), que a los 10 s toma el MISMO mutex
 // para scrapear hoy/ayer. Ese 409 es correcto pero no es el que buscamos: se espera y se reintenta.
-// Un 409 con `job` poblado sí es el nuestro y se devuelve tal cual.
+// Quién es el dueño del mutex lo dice `lock.motivo` ("sweeper …" vs "scrape manual …") y NADA MÁS:
+// el discriminador viejo (`job == null`) daba por propio cualquier 409 posterior al primer job
+// manual —el estado del job ya no vuelve a ser null— y una colisión real con el sweeper se colaba
+// como respuesta buena, con el 202 fallando después (H32).
 async function lanzarScrape(body, { sesion_id = ctx.sesiones.jdt, intentos = 8 } = {}) {
   for (let i = 0; i < intentos; i++) {
     const r = await call('POST', '/api/combustibles/sis/scrape', { sesion_id, body });
-    const esDelSweeper = r.status === 409
-      && r.data?.job == null
-      && /^sweeper/.test(r.data?.lock?.motivo || '');
+    const esDelSweeper = r.status === 409 && /^sweeper/.test(r.data?.lock?.motivo || '');
     if (!esDelSweeper) return r;
     await esperarLibre();
   }
@@ -136,10 +150,30 @@ function limpiarJobLocal() {
 
 const silencio = () => {};
 
+// ──────────────────────────────────────────── CA-44 · el skip deja de ser silencioso
+
+// Este test corre SIEMPRE, tenga o no stub, y es el que impide que la mitad HTTP se evapore sin que
+// nadie se entere. Un archivo entero en `skipped` se lee igual que un archivo entero en verde si
+// nadie mira el conteo — y así estuvieron los 9 casos del scrape manual desde que nacieron (H31).
+// El opt-out existe porque a veces solo se quieren los casos de unidad, pero hay que DECLARARLO.
+test('CA-44. los casos HTTP no se saltean en silencio: sin el stub del SIS la suite queda roja', () => {
+  if (hayStub) return;
+  if (process.env.SIS_STUB_OPCIONAL === '1') {
+    // Opt-out explícito: quien lo pasa ya sabe que se está quedando solo con los casos de unidad.
+    return;
+  }
+  assert.fail(
+    'Los casos HTTP de este archivo NO corrieron: falta el stub del SIS.\n'
+    + `  Se necesita SIS_HOST=${STUB_URL} en el backend efímero Y en el proceso de node --test:\n`
+    + `${COMO_CORRERLOS}\n`
+    + '  Si de verdad solo quieres los casos de unidad, decláralo: SIS_STUB_OPCIONAL=1.',
+  );
+});
+
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 
 before(async () => {
-  if (skip) return;
+  if (!hayStub) return;   // los casos de unidad no necesitan stub, BD ni backend
 
   // Stub del SIS: 500 a todo. `fetchPeriod` lo convierte en `HTTP 500` → periodo con error, que es
   // exactamente lo que necesitamos para ejercer el camino completo sin pedirle nada al SIS real.
@@ -162,8 +196,8 @@ before(async () => {
 });
 
 after(async () => {
-  if (skip) return;
   limpiarJobLocal();
+  if (!hayStub) return;
   await limpiar();
   // Esta suite crea sesiones sintéticas sobre TEST_PLANTA: desactivarlas SIEMPRE para no dejarlas
   // en el panel CONECTADOS de producción (D-030/D-044).
@@ -176,7 +210,7 @@ after(async () => {
 
 // ──────────────────────────────────────────── CA-18 · el job (unidad, sin BD ni red)
 
-test('CA-18. el job corre el rango día a día como manual, secuencial y bajo el mutex', { skip }, async () => {
+test('CA-18. el job corre el rango día a día como manual, secuencial y bajo el mutex', async () => {
   limpiarJobLocal();
   const { fn, llamadas } = scrapeFalso();
 
@@ -223,7 +257,7 @@ test('CA-18. el job corre el rango día a día como manual, secuencial y bajo el
   limpiarJobLocal();
 });
 
-test('CA-18. un día que revienta se anota y el job sigue con los demás', { skip }, async () => {
+test('CA-18. un día que revienta se anota y el job sigue con los demás', async () => {
   limpiarJobLocal();
   const { fn } = scrapeFalso({ porFecha: { '2026-04-22': 'lanza' } });
 
@@ -246,7 +280,7 @@ test('CA-18. un día que revienta se anota y el job sigue con los demás', { ski
   limpiarJobLocal();
 });
 
-test('CA-18. soloHoy se activa únicamente para el día en curso (Bogotá)', { skip }, async () => {
+test('CA-18. soloHoy se activa únicamente para el día en curso (Bogotá)', async () => {
   limpiarJobLocal();
   const { fn, llamadas } = scrapeFalso();
 
@@ -262,7 +296,7 @@ test('CA-18. soloHoy se activa únicamente para el día en curso (Bogotá)', { s
   limpiarJobLocal();
 });
 
-test('CA-19. arrancar con un job en curso o con el mutex tomado lanza scrape_en_curso', { skip }, async () => {
+test('CA-19. arrancar con un job en curso o con el mutex tomado lanza scrape_en_curso', async () => {
   limpiarJobLocal();
 
   // (a) job en curso
@@ -301,10 +335,12 @@ test('CA-16. POST scrape: el Ingeniero Químico lee pero no dispara (403) y no a
     body: { planta_id: TEST_PLANTA, fecha: FECHA_A },
   });
   assert.equal(status, 403, 'scrape ESCRIBE celdas: va por puede_crear, igual que el batch');
-  assert.deepEqual(await estadoSis(), antes, 'el 403 no puede haber lanzado un job');
+  // SOLO `job`: `lock` es una foto viva que el tick del sweeper voltea por su cuenta, y compararla
+  // producía un rojo ajeno al 403 que se está probando, apuntando al lugar equivocado (H32).
+  assert.deepEqual((await estadoSis()).job, antes.job, 'el 403 no puede haber lanzado un job');
 });
 
-test('CA-16. POST scrape: las cinco validaciones de C7 responden 400 con su codigo', { skip }, async () => {
+test('CA-16. POST scrape: las seis validaciones de C7 responden 400 con su codigo', { skip }, async () => {
   const antes = await estadoSis();
   const casos = [
     ['planta_sin_sis',   { planta_id: 'GEC3', fecha: FECHA_A }],
@@ -331,7 +367,7 @@ test('CA-16. POST scrape: las cinco validaciones de C7 responden 400 con su codi
   assert.equal(porDefecto.status, 400);
   assert.equal(porDefecto.data.codigo, 'fecha_futura', 'sin planta_id el default GEC32 pasa el gate');
 
-  assert.deepEqual(await estadoSis(), antes, 'ningún 400 puede haber lanzado un job');
+  assert.deepEqual((await estadoSis()).job, antes.job, 'ningún 400 puede haber lanzado un job');
 });
 
 // ──────────────────────────────────────────── CA-16/17/18 · 202, estado y log
@@ -422,13 +458,23 @@ test('CA-19. un segundo POST mientras el job corre responde 409 con el job y el 
 
 // ──────────────────────────────────────────── CA-17 · GET estado
 
-test('CA-17. GET estado va por puede_ver: el Ingeniero Químico lo lee (200) con job y lock', { skip }, async () => {
+test('CA-17. GET estado va por puede_ver: el Ingeniero Químico lo lee (200) con job, lock y sweeper', { skip }, async () => {
   const { status, data } = await call('GET', '/api/combustibles/sis/estado', {
     sesion_id: ctx.sesiones.ingQuim,
   });
   assert.equal(status, 200, 'estado es lectura: mismo gate que el GET de consumos');
   assert.ok('job' in data, 'el cuerpo siempre trae la clave job (null si nunca corrió ninguno)');
+  assert.deepEqual(Object.keys(data).sort(), ['job', 'lock', 'sweeper']);
   assert.deepEqual(Object.keys(data.lock).sort(), ['desde', 'motivo', 'ocupado']);
+
+  // CA-46 (H33): un sweeper APAGADO con SIS_SWEEPER_ENABLED=0 se veía desde afuera idéntico a uno
+  // ROTO — el chip decía "SIS · sin lectura" día tras día y este endpoint respondía exactamente lo
+  // mismo que un sweeper sano en reposo. El valor refleja el entorno del SERVIDOR, no el de este
+  // proceso (el gate levanta el efímero con su propia variable), así que acá se fija la forma; el
+  // valor concreto de cada corrida queda en la evidencia del lote/gate.
+  assert.deepEqual(Object.keys(data.sweeper), ['habilitado']);
+  assert.equal(typeof data.sweeper.habilitado, 'boolean',
+    'apagado y roto tienen que poder distinguirse desde afuera');
   if (data.job) {
     assert.deepEqual(
       Object.keys(data.job).sort(),

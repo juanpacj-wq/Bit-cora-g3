@@ -351,13 +351,21 @@ router.post('/consumos', asyncH(async (req, res) => {
           `);
         creados++;
       } else {
+        // D-061 (CA-47): MISMA regla que la rama de vaciado 40 líneas más arriba — clave `detalle`
+        // ausente ⇒ se conserva el comentario que ya estaba; clave presente (aunque venga null) ⇒
+        // manda el body. Antes esta rama hacía `c.detalle ?? null` y la MISMA ausencia significaba
+        // "conservar" al vaciar y "borrar" al cambiar la cantidad: la API se contradecía consigo
+        // misma y perdía el comentario en silencio (H25).
+        const traeDetalle = Object.prototype.hasOwnProperty.call(c, 'detalle');
+        const detalleFinal = traeDetalle ? (c.detalle ?? null) : (existente.detalle ?? null);
+
         // UPDATE — modificado_por solo si cantidad cambió (paridad D-019 con MAND).
         const cantidadCambio = Number(existente.cantidad) !== c.cantidad;
         if (cantidadCambio) {
           await new sql.Request(tx)
             .input('id', sql.Int, existente.consumo_id)
             .input('cant', sql.Decimal(12, 3), c.cantidad)
-            .input('det', sql.NVarChar(sql.MAX), c.detalle ?? null)
+            .input('det', sql.NVarChar(sql.MAX), detalleFinal)
             .input('u', sql.Int, sesion.usuario_id)
             .query(`
               UPDATE bitacora.consumo_combustible
@@ -366,11 +374,11 @@ router.post('/consumos', asyncH(async (req, res) => {
               WHERE consumo_id=@id
             `);
           actualizados++;
-        } else if ((existente.detalle ?? null) !== (c.detalle ?? null)) {
+        } else if ((existente.detalle ?? null) !== detalleFinal) {
           // Solo detalle cambió: actualizar sin tocar modificado_por (igual que MAND).
           await new sql.Request(tx)
             .input('id', sql.Int, existente.consumo_id)
-            .input('det', sql.NVarChar(sql.MAX), c.detalle ?? null)
+            .input('det', sql.NVarChar(sql.MAX), detalleFinal)
             .query(`UPDATE bitacora.consumo_combustible SET detalle=@det WHERE consumo_id=@id`);
           actualizados++;
         }
@@ -602,16 +610,27 @@ router.post('/sis/scrape', asyncH(async (req, res) => {
   }
 }));
 
-// GET /api/combustibles/sis/estado — D-061 (C8). Avance del scrape manual + foto del mutex.
+// GET /api/combustibles/sis/estado — D-061 (C8). Avance del scrape manual + foto del mutex + si la
+// ingesta automática está encendida.
 // Gate `puede_ver`: es información de lectura (quién está hablando con el SIS y cómo va).
 // `job` es null si este proceso nunca corrió ninguno — incluido el caso "corrió y se reinició":
 // el estado vive en memoria y la verdad persistente es bitacora.sis_scrape_log.
+// `sweeper.habilitado` (D-061 / L10, H33): `SIS_SWEEPER_ENABLED=0` apaga el tick horario, y sin
+// esto un sweeper APAGADO se veía desde afuera idéntico a uno ROTO — el chip diría "SIS · sin
+// lectura" día tras día y este endpoint respondería lo mismo que un sweeper sano en reposo. Se lee
+// del entorno con la MISMA expresión que server.js (solo el string exacto '0' apaga; la ausencia de
+// la variable deja la ingesta encendida) y a propósito sin importar nada de allá: es un flag de
+// test, no de producción, y el router no debe poder encenderlo ni apagarlo.
 router.get('/sis/estado', asyncH(async (req, res) => {
   const sesion = req.sesion;
   if (!(await hasPermisoBitacora(sesion, dbBindings.COMB_BITACORA_ID, 'puede_ver'))) {
     return sendJSON(res, 403, { error: 'Sin permiso para ver Combustibles' });
   }
-  return sendJSON(res, 200, { job: estadoScrapeJob(), lock: estadoSisLock() });
+  return sendJSON(res, 200, {
+    job: estadoScrapeJob(),
+    lock: estadoSisLock(),
+    sweeper: { habilitado: process.env.SIS_SWEEPER_ENABLED !== '0' },
+  });
 }));
 
 export default router;

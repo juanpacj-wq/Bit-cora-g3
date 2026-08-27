@@ -12,9 +12,15 @@
 //        [--concurrencia 1..6] [--log RUTA]
 //   --solo-parciales: salta los días SIN fila en sis_scrape_log (el backend no corría ese día; llenarlos
 //   cuesta 24 fetch/día) y completa solo los que ya tienen datos parciales — la pasada rápida del P24.
-//   --from auto: sondea el SIS con discoverEarliestDate, imprime "fecha de inicio = YYYY-MM-DD" y
-//   SALE CON CÓDIGO 3 salvo que venga --confirm-from con esa misma fecha. El sondeo cuesta decenas
-//   de fetch de ~13 s: es una calibración, no algo para poner en un cron.
+//   --from auto: sondea el SIS con discoverEarliestDate, dice qué encontró y SALE SIN ESCRIBIR
+//   salvo que venga --confirm-from con esa misma fecha. El sondeo cuesta decenas de fetch de ~13 s:
+//   es una calibración, no algo para poner en un cron. Códigos de salida del sondeo (D-061 / L10):
+//     3 = encontró el inicio y falta confirmarlo con --confirm-from.
+//     4 = llegó al tope de retroceso SIN certificar el inicio: la fecha que muestra es el día con
+//         datos más antiguo que alcanzó a ver y puede haber historia más atrás. También se confirma
+//         con --confirm-from, pero sabiendo eso.
+//     2 = el sondeo no sirve (nada respondió, o el SIS falló dos veces en el mismo día): no hay
+//         fecha que confirmar. NUNCA se devuelve una fecha adivinada después de un error de red.
 //   --concurrencia N: cuántos periodos se le piden al SIS a la vez (1..6, default 1). Solo acelera la
 //   RED; la escritura del día sigue siendo una transacción y cuesta ~12 s contra dev pase lo que pase.
 //   OJO: con N>1 un periodo intermedio fallido deja el día no reanudable por ultimo_periodo, así que
@@ -36,7 +42,7 @@ import { dirname, resolve } from 'node:path';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { scrapeDia, leerScrapeLog } from '../utils/sis/carbon-scraper.js';
-import { discoverEarliestDate } from '../utils/sis/discover.js';
+import { discoverEarliestDate, explicarDescubrimiento } from '../utils/sis/discover.js';
 import { necesitaCatchup, periodoDesdeDe } from '../utils/sis/sis-sweeper-helpers.js';
 import { fechaBogotaStr } from '../utils/turno.js';
 
@@ -135,16 +141,19 @@ try {
       .query(`SELECT CONVERT(varchar(10), MIN(fecha), 120) AS f FROM bitacora.sis_scrape_log WHERE planta_id=@p`);
     const hint = h.recordset[0]?.f ?? null;
     linea(`[backfill] --from auto: sondeando el SIS (techo=${to}${hint ? `, hint=${hint}` : ''}). Esto tarda varios minutos.`);
-    const inicio = await discoverEarliestDate(pool, {
+    const res = await discoverEarliestDate(pool, {
       hint, techo: to, log: (...a) => linea(`[sis-discover] ${a.join(' ')}`),
     });
-    if (!inicio) salir('el sondeo no encontró ninguna fecha con datos (ni el hint ni el techo respondieron).');
-    linea(`[backfill] fecha de inicio = ${inicio}`);
-    if (args['confirm-from'] !== inicio) {
-      lineaErr(`[backfill] no escribo nada: para correr el backfill desde esa fecha repite el comando con --from auto --confirm-from ${inicio}`);
-      salida = 3;
+    // El sondeo dice TAMBIÉN por qué paró (D-061 / L10, C3 enmendado): "llegué al tope" ya no se
+    // imprime igual que "encontré el inicio", y un error de red no se disfraza de fecha.
+    const { lineas, confirmable, codigo } = explicarDescubrimiento(res);
+    for (const l of lineas) linea(`[backfill] ${l}`);
+    if (!confirmable) salir('no escribo nada: el sondeo no dejó una fecha utilizable.', codigo);
+    if (args['confirm-from'] !== res.fecha) {
+      lineaErr(`[backfill] no escribo nada: para correr el backfill desde esa fecha repite el comando con --from auto --confirm-from ${res.fecha}`);
+      salida = codigo;
     } else {
-      from = inicio;
+      from = res.fecha;
     }
   } else if (args['confirm-from'] !== undefined && args['confirm-from'] !== from) {
     // Con --from explícito, --confirm-from actúa de doble chequeo (útil para repetir la corrida
