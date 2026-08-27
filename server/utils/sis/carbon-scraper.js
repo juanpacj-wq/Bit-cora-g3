@@ -7,8 +7,8 @@
 // sombra valor_sis. Tabla completa en _CONTEXTO-BASE.md.
 //
 // El sweeper horario (E4), el backfill (E7) y el scrape manual (D-061) consumen scrapeDia().
-// discoverEarliestDate() se mudó a ./discover.js (D-061 / C3) y se re-exporta desde acá para no
-// romper los imports que ya la traían de este módulo.
+// El sondeo de la fecha de inicio vive en ./discover.js (D-061 / C3) y se importa SOLO desde ahí:
+// ver la nota de compat más abajo.
 //
 // D-061: scrapeDia() dejó de ser "solo GEC32". `planta_id` es un parámetro (default 'GEC32', la
 // única planta con SIS hoy) y `concurrencia` pide hasta 6 periodos en paralelo — el SIS tarda
@@ -20,9 +20,14 @@ import { fetchPeriod, periodoBounds, extraerCarbonValidado } from './sis-client.
 import { fechaBogotaStr } from '../turno.js';
 import * as dbBindings from '../../db.js';
 
-// C3 (D-061): el sondeo del backfill vive en su propio módulo. Se re-exporta acá para que los
-// imports existentes (`from './carbon-scraper.js'`) sigan resolviendo sin cambios.
-export { discoverEarliestDate } from './discover.js';
+// D-061 L11 (H55): acá vivía un re-export de compat del sondeo del backfill, puesto por L01 "para
+// no romper" a quien lo importara de este módulo. Se retira, y el motivo es que dejó de ser compat:
+// L10 le cambió el valor de retorno de `'YYYY-MM-DD' | null` a `{ fecha, motivo, sondeos }` (C3
+// enmendado), así que el nombre viejo entregaba la forma nueva y un `if (!inicio) bail()` recibía un
+// objeto SIEMPRE truthy — un backfill que arranca desde una fecha inventada, sin un solo error.
+// Verificado antes de retirarlo: el único consumidor —el CLI `backfill-carbon-gec32.js`— ya importa
+// de `./discover.js`, así que no había nada que romper y sí una trampa dormida que cerrar. Quien
+// necesite el sondeo lo importa de su módulo, que es donde está documentado el contrato.
 
 // Planta por DEFECTO — hoy la única con SIS (GEC3 no tiene). Ya no gobierna las escrituras: todas
 // usan el `planta_id` que llega por parámetro; esta constante solo alimenta los defaults.

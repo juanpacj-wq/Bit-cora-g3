@@ -111,7 +111,8 @@ export function esVacioCantidad(cantidad) {
 // mientras la regla vieja de la grilla las borraba del buffer al teclear 0 → snapshot y buffer
 // dejaban de coincidir por un cambio que no cambia nada, y eso encendía Guardar, arrancaba la
 // gavela y armaba el `beforeunload` para terminar en "Guardado: 0 nuevos, 0 actualizados".
-// Cuando el snapshot ya está en 0, el 0 tecleado debe dejar el buffer igual al snapshot.
+// Cuando el snapshot ya está en 0, el 0 tecleado debe dejar el buffer igual al snapshot — y con
+// eso la coordenada sale del conjunto de editadas (L11/H50) y no queda nada que guardar.
 export function esCeroNoOp(cantidad, celdaSnap) {
   if (!esVacioCantidad(cantidad)) return false;
   const c = celdaSnap?.cantidad;
@@ -154,6 +155,25 @@ export function reconciliarBuffer(bufferPrev, snapshotNuevo, editadas) {
   return out;
 }
 
+// D-061 L11 (H50/H52 · CA-48/CA-49): ¿esta celda del buffer dice LO MISMO que la del server?
+//
+// Es la única definición de "cambió" de toda la pantalla, y por eso vive en un solo lugar: la usan
+// `calcularDiff` (qué viaja en el POST), `setCelda` (qué coordenada queda marcada como editada) y
+// —derivado de ese diff— el "hay cambios sin guardar" que enciende Guardar, la gavela y el
+// `beforeunload`. Cuando cada uno tenía su propia idea de "sucio", las tres discrepaban: el botón
+// quedaba encendido con un diff vacío y respondía "Sin cambios para guardar" (H52).
+//
+// Compara SOLO lo que el operador escribe —`cantidad` y `detalle`—, nunca la metadata: un GET que
+// vuelve con `modificado_en`/`valor_sis`/`es_override` frescos de una celda editada no es un cambio
+// del operador. Dos celdas ausentes son equivalentes (`!b && !s`): teclear y deshacer sobre una
+// celda que el server no tiene no deja nada que mandar.
+export function celdaEquivalente(celdaBuffer, celdaSnap) {
+  if (!celdaBuffer && !celdaSnap) return true;
+  if (!celdaBuffer || !celdaSnap) return false;
+  return Number(celdaBuffer.cantidad) === Number(celdaSnap.cantidad)
+    && (celdaBuffer.detalle ?? null) === (celdaSnap.detalle ?? null);
+}
+
 // D-061 L09 (H24/CA-37): qué celdas van en el body del POST. Recorre `editadas`, NO la unión de
 // buffer y snapshot: una celda que el operador nunca tocó no puede viajar al server, ni siquiera
 // cuando el SIS la cambió por debajo entre el GET y el Guardar. Ese era el camino por el que un
@@ -172,16 +192,11 @@ export function calcularDiff(buffer, snapshot, editadas) {
     if (p === null) continue;
     const b = buffer?.[p]?.[cid];
     const s = snapshot?.[p]?.[cid];
+    if (celdaEquivalente(b, s)) continue;        // se tecleó y quedó igual: no hay nada que mandar
     const periodo = Number(p);
     const combustible_id = Number(cid);
-    if (!b && !s) continue;                      // se tecleó y se deshizo sin dejar rastro
-    if (!b) {
-      out.push({ periodo, combustible_id, cantidad: null });
-    } else if (!s
-      || Number(b.cantidad) !== Number(s.cantidad)
-      || (b.detalle ?? null) !== (s.detalle ?? null)) {
-      out.push({ periodo, combustible_id, cantidad: b.cantidad, detalle: b.detalle ?? null });
-    }
+    if (!b) out.push({ periodo, combustible_id, cantidad: null });
+    else out.push({ periodo, combustible_id, cantidad: b.cantidad, detalle: b.detalle ?? null });
   }
   out.sort((x, y) => x.periodo - y.periodo || x.combustible_id - y.combustible_id);
   return out;
@@ -212,7 +227,17 @@ export const ANCHO_TIP = 280;
 //
 // Voltea solo cuando el lado por defecto NO alcanza Y el opuesto tiene más aire: contra un
 // contenedor más chico que el popover, quedarse donde está es al menos predecible.
-export function ladoPopover({ banderin, contenedor, alto = ALTO_TIP, ancho = ANCHO_TIP } = {}) {
+//
+// D-061 L11 (H54/CA-51): `margenArriba` y `margenIzquierda` son lo que la CABECERA y la PRIMERA
+// COLUMNA pegajosas tapan del recuadro. Sin descontarlas, los ~34 px del `thead`
+// (`position:sticky; top:0`) contaban como espacio libre y un popover volteado hacia arriba se
+// pintaba ENCIMA de los nombres de columna —gana por `z-index:5` contra el `2` del `thead`—, que es
+// exactamente el recorte que voltearlo venía a evitar. Entran por parámetro y no se leen del DOM:
+// la función sigue siendo pura y probable sin layout; quien mide es el componente.
+export function ladoPopover({
+  banderin, contenedor, alto = ALTO_TIP, ancho = ANCHO_TIP,
+  margenArriba = 0, margenIzquierda = 0,
+} = {}) {
   const quieto = { arriba: false, izq: false };
   if (!banderin || !contenedor) return quieto;
   if (!(contenedor.bottom - contenedor.top > 0) || !(contenedor.right - contenedor.left > 0)) {
@@ -220,11 +245,11 @@ export function ladoPopover({ banderin, contenedor, alto = ALTO_TIP, ancho = ANC
   }
   // El popover nace pegado al banderín: hacia abajo crece desde su borde inferior, hacia arriba
   // desde el superior; hacia la derecha desde su borde izquierdo (`left:0`) y hacia la izquierda
-  // desde el derecho (`right:0`).
+  // desde el derecho (`right:0`). Abajo y a la derecha no hay nada pegajoso que descontar.
   const libreAbajo = contenedor.bottom - banderin.bottom;
-  const libreArriba = banderin.top - contenedor.top;
+  const libreArriba = banderin.top - (contenedor.top + margenArriba);
   const libreDerecha = contenedor.right - banderin.left;
-  const libreIzquierda = banderin.right - contenedor.left;
+  const libreIzquierda = banderin.right - (contenedor.left + margenIzquierda);
   return {
     arriba: libreAbajo < alto && libreArriba > libreAbajo,
     izq: libreDerecha < ancho && libreIzquierda > libreDerecha,
@@ -242,8 +267,10 @@ function partesClave(clave) {
   return { p: clave.slice(0, i), cid: clave.slice(i + 1) };
 }
 
-// Clon por JSON, igual que el de la grilla: conserva el orden de claves, que es de lo que depende
-// la comparación `JSON.stringify(buffer) !== JSON.stringify(snapshot)` de `hayCambios`.
+// Clon por JSON, igual que el de la grilla. Ya no hay ninguna comparación de `JSON.stringify` que
+// dependa del orden de claves (L11/H52 la retiró: "sucio" sale de `calcularDiff`); se conserva
+// porque es un clon profundo de estructuras JSON puras, sin referencias compartidas con el
+// snapshot ni con el buffer previo.
 function clon(x) {
   return JSON.parse(JSON.stringify(x));
 }

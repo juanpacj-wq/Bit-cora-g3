@@ -9,7 +9,7 @@
 // puro podía ver: son de cableado (qué pasa cuando una respuesta llega tarde, cuándo se deshabilita
 // un botón, qué clase lleva un popover). El módulo puro `override.js` ya está probado aparte.
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
-import { createElement as h, act } from 'react';
+import { createElement as h, act, Profiler } from 'react';
 import { createRoot } from 'react-dom/client';
 import ConsumosGrid from './ConsumosGrid.jsx';
 
@@ -197,13 +197,24 @@ async function render(props = {}) {
     showToast: (texto, tipo) => toasts.push({ texto, tipo }),
     ...props,
   };
-  await act(async () => { root.render(h(ConsumosGrid, actuales)); });
+  // D-061 L11 (H58/CA-50): contador de commits del árbol. `<Profiler>` avisa cada vez que algo de
+  // acá adentro se re-renderiza y se pinta, así que es lo que permite afirmar que pasar el puntero
+  // por un banderín NO cuesta un render de las ~240 celdas — y hacerlo sin instrumentar el
+  // componente para el test. Un hover que no cambia estado no produce commit y el arreglo consiste
+  // justamente en eso.
+  const commits = [];
+  const arbol = () => h(
+    Profiler,
+    { id: 'comb', onRender: (_id, fase) => commits.push(fase) },
+    h(ConsumosGrid, actuales),
+  );
+  await act(async () => { root.render(arbol()); });
 
   // Re-render con props nuevas: la grilla es controlada (D-035), así que "cambiar de fecha" desde
   // afuera es exactamente esto y no un clic en el selector.
   const reprops = async (parche) => {
     actuales = { ...actuales, ...parche };
-    await act(async () => { root.render(h(ConsumosGrid, actuales)); });
+    await act(async () => { root.render(arbol()); });
   };
   let desmontado = false;
   const teardown = () => {
@@ -213,7 +224,7 @@ async function render(props = {}) {
     container.remove();
   };
   montados.push(teardown);
-  return { container, reprops, teardown };
+  return { container, reprops, teardown, commits };
 }
 
 // Escribe en un <input type=number> como lo haría una persona (setter nativo + evento `input`,
@@ -865,6 +876,252 @@ describe('CA-39 · el popover mide, no cuenta periodos', () => {
       expect(tip.classList.contains('comb-tip--arriba')).toBe(false);
       expect(tip.classList.contains('comb-tip--izq')).toBe(false);
     }
+    teardown();
+  });
+});
+
+// ── CA-48 · una celda tocada y devuelta a su valor original no viaja ────────────────────────────
+
+describe('CA-48 · tocar y deshacer no ancla la celda al buffer viejo', () => {
+  // H50, el escenario que el gate de la O3 verificó. L09 cerró H24 marcando toda celda tecleada y
+  // no soltándola nunca, con el argumento de que `calcularDiff` no la emite si no difiere — y eso
+  // solo vale mientras el server no la cambie. Cuando el SIS relee el periodo durante un GET
+  // preservado, la celda marcada se restaura desde el buffer viejo, el diff la emite porque AHORA sí
+  // difiere, y el Guardar escribe el número viejo encima del fresco a nombre del operador. Con la
+  // ownership de D-029 esa lectura no vuelve sola.
+  //
+  // Como en CA-37, todo se afirma sobre el BODY REAL del POST: en pantalla no se nota nada.
+
+  it('el número que el SIS escribió durante el GET no se pisa con el que ya estaba', async () => {
+    const { container, teardown } = await render();
+
+    modoManual = true;
+    await latido();                                    // GET del auto-refresco en vuelo
+    await teclear(inputDe(container, 5, 0), '9');      // esto es lo que enciende hayCambios
+    await teclear(inputDe(container, 3, 0), '2');      // toca 3/1 (el snapshot la tiene en 20)…
+    await teclear(inputDe(container, 3, 0), '20');     // …y la deja exactamente como estaba
+
+    await act(async () => {
+      cola[0].resolver(respuesta(payload({
+        // El SIS releyó el periodo. 24 y no 26: `cantidad_max` de un alimentador es 25 (D-034) y
+        // una celda fuera de rango bloquea el Guardar por otro motivo, que taparía lo que se mide.
+        celdas: { 3: { 1: celda({ consumo_id: 301, cantidad: 24 }) } },
+      })));
+    });
+
+    // Lo primero que se afirma es el BODY, que es donde está el daño: sin el arreglo viaja también
+    // 3/1 con el 20 viejo y el backend lo escribe encima del 24 que acababa de poner el SIS.
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 5, combustible_id: 1, cantidad: 9, detalle: null },
+    ]);
+    // Y en pantalla gana la lectura fresca: 3/1 ya no está anclada al buffer viejo.
+    expect(inputDe(container, 3, 0).value).toBe('24');
+    teardown();
+  });
+
+  it('devolver la celda a su valor original apaga Guardar y la gavela', async () => {
+    const { container, teardown } = await render();
+
+    await teclear(inputDe(container, 3, 0), '');       // vaciar: es un cambio…
+    expect(guardar(container).disabled).toBe(false);
+    expect(container.querySelector('.comb-gavela')).toBeTruthy();
+
+    await teclear(inputDe(container, 3, 0), '20');     // …y volver al valor del server, no
+    expect(guardar(container).disabled).toBe(true);
+    expect(container.querySelector('.comb-gavela')).toBeNull();
+    teardown();
+  });
+
+  it('vaciar una celda que el server tampoco tiene no deja nada que guardar', async () => {
+    const { container, teardown } = await render();
+
+    await teclear(inputDe(container, 7, 2), '4');      // celda nueva
+    expect(guardar(container).disabled).toBe(false);
+    await teclear(inputDe(container, 7, 2), '');       // y se arrepiente
+    expect(guardar(container).disabled).toBe(true);
+    teardown();
+  });
+});
+
+// ── CA-49 · Guardar se enciende si y solo si hay algo que mandar ────────────────────────────────
+
+describe('CA-49 · "sucio" es lo mismo para el botón y para el POST', () => {
+  it('la metadata refrescada de una celda editada no deja Guardar encendido ni corriendo la gavela', async () => {
+    // H52: `hayCambios` comparaba `JSON.stringify` del buffer entero —metadata incluida— mientras el
+    // diff miraba solo `cantidad`/`detalle` de las editadas. Bastaba que el GET trajera
+    // `modificado_en`/`valor_sis` frescos de la celda tecleada para dejar el botón encendido, la
+    // gavela corriendo y el `beforeunload` armado sobre un diff VACÍO: al hacer clic salía "Sin
+    // cambios para guardar" y no había forma de salir salvo Descartar o esperar 10 minutos.
+    const { container, teardown } = await render();
+
+    modoManual = true;
+    await latido();
+    await teclear(inputDe(container, 3, 0), '22');
+    // Mientras el GET viaja, `loading` mantiene Guardar apagado por su cuenta; lo que delata que la
+    // grilla SÍ se considera sucia es la gavela (CA-14), que solo depende de `hayCambios`.
+    expect(container.querySelector('.comb-gavela')).toBeTruthy();
+
+    await act(async () => {
+      cola[0].resolver(respuesta(payload({
+        celdas: {
+          3: {
+            1: celda({
+              consumo_id: 301,
+              cantidad: 22,                                    // la MISMA cantidad que se tecleó
+              modificado_por: { usuario_id: 7, nombre_completo: 'Ana Ríos' },
+              modificado_en: '2026-08-27T12:00:00.000Z',       // metadata refrescada
+              valor_sis: 19,
+              sis_actualizado_en: '2026-08-27T12:00:00.000Z',
+              sis_owned: false,
+              es_override: true,
+            }),
+          },
+        },
+      })));
+    });
+
+    expect(inputDe(container, 3, 0).value).toBe('22');
+    expect(guardar(container).disabled).toBe(true);            // no hay nada que mandar
+    expect(container.querySelector('.comb-gavela')).toBeNull();
+    expect(toasts).toEqual([]);                                // nunca llegó a "Sin cambios para guardar"
+    teardown();
+  });
+
+  it('con algo real que mandar, Guardar sigue encendido y la gavela sigue corriendo (CA-13/CA-14)', async () => {
+    const { container, teardown } = await render();
+    await teclear(inputDe(container, 3, 0), '22');
+    expect(guardar(container).disabled).toBe(false);
+    expect(container.querySelector('.comb-gavela').textContent).toContain('10:00');
+    teardown();
+  });
+});
+
+// ── CA-50 / CA-51 · el popover fijado y la cabecera pegajosa ────────────────────────────────────
+
+describe('CA-50 · el popover fijado no se lo lleva el puntero', () => {
+  const CONT = { top: 100, bottom: 500, left: 0, right: 1000 };
+
+  function prepararMedicion(container, celdaTd, rectBanderin) {
+    conRect(container.querySelector('.comb-scroll'), CONT);
+    conRect(celdaTd.querySelector('.comb-override'), rectBanderin);
+    return conRect(celdaTd.querySelector('.comb-override-wrap'), rectBanderin);
+  }
+
+  it('fijar uno, pasar el puntero por otro y el primero conserva su lado', async () => {
+    // H53: el lado medido vivía en UNA sola entrada con su `clave`, independiente de `tipAbierto`.
+    // Mover el puntero sobre cualquier otro banderín le reescribía la clave, el popover fijado
+    // dejaba de matchear y volvía al default abajo-derecha — recortado, que es H13 otra vez.
+    const { container, commits, teardown } = await render();
+    const tdA = celdasDe(container, 1)[0];                     // P1/ALIM_1
+    const tdB = celdasDe(container, 1)[7];                     // P1/ALIM_8
+    const wrapA = prepararMedicion(container, tdA, { top: 470, bottom: 484, left: 40, right: 54 });
+    const wrapB = prepararMedicion(container, tdB, { top: 120, bottom: 134, left: 940, right: 954 });
+
+    await click(wrapA.querySelector('.comb-override'));
+    const tipA = tdA.querySelector('.comb-tip');
+    expect(tipA.classList.contains('comb-tip--arriba')).toBe(true);
+    expect(tipA.classList.contains('open')).toBe(true);
+
+    const antes = commits.length;
+    await entrar(wrapB);
+
+    expect(tipA.classList.contains('comb-tip--arriba')).toBe(true);
+    expect(tipA.classList.contains('open')).toBe(true);
+    // Y el que sí está bajo el puntero queda medido, como pide CA-39.
+    expect(tdB.querySelector('.comb-tip').classList.contains('comb-tip--izq')).toBe(true);
+    // H58: y todo eso sin un solo render de la grilla.
+    expect(commits.length).toBe(antes);
+    teardown();
+  });
+
+  it('pasear el puntero por todos los banderines no produce un solo render', async () => {
+    const { container, commits, teardown } = await render();
+    conRect(container.querySelector('.comb-scroll'), CONT);
+    const wraps = [...container.querySelectorAll('.comb-override-wrap')];
+    wraps.forEach((w, i) => conRect(w, { top: 120 + i, bottom: 134 + i, left: 940, right: 954 }));
+    expect(wraps.length).toBeGreaterThan(1);
+
+    const antes = commits.length;
+    for (const w of wraps) await entrar(w);
+    expect(commits.length).toBe(antes);
+    // Y el hover igual midió: el último que pisó el puntero abre hacia la izquierda.
+    expect(wraps.at(-1).querySelector('.comb-tip').classList.contains('comb-tip--izq')).toBe(true);
+    teardown();
+  });
+
+  it('cerrar el popover suelta también su lado (Escape y segundo clic)', async () => {
+    const { container, teardown } = await render();
+    const td = celdasDe(container, 1)[0];
+    const wrap = prepararMedicion(container, td, { top: 470, bottom: 484, left: 40, right: 54 });
+    const banderin = wrap.querySelector('.comb-override');
+    const tip = td.querySelector('.comb-tip');
+
+    await click(banderin);
+    expect(tip.classList.contains('open')).toBe(true);
+    expect(tip.classList.contains('comb-tip--arriba')).toBe(true);
+
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(tip.classList.contains('open')).toBe(false);
+    expect(tip.classList.contains('comb-tip--arriba')).toBe(false);
+
+    await click(banderin);
+    expect(tip.classList.contains('comb-tip--arriba')).toBe(true);
+    await click(banderin);                                     // el segundo clic cierra
+    expect(tip.classList.contains('open')).toBe(false);
+    expect(tip.classList.contains('comb-tip--arriba')).toBe(false);
+    teardown();
+  });
+});
+
+describe('CA-51 · el popover volteado no invade la cabecera pegajosa', () => {
+  // El `thead` es `position:sticky; top:0`, así que sus ~34 px NO son espacio libre: el popover
+  // volteado hacia arriba se pintaba encima de los nombres de columna (gana por `z-index:5` contra
+  // el `2` del `thead`). La aritmética está en `override.test.js › ladoPopover · lo pegajoso…`;
+  // acá se prueba que el componente la MIDE y se la pasa.
+  const CONT_BAJO = { top: 100, bottom: 260, left: 0, right: 1000 };
+  const BANDERIN = { top: 180, bottom: 194, left: 40, right: 54 };
+
+  function prepararCelda(container, celdaTd) {
+    conRect(container.querySelector('.comb-scroll'), CONT_BAJO);
+    conRect(celdaTd.querySelector('.comb-override'), BANDERIN);
+    return conRect(celdaTd.querySelector('.comb-override-wrap'), BANDERIN);
+  }
+
+  it('con la cabecera medida el popover se queda abajo en vez de taparla', async () => {
+    const { container, teardown } = await render();
+    const td = celdasDe(container, 1)[0];
+    const wrap = prepararCelda(container, td);
+    conRect(container.querySelector('thead'), { top: 100, bottom: 134, left: 0, right: 1000 });
+
+    await click(wrap.querySelector('.comb-override'));
+    expect(td.querySelector('.comb-tip').classList.contains('comb-tip--arriba')).toBe(false);
+    teardown();
+  });
+
+  it('la MISMA geometría sin cabecera medida sí voltea: es la cabecera lo que cambia la decisión', async () => {
+    // La otra dirección del mismo caso (así se comportaba L09, que medía contra la caja completa).
+    const { container, teardown } = await render();
+    const td = celdasDe(container, 1)[0];
+    const wrap = prepararCelda(container, td);   // sin rect en el thead: jsdom devuelve ceros
+
+    await click(wrap.querySelector('.comb-override'));
+    expect(td.querySelector('.comb-tip').classList.contains('comb-tip--arriba')).toBe(true);
+    teardown();
+  });
+
+  it('la primera columna pegajosa tampoco cuenta como aire a la izquierda', async () => {
+    const { container, teardown } = await render();
+    const td = celdasDe(container, 1)[0];
+    const ANGOSTO = { top: 100, bottom: 500, left: 0, right: 300 };
+    const RECT = { top: 120, bottom: 134, left: 200, right: 214 };
+    conRect(container.querySelector('.comb-scroll'), ANGOSTO);
+    conRect(td.querySelector('.comb-override'), RECT);
+    const wrap = conRect(td.querySelector('.comb-override-wrap'), RECT);
+    conRect(container.querySelector('.comb-th-first'), { top: 100, bottom: 134, left: 0, right: 150 });
+
+    await click(wrap.querySelector('.comb-override'));
+    expect(td.querySelector('.comb-tip').classList.contains('comb-tip--izq')).toBe(false);
     teardown();
   });
 });

@@ -206,6 +206,14 @@ export async function discoverEarliestDate(pool, {
   //   · H29: si la ventana no cabe hacia adelante (el candidato está a menos de `span` días del
   //     techo), se extiende hacia ATRÁS desde el techo. Recortarla dejaba el ancla en K=1 y un solo
   //     día de parada en el techo bastaba para no anclar nada.
+  //   · H49 (L11): al correr la ventana hacia atrás, la rejilla se desplaza con ella y el día del
+  //     CANDIDATO se dejaba de sondear — justo el único día que el llamador tiene motivos para creer
+  //     poblado (el `hint` sale de `MIN(fecha)` de `sis_scrape_log`). En una instalación donde el
+  //     sweeper lleve pocas semanas de log, el hint cae siempre a menos de `span` del techo, no
+  //     aporta nada y `--from auto` muere con exit 2 diciendo que nadie respondió. Ahora el
+  //     candidato se mezcla en la rejilla y se recorre todo en orden ascendente: la regla "K sondeos
+  //     en W días" no cambia, solo se garantiza que el offset 0 siempre entra (cuesta un sondeo más,
+  //     y únicamente cuando la ventana se corrió).
   //   · H28: los sondeos con error no cuentan como vacíos. Si la ventana termina sin datos pero con
   //     errores, se reintentan SOLO los días que fallaron; si alguno insiste, la ventana es
   //     indecidible y el descubrimiento se detiene (nunca se la da por vacía).
@@ -215,9 +223,12 @@ export async function discoverEarliestDate(pool, {
     if (base !== cand) {
       log(`ventana de ${cand} no cabe hasta el techo ${techo}: se extiende hacia atrás desde ${base}`);
     }
+    // Ascendente y sin repetidos: el corte en el primer día con datos tiene que seguir devolviendo
+    // el más TEMPRANO de la ventana (es la cota superior del inicio). Con `base === cand` el
+    // candidato ya es el offset 0 y esto no agrega nada.
+    const dias = [...new Set([...offsets.map((off) => addDays(base, off)), cand])].sort();
     const fallidos = [];
-    for (const off of offsets) {
-      const d = addDays(base, off);
+    for (const d of dias) {
       const r = await sondearDia(d);
       if (r === 'datos') return { hayDatos: true, primera: d };
       if (r === 'error') fallidos.push(d);
@@ -275,7 +286,12 @@ export async function discoverEarliestDate(pool, {
       cursor = addDays(cursor, -365);
       log(`coarse: ventana desde ${cursor} (-${y}a, ${365 * y} d desde el ancla)`);
       const v = await ventana(cursor);
-      if (v.hayDatos) { if (v.primera < conDatos) conDatos = v.primera; }
+      // Sin `if (v.primera < conDatos)`, a diferencia del fino: acá la ventana arranca 365 días por
+      // debajo del ancla y abarca `span` (50 d), así que su día poblado más temprano es SIEMPRE
+      // anterior a `conDatos` y la comparación no puede ser falsa. En el fino sí puede: su candidato
+      // avanza de a W/2 y la ventana llega a pasarse de la cota superior (H61 — las dos se veían
+      // iguales y una estaba muerta).
+      if (v.hayDatos) conDatos = v.primera;
       else { sinDatos = cursor; break; }
     }
     if (!sinDatos) {

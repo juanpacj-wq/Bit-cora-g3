@@ -28,23 +28,59 @@ import { estadoSisLock, withSisLock, _resetSisLockParaTests } from '../utils/sis
 // D-061 / L10 (H31): antes TODO el archivo —los casos de unidad incluidos, que no tocan BD ni red—
 // estaba gateado por SIS_HOST. Un `npm test` con el .env real dejaba los 9 casos en `skipped` y la
 // suite quedaba verde y VACÍA sobre el endpoint nuevo: una regresión en la tabla de validaciones,
-// en el 409 o en el manejo de errores por día no la veía nadie. Ahora:
-//   · los casos de unidad corren SIEMPRE (no necesitan stub, ni BD, ni backend);
-//   · los casos HTTP siguen necesitando el stub, pero su ausencia deja la suite ROJA con el comando
-//     exacto que sí los corre (CA-44), salvo opt-out explícito con SIS_STUB_OPCIONAL=1.
+// en el 409 o en el manejo de errores por día no la veía nadie. Los casos de unidad pasaron a
+// correr SIEMPRE (no necesitan stub, ni BD, ni backend) y el salto de la mitad HTTP dejó de ser
+// invisible.
+//
+// D-061 / L11 (H51/CA-53): el fin era correcto y no se toca; el MEDIO estaba mal calibrado. L10
+// convirtió la ausencia de stub en un rojo incondicional, y como `.env` no trae `SIS_HOST` eso dejó
+// `npm test` en rojo PERMANENTE (medido por el gate: `pass 4 · fail 1`). Un rojo que no es una
+// regresión destruye la señal igual de bien que el skip silencioso que H31 quería evitar, y encima
+// entrena a la gente a ignorar el rojo. La regla quedó así:
+//   · sin harness HTTP declarado (o sea, `npm test` a secas contra el backend de dev): VERDE, pero
+//     con los saltados contados —el `skipped` de node— y un aviso ruidoso por stderr que dice
+//     cuántos casos no corrieron y con qué comando corren;
+//   · con harness declarado (`TEST_BASE_URL` explícito, que es lo que hace quien levanta un efímero
+//     para esto) y sin stub: ROJO, porque ahí el salto sí es un accidente;
+//   · `SIS_STUB_OPCIONAL=1` sigue siendo el opt-out explícito de ese rojo;
+//   · y el recuento de casos HTTP está fijado a mano (`HTTP_ESPERADOS`): agregar uno sin tocar ese
+//     número deja la suite roja, que es lo que impide que "5 saltados" se vuelva "3 saltados" sin
+//     que nadie lo note.
 
 const STUB_URL = 'http://localhost:3154';
 // El server efímero resuelve SIS_HOST al cargar sis-client.js: si no apunta al stub, los casos HTTP
-// pedirían de verdad el SIS interno (~5 min por día). Sin stub no hay test HTTP, y decirlo en rojo
-// es mejor que un verde mentiroso.
+// pedirían de verdad el SIS interno (~5 min por día). Sin stub no hay test HTTP.
 const hayStub = process.env.SIS_HOST === STUB_URL;
 const skip = hayStub ? false : 'requiere SIS_HOST=http://localhost:3154 en server y tests';
 
+// ¿Alguien levantó un harness HTTP para esta corrida? `helpers.js` cae a http://localhost:3002 —el
+// backend de dev, que apunta al SIS real— cuando nadie pone `TEST_BASE_URL`, así que la variable
+// EXPLÍCITA es la única señal que distingue "corro la suite canónica" de "levanté un efímero para
+// ejercer estos casos". Se eligió esto y no meter `SIS_STUB_OPCIONAL=1` en el script `test` porque
+// eso no es portable entre Windows y Ubuntu y, sobre todo, es el skip silencioso otra vez con otro
+// nombre: el opt-out tiene que ser una decisión de quien corre, no del `package.json`.
+const harnessHttp = !!process.env.TEST_BASE_URL;
+
 // Cómo se corren de verdad los casos HTTP (el gate levanta el efímero en :3199; un lote, en el suyo).
 const COMO_CORRERLOS = [
-  'SERVER_PORT=3110 AUTH_TEST_BYPASS=1 SKIP_INITDB=1 SIS_HOST=http://localhost:3154 node --env-file=../.env server.js',
-  'TEST_BASE_URL=http://localhost:3110 SIS_HOST=http://localhost:3154 node --env-file=../.env --test --test-concurrency=1 tests/sis_scrape_endpoint.test.js',
+  'SERVER_PORT=3199 AUTH_TEST_BYPASS=1 SKIP_INITDB=1 SIS_HOST=http://localhost:3154 node --env-file=../.env server.js',
+  'TEST_BASE_URL=http://localhost:3199 SIS_HOST=http://localhost:3154 node --env-file=../.env --test --test-concurrency=1 tests/sis_scrape_endpoint.test.js',
 ].map((c) => `    ${c}`).join('\n');
+
+// Cuántos casos HTTP tiene este archivo, a mano y a propósito (ver CA-53 al final).
+const HTTP_ESPERADOS = 5;
+let httpDeclarados = 0;
+let httpCorridos = 0;
+
+// Toda la mitad HTTP se declara por acá: el mismo lugar que decide si corre es el que lleva la
+// cuenta, así que no hay forma de agregar un caso y que quede fuera del recuento.
+function testHttp(nombre, fn) {
+  httpDeclarados++;
+  return test(nombre, { skip }, async (t) => {
+    httpCorridos++;
+    return fn(t);
+  });
+}
 
 const FECHA_A = '2026-04-21';   // fechas fijas pasadas, fuera de todo rango real de la BD
 const FECHA_B = '2026-04-22';
@@ -149,28 +185,6 @@ function limpiarJobLocal() {
 }
 
 const silencio = () => {};
-
-// ──────────────────────────────────────────── CA-44 · el skip deja de ser silencioso
-
-// Este test corre SIEMPRE, tenga o no stub, y es el que impide que la mitad HTTP se evapore sin que
-// nadie se entere. Un archivo entero en `skipped` se lee igual que un archivo entero en verde si
-// nadie mira el conteo — y así estuvieron los 9 casos del scrape manual desde que nacieron (H31).
-// El opt-out existe porque a veces solo se quieren los casos de unidad, pero hay que DECLARARLO.
-test('CA-44. los casos HTTP no se saltean en silencio: sin el stub del SIS la suite queda roja', () => {
-  if (hayStub) return;
-  if (process.env.SIS_STUB_OPCIONAL === '1') {
-    // Opt-out explícito: quien lo pasa ya sabe que se está quedando solo con los casos de unidad.
-    return;
-  }
-  assert.fail(
-    'Los casos HTTP de este archivo NO corrieron: falta el stub del SIS.\n'
-    + `  Se necesita SIS_HOST=${STUB_URL} en el backend efímero Y en el proceso de node --test:\n`
-    + `${COMO_CORRERLOS}\n`
-    + '  Si de verdad solo quieres los casos de unidad, decláralo: SIS_STUB_OPCIONAL=1.',
-  );
-});
-
-// ────────────────────────────────────────────────────────────────────────────────────────────────
 
 before(async () => {
   if (!hayStub) return;   // los casos de unidad no necesitan stub, BD ni backend
@@ -328,7 +342,7 @@ test('CA-19. arrancar con un job en curso o con el mutex tomado lanza scrape_en_
 
 // ──────────────────────────────────────────── CA-16 · POST (gate y validaciones)
 
-test('CA-16. POST scrape: el Ingeniero Químico lee pero no dispara (403) y no arranca nada', { skip }, async () => {
+testHttp('CA-16. POST scrape: el Ingeniero Químico lee pero no dispara (403) y no arranca nada', async () => {
   const antes = await estadoSis();
   const { status } = await call('POST', '/api/combustibles/sis/scrape', {
     sesion_id: ctx.sesiones.ingQuim,
@@ -340,7 +354,7 @@ test('CA-16. POST scrape: el Ingeniero Químico lee pero no dispara (403) y no a
   assert.deepEqual((await estadoSis()).job, antes.job, 'el 403 no puede haber lanzado un job');
 });
 
-test('CA-16. POST scrape: las seis validaciones de C7 responden 400 con su codigo', { skip }, async () => {
+testHttp('CA-16. POST scrape: las seis validaciones de C7 responden 400 con su codigo', async () => {
   const antes = await estadoSis();
   const casos = [
     ['planta_sin_sis',   { planta_id: 'GEC3', fecha: FECHA_A }],
@@ -372,7 +386,7 @@ test('CA-16. POST scrape: las seis validaciones de C7 responden 400 con su codig
 
 // ──────────────────────────────────────────── CA-16/17/18 · 202, estado y log
 
-test('CA-16. POST scrape de un día: 202, el job termina y queda la fila manual en sis_scrape_log', { skip }, async () => {
+testHttp('CA-16. POST scrape de un día: 202, el job termina y queda la fila manual en sis_scrape_log', async () => {
   await limpiar();
   await esperarLibre();
 
@@ -418,7 +432,7 @@ test('CA-16. POST scrape de un día: 202, el job termina y queda la fila manual 
   await limpiar();
 });
 
-test('CA-19. un segundo POST mientras el job corre responde 409 con el job y el mutex', { skip }, async () => {
+testHttp('CA-19. un segundo POST mientras el job corre responde 409 con el job y el mutex', async () => {
   await limpiar();
   await esperarLibre();
 
@@ -458,7 +472,7 @@ test('CA-19. un segundo POST mientras el job corre responde 409 con el job y el 
 
 // ──────────────────────────────────────────── CA-17 · GET estado
 
-test('CA-17. GET estado va por puede_ver: el Ingeniero Químico lo lee (200) con job, lock y sweeper', { skip }, async () => {
+testHttp('CA-17. GET estado va por puede_ver: el Ingeniero Químico lo lee (200) con job, lock y sweeper', async () => {
   const { status, data } = await call('GET', '/api/combustibles/sis/estado', {
     sesion_id: ctx.sesiones.ingQuim,
   });
@@ -481,5 +495,42 @@ test('CA-17. GET estado va por puede_ver: el Ingeniero Químico lo lee (200) con
       ['dia_actual', 'dias_hechos', 'dias_total', 'error', 'estado', 'from', 'id', 'iniciado_en',
         'iniciado_por', 'planta_id', 'resultados', 'terminado_en', 'to'].sort(),
     );
+  }
+});
+
+// ──────────────────────────── CA-44 (L10) + CA-53 (L11) · el salto no puede ser silencioso
+
+// Va ÚLTIMO a propósito: los tests de un archivo corren en orden de declaración, así que acá
+// `httpCorridos` ya es definitivo. Corre siempre, con stub o sin él.
+test('CA-53. los casos HTTP no se saltean en silencio: quedan contados y con el comando exacto', () => {
+  // El recuento fijado a mano es lo que hace que "saltado" sea CONTABLE: si mañana alguien agrega un
+  // caso HTTP y no toca este número, la suite se pone roja aunque el caso nuevo se haya salteado
+  // igual que los otros. Sin esto, "5 saltados" se convierte en "3 saltados" sin que nadie lo note.
+  assert.equal(httpDeclarados, HTTP_ESPERADOS,
+    `este archivo declara ${httpDeclarados} casos HTTP y HTTP_ESPERADOS dice ${HTTP_ESPERADOS}: `
+    + 'actualiza la constante en la misma edición que agrega o quita el caso');
+
+  if (hayStub) {
+    assert.equal(httpCorridos, httpDeclarados,
+      `con el stub levantado tienen que correr los ${httpDeclarados} casos HTTP, corrieron ${httpCorridos}`);
+    return;
+  }
+
+  const aviso = `Los ${httpDeclarados} casos HTTP de este archivo NO corrieron: falta el stub del SIS.\n`
+    + `  Se necesita SIS_HOST=${STUB_URL} en el backend efímero Y en el proceso de node --test:\n`
+    + `${COMO_CORRERLOS}\n`
+    + '  Si de verdad solo quieres los casos de unidad, decláralo: SIS_STUB_OPCIONAL=1.';
+
+  // Ruidoso aunque la suite quede verde: el conteo de `skipped` de node dice CUÁNTOS y esto dice
+  // CUÁLES y cómo correrlos. Es la constancia que reemplaza al rojo permanente de L10.
+  console.error(`\n[sis_scrape_endpoint] ${aviso}\n`);
+
+  assert.equal(httpCorridos, 0, 'sin stub no puede haber corrido ningún caso HTTP');
+
+  // Con un harness HTTP declarado, saltearlos SÍ es un accidente: quien levantó un efímero y apuntó
+  // `TEST_BASE_URL` ahí cree que está ejerciendo estos casos. Ahí el rojo es la señal correcta.
+  if (harnessHttp && process.env.SIS_STUB_OPCIONAL !== '1') {
+    assert.fail(`${aviso}\n  (TEST_BASE_URL=${process.env.TEST_BASE_URL} declara un harness HTTP: `
+      + 'esto no es la suite canónica, es una corrida que cree estar probando el endpoint.)');
   }
 });

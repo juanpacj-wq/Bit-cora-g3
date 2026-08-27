@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
-  discoverEarliestDate, explicarDescubrimiento, offsetsVentana, addDays, diffDays,
+  discoverEarliestDate, explicarDescubrimiento, offsetsVentana, addDays, diffDays, MOTIVOS,
 } from '../utils/sis/discover.js';
 
 // D-061 / CA-20: `discover` v2 con K sondeos repartidos en una ventana de W días. Test PURO —
@@ -18,6 +19,11 @@ import {
 // encontró a la v2 (H28/H29/H30) y que hacían que una corrida real devolviera una fecha equivocada
 // SIN decirlo. El viejo test 10 ("un fetch que lanza cuenta como vacío y no aborta el sondeo")
 // codificaba el defecto H28 como comportamiento esperado: lo reemplaza CA-41, que es su contrario.
+//
+// D-061 / L11 — CA-52 y CA-54: la frontera que el arreglo de H29 dejó abierta (correr la ventana
+// hacia atrás sacaba de la rejilla el día del propio candidato) y la limpieza de lo que quedó
+// declarado pero sin verificar (`MOTIVOS` que nadie importaba, el re-export de compat con la forma
+// nueva bajo el nombre viejo).
 
 const INICIO = '2016-11-15';   // primer día con datos del historiador simulado.
 const TECHO = '2026-08-26';    // "hoy" del escenario (fecha de redacción del lote).
@@ -326,4 +332,84 @@ test('13. ventanaDias/sondeosPorVentana son parametrizables: W más ancho tolera
   const rAncha = await ancha.correr();
   assert.ok(Math.abs(diffDays(INICIO, rAncha.fecha)) <= 1,
     `con W=240 esperaba ${INICIO} ±1, obtuve ${rAncha.fecha}`);
+});
+
+// --- CA-52: el día del candidato se sondea SIEMPRE (H49, regresión del arreglo de H29) ----------
+
+test('CA-52. con el hint a menos de span del techo, su día igual se sondea y el inicio se halla', async () => {
+  // El repro literal del gate. `hint` es, por definición, el ÚNICO día que el llamador sabe poblado
+  // (el CLI le pasa `MIN(fecha)` de `sis_scrape_log`). Al correr la ventana hacia atrás para que
+  // entrara entera bajo el techo, la rejilla se desplazaba y el candidato dejaba de estar entre los
+  // sondeados: `discoverEarliestDate` devolvía `sin-datos` sin haberle preguntado nunca al único día
+  // del que tenía noticia. En cualquier instalación donde el sweeper lleve pocas semanas de log el
+  // hint está siempre a menos de 50 días del techo, así que `--from auto` moría con exit 2.
+  const TECHO_CORTO = '2026-08-26';
+  const HINT = '2026-08-21';               // a 5 días del techo: la ventana no cabe hacia adelante
+  const { fetchFn, pedidos } = historiador({
+    inicio: HINT,
+    paradas: [[addDays(HINT, 1), '2099-12-31']],   // SOLO el día del hint tiene datos
+  });
+  const lineas = [];
+  const r = await discoverEarliestDate(null, {
+    hint: HINT, techo: TECHO_CORTO, maxYearsBack: 2, fetchFn, log: (...a) => lineas.push(a.join(' ')),
+  });
+
+  assert.deepEqual({ fecha: r.fecha, motivo: r.motivo }, { fecha: HINT, motivo: 'hallada' });
+
+  // La rejilla del ancla es la de siempre MÁS el candidato, en orden ascendente. Sin el arreglo son
+  // estos seis días sin el 21 —2026-07-07, -07-17, -07-27, -08-06, -08-16, -08-26— y el resultado
+  // es `{ fecha: null, motivo: 'sin-datos', sondeos: 6 }`.
+  assert.deepEqual(pedidos.slice(0, 6), [
+    '2026-07-07', '2026-07-17', '2026-07-27', '2026-08-06', '2026-08-16', HINT,
+  ], 'el día del candidato tiene que entrar en su propia ventana');
+  assert.ok(lineas.includes(`${HINT} P12 → datos`), 'y el sondeo del hint tiene que decir "datos"');
+  assert.ok(
+    lineas.includes(`ventana de ${HINT} no cabe hasta el techo ${TECHO_CORTO}: se extiende hacia atrás desde 2026-07-07`),
+    'la ventana igual se corre hacia atrás: la regla K/W no cambia',
+  );
+  for (const d of pedidos) assert.ok(d <= TECHO_CORTO, `se sondeó el futuro: ${d}`);
+});
+
+test('CA-52. el candidato no se sondea DOS veces cuando la ventana sí cabe', async () => {
+  // La otra cara: con `base === cand` el candidato ya es el offset 0, así que el arreglo no puede
+  // costar un sondeo de más (a ~13 s cada uno, un duplicado por ventana se nota).
+  const c = corrida({ discover: { hint: '2017-01-10' } });
+  await c.correr();
+  assert.equal(new Set(c.pedidos).size, c.pedidos.length,
+    `hay fechas repetidas: ${c.pedidos.length} pedidos, ${new Set(c.pedidos).size} distintas`);
+});
+
+// --- CA-54: lo declarado tiene que estar verificado ---------------------------------------------
+
+test('CA-54. cada motivo de MOTIVOS lo sabe explicar el módulo, y uno de fuera NO se cuela', async () => {
+  // `MOTIVOS` se exportaba y se documentaba como el punto donde se hace cumplir el vocabulario
+  // cerrado, pero nadie lo importaba —ni los tests—: un motivo mal escrito caía al `default` de
+  // `explicarDescubrimiento`, salía con `codigo: 2` y la suite seguía verde (H60).
+  assert.ok(MOTIVOS.length > 0);
+  assert.deepEqual([...new Set(MOTIVOS)], MOTIVOS, 'MOTIVOS no puede repetir un motivo');
+
+  for (const motivo of MOTIVOS) {
+    const e = explicarDescubrimiento({ fecha: '2018-06-13', motivo, sondeos: 58 });
+    assert.ok(Array.isArray(e.lineas) && e.lineas.length > 0, `${motivo} no produce texto`);
+    assert.ok(!e.lineas.join(' ').includes('resultado desconocido'),
+      `${motivo} cae al default de explicarDescubrimiento: está en el vocabulario pero nadie lo explica`);
+    assert.ok([2, 3, 4].includes(e.codigo), `${motivo} sale con un código raro: ${e.codigo}`);
+    assert.equal(e.confirmable, e.codigo !== 2,
+      `${motivo}: "se puede confirmar" y el código de salida se contradicen`);
+  }
+
+  const raro = explicarDescubrimiento({ fecha: '2018-06-13', motivo: 'hallado', sondeos: 1 });
+  assert.deepEqual({ confirmable: raro.confirmable, codigo: raro.codigo }, { confirmable: false, codigo: 2 });
+  assert.match(raro.lineas[0], /^resultado desconocido del sondeo \(motivo=hallado\)/);
+});
+
+test('CA-54. carbon-scraper.js ya no re-exporta el sondeo: el nombre viejo no puede dar la forma nueva', async () => {
+  // H55: el re-export de compat de L01 sobrevivió al cambio de C3 (L10), así que entregaba
+  // `{ fecha, motivo, sondeos }` bajo un nombre cuyo contrato decía `'YYYY-MM-DD' | null`. Quien
+  // hiciera `if (!inicio) bail()` recibía un objeto SIEMPRE truthy. Se comprueba sobre la FUENTE y
+  // no importando el módulo: `carbon-scraper.js` arrastra `db.js`, que abre el pool al cargarse, y
+  // este archivo es puro (sin BD, sin red).
+  const fuente = await readFile(new URL('../utils/sis/carbon-scraper.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(fuente, /export[^\n]*discoverEarliestDate/,
+    'carbon-scraper.js volvió a exportar discoverEarliestDate: es una trampa dormida, no compat');
 });

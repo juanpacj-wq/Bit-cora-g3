@@ -18,7 +18,7 @@ import { HEATMAP_MAX_TON, HEATMAP_MAX_FALLBACK, temaHeatmap, tint } from './colo
 import {
   esOverride, textoOverride, politicaRefresco, restanteGavela, formatoMMSS, textoChipSis, GAVELA_MS,
   claveRefetch, esVacioCantidad, esCeroNoOp,
-  claveCelda, reconciliarBuffer, calcularDiff, ladoPopover,
+  claveCelda, reconciliarBuffer, calcularDiff, celdaEquivalente, ladoPopover,
 } from './override';
 import { getTodayBogota } from '../../utils/fecha';
 import './combustibles.css';
@@ -72,11 +72,22 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   // Celda cuyo popover de override está abierto por click ('<periodo>:<combustible_id>'). El hover
   // lo maneja el CSS; este estado es el que deja el popover fijo para poder llegar a "Revertir".
   const [tipAbierto, setTipAbierto] = useState(null);
-  // D-061 L09 (H26/CA-39): hacia dónde abre el popover de la última celda apuntada,
-  // `{ clave, arriba, izq }`. Se mide al abrir (hover o click) y no en cada scroll: un
-  // `getBoundingClientRect` por banderín tocado, contra los 240 por render que costaría recalcular
-  // la posición en vivo. Solo hay un popover visible a la vez, así que una sola entrada alcanza.
-  const [ladoTip, setLadoTip] = useState(null);
+  // D-061 L09 (H26/CA-39) + L11 (H53/H58 · CA-50): hacia dónde abre el popover. Se mide al abrir
+  // (hover o click) y no en cada scroll: un `getBoundingClientRect` por banderín tocado, contra los
+  // 240 por render que costaría recalcular la posición en vivo.
+  //
+  // Son DOS cosas distintas y por eso viven en dos lugares distintos:
+  //  - `ladoFijo`: el lado del popover FIJADO por clic. Es lo único que necesita estado, porque
+  //    tiene que sobrevivir a cualquier re-render. L09 lo guardaba en la MISMA entrada que el
+  //    hover, así que pasar el puntero por cualquier otro banderín le cambiaba la `clave` al
+  //    fijado: volvía al default abajo-derecha y se recortaba (H53, que es H13 otra vez).
+  //  - `ladoHoverRef`: el lado del popover que aparece SOLO por puntero. Va en un ref y se escribe
+  //    directo en el nodo (ver el `onMouseEnter` del banderín). Como estado costaba un re-render de
+  //    las ~240 celdas por cada banderín que el puntero rozaba, donde L08 tenía hover de CSS puro a
+  //    costo cero (H58). El render lo vuelve a leer de acá, así que un re-render que llegue con el
+  //    puntero encima no le quita el lado ya medido.
+  const [ladoFijo, setLadoFijo] = useState(null);
+  const ladoHoverRef = useRef(null);
   // Gavela (D-061): instante en que empezó a correr la ventana de 10 min, y lo que le queda.
   const [gavelaInicio, setGavelaInicio] = useState(null);
   const [restanteMs, setRestanteMs] = useState(GAVELA_MS);
@@ -149,8 +160,20 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     refetch();
   }, [refetch, plantaId, fecha]);
 
+  // D-061 L11 (H52/CA-49): "sucio" tiene UNA sola definición, y es la del POST. Antes esto
+  // comparaba `JSON.stringify` del buffer entero contra el snapshot —metadata incluida—, mientras
+  // el diff miraba solo las editadas y solo `cantidad`/`detalle`. Bastaba con que la respuesta de
+  // un GET trajera `modificado_en`/`valor_sis` frescos de una celda editada para dejar Guardar
+  // encendido, la gavela corriendo y el `beforeunload` armado sobre un diff VACÍO: al hacer clic
+  // salía "Sin cambios para guardar" y el operador quedaba atascado hasta descartar o esperar los
+  // 10 min de la gavela, que además le anunciaba que "se descartaron cambios sin guardar".
+  //
+  // `editadasRef` es un ref y no dispara render por sí solo. Este memo se recalcula igual porque
+  // TODA mutación del conjunto va acompañada de un `setBuffer` en el mismo manejador (`setCelda`,
+  // `descartar`, las dos ramas de `refetch`): esa es la invariante que hay que conservar si mañana
+  // aparece otro camino que toque el conjunto.
   const hayCambios = useMemo(
-    () => JSON.stringify(buffer) !== JSON.stringify(snapshot),
+    () => calcularDiff(buffer, snapshot, editadasRef.current).length > 0,
     [buffer, snapshot]
   );
 
@@ -250,10 +273,8 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
 
   const setCelda = (periodo, combustibleId, cantidad) => {
     // D-061 L09 (H24/CA-37): este es el ÚNICO lugar por el que el operador toca el buffer, así que
-    // es el único que da de alta una coordenada como "editada". Se marca aunque el valor termine
-    // siendo igual al del server (`calcularDiff` ya no la emite si no difiere): lo que importa es
-    // que la celda quede protegida de la reconciliación mientras la edición esté viva.
-    editadasRef.current.add(claveCelda(periodo, combustibleId));
+    // es el único que da de alta —o de baja— una coordenada como "editada".
+    const clave = claveCelda(periodo, combustibleId);
     setBuffer((b) => {
       const next = { ...b };
       const p = String(periodo);
@@ -261,8 +282,10 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
       const fila = next[p] ? { ...next[p] } : {};
       // D-061 L08 (H5/CA-34): el snapshot manda. Si el server ya tiene esta celda en 0 (override 0
       // de C6), teclear 0 o vaciarla no es un cambio: se restituye la celda del snapshot tal cual
-      // —clon por JSON, que conserva el orden de claves y por eso `hayCambios` (que compara
-      // `JSON.stringify`) vuelve a dar false— en vez de borrar la clave del buffer.
+      // en vez de borrar la clave del buffer, y con eso la coordenada sale del conjunto de editadas
+      // por la regla de abajo. (L09 restituía un clon por JSON para que el `JSON.stringify` de
+      // `hayCambios` volviera a dar false; desde L11 esa comparación ya no existe, pero restituir
+      // la celda del server sigue siendo lo correcto: es lo que el server tiene.)
       const celdaSnap = snapshotRef.current[p]?.[k];
       if (esCeroNoOp(cantidad, celdaSnap)) {
         fila[k] = deepClone(celdaSnap);
@@ -282,6 +305,23 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
         fila[k] = { ...(base || {}), cantidad };
         next[p] = fila;
       }
+      // D-061 L11 (H50/CA-48): la coordenada entra al conjunto según CÓMO QUEDÓ, no por el mero
+      // hecho de haberla tecleado. L09 la marcaba siempre y nunca la soltaba, con el argumento de
+      // que `calcularDiff` no la emite si no difiere — y eso solo vale mientras el server no la
+      // cambie. Escenario medido: el operador toca 3/1 y la devuelve a su valor original; durante
+      // un GET preservado el SIS relee el periodo y esa celda vuelve con otro número;
+      // `reconciliarBuffer` restaura la vieja porque está marcada, `calcularDiff` la emite porque
+      // ahora sí difiere, y el Guardar escribe el valor viejo encima del fresco a nombre del
+      // operador — con la ownership de D-029 impidiendo que el scraper lo reponga.
+      //
+      // La regla de equivalencia es LA MISMA que decide qué viaja en el POST (`celdaEquivalente`),
+      // así que el conjunto y el diff no pueden discrepar. Vaciar una celda que el server tampoco
+      // tiene también desmarca: no hay nada que mandar (dos ausencias son equivalentes, que es lo
+      // que antes escribía a mano `if (!b && !s) continue`). Se decide acá adentro y no antes,
+      // porque el resultado depende de cuál de las tres ramas de arriba corrió. La operación sobre
+      // el Set es idempotente, así que una re-ejecución del actualizador no puede dejarlo a medias.
+      if (celdaEquivalente(next[p]?.[k], celdaSnap)) editadasRef.current.delete(clave);
+      else editadasRef.current.add(clave);
       return next;
     });
   };
@@ -339,7 +379,7 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
       const r = await revertirCelda({
         planta_id: plantaId, fecha, periodo, combustible_id: combustibleId,
       });
-      setTipAbierto(null);
+      cerrarTip();
       await refetch();
       // H14/CA-32: el toast dice lo que REALMENTE pasó. Antes, `sin_cambios` (la celda ya estaba en
       // el valor del SIS) se anunciaba como "Revertido al valor SIS": el operador leía que su
@@ -353,34 +393,52 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     }
   };
 
-  // D-061 L09 (H26/CA-39): mide el banderín contra el recuadro visible de `.comb-scroll` y guarda
-  // hacia dónde tiene que abrir su popover. Se llama al entrar el puntero al banderín y al hacer
-  // clic en él — los dos caminos por los que el popover aparece—, nunca en el scroll ni en el
-  // render. Si el lado no cambió se devuelve el mismo objeto para no re-renderizar la grilla
-  // entera cada vez que el puntero cruza un banderín.
+  // D-061 L09 (H26/CA-39): mide el banderín contra el recuadro visible de `.comb-scroll` y
+  // devuelve hacia dónde tiene que abrir su popover. Se llama al entrar el puntero al banderín y al
+  // hacer clic en él — los dos caminos por los que el popover aparece—, nunca en el scroll ni en el
+  // render.
+  //
+  // D-061 L11 (H54/CA-51): descuenta lo que la cabecera y la primera columna PEGAJOSAS tapan del
+  // recuadro. `.comb-scroll` es el que recorta, pero sus ~34 px de arriba los ocupa el `thead`
+  // (`position:sticky; top:0`) y la izquierda la columna de periodos: contarlos como espacio libre
+  // hacía que un popover volteado hacia arriba se pintara ENCIMA de los nombres de columna —gana
+  // por `z-index:5` contra el `2` del `thead`—, justo el recorte que voltearlo venía a evitar.
+  // La decisión sigue siendo pura (`ladoPopover`); acá solo se mide.
+  //
+  // D-061 L11 (H58/CA-50): ya no escribe estado. Devuelve el lado y cada llamador decide qué hacer
+  // con él: el clic lo guarda en `ladoFijo`, el hover lo escribe en el nodo sin re-renderizar.
   const scrollRef = useRef(null);
-  const medirLado = useCallback((clave, el) => {
-    if (!el || !scrollRef.current) return;
-    const lado = ladoPopover({
+  const medirLado = useCallback((el) => {
+    if (!el || !scrollRef.current) return null;
+    const caja = scrollRef.current;
+    const cabecera = caja.querySelector('thead')?.getBoundingClientRect();
+    const primeraCol = caja.querySelector('.comb-th-first')?.getBoundingClientRect();
+    return ladoPopover({
       banderin: el.getBoundingClientRect(),
-      contenedor: scrollRef.current.getBoundingClientRect(),
+      contenedor: caja.getBoundingClientRect(),
+      margenArriba: cabecera ? cabecera.bottom - cabecera.top : 0,
+      margenIzquierda: primeraCol ? primeraCol.right - primeraCol.left : 0,
     });
-    setLadoTip((prev) => (
-      prev && prev.clave === clave && prev.arriba === lado.arriba && prev.izq === lado.izq
-        ? prev
-        : { clave, ...lado }
-    ));
   }, []);
+
+  // Cerrar el popover fijado suelta también su lado (H53): dejarlo colgado era la mitad del defecto
+  // —`setTipAbierto(null)` no limpiaba nada— y con el lado del hover en su propio ref no hace falta
+  // conservarlo: el próximo `onMouseEnter` vuelve a medir.
+  const cerrarTip = useCallback(() => { setTipAbierto(null); setLadoFijo(null); }, []);
 
   // El popover no debe sobrevivir a un cambio de planta/fecha (quedaría describiendo una celda
   // que ya no está en pantalla) ni a un Escape.
-  useEffect(() => { setTipAbierto(null); setLadoTip(null); }, [plantaId, fecha]);
+  useEffect(() => {
+    setTipAbierto(null);
+    setLadoFijo(null);
+    ladoHoverRef.current = null;   // su `clave` es de la coordenada que se acaba de dejar
+  }, [plantaId, fecha]);
   useEffect(() => {
     if (!tipAbierto) return;
-    const h = (e) => { if (e.key === 'Escape') setTipAbierto(null); };
+    const h = (e) => { if (e.key === 'Escape') cerrarTip(); };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [tipAbierto]);
+  }, [tipAbierto, cerrarTip]);
 
   // Reorden de columnas: alimentadores → Total Carbón (virtual) → Caliza → ACPM.
   // La columna virtual lleva `virtual: true` y un id 'TOTAL' que no se confunde con ningún
@@ -568,7 +626,16 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                         // borde de ARRIBA y el último alimentador tener lienzo de sobra a la
                         // derecha. Sin medida todavía (o en jsdom, que no hace layout) manda el
                         // default del CSS, que es el mismo abajo-derecha.
-                        const lado = ladoTip?.clave === claveTip ? ladoTip : null;
+                        //
+                        // D-061 L11 (H53/CA-50): si esta celda es la del popover FIJADO, manda su
+                        // lado y ninguna otra cosa lo toca. Solo si no lo es se mira la medida del
+                        // hover, que es de una celda a la vez (la que el puntero tiene encima) y
+                        // vive en un ref: leerlo acá es lo que hace que un re-render cualquiera no
+                        // le devuelva el default a un popover que el puntero está mostrando.
+                        const hover = ladoHoverRef.current;
+                        const lado = ladoFijo?.clave === claveTip
+                          ? ladoFijo
+                          : (hover?.clave === claveTip ? hover : null);
                         tipClases = `comb-tip${lado?.arriba ? ' comb-tip--arriba' : ''}`
                           + `${lado?.izq ? ' comb-tip--izq' : ''}`
                           + `${tipAbierto === claveTip ? ' open' : ''}`;
@@ -586,7 +653,24 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                               // hay que medirlo al entrar el puntero y no solo al hacer clic. El
                               // wrap mide exactamente los 14×14 del banderín (su único hijo en
                               // flujo), así que su rect ES el del banderín.
-                              onMouseEnter={(e) => medirLado(claveTip, e.currentTarget)}
+                              //
+                              // D-061 L11 (H58/CA-50): la medida del hover se escribe en el nodo,
+                              // no en el estado. Un `setState` acá re-renderizaba las ~240 celdas
+                              // por cada banderín que el puntero rozaba —y el corto-circuito por
+                              // identidad de L09 no saltaba justo en el caso normal, moverse ENTRE
+                              // banderines—. Queda además en `ladoHoverRef` para que el próximo
+                              // render lo reponga igual.
+                              onMouseEnter={(e) => {
+                                // El fijado no lo mueve el puntero.
+                                if (tipAbierto === claveTip) return;
+                                const lado = medirLado(e.currentTarget);
+                                if (!lado) return;
+                                ladoHoverRef.current = { clave: claveTip, ...lado };
+                                const tip = e.currentTarget.querySelector('.comb-tip');
+                                if (!tip) return;
+                                tip.classList.toggle('comb-tip--arriba', lado.arriba);
+                                tip.classList.toggle('comb-tip--izq', lado.izq);
+                              }}
                             >
                               <button
                                 type="button"
@@ -600,8 +684,10 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                                 // texto ya le llega al lector de pantalla por `aria-describedby`.
                                 tabIndex={-1}
                                 onClick={(e) => {
-                                  medirLado(claveTip, e.currentTarget);
-                                  setTipAbierto((k) => (k === claveTip ? null : claveTip));
+                                  if (tipAbierto === claveTip) { cerrarTip(); return; }
+                                  const lado = medirLado(e.currentTarget);
+                                  setLadoFijo(lado ? { clave: claveTip, ...lado } : null);
+                                  setTipAbierto(claveTip);
                                 }}
                               />
                               {/* Sin `title` nativo: el popover ya dice lo mismo y el navegador lo

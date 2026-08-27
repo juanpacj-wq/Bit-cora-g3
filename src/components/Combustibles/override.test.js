@@ -23,6 +23,7 @@ import {
   claveCelda,
   reconciliarBuffer,
   calcularDiff,
+  celdaEquivalente,
   ladoPopover,
 } from './override.js';
 
@@ -436,6 +437,20 @@ describe('calcularDiff (L09, CA-37)', () => {
     expect(calcularDiff({}, {}, new Set(['9|4']))).toEqual([]);
   });
 
+  it('la metadata refrescada de una celda editada no viaja (L11, H52)', () => {
+    // El escenario de H52: el operador tecleó 22 en 3/1, el GET volvió con esa MISMA cantidad y
+    // metadata nueva (`modificado_en`, `valor_sis`, `es_override`), y `reconciliarBuffer` conservó
+    // la celda del operador —con la metadata vieja—. El diff tiene que salir vacío: lo único que
+    // el operador escribe es `cantidad` y `detalle`.
+    const snapFresco = {
+      3: { 1: { cantidad: 22, detalle: null, modificado_en: '2026-08-27T12:00:00.000Z', valor_sis: 19, es_override: true } },
+    };
+    const buffer = {
+      3: { 1: { cantidad: 22, detalle: null, modificado_en: null, valor_sis: null, es_override: false } },
+    };
+    expect(calcularDiff(buffer, snapFresco, new Set(['3|1']))).toEqual([]);
+  });
+
   it('sale ordenado por periodo y combustible, no por el orden en que se tecleó', () => {
     const buffer = { 3: { 1: { cantidad: 22 }, 2: { cantidad: 1 } }, 1: { 5: { cantidad: 4 } } };
     const claves = new Set(['3|2', '1|5', '3|1']);
@@ -502,5 +517,91 @@ describe('ladoPopover (L09, CA-39)', () => {
     const b = banderin(120, 700);
     expect(ladoPopover({ banderin: b, contenedor: CONT, ancho: 280 }).izq).toBe(false);
     expect(ladoPopover({ banderin: b, contenedor: CONT, ancho: 400 }).izq).toBe(true);
+  });
+});
+
+describe('celdaEquivalente (L11, CA-48/CA-49)', () => {
+  // La única definición de "cambió" de la pantalla. Que sea una sola es lo que hace que el conjunto
+  // de editadas (`setCelda`), el body del POST (`calcularDiff`) y el "hay cambios sin guardar" no
+  // puedan discrepar — que es de donde salieron H50 y H52.
+
+  it('dos celdas ausentes son equivalentes: teclear y deshacer no deja nada que mandar', () => {
+    expect(celdaEquivalente(undefined, undefined)).toBe(true);
+    expect(celdaEquivalente(null, undefined)).toBe(true);
+  });
+
+  it('una celda que existe de un solo lado NO es equivalente', () => {
+    expect(celdaEquivalente({ cantidad: 20 }, undefined)).toBe(false);  // INSERT
+    expect(celdaEquivalente(undefined, { cantidad: 20 })).toBe(false);  // vaciar (C6)
+  });
+
+  it('solo mira cantidad y detalle: la metadata refrescada del server no es un cambio (H52)', () => {
+    const delOperador = celda({ cantidad: 22, detalle: 'Tolva atascada' });
+    const delServer = celda({
+      cantidad: 22,
+      detalle: 'Tolva atascada',
+      modificado_en: '2026-08-27T12:00:00.000Z',
+      valor_sis: 19,
+      sis_actualizado_en: '2026-08-27T12:00:00.000Z',
+      es_override: true,
+      consumo_id: 777,
+    });
+    expect(celdaEquivalente(delOperador, delServer)).toBe(true);
+  });
+
+  it('cambiar la cantidad o el detalle sí rompe la equivalencia', () => {
+    const base = { cantidad: 20, detalle: null };
+    expect(celdaEquivalente({ cantidad: 21, detalle: null }, base)).toBe(false);
+    expect(celdaEquivalente({ cantidad: 20, detalle: 'Nota' }, base)).toBe(false);
+  });
+
+  it('`detalle` ausente y `detalle: null` son lo mismo (el buffer no siempre trae la clave)', () => {
+    expect(celdaEquivalente({ cantidad: 20 }, { cantidad: 20, detalle: null })).toBe(true);
+  });
+
+  it('no distingue el número del string: el server puede mandar la cantidad como texto', () => {
+    expect(celdaEquivalente({ cantidad: 20 }, { cantidad: '20', detalle: null })).toBe(true);
+  });
+});
+
+describe('ladoPopover · lo pegajoso no es espacio libre (L11, CA-51)', () => {
+  // `.comb-scroll` recorta, pero sus ~34 px de arriba los ocupa el `thead` (`position:sticky`) y su
+  // izquierda la columna de periodos. Contarlos como aire hacía que el popover volteado se pintara
+  // ENCIMA de la cabecera (gana por `z-index:5` contra el `2` del `thead`), que es exactamente el
+  // recorte que voltearlo venía a evitar.
+  const banderin = (top, left) => ({ top, bottom: top + 14, left, right: left + 14 });
+
+  it('con la cabecera descontada el popover ya no voltea contra ella', () => {
+    // Recuadro bajo (160 px) con 34 px de cabecera pegajosa. Debajo del banderín quedan 66 px
+    // (menos que los 120 del popover) y arriba 80 — pero 34 de esos 80 son el `thead`: libres solo
+    // 46, o sea MENOS que abajo. Voltear sería pintar sobre los nombres de columna.
+    const CONT_BAJO = { top: 100, bottom: 260, left: 0, right: 1000 };
+    const b = banderin(180, 40);
+    expect(ladoPopover({ banderin: b, contenedor: CONT_BAJO }).arriba).toBe(true);
+    expect(ladoPopover({ banderin: b, contenedor: CONT_BAJO, margenArriba: 34 }).arriba).toBe(false);
+  });
+
+  it('con la primera columna descontada tampoco voltea hacia ella', () => {
+    // Contenedor angosto (300 px) con 150 px de columna de periodos pegada a la izquierda.
+    const CONT_ANGOSTO = { top: 100, bottom: 500, left: 0, right: 300 };
+    const b = banderin(120, 200);
+    expect(ladoPopover({ banderin: b, contenedor: CONT_ANGOSTO }).izq).toBe(true);
+    expect(ladoPopover({ banderin: b, contenedor: CONT_ANGOSTO, margenIzquierda: 150 }).izq).toBe(false);
+  });
+
+  it('los márgenes son 0 por defecto: sin medida no cambia ninguna decisión previa', () => {
+    const CONT = { top: 100, bottom: 500, left: 0, right: 1000 };
+    const b = banderin(460, 900);
+    expect(ladoPopover({ banderin: b, contenedor: CONT }))
+      .toEqual(ladoPopover({ banderin: b, contenedor: CONT, margenArriba: 0, margenIzquierda: 0 }));
+    expect(ladoPopover({ banderin: b, contenedor: CONT })).toEqual({ arriba: true, izq: true });
+  });
+
+  it('un margen que se come el recuadro entero deja el lado por defecto, no uno peor', () => {
+    // No hay lado bueno: con la cabecera tapando todo el aire de arriba, quedarse abajo es al menos
+    // predecible (misma regla que el contenedor más chico que el popover).
+    const CONT_BAJO = { top: 100, bottom: 260, left: 0, right: 1000 };
+    expect(ladoPopover({ banderin: banderin(180, 40), contenedor: CONT_BAJO, margenArriba: 160 }))
+      .toEqual({ arriba: false, izq: false });
   });
 });
