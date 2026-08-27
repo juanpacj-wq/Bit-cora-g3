@@ -13,7 +13,7 @@ Documentos autoritativos para el modelo de datos y RFs detallados: `BIT-MODBD-20
 | Frontend | React 19, Vite 5, TailwindCSS 3, lucide-react |
 | Backend | Node.js ≥20 ESM, **Express** (modelo de routing único, D-037): `session → cors → csrf → auth OIDC (D-031) → requireEntra → express.json → routers de dominio (`routes/*.js`) → 404 → errorHandler`; `--env-file` |
 | BD | SQL Server 2019+ (driver `mssql` con `useUTC=true`) |
-| Tests | `node:test` (backend), Vitest (frontend, pendiente) |
+| Tests | `node:test` (backend, `npm test` en `server/`), **Vitest** (frontend, `npm test` en la raíz) |
 | Build frontend | Vite (`npm run dev`, `npm run build`) |
 | Backend dev | `node --watch --env-file=../.env server.js` (puerto 3002) |
 
@@ -78,8 +78,22 @@ Bit-cora-g3/server/
 │   ├── xlsx.js                D-058 — leerZip/escribirZip OOXML en ESM, sin dependencias.
 │   ├── mand-sweeper.js        Cron interno c/60s, detecta cambio de día Bogotá → cerrarDiaMand()
 │   ├── turno-sweeper.js       (legacy o coexistente — revisar al tocar)
+│   ├── sis/                   D-029/D-060/D-061 — ingesta del carbón GEC32 desde el SIS.
+│   │   ├── sis-client.js          SIS_HOST validado, TAGS, buildUrl/periodoBounds/fetchPeriod,
+│   │   │                          extraerCarbonValidado (filtra tolvas ≤ 0,5 t/h como 0).
+│   │   ├── xls-parser.js          Lector .xls (OLE2/CFB + BIFF8) sin dependencias, endurecido (AUD-08).
+│   │   ├── xls-parser-worker.js   El parser corriendo en un Worker...
+│   │   ├── parse-isolated.js      ...y el arnés que lo lanza con tope de heap y timeout.
+│   │   ├── carbon-scraper.js      scrapeDia(pool, {planta_id, concurrencia 1..6, …}) + leerScrapeLog:
+│   │   │                          fase de red (paralelizable) → transacción única con la ownership.
+│   │   ├── sis-sweeper.js         Tick horario a HH:02 Bogotá (ejecutarTick puro, sin timers)...
+│   │   ├── sis-sweeper-helpers.js ...y sus helpers puros (necesitaCatchup, periodoDesdeDe, marca).
+│   │   ├── sis-lock.js            Mutex de PROCESO sin cola entre sweeper y scrape manual.
+│   │   ├── sis-job.js             Job del scrape manual: uno a la vez, en memoria, bajo el mutex.
+│   │   └── discover.js            Sondeo calibrado de la primera fecha con datos (K en W días).
 │   └── ...
-└── tests/                     node:test (helpers, auth, disponibilidad, mand batch)
+├── scripts/backfill-carbon-gec32.js  CLI de backfill/reparación del carbón GEC32 (resumible).
+└── tests/                     node:test (helpers, auth, disponibilidad, mand batch, SIS)
 ```
 
 ### Endpoints principales
@@ -105,6 +119,12 @@ Bit-cora-g3/server/
 | `DELETE /api/sala-de-mando/lotes/:lote_id?planta_id=` | **Borrado real por lote** (D-057). Recalcula cada celda liberada → lo publicado retrocede al lote anterior vigente, o la fila de `evento_dashboard` se elimina. |
 | `GET /api/sala-de-mando/reporte-mensual?mes=YYYY-MM` | **Libro mensual GENE-F03** (D-058). Responde el `.xlsx` (`Content-Disposition: attachment`), una hoja por día, tres bloques de turno, **las dos unidades mezcladas**. `mes` opcional (default: mes Bogotá en curso); `400 mes_invalido` / `mes_futuro`. **Solo lectura**, gated por `puede_crear` (`puede_ver` lo tienen todos los cargos: no gatearía nada). |
 | `POST /api/sala-de-mando/cierre-diario` | Trigger manual del sweeper (tests, recovery). Requiere `puede_cerrar_turno`. |
+| `GET /api/combustibles/catalogo?planta_id=` | Catálogo activo de la planta (`lov_bit.combustible`, con `cantidad_max`). `planta_id ∈ {GEC3, GEC32, TST}`; el resto → `400 planta_invalida`. |
+| `GET /api/combustibles/consumos?planta_id=&fecha=` | Grilla del día. Desde **D-061** cada celda trae `valor_sis`, `sis_actualizado_en`, `sis_owned` y `es_override` (derivados en el backend), y la respuesta agrega el bloque `sis` con la fila de `sis_scrape_log` de ese día. |
+| `POST /api/combustibles/consumos` | Batch atómico. Desde **D-061** vaciar una celda **con** `valor_sis` la deja en `cantidad=0` como override humano (solo borra la que nunca tuvo lectura del SIS); la clave `detalle` ausente conserva el comentario. Gated por `puede_crear`. |
+| `POST /api/combustibles/consumos/revertir` | **D-061.** Devuelve una celda al valor del SIS: `restaurado` (`valor_sis>0`, con `creado_por=SISTEMA` y `modificado_por=NULL`) · `eliminado` (`valor_sis=0`) · `sin_cambios`. `400 sin_valor_sis` / `404 celda_no_existe`. Gated por `puede_crear`. |
+| `POST /api/combustibles/sis/scrape` | **D-061.** Dispara el scrape manual y responde **202 sin esperarlo** (un día son ~24 fetch de ~13 s; el proxy corta a los 60 s). Body `{ planta_id?, fecha }` o `{ planta_id?, from, to }` (≤ 31 días). **409 `scrape_en_curso`** si hay job vivo o el mutex está tomado; `400 planta_sin_sis` para GEC3. Gated por `puede_crear`. |
+| `GET /api/combustibles/sis/estado` | **D-061.** `{ job, lock, sweeper: { habilitado } }`. Gated por `puede_ver`. **Sin consumidor de UI todavía** — el chip que ve el operador sale del bloque `sis` del GET de consumos. |
 | `GET /api/eventos-dashboard?tipo=&planta_id=` | Endpoint hacia dashboard-gen-gec3. `tipo ∈ {AUTH,REDESP,PRUEBA}` lee de `evento_dashboard`; `tipo=DISP` lee de `disponibilidad_dashboard`. |
 | `GET /api/catalogos/jdt-actual` | Para autocompletado. Lee `sesion_bitacora` con `finalizada_en IS NULL`. |
 
@@ -134,6 +154,13 @@ Bit-cora-g3/src/
 │   │   ├── CambiarEstadoModal.jsx
 │   │   ├── TiempoEnEstado.jsx     Counter live (setInterval 1s); exporta formatDiff + useTiempoTranscurrido
 │   │   └── colores.js             Paleta de estados DISP
+│   ├── Combustibles/
+│   │   ├── ConsumosGrid.jsx     UI COMB (24 periodos × N combustibles). Badge de override, popover
+│   │   │                        con autoría + valor SIS + Revertir, auto-refresco con gavela, chip SIS.
+│   │   ├── override.js          Módulo PURO de la mecánica de override (16 exports; ver abajo).
+│   │   ├── SelectorFecha.jsx    Fecha controlada (default hoy Bogotá, futuro bloqueado).
+│   │   ├── combustibles.css     Piel "Blueprint Heatmap" (D-033), scopeada bajo `.comb-root`.
+│   │   └── colores.js           Rampa del heatmap compartida por `tint()` y la leyenda.
 │   ├── historicos/HistoricoTable.jsx
 │   └── BarraEstado.jsx            Filtros F11 (fecha+turno) — NO se renderiza para DISP. En MAND se renderiza pero oculta filtros/cierres (la grilla solo muestra HOY) y muestra contador "X registros" sincronizado con el badge.
 └── hooks/
@@ -142,6 +169,7 @@ Bit-cora-g3/src/
     ├── useUsuariosActivos.js      WS de "usuarios en turno"
     ├── useDisponibilidad.js       getEstado/getMetricas/crear/editar/deshacer para DISP
     ├── useSalaDeMando.js          getGrilla + guardarBatch
+    ├── useCombustibles.js         getCatalogo/getConsumos/guardarBatch/revertirCelda (COMB)
     └── useApi.js                  fetch base con manejo de errores estructurados
 ```
 
@@ -292,6 +320,43 @@ Dos módulos que no se conocen entre sí. `utils/f03-datos.js::armarMes` **consu
 - `CambiarEstadoModal.jsx`: 3 modos (crear / editar / deshacer-confirm). Manejo de 409 con popups reactivos.
 - Planta activa: la persiste el **routing por hash** (`#/disp?planta=GEC3|GEC32`, D-035), fuente única de verdad. El viejo `sessionStorage('disponibilidad.plantaSeleccionada')` se retiró (doble fuente).
 
+### COMB (Consumos de combustible) e ingesta SIS de carbón GEC32
+
+Grilla de 24 periodos × N combustibles por planta (8 en GEC3, 10 en GEC32, desde `lov_bit.combustible`). No es una bitácora de eventos: es un reporte numérico con batch save atómico. Lo que la hace especial es que **tiene dos escritores**: el operador y el SIS.
+
+**El SIS** es el historiador industrial interno (`http://192.168.18.201`, HTTP plano sin auth, allowlist en `validarSisHost`). Exporta un `.xls` por rango horario; un periodo pesa ~830 KB (3.601 filas) y tarda ~13 s. De ahí salen las 8 tolvas (`ALIM_1..8`) de GEC32. **GEC3 no tiene SIS.**
+
+#### Los módulos y quién le pide días al SIS
+
+| Camino | Módulo | Cuándo | `scrape_tipo` |
+|---|---|---|---|
+| Sweeper horario | `utils/sis/sis-sweeper.js` | tick a **HH:02 Bogotá** (el primero 10 s tras arrancar): completa AYER si su log no dice 24/24, después re-scrapea HOY. Lo arranca `server.js` salvo `SIS_SWEEPER_ENABLED=0` | `horario` |
+| Job manual | `utils/sis/sis-job.js` + `POST /api/combustibles/sis/scrape` | a pedido, día a día, rango ≤ 31 días; responde **202** y el avance se lee en `GET /sis/estado` | `manual` |
+| CLI de backfill | `scripts/backfill-carbon-gec32.js` | corridas históricas largas, a mano | `backfill` |
+
+Los tres llaman a `scrapeDia(pool, { fecha, planta_id='GEC32', concurrencia=1, periodoDesde, soloHoy, … })`, que hace **fase de red** (paralelizable hasta 6 periodos; las lecturas se ordenan por periodo antes de escribir) y después **una sola transacción** con la regla de ownership. El resumen del día va a `bitacora.sis_scrape_log` (una fila por `planta+fecha`, UQ).
+
+**`sis-lock.js` es un mutex de proceso y sin cola.** El tick del sweeper corre entero adentro; el job manual también. Quien lo encuentre tomado **no espera**: el sweeper omite el tick completo y vuelve en una hora, el endpoint responde `409 scrape_en_curso` con `job` y `lock` para poder decir *cuál* de los dos está corriendo y desde cuándo. El CLI es **otro proceso** y el mutex no lo alcanza: su exclusión con el sweeper es `--to ≤ hoy-2` (D-060).
+
+**`SIS_SWEEPER_ENABLED=0` apaga el sweeper.** Existe para los **backends efímeros de test** (con `SIS_HOST` apuntando a un stub, el tick real ensucia la fila de hoy de GEC32) y **no es un flag de producción**. Solo el string exacto `'0'` apaga; la ausencia de la variable deja la ingesta encendida y el apagado se anuncia en el log de arranque, porque un sweeper mudo es indistinguible de uno roto.
+
+#### La regla de ownership ("operador gana")
+
+Una celda es **SIS-owned** ⇔ `creado_por = SISTEMA AND (modificado_por IS NULL OR = SISTEMA)`. El SIS escribe siempre la sombra `valor_sis`, pero solo manda en `cantidad` mientras la celda sea suya; en una celda editada por un humano actualiza **únicamente** la sombra. Un cero del SIS **borra** la fila si es SIS-owned (la ausencia de fila es su representación canónica de "no hubo consumo") y solo baja la sombra si es humana. Tabla completa de las seis ramas y el resto de la semántica: **BIT-MODBD §4.9.1**.
+
+`sis_owned` y `es_override` los calcula el backend en `GET /consumos` (`es_override = !sis_owned AND valor_sis IS NOT NULL AND cantidad <> valor_sis`): **el front pinta, no decide**. Vaciar una celda con lectura del SIS la deja en `cantidad = 0` como override; `POST /consumos/revertir` es el único camino de vuelta.
+
+#### El front (`Combustibles/ConsumosGrid.jsx` + `override.js`)
+
+Toda la lógica que se puede equivocar —formato de fecha Bogotá, política de refresco, aritmética de la gavela, reconciliación del buffer, lado del popover— vive en el módulo **puro** `override.js` (16 exports), probado sin DOM ni backend; la grilla lo consume.
+
+- **Badge de override**: banderín ámbar en la esquina de las celdas ALIM con `es_override`, leído del **snapshot del server** y no del buffer local, así que mientras alguien teclea la marca no parpadea. El popover muestra autoría, fecha Bogotá y el valor SIS, y lleva el botón **Revertir** (solo con `puede_crear`). Hacia dónde abre se decide **midiendo** el banderín contra el recuadro que lo recorta (`ladoPopover`, función pura que recibe los dos rects), no por índice de fila.
+- **Auto-refresco**: solo en GEC32 viendo hoy, cada 5 min y al volver a la pestaña. **Nunca pisa una edición**: toda lectura lleva número de secuencia y la coordenada `(planta, fecha)` con la que salió, y se descarta sola si dejó de ser la última o si la coordenada cambió. Lo que **siempre** se aplica es el snapshot, el catálogo y el estado del SIS (la verdad del server, de donde sale el badge); el buffer solo si nadie está escribiendo.
+- **Gavela**: con cambios sin guardar el refresco se detiene y arranca una cuenta regresiva de 10 min en la topbar, con salida explícita (Guardar / Descartar) y descarte automático al vencer.
+- **Lo que se guarda es lo que el operador tocó**, no la diferencia entre dos estructuras: la grilla lleva el conjunto explícito de coordenadas editadas, `setCelda` es la **única** puerta de escritura del buffer, y cuando vuelve una lectura con una edición viva el buffer se reconcilia celda por celda contra el snapshot nuevo. Sin eso, un refresco de fondo convertía el Guardar siguiente en un borrado de lo que el SIS acababa de escribir. Cualquier camino nuevo que escriba el buffer sin pasar por `setCelda` quedaría fuera del conjunto y **sus cambios no se guardarían, en silencio**.
+- **Chip SIS**: `SIS 24/24 ✓` / `SIS n/24 · HH:mm` / `SIS · sin lectura`, alimentado por el bloque `sis` del GET. **No** se alimenta de `GET /sis/estado`, que hoy no tiene consumidor de UI.
+- No hay botón de scrape manual en la pantalla: el endpoint existe, la UI no lo expone.
+
 ### Otras bitácoras (formulario_especial=0)
 
 Usan `GrillaRegistros.jsx` genérico. Aceptan filtros F11 (fecha + chevrons día anterior/siguiente + botón "Hoy" + dropdown turno T1/T2). Filtros persisten en `sessionStorage`, filtrado client-side sobre `/api/registros/activos`.
@@ -363,7 +428,10 @@ Tests existentes en `Bit-cora-g3/server/tests/`:
 - `reactivate.test.js` — sesiones reactivadas.
 - `disponibilidad.test.js` — flujo DISP completo.
 - `sala_de_mando_batch.test.js` — batch save + sweeper diario + errores.
+- COMB / SIS: `consumos_combustible.test.js`, `sis_endpoints.test.js` (GET con `valor_sis`, vaciar, revertir), `sis_scrape_endpoint.test.js` (202/409/estado contra un stub local del SIS), `sis_scraper_ownership.test.js`, `sis_concurrencia.test.js`, `sis_lock.test.js`, `sis_sweeper.test.js`, `sis_discover.test.js`, `sis_parser*.test.js`, `sis_schema.test.js`. Front: `src/components/Combustibles/override.test.js` y `ConsumosGrid.test.jsx` (Vitest).
 
-Correr con `cd Bit-cora-g3/server && node --test --env-file=../.env tests/`.
+Correr con `cd Bit-cora-g3/server && npm test` (la lista y el orden viven en el script `test` de `server/package.json`, con `--test-concurrency=1`: dos archivos HTTP en paralelo sobre la misma fixture se dan 401 mutuo por la sesión única de D-035).
+
+**Escribir en la BD desde un test va SIEMPRE a la planta-fixture `'TST'`** (D-030/D-055): la suite corre contra la base productiva. Desde D-061 `'TST'` tiene su propio catálogo de combustibles, así que también es scrapeable. `npm run test:residuos` cuenta lo que quedó vivo.
 
 Smoke manual: levantar backend (`npm run dev` en `server/`) + frontend (`npm run dev` en `Bit-cora-g3/`), login como cargo 1, recorrer las 4 bitácoras visibles.

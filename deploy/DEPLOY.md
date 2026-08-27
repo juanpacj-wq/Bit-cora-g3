@@ -30,6 +30,23 @@ GEMINI_API_KEY=<key de Google AI Studio>  # opcional: habilita "Mejorar con IA" 
                                           # además la CA corporativa (paso 7).
 ```
 
+**Variables de la ingesta del SIS (carbón GEC32, D-029/D-060/D-061)** — las dos son opcionales y en producción **se dejan como están**:
+
+```
+# SIS_HOST=http://192.168.18.201    # opcional: default del código. Solo se toca para apuntar a otro
+                                    # historiador o a un stub. Validado contra allowlist interna; el
+                                    # servidor de prod necesita ruta HTTP hacia esa IP o el sweeper
+                                    # deja el día en periodos_error (no rompe el backend).
+# SIS_SWEEPER_ENABLED=0             # NO PONER EN PRODUCCIÓN. Apaga el sweeper horario del SIS.
+                                    # Existe para los backends efímeros de test (con SIS_HOST
+                                    # apuntando a un stub, el tick real ensucia el log de GEC32).
+                                    # Solo el string exacto '0' apaga; ausente o cualquier otro
+                                    # valor deja la ingesta encendida. El apagado se anuncia en el
+                                    # log de arranque: [SIS] sweeper DESHABILITADO.
+```
+
+Con el sweeper encendido, el backend le pide el carbón de GEC32 al SIS **a HH:02 hora Bogotá** (y 10 s después de arrancar): completa el día de ayer si le falta algún periodo y vuelve a leer el de hoy. Un SIS inalcanzable **no rompe nada** — cuenta los periodos como error y reprograma.
+
 ## 2. Build del frontend con el sub-path
 
 El `base` de Vite se toma de `APP_BASE_PATH` en tiempo de build (ver `vite.config.js`):
@@ -146,6 +163,113 @@ NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/corp-fortigate-ca.crt \
 
 **Ojo:** si el FortiGate rota su CA (cambio de equipo/firmware), el fetch vuelve a fallar con el
 mismo error — repetir pasos 1-4.
+
+## 8. Backfill del carbón GEC32 en prod (D-061)
+
+El sweeper solo cubre hoy y ayer. Para cargar el **histórico** de GEC32 —o para reparar días viejos que quedaron incompletos— se corre a mano `server/scripts/backfill-carbon-gec32.js`. **No hay botón en la UI y no debe haberlo**: son días de proceso.
+
+Es **resumible**: salta lo que ya está 24/24, así que se relanza con el mismo comando cuantas veces haga falta. La ownership de D-029 protege toda celda editada a mano; el backfill nunca pisa una corrección del operador.
+
+### 8.1 Guardrails que trae el CLI
+
+| Guardrail | Qué hace |
+|---|---|
+| `--confirm-db <nombre>` | **Obligatorio.** Debe ser exactamente el `DB_NAME` activo. Es lo que impide correr contra la base equivocada. |
+| `--to` por defecto `hoy-2`, nunca `>= hoy` | No compite con el tick del sweeper, que es quien cierra ayer y hoy (D-060). |
+| `--confirm-from YYYY-MM-DD` | Con `--from auto` es lo que **habilita la escritura**; con un `--from` explícito es un doble chequeo. |
+| `--dry-run` | Dice qué pediría, no escribe nada. Igual imprime el conteo por año. |
+| `--concurrencia 1..6` | Cuántos periodos le pide al SIS a la vez. Solo acelera la red. |
+| `--log <ruta>` | Apila cada línea también en un archivo (imprescindible en corridas de días). |
+| `--solo-parciales` | Salta los días **sin fila** en `sis_scrape_log` y completa solo los que ya tienen datos parciales. **Ojo con esto**, ver §8.4. |
+
+`--from auto` sondea el SIS para descubrir desde cuándo hay datos y **sale sin escribir**. Sus códigos de salida:
+
+| Exit | Significa | Qué hacer |
+|---|---|---|
+| `3` | Encontró el inicio y falta confirmarlo. | Repetir el comando agregando `--confirm-from <la fecha que imprimió>`. |
+| `4` | **Llegó al tope de retroceso sin certificar el inicio.** La fecha que muestra es el día con datos más antiguo que alcanzó a ver: **puede haber historia más atrás**. | Verificar a mano antes de tomarla como la primera fecha del SIS. |
+| `2` | El sondeo no sirve (nada respondió, o el SIS falló dos veces en el mismo día). | No hay fecha que confirmar: revisar la red contra el SIS y repetir. |
+
+El sondeo cuesta decenas de fetch de ~13 s (la calibración de GEC32 fueron **58 sondeos en 14 min**). Es una **calibración de una sola vez**, no algo para un cron: su resultado se fija a mano en el comando. Y no es un oráculo — el histórico real de GEC32 tiene huecos de más de 60 días que la ventana por defecto no distingue del pre-inicio.
+
+### 8.2 El comando
+
+Se corre desde `Bit-cora-g3/server`, en una máquina con ruta hacia el SIS **y** hacia la BD. `DB_NAME=PortalG3` es lo que elige producción (**`DB_NAME_PROD` del `.env` no lo lee nadie**).
+
+```
+DB_NAME=PortalG3 node --env-file=../.env scripts/backfill-carbon-gec32.js \
+  --confirm-db PortalG3 \
+  --from 2018-06-13 --confirm-from 2018-06-13 \
+  --to <hoy-2> \
+  --concurrencia 6 \
+  --log <ruta del log>
+```
+
+`2018-06-13` es la fecha de inicio de GEC32 en el SIS, ya descubierta y verificada (58 sondeos, 0 errores de red): **no hace falta volver a pagar el `--from auto`**. Ese primer día trae 0,13 MW y cero carbón; el primer carbón medido es del `2018-07-15`. El rango completo hasta 2026 son **2.996 días** a ~95 s cada uno: **ETA ≈ 3,3 días** de proceso.
+
+Antes de lanzar, dos verificaciones que **no escriben**:
+
+```
+# 1. Que el guardrail de base funciona (debe RECHAZAR):
+DB_NAME=PortalG3 node --env-file=../.env scripts/backfill-carbon-gec32.js --confirm-db PortalG3_dev --dry-run
+#    → [backfill] --confirm-db debe ser exactamente el DB_NAME activo ("PortalG3"). Recibido: "PortalG3_dev".
+
+# 2. Que NO reescribe lo que ya está completo (saltados=N, procesados=0):
+DB_NAME=PortalG3 node --env-file=../.env scripts/backfill-carbon-gec32.js \
+  --confirm-db PortalG3 --from 2026-08-20 --to 2026-08-22 --dry-run --concurrencia 6
+```
+
+**Lanzarlo desacoplado.** Son días de corrida: si muere la terminal, muere el backfill. En Windows, `Start-Process … -WindowStyle Hidden` con `WorkingDirectory` en `Bit-cora-g3/server`; en Linux, `systemd-run --user` o `nohup`. Anotar el **PID** y la ruta del log.
+
+### 8.3 La corrida grande son DOS pasadas, no una
+
+Con `concurrencia 6` sostenida durante horas el SIS **sí falla**: medido en las corridas de D-061, **~7–10 % de los días** quedan con algún periodo en error (22 de 331 en dev, 23 de 235 en prod). No se pierde nada: esos días quedan `completo = 0` y una **segunda pasada del mismo comando los re-pide enteros** (con `periodos_error != 0`, el scraper vuelve a arrancar en el periodo 1).
+
+Bajar la concurrencia costaría días de calendario para evitar un reintento de minutos: se deja en 6 y se hace la segunda pasada.
+
+### 8.4 Cómo se sabe que terminó — y por qué el proceso no sirve de criterio
+
+**El criterio de "terminado" son estas dos consultas en cero, nunca que el proceso haya salido.** Un backfill puede morir sin imprimir su línea `FIN`, y puede terminar habiendo saltado días.
+
+```sql
+-- (a) Días con lectura incompleta: los cierra la segunda pasada.
+SELECT COUNT(*) FROM bitacora.sis_scrape_log
+WHERE planta_id = 'GEC32' AND completo = 0 AND fecha < CAST(DATEADD(HOUR,-5,SYSUTCDATETIME()) AS DATE);
+
+-- (b) Días del rango SIN NINGUNA FILA de log: el backfill nunca los llegó a escribir.
+WITH d AS (SELECT CAST('2018-06-13' AS DATE) AS ini,
+                  CAST(DATEADD(DAY,-2, DATEADD(HOUR,-5,SYSUTCDATETIME())) AS DATE) AS fin)
+SELECT COUNT(*) FROM (
+  SELECT DATEADD(DAY, n.number, d.ini) AS f FROM d
+  JOIN master.dbo.spt_values n ON n.type='P' AND n.number <= DATEDIFF(DAY, d.ini, d.fin)
+) t
+WHERE NOT EXISTS (SELECT 1 FROM bitacora.sis_scrape_log l
+                  WHERE l.planta_id='GEC32' AND l.fecha = t.f);
+```
+
+**La consulta (b) es la que hay que mirar con más cuidado**, y de ahí sale la advertencia sobre `--solo-parciales`:
+
+- Un día cuyo `scrapeDia` **reventó entero** (la BD dejó de responder, se cayó la red) queda **sin fila** en `sis_scrape_log`: el CLI lo anota como `FALLÓ` **en stderr**, espera 15 s y **sigue con el siguiente**. No lo reintenta.
+- `--solo-parciales` **salta justamente los días sin fila**. Una segunda pasada con ese flag deja esos días vacíos para siempre, y la consulta (a) daría cero: "terminado" mentiroso.
+- Por eso **la segunda pasada va con el comando completo, sin `--solo-parciales`**. El flag es solo para la variante barata cuando ya se sabe que todos los días del rango tienen fila.
+
+Y por eso hay que **mirar el stderr, no solo el log principal**: las líneas `[backfill] <fecha>: FALLÓ — …` van ahí. Un `grep -c FALLÓ` sobre el `.stderr.log` dice de un vistazo cuántos días se perdieron.
+
+Para ver cómo va, además de las dos consultas:
+
+```sql
+SELECT COUNT(*) AS dias, MIN(fecha) AS desde, MAX(fecha) AS hasta,
+       SUM(CASE WHEN completo = 1 THEN 1 ELSE 0 END) AS completos
+FROM bitacora.sis_scrape_log WHERE planta_id = 'GEC32';
+
+SELECT YEAR(cc.fecha) AS anio, COUNT(*) AS celdas, COUNT(DISTINCT cc.fecha) AS dias
+FROM bitacora.consumo_combustible cc
+JOIN lov_bit.combustible c ON c.combustible_id = cc.combustible_id
+WHERE cc.planta_id = 'GEC32' AND c.tipo = 'ALIMENTADOR'
+GROUP BY YEAR(cc.fecha) ORDER BY 1;
+```
+
+**Un día sin celdas no es un fallo.** Si la unidad estuvo fuera de servicio las 24 horas, el SIS reporta ceros, el scraper no crea ninguna celda y solo queda la fila de log con `completo = 1`. Es la semántica acordada: los días en cero viven en el log, no en la tabla de consumos. Los primeros meses de 2018 son así.
 
 ---
 

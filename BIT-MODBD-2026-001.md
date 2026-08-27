@@ -5,8 +5,8 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 2.4 |
-| Fecha | 2026-08-25 |
+| Versión | 2.5 |
+| Fecha | 2026-08-27 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
@@ -95,6 +95,7 @@
    - 4.7 [`conformacion_turno` — snapshot histórico por turno-planta](#47-conformacion_turno--snapshot-histórico-por-turno-planta)
    - 4.8 [`disponibilidad_estado` — máquina de estados DISP (D-026)](#48-disponibilidad_estado--máquina-de-estados-disp-d-026)
    - 4.9 [`consumo_combustible` — Consumos long-format + vista pivot (D-027)](#49-consumo_combustible--consumos-long-format--vista-pivot-d-027)
+   - 4.9.1 [Ingesta automática desde el SIS (GEC32) — `valor_sis` + `sis_scrape_log`](#491-ingesta-automática-desde-el-sis-gec32--valor_sis--sis_scrape_log-d-029-f27a1-semántica-corregida-en-d-060-f33a1-ownership-override-y-backfill-cerrados-en-d-061)
 5. [Integración con el Dashboard (esquema `bitacora`)](#5-integración-con-el-dashboard-esquema-bitacora)
 6. [Vistas útiles](#6-vistas-útiles)
 7. [Notas de diseño](#7-notas-de-diseño)
@@ -1096,26 +1097,28 @@ GROUP BY c.planta_id, c.fecha, c.periodo;
 **Invariantes:**
 
 - **UQ compuesto `(planta_id, fecha, periodo, combustible_id)`** garantiza una sola celda por intersección — el endpoint POST hace lookup→UPDATE/INSERT/DELETE en lugar de re-INSERT.
-- **`cantidad >= 0`** (CHECK constraint); el handler trata `cantidad=null` o `cantidad=0` como "celda vacía" y DELETE-ea la fila si existía.
+- **`cantidad >= 0`** (CHECK constraint); el handler trata `cantidad=null` o `cantidad=0` como "celda vacía". Desde **D-061** eso borra la fila **solo si `valor_sis IS NULL`**: una celda con lectura del SIS se queda viva en `cantidad = 0` como **override 0** (§4.9.1).
 - **Ventana de fechas**: hoy o pasado en TZ Bogotá. Futuro rechazado con `400 fecha_futura` por el handler (`fechaBogotaStr(new Date())` para el corte canónico).
 - **`modificado_por` paridad D-019**: el UPDATE solo setea `modificado_por`/`modificado_en` si `cantidad` cambió. Cambios solo de `detalle` actualizan la fila pero NO el audit trail (no es una modificación operativa). Cross-ref [[D-019]] (MAND).
 
 **Flujo del POST batch** (endpoint `POST /api/combustibles/consumos`):
 
 1. Validar permiso `puede_crear` en bitácora COMB. 403 si no.
-2. Validar `planta_id ∈ {GEC3, GEC32}`, `fecha` formato `YYYY-MM-DD`, `fecha <= hoyBogota`, `celdas: Array`.
+2. Validar `planta_id ∈ {GEC3, GEC32, TEST_PLANTA_ID}` (`400 planta_invalida`; la planta-fixture entró en D-061, §4.9.1), `fecha` formato `YYYY-MM-DD` (`400 fecha_invalida`), `fecha <= hoyBogota` (`400 fecha_futura`, con `codigo` desde D-061), `celdas: Array`.
 3. Pre-load del catálogo activo de la planta (incluye `cantidad_max`). Validar cada celda: `periodo ∈ [1,24]` (`periodo_fuera_rango`), `combustible_id ∈ catálogo` (`combustible_no_pertenece_planta`), `cantidad` número finito `>= 0` (`cantidad_invalida`), y `cantidad <= cantidad_max` si el combustible tiene tope (`cantidad_excede_max`, D-034; boundary inclusivo, `NULL`=sin tope).
 4. Si hay errores estructurados → `400 { errores: [{periodo, combustible_id, motivo}] }` sin ejecutar nada.
-5. Transacción única: por celda, lookup por UQ → si `cantidad` vacío y existe ⇒ DELETE (`eliminados++`); si nuevo ⇒ INSERT (`creados++`); si existe y `cantidad` cambió ⇒ UPDATE + setear `modificado_por` (`actualizados++`); si solo cambió `detalle` ⇒ UPDATE detalle sin tocar audit (`actualizados++`); si idéntico ⇒ no-op.
+5. Transacción única: por celda, lookup por UQ → si `cantidad` vacío y existe ⇒ **DELETE si `valor_sis IS NULL`** (`eliminados++`) o **UPDATE a `cantidad=0` con `modificado_por` humano si tiene `valor_sis`** (override 0, `actualizados++`, D-061); si nuevo ⇒ INSERT (`creados++`); si existe y `cantidad` cambió ⇒ UPDATE + setear `modificado_por` (`actualizados++`); si solo cambió `detalle` ⇒ UPDATE detalle sin tocar audit (`actualizados++`); si idéntico ⇒ no-op. La clave `detalle` **ausente** en el body significa "conservar el que ya está" en **todas** las ramas (D-061).
 6. Response `200 { resumen: { creados, actualizados, eliminados } }`.
 
 **Migración idempotente (F26.B1):**
 
 `db.js::initDB()` ejecuta el bloque F26.B1 una sola vez (gateado por flag en `bitacora.migracion_aplicada`). Dentro de una transacción única: crea `lov_bit.combustible` + índice + UQ, MERGE de 18 seeds del catálogo, crea `bitacora.consumo_combustible` + índice + columnas Bogotá, crea `v_consumo_periodo`, INSERT IF NOT EXISTS de la fila `COMB` en `lov_bit.bitacora`, seed one-shot de permisos en `cargo_bitacora_permiso` (Operador Carbón y Caliza + JdT crean; resto ven), validación de conteo (`THROW` si <18), INSERT flag F26.B1. Ortogonal a F26.A1 (DISP). La matriz canónica de §2.6 se extendió con CASE clauses para `b.codigo='COMB'` → los permisos persisten en restarts subsecuentes vía el rebuild de matriz, sin depender del flag F26.B1.
 
-**Cross-ref:** ADR [[D-027]] documenta la decisión completa. §2.7 detalla el catálogo. Paridad de `modificado_por` con [[D-019]] (MAND).
+**Seed del catálogo de la planta-fixture (D-061, sin migración):** además del bloque F26.B1, `initDB()` corre en **cada arranque** un `MERGE` idempotente que le da a `TEST_PLANTA_ID = 'TST'` las 10 filas espejo de GEC32. No es schema, es una fixture, y por eso no lleva flag `F-NN`. Detalle y sus dos gotchas en §4.9.1.
 
-#### 4.9.1 Ingesta automática desde el SIS (GEC32) — `valor_sis` + `sis_scrape_log` (D-029, F27.A1; semántica corregida en D-060, F33.A1)
+**Cross-ref:** ADR [[D-027]] documenta la decisión completa. §2.7 detalla el catálogo. Paridad de `modificado_por` con [[D-019]] (MAND). La ingesta automática del SIS y el override viven en §4.9.1 ([[D-029]], [[D-060]], [[D-061]]).
+
+#### 4.9.1 Ingesta automática desde el SIS (GEC32) — `valor_sis` + `sis_scrape_log` (D-029, F27.A1; semántica corregida en D-060, F33.A1; ownership, override y backfill cerrados en D-061)
 
 El carbón de GEC32 (`ALIM_1..8`) lo escribe cada hora el sweeper `server/utils/sis/sis-sweeper.js` vía `scrapeDia` (`carbon-scraper.js`) con la **regla de ownership "operador gana"**: una fila es SIS-owned ⇔ `creado_por = SISTEMA AND (modificado_por IS NULL OR = SISTEMA)`; el SIS solo pisa `cantidad` en filas SIS-owned y en las humano-owned escribe únicamente la sombra `valor_sis`.
 
@@ -1140,6 +1143,61 @@ CREATE TABLE bitacora.sis_scrape_log (
 ```
 
 **Semántica (D-060):** `completo = 1` ⇔ el día tiene sus **24 periodos sin errores** (`periodos_error = 0 AND ultimo_periodo = 24`). NUNCA significa "scrapeado hasta la hora actual": el periodo 24 (23:00→00:00) solo se puede leer al día siguiente, así que el día en curso queda siempre `completo = 0` y lo cierra la repesca de "ayer" del sweeper (cada tick, a HH:02 Bogotá, pidiendo `ultimo_periodo+1..24`). `periodos_ok`/`ultimo_periodo` acumulan lo previo cuando el scrape arranca en `periodoDesde > 1` (solo si lo previo es contiguo y sin errores; si no, día completo). **F33.A1** recalificó a `completo = 0` toda fila que no cumplía 24/24 (herencia del flag que se calculaba contra el horizonte de "hoy"). Reparación histórica: `server/scripts/backfill-carbon-gec32.js`.
+
+**Regla de ownership completa (D-029; cerrada en D-061).** Una fila es **SIS-owned** ⇔ `creado_por = SISTEMA AND (modificado_por IS NULL OR modificado_por = SISTEMA)`; cualquier otra combinación es **humano-owned**. Cada periodo leído cae en una de seis ramas (`aplicarCelda`, `server/utils/sis/carbon-scraper.js`):
+
+| Lectura del SIS | Estado de la celda | Qué escribe el scraper | Quién manda en `cantidad` |
+|---|---|---|---|
+| `> 0` | no existe | INSERT con `cantidad = valor_sis`, `creado_por = SISTEMA`, `valor_sis`, `sis_actualizado_en` | el SIS |
+| `> 0` | SIS-owned | UPDATE de `cantidad` + sombra, `modificado_por = SISTEMA` (sigue SIS-owned) | el SIS |
+| `> 0` | humano-owned (**override**) | **solo** `valor_sis` + `sis_actualizado_en` | el operador |
+| `= 0` | no existe | nada | — |
+| `= 0` | SIS-owned | **DELETE** de la fila | el SIS |
+| `= 0` | humano-owned (**override 0** incluido) | **solo** `valor_sis = 0` + `sis_actualizado_en` | el operador |
+
+Dos consecuencias que hay que tener presentes al leer los datos: la representación canónica del SIS para "no hubo consumo" es la **ausencia de fila**, nunca un 0; y un **override 0 deja de verse como override** en cuanto el propio SIS reporta 0 para esa celda (`valor_sis` y `cantidad` coinciden), aunque la fila siga siendo humano-owned. Además, una tolva que reporta ≤ 0,5 t/h se lee como 0 (filtro de ruido de `extraerCarbonValidado`) y un valor por encima de `cantidad_max` (D-034) se **clampa al tope** dejando constancia en el log: el SIS nunca escribe un número que el POST manual rechazaría.
+
+**`sis_owned` y `es_override` los deriva el backend, no la UI** (`GET /api/combustibles/consumos`, D-061). `sis_owned` se calcula en SQL con el predicado de arriba; `es_override = !sis_owned AND valor_sis IS NOT NULL AND cantidad <> valor_sis`, y se compara en JavaScript pasando ambos lados por `Number` una sola vez — el driver puede entregar dos `DECIMAL(12,3)` como string y `'12.500' !== '12.5'` sería un falso positivo. Cada celda del GET viaja con `valor_sis`, `sis_actualizado_en`, `sis_owned` y `es_override`, y la respuesta agrega el bloque `sis` con la fila de `sis_scrape_log` de ese `(planta_id, fecha)` (`null` si no hay).
+
+**Vaciar una celda con lectura del SIS = override 0 (D-061).** En `POST /api/combustibles/consumos`, una celda con `cantidad` nula/0/ausente ya no borra siempre la fila:
+
+- si la fila existente tiene `valor_sis IS NOT NULL` → `UPDATE cantidad = 0, modificado_por = <usuario>, modificado_en = SYSUTCDATETIME()` (solo si `cantidad <> 0`) y cuenta en `actualizados`;
+- si `valor_sis IS NULL` → DELETE, como desde D-027, y cuenta en `eliminados`.
+
+El motivo es que borrarla la dejaría **sin dueño humano** y el siguiente scrape la repondría con el valor del SIS: el operador vería revivir lo que acaba de vaciar. Con la fila viva en 0 y `modificado_por` humano, la ownership la protege y `valor_sis` se conserva como sombra para poder revertir. La clave `detalle` **ausente** significa "conservar" en **todas** las ramas del POST (D-061); presente —aunque venga `null`— manda el body.
+
+**Revertir al valor del SIS — `POST /api/combustibles/consumos/revertir` (D-061).** Es el único camino de vuelta desde un override. Body `{ planta_id, fecha, periodo, combustible_id }`, gate `puede_crear`, todo en una transacción:
+
+| Estado de la celda | Desenlace | Efecto en BD |
+|---|---|---|
+| no existe la fila | `404 celda_no_existe` | ninguno |
+| `valor_sis IS NULL` | `400 sin_valor_sis` | ninguno |
+| SIS-owned con `valor_sis > 0` y `cantidad = valor_sis` | `200 { accion: 'sin_cambios' }` | ninguno |
+| `valor_sis > 0` (cualquier otro caso) | `200 { accion: 'restaurado' }` | `UPDATE cantidad = valor_sis, creado_por = SISTEMA, modificado_por = NULL, modificado_en = NULL, sis_actualizado_en = SYSUTCDATETIME()` |
+| `valor_sis = 0` | `200 { accion: 'eliminado', celda: null }` | `DELETE` de la fila |
+
+Devolver la propiedad al SISTEMA es **parte** de restaurar: si `modificado_por` se quedara con el humano, la celda seguiría contando como override y el próximo scrape la respetaría en vez de actualizarla. Para `valor_sis = 0` se elimina porque una fila viva en 0 y SIS-owned es un estado que el scraper nunca produce. La celda que devuelve el 200 tiene **literalmente el mismo shape** que la del GET (comparten el `SELECT_CELDA`): si divergieran, el front pintaría el badge con otra forma justo después de revertir.
+
+**Quién le pide días al SIS.** Tres caminos escriben las mismas celdas y la misma fila de `sis_scrape_log`:
+
+| Camino | Dónde vive | Cuándo | `scrape_tipo` | Exclusión |
+|---|---|---|---|---|
+| Sweeper horario | `server/utils/sis/sis-sweeper.js` | tick a **HH:02 Bogotá** (el primero, 10 s tras el arranque): completa AYER si su log no dice 24/24 y luego re-scrapea HOY | `horario` | corre entero bajo `sis-lock`; con el mutex tomado **omite el tick completo** y vuelve en una hora |
+| Scrape manual | `server/utils/sis/sis-job.js` + `POST /api/combustibles/sis/scrape` | a pedido, día a día, rango ≤ **31 días** | `manual` | toma `sis-lock`; si está tomado responde **409 `scrape_en_curso`** |
+| Backfill por CLI | `server/scripts/backfill-carbon-gec32.js` | corridas históricas largas, a mano | `backfill` | **otro proceso**: el mutex no lo alcanza. Su exclusión con el sweeper es `--to ≤ hoy-2` (D-060) |
+
+`sis-lock` (`server/utils/sis/sis-lock.js`) es un **mutex de proceso y sin cola**: quien lo encuentra tomado **no espera** — falla al instante con `codigo = 'sis_ocupado'`, el motivo del dueño y desde cuándo lo tiene. Encolar un request de varios minutos sería peor que perder un tick. El **estado del job manual es volátil** (memoria del proceso): un reinicio lo borra aunque el scrape haya terminado bien, y la verdad persistente de qué se scrapeó sigue siendo `bitacora.sis_scrape_log`.
+
+**Concurrencia de la fase de red (D-061).** `scrapeDia(pool, { planta_id = 'GEC32', concurrencia = 1, … })` acepta pedir hasta **6 periodos en paralelo**. Solo se paraleliza la **red**: las lecturas se ordenan por `periodo` ascendente antes de escribir, la escritura del día sigue siendo una sola transacción (192 statements, ~12 s contra dev) y `ultimo_periodo` es el mayor periodo OK. Con `concurrencia = 1` el comportamiento es idéntico al previo, byte a byte. Medido contra el SIS real: 24 periodos en **78,6 s** con `N = 6` (3,3 s por periodo, 4,2× sobre secuencial, cero errores, RSS plano en 132 MB); un día completo cuesta **~95 s**. **Ojo con la reanudación:** con `N > 1` un periodo intermedio fallido deja `periodos_error = 1` con `ultimo_periodo = 24`, y como `periodoDesdeDe` devuelve 1 cuando hay errores, la pasada siguiente re-pide el día **entero**. Sigue siendo resumible, solo más caro.
+
+**Desde cuándo hay historia y cómo se rellena (D-061).** `server/utils/sis/discover.js` sondea hacia atrás para hallar la primera fecha con datos: un candidato se declara "sin datos" **solo** si los `K` sondeos (6 por defecto) repartidos en una ventana de `W` días (60) salen todos vacíos, porque el SIS devuelve un `.xls` válido con todo en cero cuando la unidad está parada y un solo sondeo confunde una parada larga con "acá el historiador todavía no existía". Devuelve `{ fecha, motivo, sondeos }` con `motivo ∈ { hallada | tope-alcanzado | sin-datos | error-de-sondeo }` y **nunca** una fecha después de un error de red.
+
+Resultado de la calibración (58 sondeos, 14 min, 0 errores de red, 2026-08-26): **GEC32 empieza el `2018-06-13`** en el SIS —ese primer día trae 0,13 MW, fuera de servicio y las 8 tolvas en 0— y el **primer carbón medido es del `2018-07-15`**. El histórico completo son **2.996 días**. Ese histórico tiene **huecos reales de más de 60 días** (agosto–octubre de 2018, confirmado por sondeo) que la ventana por defecto no distingue del pre-inicio: por eso `--from auto` es una **calibración asistida de una sola vez** cuyo resultado se fija a mano en el comando, no un cálculo automático. Runbook de la corrida histórica en `deploy/DEPLOY.md`.
+
+**La planta-fixture `'TST'` tiene catálogo propio (D-055 / D-061).** `initDB()` ejecuta en **cada arranque** un seed idempotente (`MERGE … WITH (HOLDLOCK)` por `(planta_id, codigo)`, fuera del gate `F26.B1`: es una fixture, no schema) que le da a `TEST_PLANTA_ID = 'TST'` las **10 filas espejo de GEC32** — `ALIM_1..8` (`ALIMENTADOR`, `Ton`, `cantidad_max = 25`), `CALIZA` (`Ton`, 40) y `ACPM` (`Gal`, 25000). Con eso `'TST'` es una planta scrapeable como cualquier otra y las suites de COMB/SIS dejaron de escribir en GEC3/GEC32. Dos cosas que hay que saber:
+
+- El seed está **guardado por la existencia de la fila `'TST'` en `lov_bit.planta`**, que siembra el harness de tests y no `initDB` — en una BD virgen el catálogo aparece en el **segundo** arranque. Es deliberado: una fixture de test jamás puede tumbar el arranque de producción. Dev y prod ya tienen la fila.
+- Ese catálogo es un **fixture residente, no residuo**: sube el conteo global de `lov_bit.combustible` de 18 a 28 filas. Cualquier aserción que cuente ese catálogo **sin acotar por planta** se rompe por construcción.
 
 ---
 
@@ -1651,6 +1709,7 @@ ADR propio pendiente, porque agrega el estado "copia anulada" de RQ-02.12.
 | 2.2 | 2026-07-22 | **Operación 24h append-only (D-056).** §7.9 reescrita en su encabezado: la grilla MAND pasa de espejo persistente editable a **formulario de captura** — `POST /api/sala-de-mando/guardar` **siempre INSERTA** (se retiran la máquina de 4 casos, el UPDATE de metadata a nivel de fila y el motivo `detalle_sin_celdas`), varios registros coexisten por `(tipo, periodo, día, planta)`, y aparecen los motivos `hora_requerida`/`hora_invalida`/`hora_futura`/`lote_sin_celdas`. **`campos_extra` de MAND gana `lote_id`** (GUID del servidor por fila/tipo; agrupa el lote; su metadata queda **replicada por celda sin constraint**, sostenida solo por un guard de test) **y `hora_llamada`** (ISO UTC compuesta server-side desde `HH:mm` Bogotá, validada contra el reloj del server con 5 min de tolerancia; **`fecha_evento` no cambia**; **AUSENTE** en lo migrado, y ese NULL va último en todo `ORDER BY` y nunca gana por hora). §5.1: el vigente publicado se resuelve **por CELDA y desde cero** con `recalcularEventoDashboard` (`upsertEventoDashboard` queda para la rama genérica de `registros.js`) — los lotes se solapan parcialmente, así que decidir por lote publica mal los periodos compartidos; **sin ganador se BORRA** la fila (el soft-delete `activa=0` sigue intacto en `cerrarDiaMand`). El pivote `GET /api/sala-de-mando` se dio de baja (404); lo reemplaza `GET /api/sala-de-mando/lotes` (listado del día, solo lectura, `publicado` por celda como indicador derivado, gated por `puede_ver`). Migración **F32.A1** (excepción a RF-032): respaldos **residentes** `registro_historico_backup_D056` / `registro_activo_backup_D056` (**no se borran**) + `JSON_MODIFY('$.lote_id', NEWID())` por fila, idempotente por `ISJSON=1 AND JSON_VALUE('$.lote_id') IS NULL`, sin alterar valores/autores/fechas y logueando lo no-JSON. Verificada en prod: 0 históricos / 7 activos convertidos. Corrección y borrado por lote quedan para D-057. |
 | 2.3 | 2026-07-27 | **Asientos normalizados de operación (D-058).** §2.5: columna **`lov_bit.tipo_evento.seleccionable BIT NOT NULL DEFAULT 1`** (migración **`F34.A1`**, idempotente por `COL_LENGTH`, `WITH VALUES` → cero filas de datos tocadas) + seed de los **8 tipos espejo** (`Autorización` · `Pruebas` · `Redespacho` · `Cambio de Disponibilidad` × `SALAJDT`/`SALAING`, nombres **literales** del catálogo de origen) con `seleccionable = 0`, idempotentes por `(bitacora_id, nombre)` y reafirmados por un `UPDATE` complementario en cada arranque — que **no** fuerza `1` en el resto. El filtro `seleccionable = 1` se aplica en `GET /api/catalogos/bitacoras/:id/tipos-evento` **y** en los dos lookups del `POST`/`PUT` de `registros.js` (esconder no es impedir). **Nueva §7.11** — asientos reflejados: `campos_extra.origen_bitacora` + `origen_lote_id` en las copias de `SALAJDT`/`SALAING` (**sin DDL**), vínculo **por lote y nunca por `registro_id`** (la copia también migra al histórico → no hay FK posible, precedente D-055 (c)), búsqueda acotada por lote **+ planta + `bitacora_id IN`**, `rowsAffected = 0` **no es error** (las copias ya se archivaron; RF-032 intacto y la corrección del origen procede), `fecha_evento` = hora de llamada (narrativo) vs `turno_id` = turno **ABIERTO** (puntero de archivado, D-045), y solo lectura en destino **incluso para su autor** (`403 asiento_reflejado`, restricción — no bypass de D-049 — con `canEditarRegistro` y su espejo SQL cambiados juntos). **Sin migración de datos** y **sin cambios en el contrato cross-repo**. El reflejo de **DISP queda fuera** (tipos ya sembrados): ADR propio pendiente. |
 | 2.4 | 2026-08-25 | **Periodo 24 del carbón GEC32 (D-060).** **Nueva §4.9.1** documenta la ingesta SIS que faltaba en este modelo: columnas `valor_sis`/`sis_actualizado_en` de `consumo_combustible` y la tabla `bitacora.sis_scrape_log` (F27.A1). Semántica corregida: `completo = 1` ⇔ 24 periodos sin errores (antes se calculaba contra el horizonte de "hoy" y dejaba `completo=1, ultimo_periodo=23` → el P24 nunca se cargaba; 41 días en prod). Migración **F33.A1**: `UPDATE sis_scrape_log SET completo=0 WHERE completo=1 AND (ultimo_periodo IS NULL OR ultimo_periodo<>24 OR periodos_error>0)`; no toca `consumo_combustible`. Reparación de datos con `server/scripts/backfill-carbon-gec32.js` (resumible, guardrail `--confirm-db`). Sin cambios de DDL. |
+| 2.5 | 2026-08-27 | **Cierre de la ingesta SIS del carbón GEC32 (D-061).** **Sin DDL y sin migración `F-NN`.** §4.9.1 ampliada con lo que faltaba de la ingesta: la **tabla de ownership completa** de `aplicarCelda` (seis ramas, incluida la del **override 0**), el clamp a `cantidad_max` y el filtro de ruido de ≤ 0,5 t/h; `sis_owned`/`es_override` **derivados en el backend** y expuestos por celda en `GET /api/combustibles/consumos` junto al bloque `sis`; **vaciar una celda con `valor_sis` = override 0** en vez de DELETE (§4.9 puntos 2 y 5 corregidos, y la invariante de "celda vacía"); **tabla de decisión de `POST /api/combustibles/consumos/revertir`** (`restaurado` / `eliminado` / `sin_cambios`, con la devolución de la propiedad al SISTEMA); los **tres caminos** que le piden días al SIS (sweeper HH:02, job manual `POST /sis/scrape` con estado volátil, CLI de backfill) y el **mutex de proceso sin cola** `sis-lock` que serializa los dos primeros; la **concurrencia 1..6** de la fase de red (~95 s/día, `N=1` idéntico al previo) y su efecto en la reanudación; el **descubrimiento calibrado** (`discover.js`, K sondeos en W días, retorno `{ fecha, motivo, sondeos }`) con la fecha real de inicio de GEC32 —**`2018-06-13`**, primer carbón el **`2018-07-15`**, 2.996 días de histórico— y la advertencia de los huecos > 60 días; y el **seed idempotente del catálogo de `'TST'`** (10 filas espejo, guardado por la fila de `lov_bit.planta`, fixture residente que sube el catálogo global de 18 a 28). Runbook de la corrida histórica en `deploy/DEPLOY.md`. |
 
 ---
 
