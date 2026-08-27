@@ -184,7 +184,14 @@
    poder rastrear. La marca va en la esquina del <td>, nunca dentro del <input>: el campo es
    numérico y con texto seleccionable, y cualquier cosa encima estorbaría al teclear. */
 .comb-root td.comb-cell.override{position:relative}
-.comb-root .comb-override-wrap{position:absolute;top:0;left:0;z-index:1}
+/* D-061 L08 (H10): SIN `z-index` acá. Un `z-index` numérico en el wrap crea un contexto de
+   apilamiento, y adentro de él el `z-index:5` del popover ya no vale nada hacia afuera: el
+   banderín de la celda vecina (wrap hermano, mismo nivel) pintaba ENCIMA del popover abierto y le
+   robaba el `:hover` justo en el camino hacia "Revertir". Sin `z-index` el wrap sigue tapando al
+   input —un elemento posicionado pinta sobre el contenido en flujo sin ayuda de nadie— y el
+   popover compite en el contexto raíz, donde su 5 le gana tanto al banderín vecino como al
+   `thead` sticky (`z-index:2`). */
+.comb-root .comb-override-wrap{position:absolute;top:0;left:0}
 /* Banderín triangular en la esquina: caja de 14px (área de click cómoda) con el triángulo
    pintado por gradiente, en vez de un punto de 6px imposible de acertar con el mouse. */
 .comb-root .comb-override{
@@ -194,6 +201,15 @@
 }
 .comb-root .comb-override:hover{background:linear-gradient(135deg,#b45309 0 50%,transparent 50% 100%)}
 .comb-root .comb-override:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+/* D-061 L08 (H11): el banderín queda FUERA del área de texto del input. El número va alineado a la
+   derecha, así que la esquina superior izquierda es el lado vacío del campo; lo único que podía
+   meterse debajo del banderín era una cifra larga, y para eso la celda con banderín reserva 20px
+   de padding izquierdo (14 del banderín + aire). Se ensancha por la izquierda a propósito: hacerlo
+   por la derecha correría los números de las celdas con override respecto a los de sus vecinas y
+   rompería la alineación de la columna, que es lo que la hace legible de un vistazo.
+   El wrap se ajusta al banderín (el popover es `position:absolute` y no cuenta para su tamaño),
+   así que el área que intercepta el puntero es exactamente ese cuadro de 14px y nada más. */
+.comb-root td.comb-cell.override input{padding-left:20px}
 
 /* Popover del override. Se abre con hover Y con click (`.open`): el hover lo hace descubrible y
    el click lo fija para poder llegar hasta "Revertir" sin que se cierre en el camino. Arranca
@@ -209,6 +225,17 @@
 }
 .comb-root .comb-override-wrap:hover .comb-tip,
 .comb-root .comb-tip.open{display:block}
+
+/* D-061 L08 (H13): el popover vive dentro de `.comb-scroll`, que es `overflow:auto` y por lo tanto
+   lo RECORTA contra sus bordes. Abriendo siempre abajo-derecha, en los periodos altos (P22-P24)
+   quedaba cortado por el borde inferior y contra la última columna con banderín por el derecho —
+   y al arrastrar el puntero hacia el trozo cortado se perdía el `:hover` y desaparecía.
+   Se decide por `periodo` e índice de columna, no midiendo: una posición calculada con
+   `getBoundingClientRect` habría que recalcularla en cada scroll y resize, y obligaría a mover el
+   `:hover` de CSS a JS. Mantiene la misma solapa de 1px con el banderín para que el puntero pueda
+   viajar del uno al otro sin cruzar un hueco. */
+.comb-root .comb-tip--arriba{top:auto;bottom:13px}
+.comb-root .comb-tip--izq{left:auto;right:0}
 .comb-root .comb-tip-texto{display:block;margin-bottom:9px;color:var(--muted)}
 .comb-root .comb-tip-revertir{
   background:var(--ink);color:#fff;border:none;border-radius:6px;

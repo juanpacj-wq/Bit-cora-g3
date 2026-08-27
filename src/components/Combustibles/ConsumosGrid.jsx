@@ -17,6 +17,7 @@ import { SelectorFecha } from './SelectorFecha';
 import { HEATMAP_MAX_TON, HEATMAP_MAX_FALLBACK, temaHeatmap, tint } from './colores';
 import {
   esOverride, textoOverride, politicaRefresco, restanteGavela, formatoMMSS, textoChipSis, GAVELA_MS,
+  claveRefetch, esVacioCantidad, esCeroNoOp,
 } from './override';
 import { getTodayBogota } from '../../utils/fecha';
 import './combustibles.css';
@@ -36,6 +37,15 @@ const PERIODOS = Array.from({ length: 24 }, (_, i) => i + 1);
 // medias). 5 min es holgado frente al sweeper del SIS —que escribe la hora cerrada— y no convierte
 // una pestaña abierta todo el turno en polling agresivo contra el server.
 const AUTO_REFRESCO_MS = 5 * 60 * 1000;
+
+// D-061 L08 (H14/CA-32): cada `accion` que puede devolver C5 tiene su propio texto y su propio
+// tono. `sin_cambios` no es un éxito operativo: no se deshizo nada, y decirlo como tal haría que
+// alguien creyera que su corrección desapareció.
+const TOAST_REVERTIR = {
+  restaurado: ['Revertido al valor SIS', 'success'],
+  eliminado: ['Celda eliminada (valor SIS = 0)', 'success'],
+  sin_cambios: ['La celda ya tenía el valor del SIS', 'info'],
+};
 
 // D-034: motivos estructurados del backend → texto amigable es-CO para los toasts.
 const MOTIVO_TEXTO = {
@@ -69,23 +79,48 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   const showToastRef = useRef(showToast);
   useEffect(() => { showToastRef.current = showToast; }, [showToast]);
 
-  // Refetch al cambiar planta o fecha. Descartar el buffer es OK porque el `beforeunload`
-  // y la confirmación al cambiar de fecha (si se agrega más adelante) cubren el caso.
-  const refetch = useCallback(async () => {
+  // D-061 L08 (H3/CA-33) — refs de la lectura en vuelo. Una respuesta del server que llega tarde no
+  // puede aplicarse a ciegas: entre que sale el GET y vuelve, el operador pudo teclear una celda o
+  // cambiar de fecha. `refetchSeqRef` numera cada lectura (solo la última manda) y `claveActualRef`
+  // guarda la coordenada (planta, fecha) que se está viendo AHORA.
+  const refetchSeqRef = useRef(0);
+  const claveActualRef = useRef(claveRefetch(plantaId, fecha));
+
+  // Lee del server y aplica la respuesta, salvo que haya quedado obsoleta.
+  //
+  // `preservarEdicion` distingue los dos motivos por los que se relee:
+  //  - false (cambio de planta/fecha, guardar, revertir, vencimiento de la gavela): el buffer se
+  //    reemplaza porque el usuario pidió explícitamente moverse o ya cerró su edición.
+  //  - true (latido del auto-refresco y `focus`): el buffer NO se toca si hay algo sin guardar. El
+  //    latido chequea `hayCambios` ANTES de disparar, pero teclear durante el GET caía en la
+  //    ventana ciega y se perdía bajo un refresco que nadie pidió.
+  const refetch = useCallback(async ({ preservarEdicion = false } = {}) => {
     if (!plantaId) return;
+    const seq = ++refetchSeqRef.current;
+    const clave = claveRefetch(plantaId, fecha);
     try {
-      setError(null);
       const r = await getConsumos(plantaId, fecha);
+      // Obsoleta por adelantamiento (llegó otra lectura después) o por cambio de coordenada.
+      if (seq !== refetchSeqRef.current || clave !== claveActualRef.current) return;
+      setError(null);
       setCatalogo(r.catalogo || []);
       setSnapshot(r.celdas || {});
-      setBuffer(deepClone(r.celdas || {}));
       setSis(r.sis ?? null);
+      // El snapshot y el chip SIS sí se actualizan aunque haya edición en curso: son la verdad del
+      // server (de ahí sale el badge de override) y no pisan nada de lo tecleado.
+      if (!(preservarEdicion && hayCambiosRef.current)) setBuffer(deepClone(r.celdas || {}));
     } catch (e) {
+      if (seq !== refetchSeqRef.current || clave !== claveActualRef.current) return;
       setError(e);
     }
   }, [plantaId, fecha, getConsumos]);
 
-  useEffect(() => { refetch(); }, [refetch]);
+  // La clave se refresca en el MISMO efecto que dispara la lectura de la nueva coordenada: así no
+  // hay ventana en que `claveActualRef` apunte a la fecha vieja y se descarte la respuesta buena.
+  useEffect(() => {
+    claveActualRef.current = claveRefetch(plantaId, fecha);
+    refetch();
+  }, [refetch, plantaId, fecha]);
 
   const hayCambios = useMemo(
     () => JSON.stringify(buffer) !== JSON.stringify(snapshot),
@@ -103,12 +138,26 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   useEffect(() => { hayCambiosRef.current = hayCambios; }, [hayCambios]);
   useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
 
-  // El día Bogotá se pregunta acá y NO en cada render (la grilla re-renderiza con cada tecla y
-  // `getTodayBogota` arma un Intl.DateTimeFormat nuevo cada vez). El cruce de medianoche con la
-  // pestaña quieta lo cubre el guardia de `tick` más abajo, que vuelve a preguntar el día.
+  // D-061 L08 (H6/CA-33) — el día Bogotá es ESTADO, no un valor memorizado por (planta, fecha,
+  // hayCambios). Antes, una pestaña abierta que cruzaba las 00:00 se quedaba con el `hoy` del
+  // render anterior: seguía auto-refrescando un día que ya era ayer y —peor— mantenía viva la
+  // gavela, que a los 10 min DESCARTA lo tecleado, sobre una fecha pasada donde no aplica.
+  // Se repregunta cada minuto y al volver a la pestaña; sigue sin preguntarse en cada render
+  // (la grilla re-renderiza con cada tecla y `getTodayBogota` arma un Intl.DateTimeFormat nuevo).
+  const [hoy, setHoy] = useState(getTodayBogota);
+  useEffect(() => {
+    const revisar = () => setHoy(getTodayBogota());
+    const id = setInterval(revisar, 60 * 1000);
+    window.addEventListener('focus', revisar);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', revisar);
+    };
+  }, []);
+
   const politica = useMemo(
-    () => politicaRefresco({ plantaId, fecha, hoy: getTodayBogota(), hayCambios }),
-    [plantaId, fecha, hayCambios]
+    () => politicaRefresco({ plantaId, fecha, hoy, hayCambios }),
+    [plantaId, fecha, hoy, hayCambios]
   );
 
   // Auto-refresco (CA-13): solo GEC32 viendo hoy y sin cambios locales. Se desmonta solo cuando
@@ -119,7 +168,9 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     const tick = () => {
       if (hayCambiosRef.current) return;              // empezó a editar entre latidos
       if (fecha !== getTodayBogota()) return;         // la pestaña cruzó la medianoche: ya no es hoy
-      refetchRef.current();
+      // `preservarEdicion`: la guarda de arriba mira ANTES de salir; esta protege lo que se teclee
+      // MIENTRAS el GET viaja, que es la ventana que H3 encontró abierta.
+      refetchRef.current({ preservarEdicion: true });
     };
     const id = setInterval(tick, AUTO_REFRESCO_MS);
     window.addEventListener('focus', tick);           // volver a la pestaña trae el dato fresco ya
@@ -175,8 +226,15 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
       const p = String(periodo);
       const k = String(combustibleId);
       const fila = next[p] ? { ...next[p] } : {};
-      const esVacio = cantidad === null || cantidad === 0 || Number.isNaN(cantidad);
-      if (esVacio) {
+      // D-061 L08 (H5/CA-34): el snapshot manda. Si el server ya tiene esta celda en 0 (override 0
+      // de C6), teclear 0 o vaciarla no es un cambio: se restituye la celda del snapshot tal cual
+      // —clon por JSON, que conserva el orden de claves y por eso `hayCambios` (que compara
+      // `JSON.stringify`) vuelve a dar false— en vez de borrar la clave del buffer.
+      const celdaSnap = snapshotRef.current[p]?.[k];
+      if (esCeroNoOp(cantidad, celdaSnap)) {
+        fila[k] = deepClone(celdaSnap);
+        next[p] = fila;
+      } else if (esVacioCantidad(cantidad)) {
         delete fila[k];
         if (Object.keys(fila).length === 0) delete next[p];
         else next[p] = fila;
@@ -250,16 +308,6 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     }
   };
 
-  // ¿Esta celda tiene una edición sin guardar encima? Se pregunta solo de celdas que en el
-  // SNAPSHOT son override, así que `s` siempre existe; la ausencia de `b` significa "la vaciaron".
-  const celdaConCambios = useCallback((periodo, combustibleId) => {
-    const b = buffer[String(periodo)]?.[String(combustibleId)];
-    const s = snapshot[String(periodo)]?.[String(combustibleId)];
-    if (!b && !s) return false;
-    if (!b || !s) return true;
-    return Number(b.cantidad) !== Number(s.cantidad) || (b.detalle ?? null) !== (s.detalle ?? null);
-  }, [buffer, snapshot]);
-
   // D-061 (CA-12): devolver la celda al valor del SIS. El refetch posterior es el que hace
   // desaparecer el badge —el estado de override lo dicta el backend, no el front—.
   const onRevertir = async (periodo, combustibleId) => {
@@ -269,10 +317,11 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
       });
       setTipAbierto(null);
       await refetch();
-      showToastRef.current?.(
-        r?.accion === 'eliminado' ? 'Celda eliminada (valor SIS = 0)' : 'Revertido al valor SIS',
-        'success'
-      );
+      // H14/CA-32: el toast dice lo que REALMENTE pasó. Antes, `sin_cambios` (la celda ya estaba en
+      // el valor del SIS) se anunciaba como "Revertido al valor SIS": el operador leía que su
+      // corrección se deshizo cuando no había nada que deshacer.
+      const [texto, tipo] = TOAST_REVERTIR[r?.accion] ?? TOAST_REVERTIR.restaurado;
+      showToastRef.current?.(texto, tipo);
     } catch (e) {
       // `e.message` ya viene saneado por el backend (D-032); `body.mensaje` es el texto largo
       // cuando el endpoint lo manda. Nunca se arma el texto a partir de un `codigo` crudo.
@@ -304,6 +353,15 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
       ...acpm,
     ];
   }, [catalogo]);
+
+  // D-061 L08 (H13/CA-35): cuántas columnas de alimentador hay. Solo esas pueden llevar banderín
+  // (el badge se pinta únicamente en tipo='ALIMENTADOR') y van primero en el orden, así que el
+  // índice de columna dentro de `columnasOrdenadas` es también el índice del alimentador: las dos
+  // últimas son las que tienen el borde derecho de la tabla demasiado cerca para abrir hacia allá.
+  const nAlim = useMemo(
+    () => catalogo.filter((c) => c.tipo === 'ALIMENTADOR').length,
+    [catalogo]
+  );
 
   // D-034: límite físico por combustible (data-driven desde cantidad_max del catálogo).
   // maxPorId: clave string (igual que el buffer). null = sin tope.
@@ -436,7 +494,7 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                       P{p}
                       <small>{String(p - 1).padStart(2, '0')}h</small>
                     </td>
-                    {columnasOrdenadas.map((c) => {
+                    {columnasOrdenadas.map((c, idx) => {
                       if (c.virtual) {
                         const t = totalCarbonPeriodo(p);
                         return (
@@ -464,7 +522,13 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                       const marcada = c.tipo === 'ALIMENTADOR' && esOverride(celdaSnap);
                       const claveTip = `${p}:${c.combustible_id}`;
                       const idTip = `comb-tip-${p}-${c.combustible_id}`;
-                      const sucia = marcada && celdaConCambios(p, c.combustible_id);
+                      // D-061 L08 (H13/CA-35): el popover abre abajo-derecha por defecto, y
+                      // `.comb-scroll` (overflow:auto) lo recorta contra sus bordes. En los últimos
+                      // periodos abre hacia arriba y en las últimas columnas con banderín hacia la
+                      // izquierda, que es donde sí hay lienzo.
+                      const tipClases = `comb-tip${p >= 19 ? ' comb-tip--arriba' : ''}`
+                        + `${idx >= nAlim - 2 ? ' comb-tip--izq' : ''}`
+                        + `${tipAbierto === claveTip ? ' open' : ''}`;
                       return (
                         <td
                           key={c.combustible_id}
@@ -479,19 +543,29 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                                 aria-label="Valor editado a mano sobre la lectura del SIS"
                                 aria-expanded={tipAbierto === claveTip}
                                 aria-describedby={idTip}
+                                // D-061 L08 (H11/CA-35): fuera del recorrido del Tab. Una fila con
+                                // 8 overrides metía 16 paradas (banderín + Revertir) entre una
+                                // celda y la siguiente, y el operador tabula para capturar. El
+                                // texto ya le llega al lector de pantalla por `aria-describedby`.
+                                tabIndex={-1}
                                 onClick={() => setTipAbierto((k) => (k === claveTip ? null : claveTip))}
                               />
                               {/* Sin `title` nativo: el popover ya dice lo mismo y el navegador lo
                                   repetiría encima un segundo después. El texto llega al lector de
                                   pantalla por `aria-describedby`. */}
-                              <span className={`comb-tip${tipAbierto === claveTip ? ' open' : ''}`}>
+                              <span className={tipClases}>
                                 <span className="comb-tip-texto" id={idTip}>{textoOverride(celdaSnap)}</span>
                                 {puedeCrear && (
                                   <button
                                     type="button"
                                     className="comb-tip-revertir"
-                                    disabled={sucia || loading}
-                                    title={sucia ? 'Guarda o descarta primero' : 'Volver al valor del SIS'}
+                                    // D-061 L08 (H2/CA-32): con CUALQUIER celda sucia, todos los
+                                    // Revertir se apagan. Revertir relee la grilla entera, así que
+                                    // hacerlo con ediciones pendientes en otras celdas las borraba
+                                    // en silencio bajo un toast de éxito. Con cambios encima la
+                                    // salida es la misma que pide la gavela: Guardar o Descartar.
+                                    disabled={hayCambios || loading}
+                                    title={hayCambios ? 'Guarda o descarta primero' : 'Volver al valor del SIS'}
                                     onClick={() => onRevertir(p, c.combustible_id)}
                                   >
                                     Revertir

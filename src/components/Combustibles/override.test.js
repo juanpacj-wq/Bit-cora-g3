@@ -17,6 +17,9 @@ import {
   formatoMMSS,
   textoChipSis,
   GAVELA_MS,
+  claveRefetch,
+  esVacioCantidad,
+  esCeroNoOp,
 } from './override.js';
 
 // El equipo de dev del que salió esto tiene el sistema en America/Bogota: un helper al que se le
@@ -229,5 +232,73 @@ describe('textoChipSis', () => {
 describe('GAVELA_MS', () => {
   it('son 10 minutos exactos', () => {
     expect(GAVELA_MS).toBe(10 * 60 * 1000);
+  });
+});
+
+// ── D-061 L08 ────────────────────────────────────────────────────────────────────────────────────
+
+describe('claveRefetch (L08, CA-33)', () => {
+  it('distingue dos fechas de la misma planta', () => {
+    expect(claveRefetch('GEC32', '2026-08-26')).not.toBe(claveRefetch('GEC32', '2026-08-25'));
+  });
+
+  it('distingue dos plantas en la misma fecha', () => {
+    expect(claveRefetch('GEC32', '2026-08-26')).not.toBe(claveRefetch('GEC3', '2026-08-26'));
+  });
+
+  it('la misma coordenada da siempre la misma clave', () => {
+    expect(claveRefetch('GEC32', '2026-08-26')).toBe(claveRefetch('GEC32', '2026-08-26'));
+  });
+
+  it('no confunde ausencias: (null, X) no es (X, null)', () => {
+    // Concatenar sin separador haría que ('GEC3','2') y ('GEC','32') colisionaran.
+    expect(claveRefetch(null, 'GEC32')).not.toBe(claveRefetch('GEC32', null));
+    expect(claveRefetch(undefined, undefined)).toBe(claveRefetch(null, null));
+  });
+});
+
+describe('esVacioCantidad (L08, CA-34)', () => {
+  it('null, undefined, cadena vacía, 0 y NaN cuentan como vacío', () => {
+    for (const v of [null, undefined, '', 0, NaN]) expect(esVacioCantidad(v)).toBe(true);
+  });
+
+  it('cualquier cantidad real no es vacío', () => {
+    for (const v of [0.001, 5, 25, -3]) expect(esVacioCantidad(v)).toBe(false);
+  });
+});
+
+describe('esCeroNoOp (L08, CA-34)', () => {
+  // El caso que motiva todo: el override 0 de C6. El server conserva la celda viva en 0, así que
+  // volver a teclear 0 (o vaciarla) no cambia nada y no puede encender "Guardar".
+  it('teclear 0 sobre una celda que el server ya tiene en 0 es un no-op', () => {
+    expect(esCeroNoOp(0, { cantidad: 0, valor_sis: 17.25, es_override: true })).toBe(true);
+  });
+
+  it('vaciar (null) o dejar el campo en blanco sobre esa misma celda también es no-op', () => {
+    expect(esCeroNoOp(null, { cantidad: 0 })).toBe(true);
+    expect(esCeroNoOp('', { cantidad: 0 })).toBe(true);
+    expect(esCeroNoOp(NaN, { cantidad: 0 })).toBe(true);
+  });
+
+  it('vaciar una celda con cantidad real SÍ es un cambio (es el "vaciar" de C6)', () => {
+    expect(esCeroNoOp(null, { cantidad: 18.5, valor_sis: 17.25 })).toBe(false);
+    expect(esCeroNoOp(0, { cantidad: 18.5 })).toBe(false);
+  });
+
+  it('teclear 0 donde el server no tiene celda sigue siendo "no escribir nada"', () => {
+    // Sin fila previa el 0 no crea celda: el buffer debe quedar sin la clave, no con un 0 falso.
+    expect(esCeroNoOp(0, undefined)).toBe(false);
+    expect(esCeroNoOp(0, {})).toBe(false);
+    expect(esCeroNoOp(0, { cantidad: null })).toBe(false);
+  });
+
+  it('escribir una cantidad real nunca es no-op, ni sobre una celda en 0', () => {
+    expect(esCeroNoOp(5, { cantidad: 0 })).toBe(false);
+  });
+
+  it('tolera un 0 que llegue como string del server', () => {
+    // `calcularDiff` ya compara con Number(); esta guarda no puede ser más estricta que aquella,
+    // o una celda en "0" quedaría marcada como cambio para siempre.
+    expect(esCeroNoOp(0, { cantidad: '0' })).toBe(true);
   });
 });

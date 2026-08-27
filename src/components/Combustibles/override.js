@@ -88,6 +88,37 @@ export function textoChipSis(sis) {
   return hora ? `SIS ${ok}/24 · ${hora}` : `SIS ${ok}/24`;
 }
 
+// D-061 L08 (H3/CA-33): identidad de la coordenada que se está leyendo. Cada `refetch` se acuerda
+// de con qué (planta, fecha) salió; al volver la respuesta se compara contra la coordenada de
+// ahora y, si cambió, se tira. Sin esto, cambiar de fecha mientras vuela el GET de "hoy" deja el
+// snapshot de hoy pintado bajo la cabecera de ayer, sin ningún síntoma visible.
+export function claveRefetch(plantaId, fecha) {
+  return `${plantaId ?? ''}|${fecha ?? ''}`;
+}
+
+// ¿El input quedó "vacío"? Es la misma noción que usa la grilla desde D-027: el <input type=number>
+// entrega `null` cuando lo borran y `NaN` cuando el texto no parsea, y un 0 tecleado significa
+// "esta celda no lleva nada" — no "cero toneladas medidas".
+export function esVacioCantidad(cantidad) {
+  return cantidad === null || cantidad === undefined || cantidad === ''
+    || cantidad === 0 || Number.isNaN(cantidad);
+}
+
+// D-061 L08 (H5/CA-34): ¿vaciar/teclear 0 sobre ESTA celda es un no-op?
+//
+// Desde C6 el backend ya no borra una celda con lectura del SIS que se vacía: la deja viva con
+// `cantidad: 0` (el "override 0"). Así que el GET ahora trae celdas en 0 que el snapshot conserva,
+// mientras la regla vieja de la grilla las borraba del buffer al teclear 0 → snapshot y buffer
+// dejaban de coincidir por un cambio que no cambia nada, y eso encendía Guardar, arrancaba la
+// gavela y armaba el `beforeunload` para terminar en "Guardado: 0 nuevos, 0 actualizados".
+// Cuando el snapshot ya está en 0, el 0 tecleado debe dejar el buffer igual al snapshot.
+export function esCeroNoOp(cantidad, celdaSnap) {
+  if (!esVacioCantidad(cantidad)) return false;
+  const c = celdaSnap?.cantidad;
+  if (c === null || c === undefined) return false;   // la celda no existe en el snapshot: sí es cambio
+  return Number(c) === 0;
+}
+
 // --- internos ---------------------------------------------------------------------------------
 
 // Partes de fecha/hora en Bogotá con `timeZone` explícito (convención de TZ del workspace: la BD
