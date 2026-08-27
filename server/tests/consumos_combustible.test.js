@@ -327,8 +327,10 @@ test('12. F26.B1 idempotente: flag presente + 18 combustibles + 1 fila COMB', as
   )).recordset[0].n;
   assert.equal(flagCount, 1, 'flag F26.B1 debe estar exactamente 1 vez (PK migracion_aplicada.codigo)');
 
-  const n = (await db.request().query(`SELECT COUNT(*) AS n FROM lov_bit.combustible`)).recordset[0].n;
-  assert.equal(n, 18, '18 combustibles (8 GEC3 + 10 GEC32)');
+  const n = (await db.request().query(
+    `SELECT COUNT(*) AS n FROM lov_bit.combustible WHERE planta_id IN ('GEC3','GEC32')`
+  )).recordset[0].n;
+  assert.equal(n, 18, '18 combustibles reales (8 GEC3 + 10 GEC32); TST se cuenta aparte (D-061)');
 
   const nComb = (await db.request().query(`SELECT COUNT(*) AS n FROM lov_bit.bitacora WHERE codigo='COMB'`)).recordset[0].n;
   assert.equal(nComb, 1, '1 fila COMB en lov_bit.bitacora');
@@ -336,7 +338,9 @@ test('12. F26.B1 idempotente: flag presente + 18 combustibles + 1 fila COMB', as
   // Re-ejecutar initDB() no debe cambiar conteos (idempotencia del bloque F26.B1).
   const { initDB } = await import('../db.js');
   await initDB();
-  const n2 = (await db.request().query(`SELECT COUNT(*) AS n FROM lov_bit.combustible`)).recordset[0].n;
+  const n2 = (await db.request().query(
+    `SELECT COUNT(*) AS n FROM lov_bit.combustible WHERE planta_id IN ('GEC3','GEC32')`
+  )).recordset[0].n;
   assert.equal(n2, n, 'conteo de combustibles estable tras re-initDB');
 });
 

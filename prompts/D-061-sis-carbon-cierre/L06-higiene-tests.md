@@ -6,7 +6,65 @@
 > cabecera) por el gate de la O1 si hizo falta.
 
 ## ENMIENDAS Y HECHOS QUE CAMBIAN — léelo antes que el resto
-- {{El gate O1 rellena esto. Si está vacío y `GATE-O1.md` existe, léelo tú: §6 "Hechos que cambian".}}
+- **ENMIENDA G1 (L06):** el diff de `consumos_combustible.test.js:330` (conteo acotado a `GEC3`/`GEC32`, también `n2`) **ya lo aplicó el gate** (D1): consérvalo tal cual al migrar el archivo. En `sis_scraper_ownership` el caso negativo "planta sin catálogo" apunta a `GEC3` (no a `'TST'`, que ahora sí tiene `ALIM_1..8`). Tu backend `SKIP_INITDB=1` en `:3106` sirve COMB con normalidad (D2). La línea de tests de tu §6 ahora lleva `--test-concurrency=1`. CA-28 incluye los dos checks de `residuos.js` que el gate O1 tuvo que hacer a mano.
+- **ENMIENDA G2 (L06) — tu territorio gana `server/tests/sis_concurrencia.test.js`** (de L01; hallazgo H1 del code-review, severidad alta): hoy borra y reescribe `consumo_combustible` y `sis_scrape_log` de **GEC32 en `2026-04-17`**, y el backfill de L05 va a poblar esa fecha con datos reales durante esta misma ola. Migra los 7 casos a `TEST_PLANTA` (mismo patrón que `sis_scraper_ownership`, fecha fija distinta a la de ese archivo). El caso "sin `planta_id` el default es GEC32" se prueba **sin escribir**: un `pool` falso cuyo `request()` registra el `@p` de la query del catálogo y aborta antes del fetch (o equivalente). CA-26 se amplía a los dos archivos.
+- **ENMIENDA G3 (L06) — `db.js` exporta `seedCatalogoCombTest(db)`** (gate O1, hallazgo H4): `setupSessions({ planta })` la llama justo después del `MERGE` de la planta TST, para que una BD virgen tenga el catálogo en el **primer** arranque (hoy `initDB` lo omite si la planta no existe y aparece en el segundo). Entra a CA-28.
+- **Hechos que cambian (GATE-O1 §6, copiados tal cual):**
+  - **`SKIP_INITDB=1` ya resuelve los live bindings** (`USUARIO_SISTEMA_ID`, `COMB_BITACORA_ID`)
+    antes de retornar (GATE-O1 D2). Un backend efímero con ese flag sirve COMB y los sweepers con
+    normalidad; ya no hace falta arrancar sin él. Lo que dicen `CLAUDE.md` y
+    `server/migrations/README.md` ("solo abre el pool") queda impreciso hasta el cierre.
+  - **El diff de `consumos_combustible.test.js:330` ya está aplicado por el gate** (D1): el test 12
+    cuenta `lov_bit.combustible` acotado a `GEC3`/`GEC32` (18) y `n2` igual. **L06 no lo repite**;
+    al migrar ese archivo a `TEST_PLANTA` conserva esos dos asserts tal cual.
+  - `discoverEarliestDate` **ya no se define** en `carbon-scraper.js`: vive en
+    `server/utils/sis/discover.js` (cuerpo idéntico al v1) y `carbon-scraper.js` la re-exporta. L05
+    trabaja sobre `discover.js`; los imports viejos siguen funcionando.
+  - `scrapeDia(pool, { planta_id='GEC32', concurrencia=1, … })` y `leerScrapeLog(pool, fecha,
+    planta_id='GEC32')` están tal cual C1. El error de planta sin catálogo es
+    `scrapeDia: planta sin catálogo ALIM_1..8: <p>` y se lanza **antes** del primer fetch.
+  - **`'TST'` es una planta con SIS válida para `scrapeDia`** (tiene `ALIM_1..8` por el seed C12).
+    `GEC3` (usa `ALIM_A..F`) es el "sin catálogo" estable: **L06**, al migrar
+    `sis_scraper_ownership` a `TEST_PLANTA`, deja el caso negativo apuntando a `GEC3`.
+  - El sweeper expone `ejecutarTick({ pool, scrapeFn, leerLogFn, lockFn, hoy, log })` y su tick corre
+    **entero** bajo `withSisLock('sweeper <hoy>', …)`: mientras el job manual (L04) tenga el lock, el
+    tick se omite completo (ni ayer ni hoy) y vuelve a la hora siguiente. `withSisLock` lanza `Error`
+    con `.codigo='sis_ocupado'`, `.motivo` (del dueño) y `.desde`; `estadoSisLock()` sirve directo
+    para el cuerpo del 409 de L04.
+  - **Con `concurrencia>1`, un periodo intermedio fallido deja el día no reanudable por
+    `ultimo_periodo`** (`periodos_error=1`, `ultimo_periodo=24`, y `periodoDesdeDe` devuelve 1): la
+    próxima pasada re-pide el día completo. Correcto; **L05** lo cuenta en su presupuesto.
+  - **La fase de escritura cuesta ~12 s por día contra la BD dev** (192 statements en una
+    transacción) y la concurrencia no la baja: un backfill de ~1.100 días tiene un piso de ≥ 3,7 h
+    solo de escritura, aunque la red baje de ~5,2 a ~1,3 min/día con `concurrencia=4`. **L05**
+    planifica con ese piso. Sospecha no medida: RSS del proceso con `concurrencia=6` y `.xls`
+    grandes — mirarlo en la primera corrida real.
+  - **Una tolva ≤ 0,5 t/h se lee como 0 y un 0 sin fila previa no crea celda**
+    (`extraerCarbonValidado`, filtro de ruido a propósito). **L05**: el fixture
+    `sis-period.xls` debe traer tolvas > 0,5 o `discover` v2 lo leerá como día vacío.
+  - `routes/combustibles.js` ya tiene `plantaCombValida()` (admite `GEC3`, `GEC32`,
+    `TEST_PLANTA_ID`), `mapCelda`, `SELECT_CELDA` y `resolverSistemaId`: **L04 los reúsa**, no los
+    duplica. Los 400 de todo el router traen `codigo`; `fecha_invalida` aplica también a GET/POST
+    `/consumos` (D3).
+  - El GET devuelve por celda `valor_sis`, `sis_actualizado_en`, `sis_owned`, `es_override` y el
+    bloque `sis` tal cual C4; `revertir` devuelve `{ accion, celda }` con `celda` en el mismo shape
+    del pivot (hay assert que lo fija). Vaciar una celda con `valor_sis` la deja viva en 0; si solo
+    cambió `detalle` se actualiza sin tocar `modificado_por` y cuenta en `actualizados`.
+  - **`node --test a.js b.js` corre los archivos en paralelo** (un proceso por archivo): dos
+    archivos HTTP con los mismos usuarios sintéticos se dan 401 mutuo (sesión única, D-035). Toda
+    corrida conjunta lleva `--test-concurrency=1` (el script `test` ya lo trae). Los prompts de O2
+    que listan dos archivos HTTP en una línea lo añaden.
+  - `npm run test:residuos` **no** cuenta `consumo_combustible` ni `sis_scrape_log`: el gate O1 los
+    contó con query directa; L06 (CA-28) los agrega al script.
+  - `planta_invalida` ya existía como `codigo` en `routes/auth.js` (`cambiar-unidad`): el ADR no
+    lo presenta como estreno (nota para el cierre).
+  - El seed del catálogo `'TST'` está guardado por la existencia de la fila `'TST'` en
+    `lov_bit.planta` (la siembra el harness, no `initDB`): en una BD virgen el catálogo aparece en
+    el **segundo** arranque. Dev y prod ya tienen la fila. L07 lo documenta en BIT-MODBD §4.9.
+  - Los tests de formato de fecha del repo corren en equipos en `America/Bogota`, así que **no
+    distinguen** `timeZone` explícito de implícito (hallazgo H-1 de L03). `override.test.js` corre
+    bajo `process.env.TZ='Asia/Tokyo'` y afirma que el default resuelto no es Bogotá; el resto del
+    repo probablemente comparte la ceguera (deuda fuera de D-061; convención para el cierre).
 
 ## 0. Puerta de arranque (obligatorio, primero)
 ```bash
@@ -30,6 +88,7 @@ Si falla, **detente y reporta**.
 - `server/tests/consumos_combustible.test.js`
 - `server/tests/rol_coordinador_carbon_maquinaria.test.js`
 - `server/tests/sis_scraper_ownership.test.js`
+- `server/tests/sis_concurrencia.test.js` (de L01; migración a `TEST_PLANTA` — enmienda G2)
 - `server/tests/guard_no_prod_historico_destruction.test.js`
 - `server/tests/helpers.js` (**único escritor en O2**)
 - `server/tests/residuos.js`
@@ -86,9 +145,9 @@ cada ofensor con el diff exacto en `Bloqueos`; **no los edites**.
 | CA | Criterio | Verificador (tuyo) |
 |---|---|---|
 | CA-25 | `consumos_combustible` y `rol_coordinador…` operan solo en `TEST_PLANTA` (ningún DELETE/POST a GEC3/GEC32). | ambos archivos verdes + `grep -n "GEC3\|GEC32"` en ellos sin escrituras + guard |
-| CA-26 | `sis_scraper_ownership` corre `scrapeDia({ planta_id: TEST_PLANTA })` y limpia solo TST. | archivo verde + guard |
+| CA-26 | `sis_scraper_ownership` **y `sis_concurrencia`** corren `scrapeDia({ planta_id: TEST_PLANTA })` y limpian solo TST; el caso "default GEC32" no escribe (enmienda G2). | ambos archivos verdes + guard + `grep -n "GEC32" tests/sis_concurrencia.test.js` sin escrituras |
 | CA-27 | Guard protege `consumo_combustible` y `sis_scrape_log`; rojo con un DELETE sin acotador. | guard verde / rojo con `_tmp_guard` (salida literal) |
-| CA-28 | `residuos.js` cuenta consumo/log en TST/TSR; `cleanupTestRegistros` barre consumo TST. | `npm run test:residuos` → cero tras tus tests |
+| CA-28 | `residuos.js` cuenta consumo/log en TST/TSR; `cleanupTestRegistros` barre consumo y log de TST/TSR; `setupSessions` siembra el catálogo TST vía `seedCatalogoCombTest` (enmienda G3). | `npm run test:residuos` → cero tras tus tests + `grep seedCatalogoCombTest tests/helpers.js` |
 
 ## 6. Verificación que corres (solo la tuya)
 ```bash
@@ -97,7 +156,7 @@ node --check tests/helpers.js && node --check tests/residuos.js
 node --test tests/guard_no_prod_historico_destruction.test.js        # puro, sin lock
 node "../../metodología de implementación/herramientas/lotes.mjs" --impl D-061 test-lock --sesion <tu sesión>
 SERVER_PORT=3106 AUTH_TEST_BYPASS=1 SKIP_INITDB=1 node --env-file=../.env server.js   # background
-TEST_BASE_URL=http://localhost:3106 node --env-file=../.env --test tests/consumos_combustible.test.js tests/rol_coordinador_carbon_maquinaria.test.js tests/sis_scraper_ownership.test.js
+TEST_BASE_URL=http://localhost:3106 node --env-file=../.env --test --test-concurrency=1 tests/consumos_combustible.test.js tests/rol_coordinador_carbon_maquinaria.test.js tests/sis_scraper_ownership.test.js
 npm run test:residuos
 node "../../metodología de implementación/herramientas/lotes.mjs" --impl D-061 test-unlock --sesion <tu sesión>
 # apaga tu backend efímero.

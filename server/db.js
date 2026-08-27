@@ -354,6 +354,80 @@ async function migrateSchemaV2(db) {
   `);
 }
 
+// Live bindings que el server necesita para operar (los consumen los sweepers y el gating de COMB).
+// Se resuelven en cada arranque: en el camino normal en su punto del seed y, con SKIP_INITDB=1,
+// juntos antes del return (GATE-O1 de D-061). Solo lectura.
+async function resolverUsuarioSistemaId(db) {
+  const sistemaRes = await db.request().query(
+    `SELECT usuario_id FROM lov_bit.usuario WHERE username = 'SISTEMA'`
+  );
+  USUARIO_SISTEMA_ID = sistemaRes.recordset[0]?.usuario_id ?? null;
+  if (!USUARIO_SISTEMA_ID) {
+    throw new Error("[initDB] usuario 'SISTEMA' no fue sembrado (F16.A3)");
+  }
+}
+
+async function resolverCombBitacoraId(db) {
+  const combRow = await db.request().query(
+    `SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='COMB'`
+  );
+  COMB_BITACORA_ID = combRow.recordset[0]?.bitacora_id ?? null;
+  if (!COMB_BITACORA_ID) {
+    throw new Error("[initDB] bitácora 'COMB' no fue sembrada (F26.B1)");
+  }
+}
+
+async function resolverLiveBindings(db) {
+  await resolverUsuarioSistemaId(db);
+  await resolverCombBitacoraId(db);
+}
+
+// D-061 (GATE-O1): seed del catálogo COMB de la planta de test, exportado para que el harness
+// (`tests/helpers.js`, `setupSessions`) lo siembre justo después de crear la planta `TST` — así una
+// BD virgen tiene el catálogo en el primer arranque, no en el segundo. Idempotente; `HOLDLOCK`
+// para que dos `initDB()` concurrentes en el primer seed no choquen en la UQ (planta_id, codigo).
+// Devuelve cuántas filas insertó (0 si ya estaban o si la planta aún no existe).
+export async function seedCatalogoCombTest(db) {
+  const tstPlantaRes = await db.request()
+    .input('tst', sql.VarChar(10), TEST_PLANTA_ID)
+    .query(`SELECT 1 AS x FROM lov_bit.planta WHERE planta_id = @tst`);
+  if (!tstPlantaRes.recordset[0]) {
+    console.warn(`  ⚠  catálogo COMB de ${TEST_PLANTA_ID}: omitido (la planta de test aún no existe; la siembra el harness)`);
+  } else {
+    const seedTst = await db.request()
+      .input('tst', sql.VarChar(10), TEST_PLANTA_ID)
+      .query(`
+        MERGE lov_bit.combustible WITH (HOLDLOCK) AS t
+        USING (VALUES
+          ('ALIM_1', 'Alimentador 1', 'Ton', 'ALIMENTADOR',  1,    25),
+          ('ALIM_2', 'Alimentador 2', 'Ton', 'ALIMENTADOR',  2,    25),
+          ('ALIM_3', 'Alimentador 3', 'Ton', 'ALIMENTADOR',  3,    25),
+          ('ALIM_4', 'Alimentador 4', 'Ton', 'ALIMENTADOR',  4,    25),
+          ('ALIM_5', 'Alimentador 5', 'Ton', 'ALIMENTADOR',  5,    25),
+          ('ALIM_6', 'Alimentador 6', 'Ton', 'ALIMENTADOR',  6,    25),
+          ('ALIM_7', 'Alimentador 7', 'Ton', 'ALIMENTADOR',  7,    25),
+          ('ALIM_8', 'Alimentador 8', 'Ton', 'ALIMENTADOR',  8,    25),
+          ('CALIZA', 'Caliza',        'Ton', 'CALIZA',       9,    40),
+          ('ACPM',   'ACPM',          'Gal', 'ACPM',        10, 25000)
+        ) AS s(codigo, nombre, unidad, tipo, orden, cantidad_max)
+          ON t.planta_id = @tst AND t.codigo = s.codigo
+        WHEN MATCHED THEN UPDATE SET
+          nombre = s.nombre, unidad = s.unidad, tipo = s.tipo,
+          orden = s.orden, activo = 1, cantidad_max = s.cantidad_max
+        WHEN NOT MATCHED BY TARGET THEN
+          INSERT (planta_id, codigo, nombre, unidad, tipo, orden, activo, cantidad_max)
+          VALUES (@tst, s.codigo, s.nombre, s.unidad, s.tipo, s.orden, 1, s.cantidad_max)
+        OUTPUT $action AS accion;
+      `);
+    const insertadas = seedTst.recordset.filter((r) => r.accion === 'INSERT').length;
+    if (insertadas > 0) {
+      console.log(`[DB] catálogo COMB de ${TEST_PLANTA_ID}: ${insertadas} filas`);
+    }
+    return insertadas;
+  }
+  return 0;
+}
+
 export async function initDB() {
   const db = await getDB();
 
@@ -363,6 +437,11 @@ export async function initDB() {
   // no es atómico entre procesos). Nunca en producción. Ver server/migrations/README.md.
   if (process.env.SKIP_INITDB === '1') {
     console.log('[DB] initDB omitido (SKIP_INITDB=1): sin DDL, seeds ni migraciones en este proceso');
+    // GATE-O1 de D-061: los live bindings sí se resuelven (dos SELECT, sin escritura). Sin ellos
+    // `hasPermisoBitacora(sesion, COMB_BITACORA_ID=null)` devuelve false y TODO /api/combustibles/*
+    // responde 403 sin pista del motivo (hallazgo de L02). El schema ya está aplicado por el dueño
+    // de db.js; si no lo estuviera, el throw de abajo lo dice en el arranque, no en un 403 mudo.
+    await resolverLiveBindings(db);
     return;
   }
 
@@ -1628,13 +1707,7 @@ export async function initDB() {
       VALUES ('Sistema (cierre automático)', 'SISTEMA', NULL, '!disabled!', 0, 0, 0);
     END
   `);
-  const sistemaRes = await db.request().query(
-    `SELECT usuario_id FROM lov_bit.usuario WHERE username = 'SISTEMA'`
-  );
-  USUARIO_SISTEMA_ID = sistemaRes.recordset[0]?.usuario_id ?? null;
-  if (!USUARIO_SISTEMA_ID) {
-    throw new Error("[initDB] usuario 'SISTEMA' no fue sembrado (F16.A3)");
-  }
+  await resolverUsuarioSistemaId(db);
 
   // F16.A4: log de cierre diario MAND. Idempotencia del sweeper — segunda llamada para
   // (fecha, planta) detecta la fila y retorna skipped sin duplicar el cierre. Resiliente
@@ -2169,13 +2242,7 @@ export async function initDB() {
   // D-027: cache del id de la bitácora COMB. Fuera del bloque F26.B1 para que se
   // resuelva en CADA arranque (no solo el primero). Lo consumen los endpoints
   // /api/combustibles/* en server.js para gating con hasPermisoBitacora.
-  const combRow = await db.request().query(
-    `SELECT bitacora_id FROM lov_bit.bitacora WHERE codigo='COMB'`
-  );
-  COMB_BITACORA_ID = combRow.recordset[0]?.bitacora_id ?? null;
-  if (!COMB_BITACORA_ID) {
-    throw new Error("[initDB] bitácora 'COMB' no fue sembrada (F26.B1)");
-  }
+  await resolverCombBitacoraId(db);
 
   // F27.A1 (D-029): schema de soporte para el valor SIS sombra (consumo de carbón GEC32
   // scrapeado del SIS interno) + observabilidad/resumabilidad del scraper. Solo schema;
@@ -2295,42 +2362,7 @@ export async function initDB() {
   // `setupSessions({ planta })` del harness de tests, no initDB. Si todavía no está (BD virgen),
   // se omite el catálogo en vez de intentar el MERGE: la FK planta_id tumbaría el arranque
   // entero del server por una fixture que solo le sirve a los tests.
-  const tstPlantaRes = await db.request()
-    .input('tst', sql.VarChar(10), TEST_PLANTA_ID)
-    .query(`SELECT 1 AS x FROM lov_bit.planta WHERE planta_id = @tst`);
-  if (!tstPlantaRes.recordset[0]) {
-    console.warn(`  ⚠  catálogo COMB de ${TEST_PLANTA_ID}: omitido (la planta de test aún no existe; la siembra el harness)`);
-  } else {
-    const seedTst = await db.request()
-      .input('tst', sql.VarChar(10), TEST_PLANTA_ID)
-      .query(`
-        MERGE lov_bit.combustible AS t
-        USING (VALUES
-          ('ALIM_1', 'Alimentador 1', 'Ton', 'ALIMENTADOR',  1,    25),
-          ('ALIM_2', 'Alimentador 2', 'Ton', 'ALIMENTADOR',  2,    25),
-          ('ALIM_3', 'Alimentador 3', 'Ton', 'ALIMENTADOR',  3,    25),
-          ('ALIM_4', 'Alimentador 4', 'Ton', 'ALIMENTADOR',  4,    25),
-          ('ALIM_5', 'Alimentador 5', 'Ton', 'ALIMENTADOR',  5,    25),
-          ('ALIM_6', 'Alimentador 6', 'Ton', 'ALIMENTADOR',  6,    25),
-          ('ALIM_7', 'Alimentador 7', 'Ton', 'ALIMENTADOR',  7,    25),
-          ('ALIM_8', 'Alimentador 8', 'Ton', 'ALIMENTADOR',  8,    25),
-          ('CALIZA', 'Caliza',        'Ton', 'CALIZA',       9,    40),
-          ('ACPM',   'ACPM',          'Gal', 'ACPM',        10, 25000)
-        ) AS s(codigo, nombre, unidad, tipo, orden, cantidad_max)
-          ON t.planta_id = @tst AND t.codigo = s.codigo
-        WHEN MATCHED THEN UPDATE SET
-          nombre = s.nombre, unidad = s.unidad, tipo = s.tipo,
-          orden = s.orden, activo = 1, cantidad_max = s.cantidad_max
-        WHEN NOT MATCHED BY TARGET THEN
-          INSERT (planta_id, codigo, nombre, unidad, tipo, orden, activo, cantidad_max)
-          VALUES (@tst, s.codigo, s.nombre, s.unidad, s.tipo, s.orden, 1, s.cantidad_max)
-        OUTPUT $action AS accion;
-      `);
-    const insertadas = seedTst.recordset.filter((r) => r.accion === 'INSERT').length;
-    if (insertadas > 0) {
-      console.log(`[DB] catálogo COMB de ${TEST_PLANTA_ID}: ${insertadas} filas`);
-    }
-  }
+  await seedCatalogoCombTest(db);
 
   // ---------- F29 — D-045: entidad explícita de turno (cabecera + participante + FK) ----------
   // Solo DDL idempotente; ninguna otra capa lee/escribe estas tablas todavía (llega en E2+).

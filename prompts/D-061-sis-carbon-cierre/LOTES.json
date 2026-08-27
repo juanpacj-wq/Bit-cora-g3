@@ -4,8 +4,8 @@
   "claim_ttl_min": 240,
   "olas": {
     "O1": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O1.md"
     },
     "O2": {
       "estado": "pendiente",
@@ -20,10 +20,10 @@
     "L01": {
       "ola": "O1",
       "titulo": "Núcleo SIS: planta_id + concurrencia en scrapeDia, mutex sis-lock, discover.js",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L01-1542",
+      "claim_ts": "2026-08-26T20:42:23.179Z",
+      "done_ts": "2026-08-26T21:09:07.419Z",
       "motivo": null,
       "depende_de": [],
       "puro": false,
@@ -53,10 +53,10 @@
     "L02": {
       "ola": "O1",
       "titulo": "Backend COMB: catálogo TST, GET con valor_sis, vaciar = override 0, POST revertir",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L02-1542",
+      "claim_ts": "2026-08-26T20:42:40.499Z",
+      "done_ts": "2026-08-26T21:21:44.486Z",
       "motivo": null,
       "depende_de": [],
       "puro": false,
@@ -84,10 +84,10 @@
     "L03": {
       "ola": "O1",
       "titulo": "Front: badge de override + tooltip + Revertir + auto-refresco con gavela + chip SIS",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L03-1542",
+      "claim_ts": "2026-08-26T20:43:01.839Z",
+      "done_ts": "2026-08-26T21:04:21.341Z",
       "motivo": null,
       "depende_de": [],
       "puro": true,
@@ -129,6 +129,7 @@
         "server/utils/sis/sis-job.js",
         "server/routes/combustibles.js",
         "server/tests/sis_scrape_endpoint.test.js",
+        "server/tests/sis_endpoints.test.js",
         "prompts/D-061-sis-carbon-cierre/cierres/L04.md"
       ],
       "tests": [
@@ -139,7 +140,8 @@
         "CA-16",
         "CA-17",
         "CA-18",
-        "CA-19"
+        "CA-19",
+        "CA-36"
       ]
     },
     "L05": {
@@ -193,6 +195,7 @@
         "server/tests/consumos_combustible.test.js",
         "server/tests/rol_coordinador_carbon_maquinaria.test.js",
         "server/tests/sis_scraper_ownership.test.js",
+        "server/tests/sis_concurrencia.test.js",
         "server/tests/guard_no_prod_historico_destruction.test.js",
         "server/tests/helpers.js",
         "server/tests/residuos.js",
@@ -202,13 +205,46 @@
         "tests/consumos_combustible.test.js",
         "tests/rol_coordinador_carbon_maquinaria.test.js",
         "tests/sis_scraper_ownership.test.js",
-        "tests/guard_no_prod_historico_destruction.test.js"
+        "tests/guard_no_prod_historico_destruction.test.js",
+        "tests/sis_concurrencia.test.js"
       ],
       "criterios": [
         "CA-25",
         "CA-26",
         "CA-27",
         "CA-28"
+      ]
+    },
+    "L08": {
+      "ola": "O2",
+      "titulo": "Correcciones del front COMB tras el code-review de la O1 (revertir, refetch seguro, override 0, popover)",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L03"
+      ],
+      "puro": true,
+      "puerto": 3108,
+      "territorio": [
+        "src/components/Combustibles/ConsumosGrid.jsx",
+        "src/components/Combustibles/combustibles.css",
+        "src/components/Combustibles/override.js",
+        "src/components/Combustibles/override.test.js",
+        "src/components/Combustibles/ConsumosGrid.test.jsx",
+        "prompts/D-061-sis-carbon-cierre/cierres/L08.md"
+      ],
+      "tests": [
+        "src/components/Combustibles/override.test.js",
+        "src/components/Combustibles/ConsumosGrid.test.jsx"
+      ],
+      "criterios": [
+        "CA-32",
+        "CA-33",
+        "CA-34",
+        "CA-35"
       ]
     },
     "L07": {
@@ -222,7 +258,8 @@
       "depende_de": [
         "L04",
         "L05",
-        "L06"
+        "L06",
+        "L08"
       ],
       "puro": true,
       "puerto": 3107,

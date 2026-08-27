@@ -10,7 +10,7 @@ L01 (núcleo SIS: planta_id + concurrencia + sis-lock + discover.js) ──┬�
 L02 (backend COMB: seed TST + GET + vaciar + revertir) ───────────────┤                                  ├─> L07 (docs + cleanup) ─> cierre
                                                                       ├─> L06 (higiene D-055) ────────────┤
 L01 ──────────────────────────────────────────────────────────────────┴─> L05 (backfill histórico) ───────┘
-L03 (front override; consume C4/C5 fijados) ── independiente en O1 ──────────────────────────────────────┘
+L03 (front override; consume C4/C5 fijados) ──> L08 (correcciones front, GATE-O1) ─────────────────────────────┘
 ```
 Camino crítico: **L02 → L04 → L07 → cierre** (y la corrida prod del backfill, que depende de L05 y
 del visto bueno tras GATE-O2). Fuera del camino crítico: L03, L06. **L05 arranca una corrida de
@@ -20,7 +20,7 @@ días** (backfill dev) que sigue viva durante el gate O2 y la O3: no bloquea nad
 | Ola | Lotes | Por qué pueden ir juntos | Compartidos y su escritor |
 |---|---|---|---|
 | O1 | L01, L02, L03 | Raíces del grafo. Territorios disjuntos (`utils/sis/*` + tests SIS / `db.js` + `routes/combustibles.js` + test HTTP / `src/components/Combustibles/*` + hook). L03 construye contra los contratos C4/C5/C11 ya fijados; la integración real la ve el gate. | `db.js` → L02 · `combustibles.js` → L02 · `carbon-scraper.js` → L01 |
-| O2 | L04, L05, L06 | Consumen C1/C2/C12 verificados en GATE-O1. Disjuntos: L04 (`sis-job.js` + `combustibles.js` + su test) / L05 (`discover.js` + CLI + fixture + `sis_parser.test.js` + su test) / L06 (solo archivos de test + helpers + residuos). | `combustibles.js` → L04 · `discover.js` → L05 · `helpers.js` → L06 |
+| O2 | L04, L05, L06, **L08** | Consumen C1/C2/C12 verificados en GATE-O1. L08 (corrección front, puro) se añadió en GATE-O1 §7. Disjuntos: L04 (`sis-job.js` + `combustibles.js` + su test) / L05 (`discover.js` + CLI + fixture + `sis_parser.test.js` + su test) / L06 (solo archivos de test + helpers + residuos). | `combustibles.js` → L04 · `discover.js` → L05 · `helpers.js` → L06 |
 | Tarea del integrador tras GATE-O2 | Corrida del backfill contra **prod** (`DB_NAME=PortalG3 … --confirm-db PortalG3`) | Requiere visto bueno explícito del usuario (PREGUNTAS #11). Se registra en `GATE-O2.md` §5 y en `ESTADO.md`. | — |
 | O3 | L07 | Docs permanentes + cleanup del scaffolding v1 y del scraper standalone, con toda la funcionalidad ya verificada. | `BIT-*`, `docs/architecture.md`, `docs/domain-glossary.md`, `deploy/DEPLOY.md` → L07 |
 | Cierre | `/cerrar-implementacion D-061` | ADR D-061 completo (desde los aportes), `CLAUDE.md` conv. 35, corregir la cross-ref `[[D-029]]` de D-060 → `[[D-061]]`, `git rm` de `prompts/D-061-*`, smoke + suite final. | `decisions.md`, `CLAUDE.md` → integrador |
@@ -53,7 +53,7 @@ días** (backfill dev) que sigue viva durante el gate O2 y la O3: no bloquea nad
 
 ### L04 — Scrape manual asíncrono: `sis-job.js` + `POST /sis/scrape` (202/409) + `GET /sis/estado`
 - **Ola:** O2 · **Depende de:** L01, L02 · **Puro:** no · **Puerto de test:** 3104 (`SKIP_INITDB=1`; además un **SIS stub** local en 3154 que responde 500)
-- **Territorio:** `server/utils/sis/sis-job.js` (nuevo), `server/routes/combustibles.js`, `server/tests/sis_scrape_endpoint.test.js` (nuevo)
+- **Territorio:** `server/utils/sis/sis-job.js` (nuevo), `server/routes/combustibles.js`, `server/tests/sis_scrape_endpoint.test.js` (nuevo), `server/tests/sis_endpoints.test.js` (desde GATE-O1: CA-36)
 - **Contratos que produce:** C7, C8, C9 · **que consume:** C1, C2, C12
 - **Criterios:** CA-16, CA-17, CA-18, CA-19
 - **Tests que corre:** `tests/sis_scrape_endpoint.test.js`, `tests/sis_endpoints.test.js` (de L02, debe seguir verde)
@@ -69,11 +69,19 @@ días** (backfill dev) que sigue viva durante el gate O2 y la O3: no bloquea nad
 
 ### L06 — Higiene D-055: tests de COMB/SIS a `TEST_PLANTA`, guard ampliado, residuos
 - **Ola:** O2 · **Depende de:** L01, L02 · **Puro:** no · **Puerto de test:** 3106 (`SKIP_INITDB=1`)
-- **Territorio:** `server/tests/consumos_combustible.test.js`, `server/tests/rol_coordinador_carbon_maquinaria.test.js`, `server/tests/sis_scraper_ownership.test.js`, `server/tests/guard_no_prod_historico_destruction.test.js`, `server/tests/helpers.js`, `server/tests/residuos.js`
+- **Territorio:** `server/tests/consumos_combustible.test.js`, `server/tests/rol_coordinador_carbon_maquinaria.test.js`, `server/tests/sis_scraper_ownership.test.js`, `server/tests/sis_concurrencia.test.js` (desde GATE-O1: H1), `server/tests/guard_no_prod_historico_destruction.test.js`, `server/tests/helpers.js`, `server/tests/residuos.js`
 - **Contratos que produce:** C13 · **que consume:** C1, C12
 - **Criterios:** CA-25, CA-26, CA-27, CA-28
 - **Tests que corre:** los cuatro archivos de test de su territorio + `npm run test:residuos`
 - **Riesgo / nota:** al ampliar el guard, otros archivos fuera de su territorio pueden caer en rojo (p. ej. `sis_concurrencia.test.js` de L01 en GEC32 con fecha fija, o `sis_scrape_endpoint.test.js` de L04): **no los edita** — lo reporta como `Bloqueos` con el diff exacto y el gate lo aplica. El guard exige acotador léxico; una fecha fija no lo es.
+
+### L08 — Correcciones del front COMB tras el code-review de la O1 (añadido en GATE-O1)
+- **Ola:** O2 · **Depende de:** L03 · **Puro:** sí (vitest + build) · **Puerto de test:** 3108 (reservado; no levanta backend)
+- **Territorio:** `src/components/Combustibles/ConsumosGrid.jsx`, `combustibles.css`, `override.js`, `override.test.js`, `ConsumosGrid.test.jsx` (nuevo)
+- **Contratos:** — (consume C4/C5/C6/C11 sin cambiarlos)
+- **Criterios:** CA-32, CA-33, CA-34, CA-35
+- **Tests que corre:** `npx vitest run src/components/Combustibles`, `npm run build`
+- **Riesgo / nota:** creado por el gate O1 con los 8 hallazgos front del `/code-review` (H2, H3, H5, H6, H10, H11, H13, H14 en `GATE-O1.md` §7): Revertir pisaba ediciones ajenas, refetch en vuelo, override 0 encendía Guardar, medianoche, apilamiento y recorte del popover, toast en `sin_cambios`, banderín tabulable. Disjunto de L04/L05/L06 (solo `src/components/Combustibles/**`). No bloquea a L07 más que por el gate O2.
 
 ### L07 — Docs + cleanup
 - **Ola:** O3 · **Depende de:** L04, L05, L06 · **Puro:** sí · **Puerto de test:** 3107 (no aplica)
@@ -94,3 +102,12 @@ días** (backfill dev) que sigue viva durante el gate O2 y la O3: no bloquea nad
 - Calibrador: L02 fija el patrón "COMB en `TEST_PLANTA`" que L06 replica; L01 fija `planta_id` en
   `scrapeDia` que L04/L06 consumen.
 - Sin migración ni cambio cross-repo: no hay pasos previos en el umbrella.
+
+## Enmiendas del gate O1 (2026-08-26)
+- **L08 nuevo en O2** (corrección front, puro): los 8 hallazgos de UI del `/code-review` de la O1
+  no son de archivos compartidos, así que van en lote propio, no en el gate.
+- **L06 gana `server/tests/sis_concurrencia.test.js`** (H1, alta): el test escribe GEC32 en
+  `2026-04-17` y el backfill de L05 poblará esa fecha en la misma ola.
+- **L04 gana `server/tests/sis_endpoints.test.js`** y CA-36 (conservar `detalle` al vaciar sin la
+  clave; retirar `resolverSistemaId` del router, muerto tras D2).
+- Reparto y camino crítico sin cambios (`L02 → L04 → L07 → cierre`). O2 queda con 4 lotes.
