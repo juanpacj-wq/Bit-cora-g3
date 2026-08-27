@@ -24,6 +24,9 @@ import {
   reconciliarBuffer,
   calcularDiff,
   celdaEquivalente,
+  coordenadasEditadas,
+  hayEdicion,
+  clon,
   ladoPopover,
 } from './override.js';
 
@@ -603,5 +606,252 @@ describe('ladoPopover · lo pegajoso no es espacio libre (L11, CA-51)', () => {
     const CONT_BAJO = { top: 100, bottom: 260, left: 0, right: 1000 };
     expect(ladoPopover({ banderin: banderin(180, 40), contenedor: CONT_BAJO, margenArriba: 160 }))
       .toEqual({ arriba: false, izq: false });
+  });
+});
+
+// ── L12 · CA-55 · la tabla de casos de `celdaEquivalente` ───────────────────────────────────────
+
+// H72: `null`, `undefined`, `''` y `0` son CUATRO formas y el predicado las mezclaba de a pares en
+// las dos direcciones equivocadas — `Number()` fundía `null` con `0`, `??` separaba `''` de `null`—.
+// Como es la ÚNICA definición de "esta celda cambió", cada error se propaga a la vez al botón
+// Guardar, a la gavela, al `beforeunload` y al cuerpo del POST. Por eso el veredicto de CADA
+// combinación queda escrito acá y no en prosa: la tabla es el contrato.
+const AUSENTE = Symbol('clave ausente');
+
+// Cada forma con la CLASE a la que pertenece. Dos formas de la misma clase son equivalentes; dos de
+// clases distintas, no. Las tres formas vacías son una sola cosa ("esta celda no lleva nada"); el 0
+// es un valor real —el override 0 de C6— y no una ausencia.
+const FORMAS_CANTIDAD = [
+  ['ausente', AUSENTE, 'sin cantidad'],
+  ['null', null, 'sin cantidad'],
+  ["''", '', 'sin cantidad'],
+  ['0', 0, 'cero'],
+  ['20', 20, 'veinte'],
+];
+
+// `detalle` no tiene equivalente del 0: o hay comentario o no lo hay.
+const FORMAS_DETALLE = [
+  ['ausente', AUSENTE, 'sin comentario'],
+  ['null', null, 'sin comentario'],
+  ["''", '', 'sin comentario'],
+  ["'Tolva atascada'", 'Tolva atascada', 'con comentario'],
+];
+
+function conCampo(campo, forma) {
+  return forma === AUSENTE ? {} : { [campo]: forma };
+}
+
+function tabla(formas, campo) {
+  const filas = [];
+  for (const [nb, vb, clb] of formas) {
+    for (const [ns, vs, cls] of formas) {
+      filas.push({ campo, nb, vb, ns, vs, esperado: clb === cls });
+    }
+  }
+  return filas;
+}
+
+describe('celdaEquivalente · tabla de casos (L12, CA-55)', () => {
+  // 5 × 5: la cantidad, con el detalle ausente en los dos lados para que no interfiera.
+  it.each(tabla(FORMAS_CANTIDAD, 'cantidad'))(
+    'cantidad · buffer $nb vs snapshot $ns → $esperado',
+    ({ vb, vs, esperado }) => {
+      expect(celdaEquivalente(conCampo('cantidad', vb), conCampo('cantidad', vs))).toBe(esperado);
+    },
+  );
+
+  // 4 × 4: el detalle, con la MISMA cantidad en los dos lados para que no interfiera.
+  it.each(tabla(FORMAS_DETALLE, 'detalle'))(
+    'detalle · buffer $nb vs snapshot $ns → $esperado',
+    ({ vb, vs, esperado }) => {
+      const b = { cantidad: 20, ...conCampo('detalle', vb) };
+      const s = { cantidad: 20, ...conCampo('detalle', vs) };
+      expect(celdaEquivalente(b, s)).toBe(esperado);
+    },
+  );
+
+  it('el daño de H72 en una línea: un 0 tecleado sobre una celda sin cantidad SÍ es un cambio', () => {
+    // Con `Number()` esto daba `true` y la edición se descartaba en silencio: no viajaba en el POST
+    // y el operador no tenía cómo enterarse.
+    expect(celdaEquivalente({ cantidad: 0 }, { cantidad: null })).toBe(false);
+  });
+
+  it('el otro daño de H72: un `""` del server contra un `null` del buffer NO deja la celda marcada', () => {
+    // Con `??` esto daba `false` y la celda quedaba pendiente para siempre, reescribiéndose sola en
+    // cada Guardar.
+    expect(celdaEquivalente({ cantidad: 20, detalle: null }, { cantidad: 20, detalle: '' })).toBe(true);
+  });
+
+  it('un texto que no parsea cuenta como "sin cantidad", no como un valor propio', () => {
+    // Es lo que entrega un <input type=number> con basura adentro (`parseFloat` → NaN). Tratarlo
+    // como número lo haría distinto de sí mismo y la celda quedaría marcada para siempre.
+    expect(celdaEquivalente({ cantidad: NaN }, { cantidad: null })).toBe(true);
+    expect(celdaEquivalente({ cantidad: NaN }, { cantidad: NaN })).toBe(true);
+    expect(celdaEquivalente({ cantidad: NaN }, { cantidad: 0 })).toBe(false);
+  });
+
+  it('sigue sin distinguir el número del string: el driver puede mandar el DECIMAL como texto', () => {
+    expect(celdaEquivalente({ cantidad: 20 }, { cantidad: '20' })).toBe(true);
+    expect(celdaEquivalente({ cantidad: 20 }, { cantidad: '20.000' })).toBe(true);
+    expect(celdaEquivalente({ cantidad: 0 }, { cantidad: '0' })).toBe(true);
+  });
+
+  it('el comentario se compara tal cual: los espacios no se recortan', () => {
+    expect(celdaEquivalente({ cantidad: 20, detalle: ' Nota' }, { cantidad: 20, detalle: 'Nota' }))
+      .toBe(false);
+  });
+});
+
+// ── L12 · CA-56/CA-57 · la pertenencia se DERIVA, no se acumula ────────────────────────────────
+
+describe('coordenadasEditadas (L12, CA-56)', () => {
+  // Snapshot de referencia: 3/1 = 20 y 1/9 = 12.
+  const snap = () => ({ 3: { 1: { cantidad: 20, detalle: null } }, 1: { 9: { cantidad: 12, detalle: null } } });
+
+  it('sin diferencias no hay nada pendiente', () => {
+    expect([...coordenadasEditadas(snap(), snap())]).toEqual([]);
+  });
+
+  it('una celda tecleada aparece; las demás no', () => {
+    const b = snap();
+    b[3][1] = { cantidad: 25, detalle: null };
+    expect([...coordenadasEditadas(b, snap())]).toEqual(['3|1']);
+  });
+
+  it('una celda que el operador VACIÓ aparece: quien se acuerda de que existía es el snapshot', () => {
+    const b = snap();
+    delete b[3][1];
+    expect([...coordenadasEditadas(b, snap())]).toEqual(['3|1']);
+  });
+
+  it('una celda que nunca existió en ninguno de los dos lados NO aparece', () => {
+    const b = snap();
+    const s = snap();
+    b[7] = {};
+    s[7] = {};
+    expect([...coordenadasEditadas(b, s)]).toEqual([]);
+  });
+
+  it('una celda nueva del operador aparece aunque el snapshot no tenga la fila', () => {
+    const b = snap();
+    b[7] = { 2: { cantidad: 4 } };
+    expect([...coordenadasEditadas(b, snap())]).toEqual(['7|2']);
+  });
+
+  it('lo que el SERVER cambió no aparece si el buffer ya lo trae igual (la invariante de la grilla)', () => {
+    // Es el caso de H65 después de la reconciliación: el SIS subió 3/1 a 24 y la reconciliación lo
+    // metió en el buffer, así que los dos lados dicen lo mismo y no queda nada pendiente.
+    const s = snap();
+    s[3][1] = { cantidad: 24, detalle: null };
+    const b = clon(s);
+    expect([...coordenadasEditadas(b, s)]).toEqual([]);
+  });
+
+  it('no muta ni el buffer ni el snapshot', () => {
+    const b = Object.freeze({ 3: Object.freeze({ 1: Object.freeze({ cantidad: 25 }) }) });
+    const s = Object.freeze({ 3: Object.freeze({ 1: Object.freeze({ cantidad: 20 }) }) });
+    expect([...coordenadasEditadas(b, s)]).toEqual(['3|1']);
+    expect(b[3][1].cantidad).toBe(25);
+    expect(s[3][1].cantidad).toBe(20);
+  });
+
+  it('tolera entradas ausentes (primer render: los dos vacíos)', () => {
+    expect([...coordenadasEditadas(undefined, undefined)]).toEqual([]);
+    expect([...coordenadasEditadas({}, {})]).toEqual([]);
+  });
+});
+
+describe('hayEdicion (L12, CA-57)', () => {
+  // H66: el atasco nace de que "sucio" y "qué mandar" se respondan por caminos distintos. Acá se
+  // fija la propiedad que lo hace imposible, sobre una batería de estados.
+  const ESTADOS = [
+    ['los dos vacíos', {}, {}],
+    ['iguales', { 3: { 1: { cantidad: 20 } } }, { 3: { 1: { cantidad: 20 } } }],
+    ['una cantidad distinta', { 3: { 1: { cantidad: 25 } } }, { 3: { 1: { cantidad: 20 } } }],
+    ['una celda vaciada', {}, { 3: { 1: { cantidad: 20 } } }],
+    ['una celda nueva', { 7: { 2: { cantidad: 4 } } }, {}],
+    ['solo cambió el detalle', { 3: { 1: { cantidad: 20, detalle: 'Nota' } } }, { 3: { 1: { cantidad: 20 } } }],
+    ['solo cambió la metadata del server', { 3: { 1: { cantidad: 20 } } }, { 3: { 1: { cantidad: 20, modificado_en: 'X', valor_sis: 9 } } }],
+    ['un 0 sobre una celda sin cantidad', { 3: { 1: { cantidad: 0 } } }, { 3: { 1: { cantidad: null } } }],
+    ['un "" del server contra un null del buffer', { 3: { 1: { cantidad: 20, detalle: null } } }, { 3: { 1: { cantidad: 20, detalle: '' } } }],
+  ];
+
+  it.each(ESTADOS)('%s: hayEdicion dice exactamente lo mismo que el diff', (_titulo, b, s) => {
+    const diff = calcularDiff(b, s, coordenadasEditadas(b, s));
+    expect(hayEdicion(b, s)).toBe(diff.length > 0);
+  });
+
+  it('no puede existir "Guardar encendido y nada que mandar" (H66 en una línea)', () => {
+    for (const [, b, s] of ESTADOS) {
+      const encendido = hayEdicion(b, s);
+      const hayQueMandar = calcularDiff(b, s, coordenadasEditadas(b, s)).length > 0;
+      expect(encendido && !hayQueMandar).toBe(false);
+    }
+  });
+
+  it('no muta sus entradas', () => {
+    const b = Object.freeze({ 3: Object.freeze({ 1: Object.freeze({ cantidad: 25 }) }) });
+    const s = Object.freeze({ 3: Object.freeze({ 1: Object.freeze({ cantidad: 20 }) }) });
+    expect(hayEdicion(b, s)).toBe(true);
+    expect(hayEdicion(b, b)).toBe(false);
+  });
+});
+
+// ── L12 · CA-58 · una sola función de clonado, y funciones repetibles ───────────────────────────
+
+describe('clon (L12, CA-58)', () => {
+  it('es un clon PROFUNDO: no comparte ninguna referencia con el original', () => {
+    const original = { 3: { 1: { cantidad: 20, detalle: 'Nota' } } };
+    const copia = clon(original);
+    expect(copia).toEqual(original);
+    expect(copia[3]).not.toBe(original[3]);
+    expect(copia[3][1]).not.toBe(original[3][1]);
+    copia[3][1].cantidad = 99;
+    expect(original[3][1].cantidad).toBe(20);
+  });
+
+  it('clona el vacío sin romperse', () => {
+    expect(clon({})).toEqual({});
+  });
+});
+
+describe('repetir una llamada da el mismo resultado (L12, CA-58)', () => {
+  // React puede invocar un actualizador de estado más de una vez desde la MISMA base (modo
+  // estricto, camino de estado ansioso). El actualizador de `setBuffer` de la grilla es hoy una
+  // llamada a estas dos funciones, así que la propiedad que lo protege se fija acá: mismas
+  // entradas, mismo resultado, y ninguna entrada tocada.
+  const bufferPrev = () => ({ 3: { 1: { cantidad: 25, detalle: null } }, 5: { 1: { cantidad: 9 } } });
+  const snapPrev = () => ({ 3: { 1: { cantidad: 20, detalle: null } } });
+  const snapNuevo = () => ({ 3: { 1: { cantidad: 30, detalle: null } }, 8: { 2: { cantidad: 1 } } });
+
+  it('reconciliarBuffer llamada dos veces desde la misma base da lo mismo', () => {
+    // Las MISMAS entradas en las dos llamadas, no copias: si la función mutara alguna, la segunda
+    // llamada estaría partiendo de otra base y ahí es donde una repetición de React cambia de
+    // resultado. Es la propiedad, no el síntoma.
+    const base = bufferPrev();
+    const nuevo = snapNuevo();
+    const editadas = coordenadasEditadas(base, snapPrev());
+    const a = reconciliarBuffer(base, nuevo, editadas);
+    const b = reconciliarBuffer(base, nuevo, editadas);
+    expect(a).toEqual(b);
+    expect(a).not.toBe(nuevo);                // el resultado no ES el snapshot que recibió
+    expect(nuevo).toEqual(snapNuevo());       // …y ese snapshot quedó intacto
+    expect(base).toEqual(bufferPrev());       // la base también
+  });
+
+  it('coordenadasEditadas llamada dos veces da el mismo conjunto', () => {
+    const base = bufferPrev();
+    expect([...coordenadasEditadas(base, snapPrev())].sort())
+      .toEqual([...coordenadasEditadas(base, snapPrev())].sort());
+  });
+
+  it('el resultado de reconciliar contra el snapshot VIEJO deja pendiente solo lo del operador', () => {
+    // 3/1 lo tocó el operador (25 sobre 20) y se conserva; 8/2 lo trae el server y se adopta;
+    // 5/1 es una celda nueva del operador y sobrevive.
+    const base = bufferPrev();
+    const out = reconciliarBuffer(base, snapNuevo(), coordenadasEditadas(base, snapPrev()));
+    expect(out[3][1].cantidad).toBe(25);
+    expect(out[8][2].cantidad).toBe(1);
+    expect(out[5][1].cantidad).toBe(9);
   });
 });

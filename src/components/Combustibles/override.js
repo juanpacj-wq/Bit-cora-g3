@@ -112,7 +112,7 @@ export function esVacioCantidad(cantidad) {
 // dejaban de coincidir por un cambio que no cambia nada, y eso encendía Guardar, arrancaba la
 // gavela y armaba el `beforeunload` para terminar en "Guardado: 0 nuevos, 0 actualizados".
 // Cuando el snapshot ya está en 0, el 0 tecleado debe dejar el buffer igual al snapshot — y con
-// eso la coordenada sale del conjunto de editadas (L11/H50) y no queda nada que guardar.
+// eso la celda queda equivalente a la del server (L11/H50, L12/H65) y no queda nada que guardar.
 export function esCeroNoOp(cantidad, celdaSnap) {
   if (!esVacioCantidad(cantidad)) return false;
   const c = celdaSnap?.cantidad;
@@ -127,6 +127,16 @@ export function claveCelda(periodo, combustibleId) {
   return `${periodo ?? ''}|${combustibleId ?? ''}`;
 }
 
+// D-061 L12 (H73/CA-58): el único clon profundo de la pantalla. El componente tenía su propio
+// `deepClone` con este mismo cuerpo; L11 retiró la justificación que las mantenía separadas (la
+// comparación por `JSON.stringify` que dependía del orden de claves) y quedaron dos copias sin
+// dueño. Son estructuras JSON puras —periodo → combustible → celda—, así que `JSON.parse(
+// JSON.stringify(x))` alcanza y además garantiza lo único que importa acá: que el resultado no
+// comparta ninguna referencia con el snapshot ni con el buffer previo.
+export function clon(x) {
+  return JSON.parse(JSON.stringify(x));
+}
+
 // D-061 L09 (H24/CA-37): mezcla el snapshot recién leído con lo que el operador tiene a medias.
 //
 // Es la pieza que le faltaba al refetch preservado de L08. Aquel conservaba el buffer ENTERO
@@ -137,6 +147,13 @@ export function claveCelda(periodo, combustibleId) {
 //
 // "Tocó" incluye VACIAR: si la clave está en `editadas` y no está en el buffer, la celda tiene que
 // desaparecer del resultado aunque el server siga trayéndola — si no, el vaciado se perdería solo.
+//
+// D-061 L12 (H65/CA-56): `editadas` tiene que venir derivado contra el snapshot VIEJO
+// (`coordenadasEditadas(bufferPrev, snapshotViejo)`), que es contra el que el operador editó.
+// Derivarlo contra `snapshotNuevo` haría que una celda que el SIS acaba de cambiar pareciera una
+// edición del operador y se quedaría anclada al buffer viejo — H24 otra vez, por la puerta de al
+// lado. Esta función es, además, la razón por la que la pertenencia se puede derivar: al sembrar el
+// resultado desde el snapshot nuevo, deja el buffer difiriendo SOLO donde el operador escribió.
 export function reconciliarBuffer(bufferPrev, snapshotNuevo, editadas) {
   const out = clon(snapshotNuevo ?? {});
   for (const clave of editadas ?? []) {
@@ -167,11 +184,91 @@ export function reconciliarBuffer(bufferPrev, snapshotNuevo, editadas) {
 // vuelve con `modificado_en`/`valor_sis`/`es_override` frescos de una celda editada no es un cambio
 // del operador. Dos celdas ausentes son equivalentes (`!b && !s`): teclear y deshacer sobre una
 // celda que el server no tiene no deja nada que mandar.
+//
+// D-061 L12 (H72/CA-55): los dos lados se normalizan ANTES de compararse. Cada campo tiene cuatro
+// formas posibles y hasta acá se mezclaban de a pares, en las dos direcciones equivocadas:
+//   - `Number()` sobre `cantidad` fundía `null` con `0` (`Number(null) === 0`), así que una celda
+//     del snapshot sin cantidad se declaraba igual a un `0` del buffer y la edición se descartaba
+//     en silencio: no aparecía en el POST y el operador no se enteraba.
+//   - `?? null` sobre `detalle` dejaba `''` y `null` SEPARADOS, así que un `''` del server contra un
+//     `null` del buffer marcaba la celda para siempre y la reescribía en cada Guardar.
+// Como este predicado gobierna a la vez el botón Guardar, la gavela, el `beforeunload` y el cuerpo
+// del POST, un error de coerción acá se propaga a los cuatro de una sola vez.
 export function celdaEquivalente(celdaBuffer, celdaSnap) {
   if (!celdaBuffer && !celdaSnap) return true;
   if (!celdaBuffer || !celdaSnap) return false;
-  return Number(celdaBuffer.cantidad) === Number(celdaSnap.cantidad)
-    && (celdaBuffer.detalle ?? null) === (celdaSnap.detalle ?? null);
+  return cantidadNormalizada(celdaBuffer.cantidad) === cantidadNormalizada(celdaSnap.cantidad)
+    && detalleNormalizado(celdaBuffer.detalle) === detalleNormalizado(celdaSnap.detalle);
+}
+
+// D-061 L12 (H72/CA-55): las TRES formas de "esta celda no lleva cantidad" —clave ausente, `null` y
+// cadena vacía— son una sola, y `0` NO es una de ellas: un cero es el "override 0" de C6, un valor
+// que el operador puso a propósito y que el server conserva. Un texto que no parsea (`NaN`) también
+// cuenta como ausencia, porque es lo que entrega un `<input type=number>` con basura adentro y
+// tratarlo como número lo haría distinto de sí mismo.
+//
+// Lo que NO se normaliza es el número: `'20'` y `20` son el mismo valor porque el driver de MSSQL
+// puede entregar un DECIMAL como texto (el mismo motivo por el que `mapCelda` pasa los dos lados de
+// `es_override` por `Number`).
+function cantidadNormalizada(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isNaN(n) ? null : n;
+}
+
+// D-061 L12 (H72/CA-55): las tres formas de "esta celda no lleva comentario" —clave ausente, `null`
+// y cadena vacía— son una sola. El buffer no siempre trae la clave (una celda nueva nace sin ella)
+// y el server puede tener `''` donde el front escribió `null`: sin unificarlas, esa celda queda
+// marcada como editada para siempre. Cualquier otro texto se compara tal cual, sin recortar
+// espacios: un comentario que empieza con un espacio sigue siendo distinto de uno que no.
+function detalleNormalizado(v) {
+  if (v === null || v === undefined || v === '') return null;
+  return v;
+}
+
+// D-061 L12 (H65/CA-56): QUÉ COORDENADAS TIENE EL OPERADOR PENDIENTES, derivado del estado.
+//
+// Hasta la O4 esto era un conjunto que la grilla acumulaba por eventos: `setCelda` daba de alta y
+// de baja, y los demás caminos lo vaciaban. Un conjunto así solo es correcto si TODO camino que
+// mueve el mundo se acuerda de depurarlo, y tres olas seguidas encontraron uno que no lo hacía
+// (H24 → H50 → H65). Acá la pertenencia no se acumula: se calcula, y por eso no puede quedar vieja.
+//
+// La definición es una sola línea: una coordenada está pendiente si y solo si su celda del buffer
+// NO es equivalente a la del snapshot contra el que se editó. Que eso alcance depende de una
+// invariante que sostiene el componente y que es la razón de ser de `reconciliarBuffer`: **el
+// buffer solo puede diferir del snapshot donde el operador escribió**. Todo lo que entra al buffer
+// entra por `setCelda` (el operador) o por una reconciliación sembrada desde el snapshot (el
+// server), así que una escritura del SIS que la grilla haya leído aparece en los dos lados a la vez
+// y no produce diferencia. Sin esa invariante, comparar los dos mandaría al POST lo que el SIS
+// escribió por debajo — que es exactamente H24, y por lo que L09 introdujo el conjunto explícito.
+//
+// El "vaciar" del operador (C6) no necesita memoria aparte: una celda ausente del buffer que el
+// snapshot SÍ tiene es un vaciado pendiente, y una celda ausente de los dos lados no es nada. Quien
+// se acuerda de que la celda existía es el snapshot, no el conjunto.
+//
+// OJO con el marco de referencia: cuando entra un snapshot nuevo hay que derivar contra el VIEJO,
+// que es contra el que el operador editó. Derivar contra el nuevo confundiría "lo cambió el
+// operador" con "lo cambió el server", que es de donde salió H24.
+export function coordenadasEditadas(buffer, snapshot) {
+  const out = new Set();
+  recorrerCoordenadas(buffer, snapshot, (clave, b, s) => {
+    if (!celdaEquivalente(b, s)) out.add(clave);
+    return false;
+  });
+  return out;
+}
+
+// D-061 L12 (H66/H74 · CA-57): ¿hay algo sin guardar? Misma definición que `coordenadasEditadas` —
+// no una parecida—, pero corta en la primera coordenada que difiere.
+//
+// Antes esto se respondía armando el diff entero y ORDENÁNDOLO para mirarle el largo, en cada tecla
+// (H74). Y sobre todo: se respondía leyendo un conjunto mutable que el memo del componente no podía
+// ver cambiar, así que dependía de una invariante escrita en un comentario ("toda mutación del
+// conjunto va acompañada de un `setBuffer`") que un solo camino incumplía (H66). Derivado de
+// `(buffer, snapshot)` no hay invariante que recordar: las mismas dos entradas dan la misma
+// respuesta que el diff, siempre.
+export function hayEdicion(buffer, snapshot) {
+  return recorrerCoordenadas(buffer, snapshot, (_clave, b, s) => !celdaEquivalente(b, s));
 }
 
 // D-061 L09 (H24/CA-37): qué celdas van en el body del POST. Recorre `editadas`, NO la unión de
@@ -179,6 +276,10 @@ export function celdaEquivalente(celdaBuffer, celdaSnap) {
 // cuando el SIS la cambió por debajo entre el GET y el Guardar. Ese era el camino por el que un
 // Guardar inocente borraba —o convertía en override 0 a nombre del operador— una lectura recién
 // escrita, que la ownership de D-029 ya no repone.
+//
+// D-061 L12: el conjunto que recibe ya no se acumula, se deriva (`coordenadasEditadas`). La firma
+// no cambia: sigue tomándolo por parámetro para poder probarse con conjuntos armados a mano, y para
+// que el componente lo calcule UNA vez por Guardar en vez de una por tecla.
 //
 // Las tres formas del diff se conservan tal cual las lee el backend (C6):
 //   solo en snapshot ⇒ `cantidad: null`  (vaciar: override 0 si hay lectura SIS, DELETE si no)
@@ -267,12 +368,23 @@ function partesClave(clave) {
   return { p: clave.slice(0, i), cid: clave.slice(i + 1) };
 }
 
-// Clon por JSON, igual que el de la grilla. Ya no hay ninguna comparación de `JSON.stringify` que
-// dependa del orden de claves (L11/H52 la retiró: "sucio" sale de `calcularDiff`); se conserva
-// porque es un clon profundo de estructuras JSON puras, sin referencias compartidas con el
-// snapshot ni con el buffer previo.
-function clon(x) {
-  return JSON.parse(JSON.stringify(x));
+// Recorre la UNIÓN de coordenadas de `buffer` y `snapshot` —periodo por periodo, combustible por
+// combustible— y llama a `fn(clave, celdaBuffer, celdaSnap)` en cada una. Si `fn` devuelve `true`
+// corta ahí y el recorrido devuelve `true`; si termina sin que nadie corte, devuelve `false`.
+//
+// La unión y no solo las claves del buffer: una celda que el operador vació desaparece del buffer y
+// sigue estando en el snapshot, y ese vaciado es una edición pendiente que tiene que viajar (C6).
+function recorrerCoordenadas(buffer, snapshot, fn) {
+  const b = buffer ?? {};
+  const s = snapshot ?? {};
+  for (const p of new Set([...Object.keys(b), ...Object.keys(s)])) {
+    const filaB = b[p] ?? {};
+    const filaS = s[p] ?? {};
+    for (const cid of new Set([...Object.keys(filaB), ...Object.keys(filaS)])) {
+      if (fn(claveCelda(p, cid), filaB[cid], filaS[cid])) return true;
+    }
+  }
+  return false;
 }
 
 // Partes de fecha/hora en Bogotá con `timeZone` explícito (convención de TZ del workspace: la BD

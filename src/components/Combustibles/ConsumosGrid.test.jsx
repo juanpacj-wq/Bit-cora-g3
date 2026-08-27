@@ -9,7 +9,7 @@
 // puro podía ver: son de cableado (qué pasa cuando una respuesta llega tarde, cuándo se deshabilita
 // un botón, qué clase lleva un popover). El módulo puro `override.js` ya está probado aparte.
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
-import { createElement as h, act, Profiler } from 'react';
+import { createElement as h, act, Profiler, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import ConsumosGrid from './ConsumosGrid.jsx';
 
@@ -135,11 +135,13 @@ let modoManual;      // cuando es true, cada GET queda en la cola hasta que el t
 let cuerpoGet;       // payload del GET cuando NO es manual
 let cuerpoRevertir;  // respuesta de C5
 let cuerpoGuardar;   // resumen del POST batch
+let fallaGet;        // D-061 L12 (CA-57): status con el que responde el GET cuando debe FALLAR
 
 beforeEach(() => {
   llamadas = [];
   cola = [];
   modoManual = false;
+  fallaGet = null;
   cuerpoGet = payload();
   cuerpoRevertir = { accion: 'restaurado', celda: celda({ cantidad: 17.25 }) };
   cuerpoGuardar = { resumen: { creados: 0, actualizados: 1, eliminados: 0 } };
@@ -155,6 +157,11 @@ beforeEach(() => {
     // separa. Sin esta rama, un Guardar en modo manual quedaría retenido en la cola de los GET.
     if (u.includes('/consumos') && opciones?.method === 'POST') return respuesta(cuerpoGuardar);
     if (u.includes('/consumos')) {
+      // El GET que revienta (CA-57). `api.get` lanza con todo lo que no sea 2xx, así que un 503 es
+      // la forma más fiel de "la BD no está" sin tener que romper `fetch` entero.
+      if (fallaGet) {
+        return respuesta({ error: 'Base de datos no disponible', codigo: 'db_no_disponible' }, 503);
+      }
       if (modoManual) {
         const d = diferido();
         cola.push(d);
@@ -183,7 +190,12 @@ afterEach(() => {
 let toasts;
 const montados = [];      // desmontadores pendientes, vaciados por el afterEach
 
-async function render(props = {}) {
+// D-061 L12 (H68/CA-58): `estricto` monta el árbol dentro de `<StrictMode>`, que es lo que hace que
+// React invoque CADA actualizador de estado dos veces desde la misma base. Es la única forma de
+// probar desde afuera que el actualizador de `setBuffer` es puro: si volviera a tener un efecto
+// secundario adentro (mutar un conjunto, leer un ref que escribe un efecto), la segunda invocación
+// tomaría otra rama y el resultado dejaría de coincidir con el de la corrida normal.
+async function render(props = {}, { estricto = false } = {}) {
   toasts = [];
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -203,11 +215,14 @@ async function render(props = {}) {
   // componente para el test. Un hover que no cambia estado no produce commit y el arreglo consiste
   // justamente en eso.
   const commits = [];
-  const arbol = () => h(
-    Profiler,
-    { id: 'comb', onRender: (_id, fase) => commits.push(fase) },
-    h(ConsumosGrid, actuales),
-  );
+  const arbol = () => {
+    const nodo = h(
+      Profiler,
+      { id: 'comb', onRender: (_id, fase) => commits.push(fase) },
+      h(ConsumosGrid, actuales),
+    );
+    return estricto ? h(StrictMode, null, nodo) : nodo;
+  };
   await act(async () => { root.render(arbol()); });
 
   // Re-render con props nuevas: la grilla es controlada (D-035), así que "cambiar de fecha" desde
@@ -1122,6 +1137,246 @@ describe('CA-51 · el popover volteado no invade la cabecera pegajosa', () => {
 
     await click(wrap.querySelector('.comb-override'));
     expect(td.querySelector('.comb-tip').classList.contains('comb-tip--izq')).toBe(false);
+    teardown();
+  });
+});
+
+// ── CA-56 · lo que el server terminó igualando deja de estar pendiente ──────────────────────────
+
+describe('CA-56 · una celda que el server igualó deja de estar pendiente', () => {
+  // H65, la TERCERA aparición del mismo modo de pérdida de datos (H24 → H50 → H65). Las dos veces
+  // anteriores se cerró la puerta por la que había entrado el review; esta vez la propiedad se hace
+  // cierta por construcción: la pertenencia al conjunto de editadas se DERIVA de comparar el buffer
+  // con el snapshot vigente, así que no puede quedar vieja cuando el mundo cambia por debajo.
+  //
+  // Ojo con el orden de los pasos: el auto-refresco NO sale con la grilla sucia (CA-13), así que
+  // los dos refrescos preservados tienen que salir limpios y el tecleo va DENTRO de cada vuelo. Es
+  // la única forma en que este escenario es alcanzable en la app real.
+
+  it('dos refrescos preservados: gana la lectura fresca del SIS y el Guardar no la pisa', async () => {
+    const { container, teardown } = await render();
+    modoManual = true;
+
+    // ── Refresco #1 · sale con la grilla limpia y el operador teclea X mientras viaja.
+    await latido();
+    await teclear(inputDe(container, 3, 0), '25');        // X: el snapshot la tiene en 20
+    await act(async () => {
+      cola[0].resolver(respuesta(payload({
+        celdas: { 3: { 1: celda({ consumo_id: 301, cantidad: 25 }) } },   // el server YA coincide
+      })));
+    });
+
+    // El operador no tiene nada pendiente en X: tecleó 25 y el server dice 25.
+    expect(inputDe(container, 3, 0).value).toBe('25');
+    expect(guardar(container).disabled).toBe(true);
+    expect(container.querySelector('.comb-gavela')).toBeNull();
+
+    // ── Refresco #2 · la grilla volvió a estar limpia, así que el latido vuelve a salir…
+    await latido();
+    expect(cola).toHaveLength(2);
+    // …y esta vez el operador teclea Y, que es lo que mantiene la edición viva.
+    await teclear(inputDe(container, 5, 0), '9');
+    await act(async () => {
+      cola[1].resolver(respuesta(payload({
+        // El SIS releyó el periodo. 22 y no 30: `cantidad_max` de un alimentador es 25 (D-034)
+        // y una celda fuera de rango apaga Guardar por otro motivo, tapando lo que se mide.
+        celdas: { 3: { 1: celda({ consumo_id: 301, cantidad: 22 }) } },
+      })));
+    });
+    modoManual = false;
+
+    // Tiene que ganar el 30. Antes se veía el 25: X seguía marcada de la vez anterior y la
+    // reconciliación la restauraba desde el buffer viejo encima de la lectura nueva.
+    expect(inputDe(container, 3, 0).value).toBe('22');
+    // Y sobre todo: el 25 no puede viajar en el POST. El backend lo escribiría a nombre del
+    // operador y la ownership de D-029 impediría que el scraper repusiera el 30.
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 5, combustible_id: 1, cantidad: 9, detalle: null },
+    ]);
+    teardown();
+  });
+
+  it('el vaciado pendiente SÍ sobrevive al refresco: no es "esta celda nunca existió"', async () => {
+    // La otra mitad de la derivación, y lo único que el conjunto explícito parecía aportar: una
+    // celda ausente del buffer que el snapshot SÍ tiene es un "vaciar" de C6, no una celda que no
+    // existe. Quien se acuerda de que existía es el snapshot, no un conjunto aparte.
+    const { container, teardown } = await render();
+
+    modoManual = true;
+    await latido();
+    await teclear(inputDe(container, 3, 0), '');          // vaciar X
+    await act(async () => {
+      cola[0].resolver(respuesta(payload({
+        celdas: { 3: { 1: celda({ consumo_id: 301, cantidad: 22 }) } },   // el SIS la subió a 22
+      })));
+    });
+    modoManual = false;
+
+    expect(inputDe(container, 3, 0).value).toBe('');      // manda el vaciado del operador
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([{ periodo: 3, combustible_id: 1, cantidad: null }]);
+    teardown();
+  });
+
+  it('y si el server tampoco tiene ya esa celda, el vaciado pendiente se evapora solo', async () => {
+    const { container, teardown } = await render();
+
+    modoManual = true;
+    await latido();
+    await teclear(inputDe(container, 3, 0), '');
+    await act(async () => {
+      cola[0].resolver(respuesta(payload({ celdas: {} })));   // la celda ya no está en el server
+    });
+    modoManual = false;
+
+    expect(guardar(container).disabled).toBe(true);       // no queda nada que vaciar
+    teardown();
+  });
+});
+
+// ── CA-57 · Guardar nunca queda encendido sobre un diff vacío ───────────────────────────────────
+
+describe('CA-57 · "sucio" no puede desincronizarse del diff', () => {
+  it('cambiar de fecha con una edición viva y un GET que falla no deja la grilla atascada', async () => {
+    // H66: el efecto de cambio de coordenada vaciaba el conjunto de editadas SIN tocar el buffer,
+    // y `hayCambios` memorizaba sobre `[buffer, snapshot]`. Si ese GET fallaba, el memo no se
+    // recalculaba nunca: Guardar encendido, "Sin cambios para guardar" al pulsarlo, todos los
+    // Revertir apagados y, a los 10 minutos, una gavela anunciando un descarte que no existió.
+    const { container, reprops, teardown } = await render();
+
+    await teclear(inputDe(container, 3, 0), '22');
+    expect(guardar(container).disabled).toBe(false);
+
+    fallaGet = true;
+    await reprops({ fecha: AYER });
+
+    expect(container.querySelector('.comb-state.error')).toBeTruthy();
+    expect(guardar(container).disabled).toBe(true);       // no hay nada de AYER que guardar
+    expect(container.querySelector('.comb-gavela')).toBeNull();
+    expect(revertires(container)).toEqual([]);            // ni banderines de una fecha que no cargó
+    expect(toasts).toEqual([]);
+    teardown();
+  });
+
+  it('la edición de la fecha vieja no se arrastra a la nueva ni cuando la lectura falla', async () => {
+    // Lo que el arreglo NO puede hacer es cambiar el atasco por algo peor: guardar en la fecha nueva
+    // lo que el operador tecleó en la vieja.
+    const { container, reprops, teardown } = await render();
+
+    await teclear(inputDe(container, 3, 0), '22');        // edición de HOY
+    fallaGet = true;
+    await reprops({ fecha: AYER });                       // AYER no carga
+    fallaGet = false;
+    await reprops({ fecha: HOY });                        // y se vuelve a HOY, que sí carga
+
+    expect(guardar(container).disabled).toBe(true);       // la grilla llegó limpia del server
+    expect(inputDe(container, 3, 0).value).toBe('20');    // el 22 se fue con el cambio de fecha
+    await teclear(inputDe(container, 1, 8), '4');
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 1, combustible_id: 9, cantidad: 4, detalle: null },
+    ]);
+    teardown();
+  });
+
+  it('un refresco preservado que falla deja la edición viva y el botón honesto', async () => {
+    // El otro camino por el que puede reventar un GET: el latido del auto-refresco. Acá lo tecleado
+    // SÍ tiene que sobrevivir —es de esta misma fecha— y Guardar tiene que seguir teniendo qué
+    // mandar.
+    const { container, teardown } = await render();
+
+    modoManual = true;
+    await latido();
+    await teclear(inputDe(container, 3, 0), '22');
+    await act(async () => {
+      cola[0].resolver(respuesta({ error: 'Base de datos no disponible' }, 503));
+    });
+    modoManual = false;
+
+    expect(inputDe(container, 3, 0).value).toBe('22');
+    expect(guardar(container).disabled).toBe(false);
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 3, combustible_id: 1, cantidad: 22, detalle: null },
+    ]);
+    teardown();
+  });
+});
+
+// ── CA-58 · el actualizador de setBuffer es puro ────────────────────────────────────────────────
+
+describe('CA-58 · la grilla se comporta igual cuando React repite el actualizador', () => {
+  // Aviso honesto sobre el alcance: `<StrictMode>` invoca cada actualizador dos veces desde la MISMA
+  // base, y eso NO reproduce H68 —que necesita una repetición desde OTRA base—. Lo que este caso
+  // fija es la propiedad que hacía a H68 posible: el actualizador ya no tiene efectos secundarios
+  // adentro (no marca ni desmarca nada, no lee un ref que escriba un efecto), así que repetirlo no
+  // puede cambiar nada. La prueba directa de "misma base ⇒ mismo resultado" vive en
+  // `override.test.js › repetir una llamada da el mismo resultado`, donde es determinista.
+
+  it('las tres ramas del actualizador dan lo mismo bajo StrictMode', async () => {
+    const { container, teardown } = await render({}, { estricto: true });
+
+    await teclear(inputDe(container, 3, 0), '25');        // rama "escribir"
+    expect(guardar(container).disabled).toBe(false);
+    await teclear(inputDe(container, 3, 0), '20');        // vuelve al valor del server
+    expect(guardar(container).disabled).toBe(true);
+    await teclear(inputDe(container, 3, 0), '');          // rama "vaciar"
+    expect(guardar(container).disabled).toBe(false);
+    await teclear(inputDe(container, 3, 0), '20');
+    expect(guardar(container).disabled).toBe(true);
+
+    await teclear(inputDe(container, 7, 2), '4');
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 7, combustible_id: 3, cantidad: 4, detalle: null },
+    ]);
+    teardown();
+  });
+
+  it('la rama del override 0 tampoco cambia de resultado al repetirse', async () => {
+    // Es la rama que más depende de la celda del server (`esCeroNoOp`), o sea la que peor llevaba
+    // leer el snapshot desde adentro del actualizador.
+    cuerpoGet = payload({ celdas: { 1: { 1: celdaOverride({ cantidad: 0 }) } } });
+    const { container, teardown } = await render({}, { estricto: true });
+
+    await teclear(inputDe(container, 1, 0), '0');
+    expect(guardar(container).disabled).toBe(true);
+    expect(container.querySelector('.comb-gavela')).toBeNull();
+    await teclear(inputDe(container, 1, 0), '5');
+    expect(guardar(container).disabled).toBe(false);
+    await teclear(inputDe(container, 1, 0), '0');
+    expect(guardar(container).disabled).toBe(true);
+    teardown();
+  });
+
+  it('el escenario de CA-56, repetido, sigue dando la lectura fresca', async () => {
+    const { container, teardown } = await render({}, { estricto: true });
+    modoManual = true;
+
+    await latido();
+    await teclear(inputDe(container, 3, 0), '25');
+    const primero = cola.length - 1;
+    await act(async () => {
+      cola[primero].resolver(respuesta(payload({
+        celdas: { 3: { 1: celda({ consumo_id: 301, cantidad: 25 }) } },
+      })));
+    });
+    const segundo = cola.length;
+    await latido();
+    await teclear(inputDe(container, 5, 0), '9');
+    await act(async () => {
+      cola[segundo].resolver(respuesta(payload({
+        celdas: { 3: { 1: celda({ consumo_id: 301, cantidad: 22 }) } },
+      })));
+    });
+    modoManual = false;
+
+    expect(inputDe(container, 3, 0).value).toBe('22');
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 5, combustible_id: 1, cantidad: 9, detalle: null },
+    ]);
     teardown();
   });
 });

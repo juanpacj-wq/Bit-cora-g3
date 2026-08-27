@@ -18,7 +18,7 @@ import { HEATMAP_MAX_TON, HEATMAP_MAX_FALLBACK, temaHeatmap, tint } from './colo
 import {
   esOverride, textoOverride, politicaRefresco, restanteGavela, formatoMMSS, textoChipSis, GAVELA_MS,
   claveRefetch, esVacioCantidad, esCeroNoOp,
-  claveCelda, reconciliarBuffer, calcularDiff, celdaEquivalente, ladoPopover,
+  reconciliarBuffer, calcularDiff, coordenadasEditadas, hayEdicion, clon, ladoPopover,
 } from './override';
 import { getTodayBogota } from '../../utils/fecha';
 import './combustibles.css';
@@ -38,6 +38,12 @@ const PERIODOS = Array.from({ length: 24 }, (_, i) => i + 1);
 // medias). 5 min es holgado frente al sweeper del SIS —que escribe la hora cerrada— y no convierte
 // una pestaña abierta todo el turno en polling agresivo contra el server.
 const AUTO_REFRESCO_MS = 5 * 60 * 1000;
+
+// D-061 L12 (H66/CA-57): "todavía no hay datos de esta coordenada". Es UN valor y no un `{}` nuevo
+// cada vez para que volver a él sea un no-op de React (bail-out por identidad) en vez de un render
+// de más, y está congelado porque nadie debe escribirle encima: tanto el buffer como el snapshot
+// arrancan acá y vuelven acá cuando cambia la planta o la fecha.
+const SIN_DATOS = Object.freeze({});
 
 // D-061 L08 (H14/CA-32): cada `accion` que puede devolver C5 tiene su propio texto y su propio
 // tono. `sin_cambios` no es un éxito operativo: no se deshizo nada, y decirlo como tal haría que
@@ -63,8 +69,8 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   const { loading, getConsumos, guardarBatch, revertirCelda } = useCombustibles();
 
   const [catalogo, setCatalogo] = useState([]);
-  const [snapshot, setSnapshot] = useState({});  // shape: { "<periodo>": { "<combustible_id>": { cantidad, detalle, ... } } }
-  const [buffer, setBuffer] = useState({});
+  const [snapshot, setSnapshot] = useState(SIN_DATOS);  // shape: { "<periodo>": { "<combustible_id>": { cantidad, detalle, ... } } }
+  const [buffer, setBuffer] = useState(SIN_DATOS);
   const [error, setError] = useState(null);
   // D-061: estado del scrape SIS del día (`sis_scrape_log`, C4) para el chip de la topbar. Hasta
   // que L02 lo exponga llega `undefined` → el chip dice "sin lectura", que es la verdad.
@@ -103,13 +109,22 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   const refetchSeqRef = useRef(0);
   const claveActualRef = useRef(claveRefetch(plantaId, fecha));
 
-  // D-061 L09 (H24/CA-37) — las coordenadas que el operador tocó desde la última lectura limpia.
-  // Es la única fuente de "qué es un cambio del operador": el buffer solo dice en qué difiere de
-  // lo que el server tiene AHORA, y esa diferencia también la puede producir el SIS escribiendo
-  // por debajo. Se vacía cuando la edición se cierra (guardar, descartar, vencer la gavela) o
-  // cuando se cambia de coordenada. Es un ref y no estado porque nada del render depende de él:
-  // solo lo leen `calcularDiff` (al guardar) y la reconciliación (al volver un refetch).
-  const editadasRef = useRef(new Set());
+  // D-061 L12 (H68/CA-58) — el último snapshot que la grilla ADOPTÓ, y el punto único por el que se
+  // adopta uno. Escribe el estado y el ref en el mismo instante y devuelve el que había.
+  //
+  // Antes el ref lo escribía un efecto posterior al commit, así que quien lo leía dependía del
+  // ORDEN DE LOS COMMITS y no de sus entradas: el actualizador de `setBuffer` podía correr contra un
+  // `snapshotRef.current` distinto según cuándo React decidiera vaciar los efectos. Escribiéndolo
+  // acá, "el snapshot vigente" es un hecho del momento en que se decide, no de cuándo se pinta, y
+  // los dos lectores que quedan —la reconciliación del refetch y `descartar`— ven siempre lo mismo
+  // que el render.
+  const snapshotRef = useRef(snapshot);
+  const adoptarSnapshot = useCallback((celdas) => {
+    const previo = snapshotRef.current;
+    snapshotRef.current = celdas;
+    setSnapshot(celdas);
+    return previo;
+  }, []);
 
   // Lee del server y aplica la respuesta, salvo que haya quedado obsoleta.
   //
@@ -127,38 +142,54 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
       const r = await getConsumos(plantaId, fecha);
       // Obsoleta por adelantamiento (llegó otra lectura después) o por cambio de coordenada.
       if (seq !== refetchSeqRef.current || clave !== claveActualRef.current) return;
+      const celdas = r.celdas || {};
       setError(null);
       setCatalogo(r.catalogo || []);
-      setSnapshot(r.celdas || {});
       setSis(r.sis ?? null);
       // El snapshot y el chip SIS se actualizan siempre: son la verdad del server (de ahí sale el
-      // badge de override) y no pisan nada de lo tecleado.
-      //
+      // badge de override) y no pisan nada de lo tecleado. `snapPrev` es el snapshot contra el que
+      // el operador venía editando, y hay que leerlo ANTES de adoptar el nuevo.
+      const snapPrev = adoptarSnapshot(celdas);
+
       // D-061 L09 (H24): con una edición en curso el buffer NO se conserva entero —eso dejaba lo
       // que el SIS acababa de escribir como "solo en el snapshot", y el Guardar siguiente lo
       // mandaba al POST con `cantidad: null` a nombre del operador—. Se reconcilia celda por
       // celda: entra lo del server, se queda lo tecleado.
-      if (preservarEdicion && hayCambiosRef.current) {
-        setBuffer((b) => reconciliarBuffer(b, r.celdas || {}, editadasRef.current));
+      //
+      // D-061 L12 (H65/CA-56): la reconciliación ya no se condiciona a `hayCambiosRef`. Sin nada
+      // pendiente, `coordenadasEditadas` sale vacío y `reconciliarBuffer` degenera exactamente en
+      // "el buffer pasa a ser el snapshot nuevo", que es lo que hacía la otra rama; con algo
+      // pendiente hace lo suyo. Una rama menos, y de paso se cierra la ventana de microtareas en la
+      // que ese ref —que lo escribe un efecto— todavía decía `false` y una tecla se perdía bajo el
+      // refetch (H-2 de L09). El actualizador queda PURO: solo depende de `b` y de dos valores ya
+      // capturados, así que invocarlo dos veces desde la misma base da el mismo resultado (H68).
+      if (preservarEdicion) {
+        setBuffer((b) => reconciliarBuffer(b, celdas, coordenadasEditadas(b, snapPrev)));
       } else {
-        setBuffer(deepClone(r.celdas || {}));
-        editadasRef.current.clear();
+        setBuffer(clon(celdas));
       }
     } catch (e) {
       if (seq !== refetchSeqRef.current || clave !== claveActualRef.current) return;
       setError(e);
     }
-  }, [plantaId, fecha, getConsumos]);
+  }, [plantaId, fecha, getConsumos, adoptarSnapshot]);
 
   // La clave se refresca en el MISMO efecto que dispara la lectura de la nueva coordenada: así no
   // hay ventana en que `claveActualRef` apunte a la fecha vieja y se descarte la respuesta buena.
-  // Las celdas editadas se olvidan acá y no solo cuando vuelva el GET: son coordenadas de la
-  // planta/fecha que se acaba de dejar y no significan nada en la nueva.
+  //
+  // D-061 L12 (H66/CA-57): y el buffer y el snapshot se vacían JUNTOS, acá mismo. La invariante que
+  // hace derivable "qué está pendiente" es que los dos describen la MISMA coordenada; en cuanto la
+  // coordenada cambia, lo que quedó en pantalla es de otro día y no significa nada. Antes se
+  // limpiaba el conjunto de editadas y se dejaban los dos en pie: si el GET nuevo fallaba, la
+  // pantalla se quedaba con los números de ayer, Guardar encendido y un diff vacío —"Sin cambios
+  // para guardar" en bucle hasta descartar o esperar 10 minutos—. Vaciarlos no es solo cosmético:
+  // impide que una edición de ayer termine en el POST de hoy.
   useEffect(() => {
     claveActualRef.current = claveRefetch(plantaId, fecha);
-    editadasRef.current.clear();
+    adoptarSnapshot(SIN_DATOS);
+    setBuffer(SIN_DATOS);
     refetch();
-  }, [refetch, plantaId, fecha]);
+  }, [refetch, plantaId, fecha, adoptarSnapshot]);
 
   // D-061 L11 (H52/CA-49): "sucio" tiene UNA sola definición, y es la del POST. Antes esto
   // comparaba `JSON.stringify` del buffer entero contra el snapshot —metadata incluida—, mientras
@@ -168,25 +199,28 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   // salía "Sin cambios para guardar" y el operador quedaba atascado hasta descartar o esperar los
   // 10 min de la gavela, que además le anunciaba que "se descartaron cambios sin guardar".
   //
-  // `editadasRef` es un ref y no dispara render por sí solo. Este memo se recalcula igual porque
-  // TODA mutación del conjunto va acompañada de un `setBuffer` en el mismo manejador (`setCelda`,
-  // `descartar`, las dos ramas de `refetch`): esa es la invariante que hay que conservar si mañana
-  // aparece otro camino que toque el conjunto.
-  const hayCambios = useMemo(
-    () => calcularDiff(buffer, snapshot, editadasRef.current).length > 0,
-    [buffer, snapshot]
-  );
+  // D-061 L12 (H66/H74 · CA-57): el memo depende SOLO de sus dos entradas. La versión anterior leía
+  // además el conjunto mutable de editadas y se apoyaba en una invariante que este archivo
+  // declaraba y no cumplía —"toda mutación del conjunto va acompañada de un `setBuffer`"—: el
+  // efecto de cambio de coordenada lo vaciaba sin tocar el buffer, y si el GET siguiente fallaba el
+  // memo no se recalculaba nunca y `hayCambios` quedaba pegado en `true` sobre un conjunto vacío.
+  // Ahora no hay invariante que recordar: `hayEdicion` es la misma definición que usa el diff,
+  // aplicada a las mismas dos estructuras, y corta en la primera diferencia en vez de armar y
+  // ordenar el diff entero en cada tecla (H74).
+  const hayCambios = useMemo(() => hayEdicion(buffer, snapshot), [buffer, snapshot]);
 
   // D-061 — refs para lo que corre FUERA del render (intervalos y el listener de `focus`): un
   // `setInterval` montado una vez se queda con el `refetch`/`hayCambios` del render en que nació y
   // seguiría releyendo la fecha vieja, o pisaría una edición empezada después. Con refs, el timer
   // siempre ve el valor de ahora sin tener que re-montarse en cada tecla.
+  //
+  // D-061 L12 (H68/CA-58): `snapshotRef` ya NO se escribe desde un efecto — lo escribe
+  // `adoptarSnapshot`, en el mismo instante en que se decide el snapshot. Lo que queda acá son los
+  // dos refs que sí son "la foto del último render" para código que corre fuera de él.
   const refetchRef = useRef(refetch);
   const hayCambiosRef = useRef(hayCambios);
-  const snapshotRef = useRef(snapshot);
   useEffect(() => { refetchRef.current = refetch; }, [refetch]);
   useEffect(() => { hayCambiosRef.current = hayCambios; }, [hayCambios]);
-  useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
 
   // D-061 L08 (H6/CA-33) — el día Bogotá es ESTADO, no un valor memorizado por (planta, fecha,
   // hayCambios). Antes, una pestaña abierta que cruzaba las 00:00 se quedaba con el `hoy` del
@@ -233,8 +267,9 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   // Descartar el buffer y volver al último snapshot del server. Lo usan el botón "Descartar" y el
   // vencimiento de la gavela.
   const descartar = useCallback(() => {
-    setBuffer(deepClone(snapshotRef.current));
-    editadasRef.current.clear();
+    // D-061 L12 (H65/CA-56): no hay ningún conjunto que limpiar aparte. Dejar el buffer igual al
+    // snapshot vigente ES no tener nada pendiente, por definición.
+    setBuffer(clon(snapshotRef.current));
     setGavelaInicio(null);
   }, []);
 
@@ -272,23 +307,28 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   }, [hayCambios]);
 
   const setCelda = (periodo, combustibleId, cantidad) => {
-    // D-061 L09 (H24/CA-37): este es el ÚNICO lugar por el que el operador toca el buffer, así que
-    // es el único que da de alta —o de baja— una coordenada como "editada".
-    const clave = claveCelda(periodo, combustibleId);
+    // D-061 L09 (H24/CA-37): este es el ÚNICO lugar por el que el operador toca el buffer. Todo lo
+    // demás que escribe el buffer viene sembrado desde el snapshot, y esa es justamente la
+    // invariante que hace derivable "qué está pendiente" (ver `coordenadasEditadas`).
+    const p = String(periodo);
+    const k = String(combustibleId);
+    // D-061 L12 (H68/CA-58): la celda del server se lee ACÁ, del snapshot de este render, y no
+    // desde un ref adentro del actualizador. React puede invocar un actualizador más de una vez y
+    // desde otra base (modo estricto, camino de estado ansioso): mientras dependa solo de `b` y de
+    // valores ya capturados, repetirlo no puede dar un resultado distinto. Y es lo mismo que el
+    // operador tiene en pantalla, que es contra lo que está editando.
+    const celdaSnap = snapshot[p]?.[k];
     setBuffer((b) => {
       const next = { ...b };
-      const p = String(periodo);
-      const k = String(combustibleId);
       const fila = next[p] ? { ...next[p] } : {};
       // D-061 L08 (H5/CA-34): el snapshot manda. Si el server ya tiene esta celda en 0 (override 0
       // de C6), teclear 0 o vaciarla no es un cambio: se restituye la celda del snapshot tal cual
-      // en vez de borrar la clave del buffer, y con eso la coordenada sale del conjunto de editadas
-      // por la regla de abajo. (L09 restituía un clon por JSON para que el `JSON.stringify` de
+      // en vez de borrar la clave del buffer, y con eso la celda queda equivalente a la del server
+      // y no queda nada pendiente. (L09 restituía un clon por JSON para que el `JSON.stringify` de
       // `hayCambios` volviera a dar false; desde L11 esa comparación ya no existe, pero restituir
       // la celda del server sigue siendo lo correcto: es lo que el server tiene.)
-      const celdaSnap = snapshotRef.current[p]?.[k];
       if (esCeroNoOp(cantidad, celdaSnap)) {
-        fila[k] = deepClone(celdaSnap);
+        fila[k] = clon(celdaSnap);
         next[p] = fila;
       } else if (esVacioCantidad(cantidad)) {
         delete fila[k];
@@ -301,27 +341,20 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
         // `detalle: null` y el backend, en su rama de UPDATE, escribía NULL. Un 18,5 con la nota
         // "Tolva atascada" corregido a 20 se llevaba la nota por delante, con un 200 que decía
         // "1 actualizado". El comentario es de la celda; cambiar la cifra no lo borra.
-        const base = fila[k] || snapshotRef.current[p]?.[k];
+        const base = fila[k] || celdaSnap;
         fila[k] = { ...(base || {}), cantidad };
         next[p] = fila;
       }
-      // D-061 L11 (H50/CA-48): la coordenada entra al conjunto según CÓMO QUEDÓ, no por el mero
-      // hecho de haberla tecleado. L09 la marcaba siempre y nunca la soltaba, con el argumento de
-      // que `calcularDiff` no la emite si no difiere — y eso solo vale mientras el server no la
-      // cambie. Escenario medido: el operador toca 3/1 y la devuelve a su valor original; durante
-      // un GET preservado el SIS relee el periodo y esa celda vuelve con otro número;
-      // `reconciliarBuffer` restaura la vieja porque está marcada, `calcularDiff` la emite porque
-      // ahora sí difiere, y el Guardar escribe el valor viejo encima del fresco a nombre del
-      // operador — con la ownership de D-029 impidiendo que el scraper lo reponga.
+      // D-061 L11 (H50/CA-48) → L12 (H65/CA-56): acá ya no se marca ni se desmarca nada. Que la
+      // celda quede pendiente o no lo dice cómo QUEDÓ frente al snapshot, y eso lo responde
+      // `coordenadasEditadas` cuando alguien pregunta, sobre el estado de ese momento.
       //
-      // La regla de equivalencia es LA MISMA que decide qué viaja en el POST (`celdaEquivalente`),
-      // así que el conjunto y el diff no pueden discrepar. Vaciar una celda que el server tampoco
-      // tiene también desmarca: no hay nada que mandar (dos ausencias son equivalentes, que es lo
-      // que antes escribía a mano `if (!b && !s) continue`). Se decide acá adentro y no antes,
-      // porque el resultado depende de cuál de las tres ramas de arriba corrió. La operación sobre
-      // el Set es idempotente, así que una re-ejecución del actualizador no puede dejarlo a medias.
-      if (celdaEquivalente(next[p]?.[k], celdaSnap)) editadasRef.current.delete(clave);
-      else editadasRef.current.add(clave);
+      // L11 llevaba la decisión adentro de este actualizador porque dependía de cuál de las tres
+      // ramas de arriba había corrido. Funcionaba, pero convertía al actualizador en un efecto
+      // secundario: dos ramas distintas dejaban el conjunto distinto, así que una re-ejecución de
+      // React desde otra base podía tomar la otra rama y la idempotencia de `add`/`delete` no la
+      // cubría (H68). Y sobre todo, el conjunto podía quedar viejo apenas el server cambiara la
+      // celda por debajo (H65): esa era la tercera aparición del mismo modo de pérdida de datos.
       return next;
     });
   };
@@ -352,7 +385,7 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
       // snapshot. La diferencia entre los dos también la produce el SIS escribiendo por debajo
       // durante un refetch, y esas celdas no son del operador: mandarlas al POST las borraba (o
       // las convertía en override 0 a su nombre) y la ownership de D-029 ya no las repone.
-      const celdasDiff = calcularDiff(buffer, snapshot, editadasRef.current);
+      const celdasDiff = calcularDiff(buffer, snapshot, coordenadasEditadas(buffer, snapshot));
       if (celdasDiff.length === 0) {
         showToastRef.current?.('Sin cambios para guardar', 'info');
         return;
@@ -741,8 +774,4 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
       </div>
     </div>
   );
-}
-
-function deepClone(x) {
-  return JSON.parse(JSON.stringify(x));
 }
