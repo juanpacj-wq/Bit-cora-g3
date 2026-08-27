@@ -20,6 +20,10 @@ import {
   claveRefetch,
   esVacioCantidad,
   esCeroNoOp,
+  claveCelda,
+  reconciliarBuffer,
+  calcularDiff,
+  ladoPopover,
 } from './override.js';
 
 // El equipo de dev del que salió esto tiene el sistema en America/Bogota: un helper al que se le
@@ -300,5 +304,203 @@ describe('esCeroNoOp (L08, CA-34)', () => {
     // `calcularDiff` ya compara con Number(); esta guarda no puede ser más estricta que aquella,
     // o una celda en "0" quedaría marcada como cambio para siempre.
     expect(esCeroNoOp(0, { cantidad: '0' })).toBe(true);
+  });
+});
+
+// ── D-061 L09 ───────────────────────────────────────────────────────────────────────────────────
+
+describe('claveCelda (L09, CA-37)', () => {
+  it('distingue coordenadas que se verían iguales concatenadas sin separador', () => {
+    // (periodo 1, combustible 23) y (periodo 12, combustible 3) darían '123' las dos.
+    expect(claveCelda(1, 23)).not.toBe(claveCelda(12, 3));
+  });
+
+  it('no distingue el número del string: el buffer usa claves string y el render pasa números', () => {
+    expect(claveCelda(3, 1)).toBe(claveCelda('3', '1'));
+  });
+});
+
+describe('reconciliarBuffer (L09, CA-37)', () => {
+  const snap = () => ({
+    3: { 1: { cantidad: 20, detalle: null }, 2: { cantidad: 15, detalle: null } },
+    5: { 1: { cantidad: 7, detalle: null } },
+  });
+
+  it('sin nada editado el buffer queda igual al snapshot nuevo', () => {
+    expect(reconciliarBuffer({ 3: { 1: { cantidad: 20 } } }, snap(), new Set())).toEqual(snap());
+  });
+
+  it('la celda tecleada sobrevive y el resto entra desde el server', () => {
+    // El escenario de H24: el operador teclea P3/1 mientras vuela el GET, que trae P5/1 nueva.
+    const buffer = { 3: { 1: { cantidad: 22, detalle: null }, 2: { cantidad: 15, detalle: null } } };
+    const out = reconciliarBuffer(buffer, snap(), new Set(['3|1']));
+    expect(out[3][1].cantidad).toBe(22);          // manda lo tecleado
+    expect(out[5][1].cantidad).toBe(7);           // entra la celda nueva del SIS
+    expect(out[3][2].cantidad).toBe(15);
+  });
+
+  it('una celda que el SIS cambió por debajo se adopta si el operador no la tocó', () => {
+    const buffer = { 3: { 1: { cantidad: 20 }, 2: { cantidad: 15 } } };
+    const nuevo = { 3: { 1: { cantidad: 20 }, 2: { cantidad: 99 } } };
+    expect(reconciliarBuffer(buffer, nuevo, new Set(['3|1']))[3][2].cantidad).toBe(99);
+  });
+
+  it('vaciar es tocar: la celda no vuelve aunque el server siga trayéndola', () => {
+    // Sin esto, el vaciado a medias se perdería solo con el primer latido del auto-refresco.
+    const out = reconciliarBuffer({}, snap(), new Set(['3|1']));
+    expect(out[3][1]).toBeUndefined();
+    expect(out[3][2].cantidad).toBe(15);          // la vecina de la misma fila queda intacta
+  });
+
+  it('si se vació la única celda de la fila, la fila desaparece (no queda un objeto vacío)', () => {
+    const out = reconciliarBuffer({}, snap(), new Set(['5|1']));
+    expect(out[5]).toBeUndefined();
+  });
+
+  it('una celda tecleada en una fila que el server no tiene se conserva', () => {
+    const buffer = { 9: { 4: { cantidad: 3 } } };
+    expect(reconciliarBuffer(buffer, snap(), new Set(['9|4']))[9][4].cantidad).toBe(3);
+  });
+
+  it('no comparte referencias con el snapshot ni con el buffer previo', () => {
+    // El buffer se muta por copia en `setCelda`; compartir un objeto con el snapshot haría que
+    // `hayCambios` (que compara JSON) dejara de ver cambios reales.
+    const s = snap();
+    const buffer = { 3: { 1: { cantidad: 22 } } };
+    const out = reconciliarBuffer(buffer, s, new Set(['3|1']));
+    expect(out[5][1]).not.toBe(s[5][1]);
+    expect(out[3][1]).not.toBe(buffer[3][1]);
+  });
+
+  it('tolera claves basura en el conjunto sin romper la reconciliación', () => {
+    expect(reconciliarBuffer({}, snap(), new Set(['', '|1', 'basura', null]))).toEqual(snap());
+  });
+});
+
+describe('calcularDiff (L09, CA-37)', () => {
+  const snap = () => ({
+    3: { 1: { cantidad: 20, detalle: null } },
+    5: { 1: { cantidad: 7, detalle: null } },
+  });
+
+  it('solo emite celdas del conjunto de editadas', () => {
+    // El corazón de CA-37: P5 la creó el SIS durante el refetch y difiere del buffer, pero el
+    // operador nunca la tocó. Emitirla la borraría (o la volvería override 0 a su nombre).
+    const buffer = { 3: { 1: { cantidad: 22, detalle: null } } };
+    expect(calcularDiff(buffer, snap(), new Set(['3|1']))).toEqual([
+      { periodo: 3, combustible_id: 1, cantidad: 22, detalle: null },
+    ]);
+  });
+
+  it('sin celdas editadas no hay nada que mandar, por mucho que difieran buffer y snapshot', () => {
+    expect(calcularDiff({}, snap(), new Set())).toEqual([]);
+    expect(calcularDiff({}, snap(), undefined)).toEqual([]);
+  });
+
+  it('una celda editada que quedó igual al snapshot no viaja', () => {
+    const buffer = { 3: { 1: { cantidad: 20, detalle: null } } };
+    expect(calcularDiff(buffer, snap(), new Set(['3|1']))).toEqual([]);
+  });
+
+  it('vaciar una celda editada manda cantidad null (el "vaciar" de C6)', () => {
+    expect(calcularDiff({}, snap(), new Set(['3|1']))).toEqual([
+      { periodo: 3, combustible_id: 1, cantidad: null },
+    ]);
+  });
+
+  it('una celda nueva viaja como INSERT con su detalle', () => {
+    const buffer = { 9: { 4: { cantidad: 3, detalle: 'Arranque' } } };
+    expect(calcularDiff(buffer, snap(), new Set(['9|4']))).toEqual([
+      { periodo: 9, combustible_id: 4, cantidad: 3, detalle: 'Arranque' },
+    ]);
+  });
+
+  it('cambiar solo el detalle también es un cambio', () => {
+    const buffer = { 3: { 1: { cantidad: 20, detalle: 'Tolva atascada' } } };
+    expect(calcularDiff(buffer, snap(), new Set(['3|1']))).toEqual([
+      { periodo: 3, combustible_id: 1, cantidad: 20, detalle: 'Tolva atascada' },
+    ]);
+  });
+
+  it('el detalle de la celda viaja aunque solo haya cambiado la cantidad (H25)', () => {
+    // La otra mitad de CA-38: si el diff mandara `detalle: null` acá, el backend borraría la nota
+    // en su rama de UPDATE.
+    const snapConNota = { 3: { 1: { cantidad: 18.5, detalle: 'Tolva atascada' } } };
+    const buffer = { 3: { 1: { cantidad: 20, detalle: 'Tolva atascada' } } };
+    expect(calcularDiff(buffer, snapConNota, new Set(['3|1']))).toEqual([
+      { periodo: 3, combustible_id: 1, cantidad: 20, detalle: 'Tolva atascada' },
+    ]);
+  });
+
+  it('una celda tecleada y deshecha sin dejar rastro no viaja', () => {
+    expect(calcularDiff({}, {}, new Set(['9|4']))).toEqual([]);
+  });
+
+  it('sale ordenado por periodo y combustible, no por el orden en que se tecleó', () => {
+    const buffer = { 3: { 1: { cantidad: 22 }, 2: { cantidad: 1 } }, 1: { 5: { cantidad: 4 } } };
+    const claves = new Set(['3|2', '1|5', '3|1']);
+    expect(calcularDiff(buffer, {}, claves).map((c) => [c.periodo, c.combustible_id]))
+      .toEqual([[1, 5], [3, 1], [3, 2]]);
+  });
+});
+
+describe('ladoPopover (L09, CA-39)', () => {
+  // Recuadro visible de `.comb-scroll`: 1000 de ancho × 400 de alto.
+  const CONT = { top: 100, bottom: 500, left: 0, right: 1000 };
+  const banderin = (top, left) => ({ top, bottom: top + 14, left, right: left + 14 });
+
+  it('con lienzo de sobra abre abajo y a la derecha (el default del CSS)', () => {
+    expect(ladoPopover({ banderin: banderin(120, 40), contenedor: CONT }))
+      .toEqual({ arriba: false, izq: false });
+  });
+
+  it('pegado al borde INFERIOR abre hacia arriba', () => {
+    expect(ladoPopover({ banderin: banderin(460, 40), contenedor: CONT }))
+      .toEqual({ arriba: true, izq: false });
+  });
+
+  it('pegado al borde DERECHO abre hacia la izquierda', () => {
+    expect(ladoPopover({ banderin: banderin(120, 900), contenedor: CONT }))
+      .toEqual({ arriba: false, izq: true });
+  });
+
+  it('en la esquina inferior derecha abre arriba y a la izquierda', () => {
+    expect(ladoPopover({ banderin: banderin(460, 900), contenedor: CONT }))
+      .toEqual({ arriba: true, izq: true });
+  });
+
+  it('el mismo periodo cambia de lado según dónde esté en el viewport (H26)', () => {
+    // Esta es la razón de ser del cambio: L08 decidía por número de periodo, así que P19 abría
+    // SIEMPRE hacia arriba — también cuando el scroll lo dejaba pegado a la cabecera.
+    const desplazadoArriba = banderin(104, 40);   // P19 apenas debajo del borde superior
+    const desplazadoAbajo = banderin(470, 40);    // el MISMO P19, con la tabla sin desplazar
+    expect(ladoPopover({ banderin: desplazadoArriba, contenedor: CONT }).arriba).toBe(false);
+    expect(ladoPopover({ banderin: desplazadoAbajo, contenedor: CONT }).arriba).toBe(true);
+  });
+
+  it('en una pantalla ancha el último alimentador NO se voltea', () => {
+    // La sospecha que L08 dejó abierta: con tres columnas a la derecha el popover cabe de sobra.
+    expect(ladoPopover({ banderin: banderin(120, 620), contenedor: CONT }).izq).toBe(false);
+  });
+
+  it('un contenedor más chico que el popover deja el lado por defecto', () => {
+    // No hay lado bueno: voltear sería igual de malo y menos predecible.
+    const chico = { top: 0, bottom: 60, left: 0, right: 200 };
+    expect(ladoPopover({ banderin: banderin(20, 90), contenedor: chico }))
+      .toEqual({ arriba: false, izq: false });
+  });
+
+  it('sin rects (jsdom no hace layout) no inventa una decisión', () => {
+    const cero = { top: 0, bottom: 0, left: 0, right: 0 };
+    expect(ladoPopover({ banderin: cero, contenedor: cero })).toEqual({ arriba: false, izq: false });
+    expect(ladoPopover({ banderin: banderin(10, 10), contenedor: null }))
+      .toEqual({ arriba: false, izq: false });
+    expect(ladoPopover()).toEqual({ arriba: false, izq: false });
+  });
+
+  it('respeta el tamaño del popover que le pasen', () => {
+    const b = banderin(120, 700);
+    expect(ladoPopover({ banderin: b, contenedor: CONT, ancho: 280 }).izq).toBe(false);
+    expect(ladoPopover({ banderin: b, contenedor: CONT, ancho: 400 }).izq).toBe(true);
   });
 });

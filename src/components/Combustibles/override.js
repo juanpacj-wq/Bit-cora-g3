@@ -119,7 +119,134 @@ export function esCeroNoOp(cantidad, celdaSnap) {
   return Number(c) === 0;
 }
 
+// D-061 L09 (H24/CA-37): identidad de UNA celda de la grilla dentro del conjunto de "lo que el
+// operador tocó". Mismo separador que `claveRefetch` y por el mismo motivo: sin él, (periodo 1,
+// combustible 23) y (periodo 12, combustible 3) serían la misma clave.
+export function claveCelda(periodo, combustibleId) {
+  return `${periodo ?? ''}|${combustibleId ?? ''}`;
+}
+
+// D-061 L09 (H24/CA-37): mezcla el snapshot recién leído con lo que el operador tiene a medias.
+//
+// Es la pieza que le faltaba al refetch preservado de L08. Aquel conservaba el buffer ENTERO
+// cuando había una edición en curso, así que las celdas que el SIS creó o cambió mientras el GET
+// viajaba quedaban "solo en el snapshot" — y `calcularDiff` las mandaba al POST como si el
+// operador las hubiera vaciado. Acá la regla es celda por celda: manda el server, salvo en las
+// coordenadas que el operador tocó, donde manda el buffer.
+//
+// "Tocó" incluye VACIAR: si la clave está en `editadas` y no está en el buffer, la celda tiene que
+// desaparecer del resultado aunque el server siga trayéndola — si no, el vaciado se perdería solo.
+export function reconciliarBuffer(bufferPrev, snapshotNuevo, editadas) {
+  const out = clon(snapshotNuevo ?? {});
+  for (const clave of editadas ?? []) {
+    const { p, cid } = partesClave(clave);
+    if (p === null) continue;
+    const celdaPrev = bufferPrev?.[p]?.[cid];
+    if (celdaPrev === undefined) {
+      if (!out[p]) continue;
+      delete out[p][cid];
+      if (Object.keys(out[p]).length === 0) delete out[p];
+    } else {
+      if (!out[p]) out[p] = {};
+      out[p][cid] = clon(celdaPrev);
+    }
+  }
+  return out;
+}
+
+// D-061 L09 (H24/CA-37): qué celdas van en el body del POST. Recorre `editadas`, NO la unión de
+// buffer y snapshot: una celda que el operador nunca tocó no puede viajar al server, ni siquiera
+// cuando el SIS la cambió por debajo entre el GET y el Guardar. Ese era el camino por el que un
+// Guardar inocente borraba —o convertía en override 0 a nombre del operador— una lectura recién
+// escrita, que la ownership de D-029 ya no repone.
+//
+// Las tres formas del diff se conservan tal cual las lee el backend (C6):
+//   solo en snapshot ⇒ `cantidad: null`  (vaciar: override 0 si hay lectura SIS, DELETE si no)
+//   solo en buffer   ⇒ INSERT
+//   en ambos, distintas ⇒ UPDATE
+// Sale ordenado por periodo y combustible para que el body no dependa del orden en que se tecleó.
+export function calcularDiff(buffer, snapshot, editadas) {
+  const out = [];
+  for (const clave of editadas ?? []) {
+    const { p, cid } = partesClave(clave);
+    if (p === null) continue;
+    const b = buffer?.[p]?.[cid];
+    const s = snapshot?.[p]?.[cid];
+    const periodo = Number(p);
+    const combustible_id = Number(cid);
+    if (!b && !s) continue;                      // se tecleó y se deshizo sin dejar rastro
+    if (!b) {
+      out.push({ periodo, combustible_id, cantidad: null });
+    } else if (!s
+      || Number(b.cantidad) !== Number(s.cantidad)
+      || (b.detalle ?? null) !== (s.detalle ?? null)) {
+      out.push({ periodo, combustible_id, cantidad: b.cantidad, detalle: b.detalle ?? null });
+    }
+  }
+  out.sort((x, y) => x.periodo - y.periodo || x.combustible_id - y.combustible_id);
+  return out;
+}
+
+// Caja del popover del override, en px, tal como la deja el CSS: `max-width:280px` y una altura
+// de ~110px (dos renglones de texto + el botón Revertir + padding). Se redondea hacia ARRIBA a
+// propósito: sobrestimar hace que el popover se voltee un poco antes de lo necesario —molestia
+// cero—, mientras que subestimar lo deja recortado contra el borde de `.comb-scroll`, que es
+// justo el defecto que esto viene a cerrar.
+export const ALTO_TIP = 120;
+export const ANCHO_TIP = 280;
+
+// D-061 L09 (H26/CA-39): ¿hacia dónde abre el popover? Se decide MIDIENDO, no por el número de
+// periodo ni por el índice de columna.
+//
+// L08 lo resolvió con `p >= 19` (abre arriba) e `idx >= nAlim - 2` (abre a la izquierda). Eso
+// funciona solo si la tabla está sin desplazar: `.comb-scroll` muestra ~10-12 filas de 24, así que
+// basta con bajar un poco para que P19 quede pegado al borde SUPERIOR y su popover abra hacia
+// arriba contra el `thead` sticky — el mismo recorte de H13, espejado. Y al revés: en una pantalla
+// ancha, el popover del último alimentador cabe de sobra hacia la derecha y no hay razón para
+// voltearlo.
+//
+// La función es pura y recibe los dos rects ya medidos (los `DOMRect` del banderín y de
+// `.comb-scroll`) para que se pueda probar sin layout: jsdom devuelve ceros en
+// `getBoundingClientRect`, y por eso un contenedor degenerado cae al default (abajo-derecha, que
+// es lo que dice el CSS base) en vez de inventar una decisión.
+//
+// Voltea solo cuando el lado por defecto NO alcanza Y el opuesto tiene más aire: contra un
+// contenedor más chico que el popover, quedarse donde está es al menos predecible.
+export function ladoPopover({ banderin, contenedor, alto = ALTO_TIP, ancho = ANCHO_TIP } = {}) {
+  const quieto = { arriba: false, izq: false };
+  if (!banderin || !contenedor) return quieto;
+  if (!(contenedor.bottom - contenedor.top > 0) || !(contenedor.right - contenedor.left > 0)) {
+    return quieto;
+  }
+  // El popover nace pegado al banderín: hacia abajo crece desde su borde inferior, hacia arriba
+  // desde el superior; hacia la derecha desde su borde izquierdo (`left:0`) y hacia la izquierda
+  // desde el derecho (`right:0`).
+  const libreAbajo = contenedor.bottom - banderin.bottom;
+  const libreArriba = banderin.top - contenedor.top;
+  const libreDerecha = contenedor.right - banderin.left;
+  const libreIzquierda = banderin.right - contenedor.left;
+  return {
+    arriba: libreAbajo < alto && libreArriba > libreAbajo,
+    izq: libreDerecha < ancho && libreIzquierda > libreDerecha,
+  };
+}
+
 // --- internos ---------------------------------------------------------------------------------
+
+// `"3|1"` → `{ p: '3', cid: '1' }`. Se parte por el PRIMER separador (no con `split`) para que un
+// id con un '|' adentro no se coma la clave en silencio.
+function partesClave(clave) {
+  if (typeof clave !== 'string') return { p: null, cid: null };
+  const i = clave.indexOf('|');
+  if (i <= 0) return { p: null, cid: null };
+  return { p: clave.slice(0, i), cid: clave.slice(i + 1) };
+}
+
+// Clon por JSON, igual que el de la grilla: conserva el orden de claves, que es de lo que depende
+// la comparación `JSON.stringify(buffer) !== JSON.stringify(snapshot)` de `hayCambios`.
+function clon(x) {
+  return JSON.parse(JSON.stringify(x));
+}
 
 // Partes de fecha/hora en Bogotá con `timeZone` explícito (convención de TZ del workspace: la BD
 // guarda UTC, la presentación fija la zona). Se arma con `formatToParts` en vez de `format()`

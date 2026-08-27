@@ -18,6 +18,7 @@ import { HEATMAP_MAX_TON, HEATMAP_MAX_FALLBACK, temaHeatmap, tint } from './colo
 import {
   esOverride, textoOverride, politicaRefresco, restanteGavela, formatoMMSS, textoChipSis, GAVELA_MS,
   claveRefetch, esVacioCantidad, esCeroNoOp,
+  claveCelda, reconciliarBuffer, calcularDiff, ladoPopover,
 } from './override';
 import { getTodayBogota } from '../../utils/fecha';
 import './combustibles.css';
@@ -71,6 +72,11 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   // Celda cuyo popover de override está abierto por click ('<periodo>:<combustible_id>'). El hover
   // lo maneja el CSS; este estado es el que deja el popover fijo para poder llegar a "Revertir".
   const [tipAbierto, setTipAbierto] = useState(null);
+  // D-061 L09 (H26/CA-39): hacia dónde abre el popover de la última celda apuntada,
+  // `{ clave, arriba, izq }`. Se mide al abrir (hover o click) y no en cada scroll: un
+  // `getBoundingClientRect` por banderín tocado, contra los 240 por render que costaría recalcular
+  // la posición en vivo. Solo hay un popover visible a la vez, así que una sola entrada alcanza.
+  const [ladoTip, setLadoTip] = useState(null);
   // Gavela (D-061): instante en que empezó a correr la ventana de 10 min, y lo que le queda.
   const [gavelaInicio, setGavelaInicio] = useState(null);
   const [restanteMs, setRestanteMs] = useState(GAVELA_MS);
@@ -86,14 +92,22 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   const refetchSeqRef = useRef(0);
   const claveActualRef = useRef(claveRefetch(plantaId, fecha));
 
+  // D-061 L09 (H24/CA-37) — las coordenadas que el operador tocó desde la última lectura limpia.
+  // Es la única fuente de "qué es un cambio del operador": el buffer solo dice en qué difiere de
+  // lo que el server tiene AHORA, y esa diferencia también la puede producir el SIS escribiendo
+  // por debajo. Se vacía cuando la edición se cierra (guardar, descartar, vencer la gavela) o
+  // cuando se cambia de coordenada. Es un ref y no estado porque nada del render depende de él:
+  // solo lo leen `calcularDiff` (al guardar) y la reconciliación (al volver un refetch).
+  const editadasRef = useRef(new Set());
+
   // Lee del server y aplica la respuesta, salvo que haya quedado obsoleta.
   //
   // `preservarEdicion` distingue los dos motivos por los que se relee:
   //  - false (cambio de planta/fecha, guardar, revertir, vencimiento de la gavela): el buffer se
   //    reemplaza porque el usuario pidió explícitamente moverse o ya cerró su edición.
-  //  - true (latido del auto-refresco y `focus`): el buffer NO se toca si hay algo sin guardar. El
-  //    latido chequea `hayCambios` ANTES de disparar, pero teclear durante el GET caía en la
-  //    ventana ciega y se perdía bajo un refresco que nadie pidió.
+  //  - true (latido del auto-refresco y `focus`): lo tecleado se conserva. El latido chequea
+  //    `hayCambios` ANTES de disparar, pero teclear durante el GET caía en la ventana ciega y se
+  //    perdía bajo un refresco que nadie pidió.
   const refetch = useCallback(async ({ preservarEdicion = false } = {}) => {
     if (!plantaId) return;
     const seq = ++refetchSeqRef.current;
@@ -106,9 +120,19 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
       setCatalogo(r.catalogo || []);
       setSnapshot(r.celdas || {});
       setSis(r.sis ?? null);
-      // El snapshot y el chip SIS sí se actualizan aunque haya edición en curso: son la verdad del
-      // server (de ahí sale el badge de override) y no pisan nada de lo tecleado.
-      if (!(preservarEdicion && hayCambiosRef.current)) setBuffer(deepClone(r.celdas || {}));
+      // El snapshot y el chip SIS se actualizan siempre: son la verdad del server (de ahí sale el
+      // badge de override) y no pisan nada de lo tecleado.
+      //
+      // D-061 L09 (H24): con una edición en curso el buffer NO se conserva entero —eso dejaba lo
+      // que el SIS acababa de escribir como "solo en el snapshot", y el Guardar siguiente lo
+      // mandaba al POST con `cantidad: null` a nombre del operador—. Se reconcilia celda por
+      // celda: entra lo del server, se queda lo tecleado.
+      if (preservarEdicion && hayCambiosRef.current) {
+        setBuffer((b) => reconciliarBuffer(b, r.celdas || {}, editadasRef.current));
+      } else {
+        setBuffer(deepClone(r.celdas || {}));
+        editadasRef.current.clear();
+      }
     } catch (e) {
       if (seq !== refetchSeqRef.current || clave !== claveActualRef.current) return;
       setError(e);
@@ -117,8 +141,11 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
 
   // La clave se refresca en el MISMO efecto que dispara la lectura de la nueva coordenada: así no
   // hay ventana en que `claveActualRef` apunte a la fecha vieja y se descarte la respuesta buena.
+  // Las celdas editadas se olvidan acá y no solo cuando vuelva el GET: son coordenadas de la
+  // planta/fecha que se acaba de dejar y no significan nada en la nueva.
   useEffect(() => {
     claveActualRef.current = claveRefetch(plantaId, fecha);
+    editadasRef.current.clear();
     refetch();
   }, [refetch, plantaId, fecha]);
 
@@ -184,6 +211,7 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   // vencimiento de la gavela.
   const descartar = useCallback(() => {
     setBuffer(deepClone(snapshotRef.current));
+    editadasRef.current.clear();
     setGavelaInicio(null);
   }, []);
 
@@ -221,6 +249,11 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   }, [hayCambios]);
 
   const setCelda = (periodo, combustibleId, cantidad) => {
+    // D-061 L09 (H24/CA-37): este es el ÚNICO lugar por el que el operador toca el buffer, así que
+    // es el único que da de alta una coordenada como "editada". Se marca aunque el valor termine
+    // siendo igual al del server (`calcularDiff` ya no la emite si no difiere): lo que importa es
+    // que la celda quede protegida de la reconciliación mientras la edición esté viva.
+    editadasRef.current.add(claveCelda(periodo, combustibleId));
     setBuffer((b) => {
       const next = { ...b };
       const p = String(periodo);
@@ -239,12 +272,26 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
         if (Object.keys(fila).length === 0) delete next[p];
         else next[p] = fila;
       } else {
-        fila[k] = { ...(fila[k] || {}), cantidad };
+        // D-061 L09 (H25/CA-38): si la celda no está en el buffer se siembra desde el SNAPSHOT, no
+        // desde `{}`. Limpiar una celda la borra del buffer (rama de arriba), así que volver a
+        // teclear un número la reconstruía desde cero y perdía `detalle`: el diff mandaba
+        // `detalle: null` y el backend, en su rama de UPDATE, escribía NULL. Un 18,5 con la nota
+        // "Tolva atascada" corregido a 20 se llevaba la nota por delante, con un 200 que decía
+        // "1 actualizado". El comentario es de la celda; cambiar la cifra no lo borra.
+        const base = fila[k] || snapshotRef.current[p]?.[k];
+        fila[k] = { ...(base || {}), cantidad };
         next[p] = fila;
       }
       return next;
     });
   };
+
+  // D-061 L09 (H27/CA-40): qué es un alimentador se decide UNA vez. Antes lo decidían por su
+  // cuenta `columnasOrdenadas`, el conteo `nAlim`, el Total Carbón y el máximo del heatmap —cuatro
+  // filtros sobre el mismo catálogo, con la misma condición escrita cuatro veces—. Es el
+  // discriminador del dominio (`tipo='ALIMENTADOR'`, D-027) y sostiene el Total Carbón que el
+  // backend calcula igual en `v_consumo_periodo`: tiene que haber un solo lugar donde se lea.
+  const alimentadores = useMemo(() => catalogo.filter((c) => c.tipo === 'ALIMENTADOR'), [catalogo]);
 
   // Total Carbón por periodo: suma de tipo='ALIMENTADOR' del buffer (no incluye Caliza ni ACPM).
   // Coincide con la fórmula de bitacora.v_consumo_periodo.total_carbon_ton del backend.
@@ -252,43 +299,20 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     const p = String(periodo);
     const fila = buffer[p] || {};
     let total = 0;
-    for (const cb of catalogo) {
-      if (cb.tipo !== 'ALIMENTADOR') continue;
+    for (const cb of alimentadores) {
       const v = fila[String(cb.combustible_id)]?.cantidad;
       if (typeof v === 'number' && Number.isFinite(v)) total += v;
     }
     return total;
-  }, [buffer, catalogo]);
-
-  // diff: { periodo, combustible_id, cantidad, detalle } por celda que difiere snapshot vs buffer.
-  // - solo en snapshot ⇒ cantidad=null (backend DELETE)
-  // - solo en buffer   ⇒ INSERT con cantidad
-  // - en ambos con cantidad/detalle distintos ⇒ UPDATE
-  const calcularDiff = () => {
-    const out = [];
-    const keys = new Set([...Object.keys(buffer), ...Object.keys(snapshot)]);
-    for (const p of keys) {
-      const bFila = buffer[p] || {};
-      const sFila = snapshot[p] || {};
-      const cKeys = new Set([...Object.keys(bFila), ...Object.keys(sFila)]);
-      for (const cid of cKeys) {
-        const b = bFila[cid];
-        const s = sFila[cid];
-        if (!b && s) {
-          out.push({ periodo: Number(p), combustible_id: Number(cid), cantidad: null });
-        } else if (b && !s) {
-          out.push({ periodo: Number(p), combustible_id: Number(cid), cantidad: b.cantidad, detalle: b.detalle ?? null });
-        } else if (b && s && (Number(b.cantidad) !== Number(s.cantidad) || (b.detalle ?? null) !== (s.detalle ?? null))) {
-          out.push({ periodo: Number(p), combustible_id: Number(cid), cantidad: b.cantidad, detalle: b.detalle ?? null });
-        }
-      }
-    }
-    return out;
-  };
+  }, [buffer, alimentadores]);
 
   const onGuardar = async () => {
     try {
-      const celdasDiff = calcularDiff();
+      // D-061 L09 (H24/CA-37): el diff recorre las celdas EDITADAS, no la unión de buffer y
+      // snapshot. La diferencia entre los dos también la produce el SIS escribiendo por debajo
+      // durante un refetch, y esas celdas no son del operador: mandarlas al POST las borraba (o
+      // las convertía en override 0 a su nombre) y la ownership de D-029 ya no las repone.
+      const celdasDiff = calcularDiff(buffer, snapshot, editadasRef.current);
       if (celdasDiff.length === 0) {
         showToastRef.current?.('Sin cambios para guardar', 'info');
         return;
@@ -329,9 +353,28 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
     }
   };
 
+  // D-061 L09 (H26/CA-39): mide el banderín contra el recuadro visible de `.comb-scroll` y guarda
+  // hacia dónde tiene que abrir su popover. Se llama al entrar el puntero al banderín y al hacer
+  // clic en él — los dos caminos por los que el popover aparece—, nunca en el scroll ni en el
+  // render. Si el lado no cambió se devuelve el mismo objeto para no re-renderizar la grilla
+  // entera cada vez que el puntero cruza un banderín.
+  const scrollRef = useRef(null);
+  const medirLado = useCallback((clave, el) => {
+    if (!el || !scrollRef.current) return;
+    const lado = ladoPopover({
+      banderin: el.getBoundingClientRect(),
+      contenedor: scrollRef.current.getBoundingClientRect(),
+    });
+    setLadoTip((prev) => (
+      prev && prev.clave === clave && prev.arriba === lado.arriba && prev.izq === lado.izq
+        ? prev
+        : { clave, ...lado }
+    ));
+  }, []);
+
   // El popover no debe sobrevivir a un cambio de planta/fecha (quedaría describiendo una celda
   // que ya no está en pantalla) ni a un Escape.
-  useEffect(() => { setTipAbierto(null); }, [plantaId, fecha]);
+  useEffect(() => { setTipAbierto(null); setLadoTip(null); }, [plantaId, fecha]);
   useEffect(() => {
     if (!tipAbierto) return;
     const h = (e) => { if (e.key === 'Escape') setTipAbierto(null); };
@@ -342,26 +385,12 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   // Reorden de columnas: alimentadores → Total Carbón (virtual) → Caliza → ACPM.
   // La columna virtual lleva `virtual: true` y un id 'TOTAL' que no se confunde con ningún
   // combustible_id real (entero positivo de la BD).
-  const columnasOrdenadas = useMemo(() => {
-    const alim = catalogo.filter((c) => c.tipo === 'ALIMENTADOR');
-    const caliza = catalogo.filter((c) => c.tipo === 'CALIZA');
-    const acpm = catalogo.filter((c) => c.tipo === 'ACPM');
-    return [
-      ...alim,
-      { combustible_id: 'TOTAL', nombre: 'Total Carbón', unidad: 'Ton', tipo: 'TOTAL', virtual: true },
-      ...caliza,
-      ...acpm,
-    ];
-  }, [catalogo]);
-
-  // D-061 L08 (H13/CA-35): cuántas columnas de alimentador hay. Solo esas pueden llevar banderín
-  // (el badge se pinta únicamente en tipo='ALIMENTADOR') y van primero en el orden, así que el
-  // índice de columna dentro de `columnasOrdenadas` es también el índice del alimentador: las dos
-  // últimas son las que tienen el borde derecho de la tabla demasiado cerca para abrir hacia allá.
-  const nAlim = useMemo(
-    () => catalogo.filter((c) => c.tipo === 'ALIMENTADOR').length,
-    [catalogo]
-  );
+  const columnasOrdenadas = useMemo(() => [
+    ...alimentadores,
+    { combustible_id: 'TOTAL', nombre: 'Total Carbón', unidad: 'Ton', tipo: 'TOTAL', virtual: true },
+    ...catalogo.filter((c) => c.tipo === 'CALIZA'),
+    ...catalogo.filter((c) => c.tipo === 'ACPM'),
+  ], [catalogo, alimentadores]);
 
   // D-034: límite físico por combustible (data-driven desde cantidad_max del catálogo).
   // maxPorId: clave string (igual que el buffer). null = sin tope.
@@ -376,11 +405,11 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   // Máximo del heatmap = mayor cantidad_max entre alimentadores (fallback a la constante).
   const maxAlim = useMemo(() => {
     let mx = 0;
-    for (const c of catalogo) {
-      if (c.tipo === 'ALIMENTADOR' && c.cantidad_max != null) mx = Math.max(mx, Number(c.cantidad_max));
+    for (const c of alimentadores) {
+      if (c.cantidad_max != null) mx = Math.max(mx, Number(c.cantidad_max));
     }
     return mx > 0 ? mx : HEATMAP_MAX_TON;
-  }, [catalogo]);
+  }, [alimentadores]);
 
   // Tema por unidad: rampa del heatmap (azul GEC3 / verde GEC32) + acento del CSS.
   const { rampa, accent } = useMemo(() => temaHeatmap(plantaId), [plantaId]);
@@ -474,7 +503,10 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
         )}
 
         {catalogo.length > 0 && (
-          <div className="comb-scroll">
+          // El ref es el recuadro contra el que se mide hacia dónde abre el popover (H26/CA-39):
+          // `.comb-scroll` es `overflow:auto`, o sea el que RECORTA, y por eso es el único borde
+          // que importa — no el del viewport.
+          <div className="comb-scroll" ref={scrollRef}>
             <table>
               <thead>
                 <tr>
@@ -494,7 +526,7 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                       P{p}
                       <small>{String(p - 1).padStart(2, '0')}h</small>
                     </td>
-                    {columnasOrdenadas.map((c, idx) => {
+                    {columnasOrdenadas.map((c) => {
                       if (c.virtual) {
                         const t = totalCarbonPeriodo(p);
                         return (
@@ -520,15 +552,27 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                       // usuario teclea, esa verdad no cambia hasta que guarde y se relea.
                       const celdaSnap = snapshot[String(p)]?.[String(c.combustible_id)];
                       const marcada = c.tipo === 'ALIMENTADOR' && esOverride(celdaSnap);
-                      const claveTip = `${p}:${c.combustible_id}`;
-                      const idTip = `comb-tip-${p}-${c.combustible_id}`;
-                      // D-061 L08 (H13/CA-35): el popover abre abajo-derecha por defecto, y
-                      // `.comb-scroll` (overflow:auto) lo recorta contra sus bordes. En los últimos
-                      // periodos abre hacia arriba y en las últimas columnas con banderín hacia la
-                      // izquierda, que es donde sí hay lienzo.
-                      const tipClases = `comb-tip${p >= 19 ? ' comb-tip--arriba' : ''}`
-                        + `${idx >= nAlim - 2 ? ' comb-tip--izq' : ''}`
-                        + `${tipAbierto === claveTip ? ' open' : ''}`;
+                      // D-061 L09 (H27/CA-40): los tres armados del popover solo se hacen en las
+                      // celdas que llevan banderín. Antes se calculaban para las 240 celdas de la
+                      // grilla en CADA render —o sea, en cada tecla— y se tiraban en el 97%.
+                      let claveTip = null;
+                      let idTip = null;
+                      let tipClases = null;
+                      if (marcada) {
+                        claveTip = `${p}:${c.combustible_id}`;
+                        idTip = `comb-tip-${p}-${c.combustible_id}`;
+                        // D-061 L09 (H26/CA-39): el popover abre abajo-derecha por defecto y
+                        // `.comb-scroll` (overflow:auto) lo recorta contra sus bordes. El lado se
+                        // decide MIDIENDO al abrir (`medirLado`), no por número de periodo ni por
+                        // índice de columna: con la tabla desplazada, P19 puede estar pegado al
+                        // borde de ARRIBA y el último alimentador tener lienzo de sobra a la
+                        // derecha. Sin medida todavía (o en jsdom, que no hace layout) manda el
+                        // default del CSS, que es el mismo abajo-derecha.
+                        const lado = ladoTip?.clave === claveTip ? ladoTip : null;
+                        tipClases = `comb-tip${lado?.arriba ? ' comb-tip--arriba' : ''}`
+                          + `${lado?.izq ? ' comb-tip--izq' : ''}`
+                          + `${tipAbierto === claveTip ? ' open' : ''}`;
+                      }
                       return (
                         <td
                           key={c.combustible_id}
@@ -536,7 +580,14 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                           style={{ background: bg }}
                         >
                           {marcada && (
-                            <span className="comb-override-wrap">
+                            <span
+                              className="comb-override-wrap"
+                              // El popover también aparece por hover (regla CSS), así que el lado
+                              // hay que medirlo al entrar el puntero y no solo al hacer clic. El
+                              // wrap mide exactamente los 14×14 del banderín (su único hijo en
+                              // flujo), así que su rect ES el del banderín.
+                              onMouseEnter={(e) => medirLado(claveTip, e.currentTarget)}
+                            >
                               <button
                                 type="button"
                                 className="comb-override"
@@ -548,7 +599,10 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
                                 // celda y la siguiente, y el operador tabula para capturar. El
                                 // texto ya le llega al lector de pantalla por `aria-describedby`.
                                 tabIndex={-1}
-                                onClick={() => setTipAbierto((k) => (k === claveTip ? null : claveTip))}
+                                onClick={(e) => {
+                                  medirLado(claveTip, e.currentTarget);
+                                  setTipAbierto((k) => (k === claveTip ? null : claveTip));
+                                }}
                               />
                               {/* Sin `title` nativo: el popover ya dice lo mismo y el navegador lo
                                   repetiría encima un segundo después. El texto llega al lector de

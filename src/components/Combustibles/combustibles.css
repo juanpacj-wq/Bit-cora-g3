@@ -226,14 +226,18 @@
 .comb-root .comb-override-wrap:hover .comb-tip,
 .comb-root .comb-tip.open{display:block}
 
-/* D-061 L08 (H13): el popover vive dentro de `.comb-scroll`, que es `overflow:auto` y por lo tanto
-   lo RECORTA contra sus bordes. Abriendo siempre abajo-derecha, en los periodos altos (P22-P24)
-   quedaba cortado por el borde inferior y contra la última columna con banderín por el derecho —
-   y al arrastrar el puntero hacia el trozo cortado se perdía el `:hover` y desaparecía.
-   Se decide por `periodo` e índice de columna, no midiendo: una posición calculada con
-   `getBoundingClientRect` habría que recalcularla en cada scroll y resize, y obligaría a mover el
-   `:hover` de CSS a JS. Mantiene la misma solapa de 1px con el banderín para que el puntero pueda
-   viajar del uno al otro sin cruzar un hueco. */
+/* D-061 L08 (H13) + L09 (H26): el popover vive dentro de `.comb-scroll`, que es `overflow:auto` y
+   por lo tanto lo RECORTA contra sus bordes. Abriendo siempre abajo-derecha quedaba cortado contra
+   el borde inferior y contra el derecho — y al arrastrar el puntero hacia el trozo cortado se
+   perdía el `:hover` y desaparecía.
+   Cuál de los dos modificadores se aplica lo decide el componente MIDIENDO (`ladoPopover`, en
+   `override.js`): el rect del banderín contra el de `.comb-scroll`, una sola vez al abrir. L08 lo
+   decidía por número de periodo (`p >= 19`) e índice de columna, y eso solo vale con la tabla sin
+   desplazar: `.comb-scroll` muestra ~10-12 filas de 24, así que bastaba con bajar un poco para que
+   P19 quedara pegado al borde de ARRIBA y abriera hacia allá, contra el `thead` sticky. El costo
+   de medir es un `getBoundingClientRect` por banderín tocado; no se recalcula en el scroll.
+   Mantiene la misma solapa de 1px con el banderín para que el puntero pueda viajar del uno al otro
+   sin cruzar un hueco. */
 .comb-root .comb-tip--arriba{top:auto;bottom:13px}
 .comb-root .comb-tip--izq{left:auto;right:0}
 .comb-root .comb-tip-texto{display:block;margin-bottom:9px;color:var(--muted)}

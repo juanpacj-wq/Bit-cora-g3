@@ -134,6 +134,7 @@ let cola;            // GETs de /consumos retenidos a mano (modo manual)
 let modoManual;      // cuando es true, cada GET queda en la cola hasta que el test lo resuelva
 let cuerpoGet;       // payload del GET cuando NO es manual
 let cuerpoRevertir;  // respuesta de C5
+let cuerpoGuardar;   // resumen del POST batch
 
 beforeEach(() => {
   llamadas = [];
@@ -141,6 +142,7 @@ beforeEach(() => {
   modoManual = false;
   cuerpoGet = payload();
   cuerpoRevertir = { accion: 'restaurado', celda: celda({ cantidad: 17.25 }) };
+  cuerpoGuardar = { resumen: { creados: 0, actualizados: 1, eliminados: 0 } };
   globalThis.fetch = vi.fn(async (url, opciones) => {
     const u = String(url);
     llamadas.push({
@@ -149,6 +151,9 @@ beforeEach(() => {
       cuerpo: opciones?.body ? JSON.parse(opciones.body) : undefined,
     });
     if (u.includes('/consumos/revertir')) return respuesta(cuerpoRevertir);
+    // El POST del batch va a la MISMA ruta que el GET (C6), así que el método es lo único que los
+    // separa. Sin esta rama, un Guardar en modo manual quedaría retenido en la cola de los GET.
+    if (u.includes('/consumos') && opciones?.method === 'POST') return respuesta(cuerpoGuardar);
     if (u.includes('/consumos')) {
       if (modoManual) {
         const d = diferido();
@@ -225,6 +230,23 @@ async function click(el) {
   await act(async () => { el.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 }
 
+// Entrar con el puntero (React sintetiza `onMouseEnter` a partir de `mouseover`).
+async function entrar(el) {
+  await act(async () => { el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); });
+}
+
+// jsdom no hace layout: `getBoundingClientRect` devuelve ceros para todo. Para probar el CABLEADO
+// de la medición (CA-39) se le pone a mano el rect a los dos elementos que el componente mide —el
+// banderín y `.comb-scroll`—; la aritmética de la decisión ya está probada aparte, sobre rects
+// sintéticos, en `override.test.js › ladoPopover`.
+function conRect(el, rect) {
+  el.getBoundingClientRect = () => ({
+    top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right,
+    width: rect.right - rect.left, height: rect.bottom - rect.top, x: rect.left, y: rect.top,
+  });
+  return el;
+}
+
 // Latido del auto-refresco por `focus` (el otro camino es el intervalo de 5 min).
 async function latido() {
   await act(async () => { window.dispatchEvent(new Event('focus')); });
@@ -247,6 +269,12 @@ function guardar(container) {
 }
 function revertires(container) {
   return [...container.querySelectorAll('.comb-tip-revertir')];
+}
+// El cuerpo del POST batch que salió de verdad (C6). Es lo único que prueba CA-37: lo que se ve en
+// pantalla puede estar bien y el body llevar celdas que el operador nunca tocó.
+function celdasDelPost() {
+  const post = llamadas.find((l) => l.opciones?.method === 'POST' && !l.url.includes('/revertir'));
+  return post?.cuerpo?.celdas ?? null;
 }
 
 // ── Humo de render (reconstruido de L03) ────────────────────────────────────────────────────────
@@ -525,26 +553,6 @@ describe('CA-34 · override 0', () => {
 // ── CA-35 · Popover y banderín ──────────────────────────────────────────────────────────────────
 
 describe('CA-35 · popover y banderín', () => {
-  it('el popover abre hacia arriba en los periodos altos y hacia abajo en los bajos', async () => {
-    const { container, teardown } = await render();
-    const tipP1 = celdasDe(container, 1)[0].querySelector('.comb-tip');
-    const tipP24 = celdasDe(container, 24)[0].querySelector('.comb-tip');
-
-    expect(tipP1.classList.contains('comb-tip--arriba')).toBe(false);
-    expect(tipP24.classList.contains('comb-tip--arriba')).toBe(true);
-    teardown();
-  });
-
-  it('el popover abre hacia la izquierda en las 2 últimas columnas con banderín', async () => {
-    const { container, teardown } = await render();
-    const tipAlim1 = celdasDe(container, 1)[0].querySelector('.comb-tip');
-    const tipAlim8 = celdasDe(container, 1)[7].querySelector('.comb-tip');
-
-    expect(tipAlim1.classList.contains('comb-tip--izq')).toBe(false);
-    expect(tipAlim8.classList.contains('comb-tip--izq')).toBe(true);
-    teardown();
-  });
-
   it('el banderín está fuera del recorrido del Tab', async () => {
     const { container, teardown } = await render();
     const banderines = [...container.querySelectorAll('.comb-override')];
@@ -564,6 +572,299 @@ describe('CA-35 · popover y banderín', () => {
 
     await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
     expect(celdasDe(container, 1)[0].querySelector('.comb-tip').classList.contains('open')).toBe(false);
+    teardown();
+  });
+});
+
+// ── CA-37 · El refetch preservado no puede convertirse en un borrado al guardar ─────────────────
+
+describe('CA-37 · lo que el operador no tocó no viaja en el Guardar', () => {
+  // El escenario de H24, tal cual pasa en producción: GEC32 viendo hoy, el `focus` dispara el
+  // latido del auto-refresco, y el operador teclea mientras el GET está en vuelo. L08 arregló que
+  // no se perdiera lo tecleado dejando el buffer viejo contra un snapshot nuevo — y abrió el camino
+  // de vuelta: la celda que el SIS escribió durante ese GET queda "solo en el snapshot" y el
+  // Guardar siguiente la manda con `cantidad: null`. El backend la convierte en override 0 a nombre
+  // del operador (o la borra), y la ownership de D-029 impide que el scraper la reponga.
+  //
+  // Por eso todos estos casos afirman sobre el BODY REAL del POST: en pantalla no se nota nada.
+
+  it('una celda que el SIS CREÓ durante el GET no aparece en el body', async () => {
+    const { container, teardown } = await render();
+
+    modoManual = true;
+    await latido();                                   // GET del auto-refresco en vuelo
+    await teclear(inputDe(container, 3, 0), '22');    // el operador teclea MIENTRAS viaja
+
+    await act(async () => {
+      cola[0].resolver(respuesta(payload({
+        celdas: {
+          3: { 1: celda({ consumo_id: 301, cantidad: 20 }) },
+          5: { 1: celda({ consumo_id: 501, cantidad: 7 }) },   // ← la escribió el SIS recién
+        },
+      })));
+    });
+    modoManual = false;
+
+    expect(inputDe(container, 3, 0).value).toBe('22');   // lo tecleado manda
+    expect(inputDe(container, 5, 0).value).toBe('7');    // y la lectura nueva ya se ve
+
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 3, combustible_id: 1, cantidad: 22, detalle: null },
+    ]);
+    teardown();
+  });
+
+  it('una celda que el SIS ACTUALIZÓ durante el GET no se pisa con el número viejo', async () => {
+    // La cara simétrica: acá la celda ya existía y el SIS le cambió el valor. Mandarla al POST la
+    // devolvería al número que el buffer tenía desde antes del GET.
+    cuerpoGet = payload({
+      celdas: {
+        3: { 1: celda({ consumo_id: 301, cantidad: 20 }) },
+        6: { 1: celda({ consumo_id: 601, cantidad: 11 }) },
+      },
+    });
+    const { container, teardown } = await render();
+
+    modoManual = true;
+    await latido();
+    await teclear(inputDe(container, 3, 0), '22');
+
+    await act(async () => {
+      cola[0].resolver(respuesta(payload({
+        celdas: {
+          3: { 1: celda({ consumo_id: 301, cantidad: 20 }) },
+          6: { 1: celda({ consumo_id: 601, cantidad: 13 }) },   // ← 11 → 13, por debajo
+        },
+      })));
+    });
+    modoManual = false;
+
+    expect(inputDe(container, 6, 0).value).toBe('13');   // se adopta el valor fresco del SIS
+
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 3, combustible_id: 1, cantidad: 22, detalle: null },
+    ]);
+    teardown();
+  });
+
+  it('en el conflicto real gana lo tecleado, y el badge muestra el valor_sis nuevo', async () => {
+    // El operador corrige la MISMA celda que el SIS acaba de cambiar. Lo tecleado es el override:
+    // manda. Pero el tooltip tiene que hablar de la lectura nueva, que ya viene en el snapshot.
+    const { container, teardown } = await render();
+
+    modoManual = true;
+    await latido();
+    await teclear(inputDe(container, 1, 0), '21');
+
+    await act(async () => {
+      cola[0].resolver(respuesta(payload({
+        celdas: { 1: { 1: celdaOverride({ valor_sis: 19 }) } },
+      })));
+    });
+    modoManual = false;
+
+    expect(inputDe(container, 1, 0).value).toBe('21');
+    expect(celdasDe(container, 1)[0].querySelector('.comb-tip-texto').textContent)
+      .toContain('Valor SIS: 19 Ton');
+
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 1, combustible_id: 1, cantidad: 21, detalle: null },
+    ]);
+    teardown();
+  });
+
+  it('Descartar olvida lo editado: esa celda vuelve a ser del server', async () => {
+    // Descartar tiene que borrar la marca de "editada", no solo devolver el valor. Si la marca
+    // sobrevive, la celda queda clavada al número descartado: la reconciliación del latido
+    // siguiente ya no adopta lo que el SIS escribió y el Guardar la manda de vuelta al valor viejo,
+    // aunque el operador ya haya dicho que descartaba.
+    const { container, teardown } = await render();
+
+    await teclear(inputDe(container, 3, 0), '22');
+    await click(container.querySelector('.comb-gavela button'));   // Descartar
+    expect(guardar(container).disabled).toBe(true);
+
+    // El latido sale con el buffer ya limpio (es la única condición en que sale, CA-13) y el
+    // operador teclea OTRA celda mientras viaja.
+    modoManual = true;
+    await latido();
+    await teclear(inputDe(container, 3, 1), '9');
+    await act(async () => {
+      cola[0].resolver(respuesta(payload({
+        celdas: { 3: { 1: celda({ consumo_id: 301, cantidad: 25 }) } },   // ← el SIS la subió
+      })));
+    });
+    modoManual = false;
+
+    expect(inputDe(container, 3, 0).value).toBe('25');
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 3, combustible_id: 2, cantidad: 9, detalle: null },
+    ]);
+    teardown();
+  });
+
+  it('lo editado se olvida al cambiar de fecha (son coordenadas de otro día)', async () => {
+    const { container, reprops, teardown } = await render();
+
+    await teclear(inputDe(container, 3, 0), '22');
+    await reprops({ fecha: AYER });
+    expect(guardar(container).disabled).toBe(true);   // el buffer de ayer llegó limpio
+
+    await teclear(inputDe(container, 1, 8), '4');     // CALIZA de ayer
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 1, combustible_id: 9, cantidad: 4, detalle: null },
+    ]);
+    teardown();
+  });
+
+  it('vaciar una celda sigue viajando como cantidad null', async () => {
+    // La protección no puede tragarse el vaciado, que es una edición como cualquier otra (C6).
+    const { container, teardown } = await render();
+    await teclear(inputDe(container, 3, 0), '');
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([{ periodo: 3, combustible_id: 1, cantidad: null }]);
+    teardown();
+  });
+});
+
+// ── CA-38 · El comentario de la celda sobrevive a limpiar y volver a escribir ───────────────────
+
+describe('CA-38 · el detalle de la celda no se borra al corregir la cifra', () => {
+  const conNota = () => payload({
+    celdas: { 3: { 1: celda({ consumo_id: 301, cantidad: 18.5, detalle: 'Tolva atascada' }) } },
+  });
+
+  it('limpiar y volver a escribir conserva el detalle en el body', async () => {
+    // H25: vaciar borra la celda del buffer, y volver a teclear la reconstruía desde `{}`. El diff
+    // mandaba `detalle: null` y el backend, en su rama de UPDATE, escribía NULL: la nota
+    // desaparecía con un 200 que decía "1 actualizado".
+    cuerpoGet = conNota();
+    const { container, teardown } = await render();
+    const input = inputDe(container, 3, 0);
+
+    await teclear(input, '');
+    await teclear(input, '20');
+
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 3, combustible_id: 1, cantidad: 20, detalle: 'Tolva atascada' },
+    ]);
+    teardown();
+  });
+
+  it('corregir la cifra de una vez (sin limpiar) también lo conserva', async () => {
+    cuerpoGet = conNota();
+    const { container, teardown } = await render();
+
+    await teclear(inputDe(container, 3, 0), '20');
+
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 3, combustible_id: 1, cantidad: 20, detalle: 'Tolva atascada' },
+    ]);
+    teardown();
+  });
+
+  it('una celda nueva sigue naciendo sin detalle', async () => {
+    // La siembra desde el snapshot no puede inventar metadata donde el server no tiene celda.
+    const { container, teardown } = await render();
+    await teclear(inputDe(container, 7, 2), '6');
+    await click(guardar(container));
+    expect(celdasDelPost()).toEqual([
+      { periodo: 7, combustible_id: 3, cantidad: 6, detalle: null },
+    ]);
+    teardown();
+  });
+});
+
+// ── CA-39 · El lado del popover se decide midiendo ──────────────────────────────────────────────
+
+describe('CA-39 · el popover mide, no cuenta periodos', () => {
+  // La aritmética vive en `override.test.js › ladoPopover` (12 casos con rects sintéticos). Acá se
+  // prueba el CABLEADO: que el componente mida el banderín contra `.comb-scroll` al abrir y aplique
+  // la clase que salga. jsdom no hace layout, así que los dos rects se ponen a mano.
+  const CONT = { top: 100, bottom: 500, left: 0, right: 1000 };
+
+  // El wrap y el botón del banderín ocupan exactamente la misma caja de 14×14 (el popover es
+  // `position:absolute` y no cuenta para el tamaño del wrap), así que se les pone el mismo rect:
+  // el hover mide el wrap y el clic mide el botón.
+  function prepararMedicion(container, celdaTd, rectBanderin) {
+    conRect(container.querySelector('.comb-scroll'), CONT);
+    conRect(celdaTd.querySelector('.comb-override'), rectBanderin);
+    return conRect(celdaTd.querySelector('.comb-override-wrap'), rectBanderin);
+  }
+
+  it('un banderín pegado al borde inferior abre hacia arriba al hacer clic', async () => {
+    const { container, teardown } = await render();
+    const td = celdasDe(container, 1)[0];
+    const wrap = prepararMedicion(container, td, { top: 470, bottom: 484, left: 40, right: 54 });
+
+    expect(td.querySelector('.comb-tip').classList.contains('comb-tip--arriba')).toBe(false);
+    await click(wrap.querySelector('.comb-override'));
+    expect(td.querySelector('.comb-tip').classList.contains('comb-tip--arriba')).toBe(true);
+    teardown();
+  });
+
+  it('un banderín pegado al borde derecho abre hacia la izquierda', async () => {
+    const { container, teardown } = await render();
+    const td = celdasDe(container, 1)[0];
+    const wrap = prepararMedicion(container, td, { top: 120, bottom: 134, left: 940, right: 954 });
+
+    await click(wrap.querySelector('.comb-override'));
+    const tip = td.querySelector('.comb-tip');
+    expect(tip.classList.contains('comb-tip--izq')).toBe(true);
+    expect(tip.classList.contains('comb-tip--arriba')).toBe(false);
+    teardown();
+  });
+
+  it('el hover también mide: el popover que aparece solo por puntero no queda recortado', async () => {
+    const { container, teardown } = await render();
+    const td = celdasDe(container, 1)[0];
+    const wrap = prepararMedicion(container, td, { top: 470, bottom: 484, left: 940, right: 954 });
+
+    await entrar(wrap);
+    const tip = td.querySelector('.comb-tip');
+    expect(tip.classList.contains('comb-tip--arriba')).toBe(true);
+    expect(tip.classList.contains('comb-tip--izq')).toBe(true);
+    expect(tip.classList.contains('open')).toBe(false);   // el hover no lo fija: eso es del clic
+    teardown();
+  });
+
+  it('P24 con lienzo debajo abre hacia ABAJO: el número de periodo ya no decide', async () => {
+    // La regresión que cierra H26. Con la regla vieja (`p >= 19`), P24 abría siempre hacia arriba
+    // aunque estuviera arriba del todo por el scroll — contra el `thead` sticky.
+    const { container, teardown } = await render();
+    const td = celdasDe(container, 24)[0];
+    const wrap = prepararMedicion(container, td, { top: 120, bottom: 134, left: 40, right: 54 });
+
+    await click(wrap.querySelector('.comb-override'));
+    const tip = td.querySelector('.comb-tip');
+    expect(tip.classList.contains('comb-tip--arriba')).toBe(false);
+    expect(tip.classList.contains('open')).toBe(true);
+    teardown();
+  });
+
+  it('el último alimentador con lienzo a la derecha ya no se voltea', async () => {
+    const { container, teardown } = await render();
+    const td = celdasDe(container, 1)[7];             // ALIM_8
+    const wrap = prepararMedicion(container, td, { top: 120, bottom: 134, left: 620, right: 634 });
+
+    await click(wrap.querySelector('.comb-override'));
+    expect(td.querySelector('.comb-tip').classList.contains('comb-tip--izq')).toBe(false);
+    teardown();
+  });
+
+  it('sin medida (jsdom sin layout) el popover se queda en el default del CSS', async () => {
+    const { container, teardown } = await render();
+    for (const tip of container.querySelectorAll('.comb-tip')) {
+      expect(tip.classList.contains('comb-tip--arriba')).toBe(false);
+      expect(tip.classList.contains('comb-tip--izq')).toBe(false);
+    }
     teardown();
   });
 });
