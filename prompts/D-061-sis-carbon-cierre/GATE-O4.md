@@ -175,7 +175,7 @@ alcanzable por una petición cambió en esta ola. El `/security-review` de la O2
     atascado al operador (**H65, H66** y la coerción de **H72**), sin tocar el popover; y el
     rediseño completo —popover en portal y modelo de edición— a **D-062**.
   - **Recomendada: c.**
-- **Decidido:** **PENDIENTE DEL USUARIO** (§8). El argumento de (c): D-061 no debería cerrar con un
+- **Decidido:** **c — elegida por el usuario el 2026-08-27**. El argumento de (c): D-061 no debería cerrar con un
   camino conocido de pérdida de datos sobre planta real, y H65/H66/H72 son acotados y verificables.
   Pero parchear la ubicación del popover por sexta vez no es trabajo de este ADR y no está
   convergiendo: eso pide un rediseño, y un rediseño pide su propio ciclo de preguntas, contratos y
@@ -235,7 +235,12 @@ alcanzable por una petición cambió en esta ola. El `/security-review` de la O2
   2. **El smoke visual** de CA-12/CA-35. Se aplazó tres veces por la misma razón; si se toma (c) o
      (b), esa pantalla se vuelve a mover y conviene esperar otra vez. Si se toma "cerrar ya", el
      smoke es lo último antes del cierre.
-- **Visto bueno del usuario:** {{pendiente}}.
+- **Visto bueno del usuario:** dado el **2026-08-27 12:05** (Bogotá), con la **opción (c)** de D16 —
+  **O5 acotada a los tres altos y el rediseño de la grilla a un D-062 propio**. O5 abierta con L12.
+- **Lo que sale de D-061 y queda para `D-062`** (a planificar con `/nueva-implementacion` cuando el
+  usuario lo decida): el popover del override (H67, H69, H70 y sobre todo **H75**: sacarlo a un
+  portal con `position: fixed` en vez de seguir corrigiendo la medición) y el rediseño del modelo de
+  edición de la grilla a una sola fuente de verdad. El cierre de D-061 deja la cross-referencia.
 
 ## 9. Commit del gate
 `gate(D-061): O4 cerrada — 2 lotes, 641/641 en verde, 0 violaciones, 9 de 13 hallazgos en la misma pantalla`

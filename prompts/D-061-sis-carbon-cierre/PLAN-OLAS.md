@@ -24,6 +24,7 @@ reporta — solo obliga a presupuestar ~58 min de suite en vez de ~30 mientras e
 | O2 | L04, L05, L06, **L08** | Consumen C1/C2/C12 verificados en GATE-O1. L08 (corrección front, puro) se añadió en GATE-O1 §7. Disjuntos: L04 (`sis-job.js` + `combustibles.js` + su test) / L05 (`discover.js` + CLI + fixture + `sis_parser.test.js` + su test) / L06 (solo archivos de test + helpers + residuos). | `combustibles.js` → L04 · `discover.js` → L05 · `helpers.js` → L06 |
 | Tarea del integrador tras GATE-O2 | Corrida del backfill contra **prod** (`DB_NAME=PortalG3 … --confirm-db PortalG3`) | Requiere visto bueno explícito del usuario (PREGUNTAS #11). Se registra en `GATE-O2.md` §5 y en `ESTADO.md`. | — |
 | O3 | **L09, L10** | Lotes de corrección abiertos por el `/code-review` de la O2 (`GATE-O2.md` §5 D9). Disjuntos por completo: L09 vive en `src/components/Combustibles/**` y L10 en `server/utils/sis/discover.js` + el CLI + `routes/combustibles.js` + tres archivos de test. | `combustibles.js` → L10 · `discover.js` → L10 |
+| O5 | **L12** | Último lote de código de D-061 (`GATE-O4.md` §5 D16, opción c): los tres hallazgos altos que pueden perder datos o atascar al operador. **Sin tocar el popover** — eso sale a D-062. | `src/components/Combustibles/**` (sin el CSS) → L12 |
 | O4 | **L11, L07** | L11 cierra las fronteras que dejaron abiertas L09 y L10 (`GATE-O3.md` §5 D12) y L07 documenta. Van en paralelo porque los territorios son disjuntos (`src/**` + `utils/sis` + tests, contra `BIT-*` + `docs/` + `deploy/`) y **L11 no mueve ningún contrato**: C3 y C8 quedan como los dejó L10, así que lo que L07 escribe no se mueve bajo sus pies. | `discover.js`, `carbon-scraper.js` → L11 · `BIT-*`, `docs/*`, `deploy/DEPLOY.md` → L07 |
 | Cierre | `/cerrar-implementacion D-061` | ADR D-061 completo (desde los aportes), `CLAUDE.md` conv. 35, corregir la cross-ref `[[D-029]]` de D-060 → `[[D-061]]`, `git rm` de `prompts/D-061-*`, smoke + suite final. | `decisions.md`, `CLAUDE.md` → integrador |
 
@@ -122,6 +123,18 @@ reporta — solo obliga a presupuestar ~58 min de suite en vez de ~30 mientras e
   arreglos anteriores**, no defectos independientes: el prompt le pide leer primero el cierre del
   lote que hizo cada arreglo. Disjunto de L07.
 
+### L12 — Una sola definición de "esta celda cambió", y que el conjunto de editadas no mienta
+- **Ola:** O5 · **Depende de:** L11 · **Puro:** sí (vitest + build) · **Puerto de test:** 3112 (reservado; no levanta backend)
+- **Territorio:** `src/components/Combustibles/{ConsumosGrid.jsx,override.js,override.test.js,ConsumosGrid.test.jsx}` — **`combustibles.css` queda fuera a propósito**: es la señal de que el popover no es suyo
+- **Contratos:** ninguno (C11 puede crecer; `celdaEquivalente` corrige comportamiento, no firma)
+- **Criterios:** CA-55, CA-56, CA-57, CA-58
+- **Tests que corre:** `npx vitest run src/components/Combustibles`, `npx vitest run src`, `npm run build`
+- **Riesgo / nota:** creado por el gate O4 (D16, opción c) con **H65, H66, H72** (altos) más H68, H73
+  y H74. **H65 es la tercera aparición del mismo modo de pérdida de datos** (H24 → H50 → H65): el
+  prompt le exige que la propiedad quede cierta **por construcción**, derivando la pertenencia al
+  conjunto del estado en vez de acumularla por eventos, en lugar de tapar otra puerta. Los hallazgos
+  del popover (H67, H69, H70, **H75**) **no son suyos**: salen a D-062.
+
 ### L07 — Docs + cleanup
 - **Ola:** **O4** (movida por `GATE-O2.md` §5 D9) · **Depende de:** L04, L05, L06, L08, L09, L10 · **Puro:** sí · **Puerto de test:** 3107 (no aplica) · **Comparte ola con L11**, que no mueve contratos
 - **Territorio:** `BIT-MODBD-2026-001.md`, `BIT-RF-2026-001.md`, `docs/architecture.md`, `docs/domain-glossary.md`, `deploy/DEPLOY.md`, `js-scraper-carbon-g32/**` (git rm + sueltos), `prompts/D-029-sis-carbon-gec32/**` (git rm)
@@ -176,3 +189,17 @@ reporta — solo obliga a presupuestar ~58 min de suite en vez de ~30 mientras e
   criterio de terminado es `COUNT(*) WHERE completo = 0` en cero. Lo escribe L07 en `DEPLOY.md`.
 - **El smoke visual del front se hace después de L11**, que es la última mano sobre esa pantalla.
 - Puerto de test reservado: **L11 → 3111**.
+
+## Enmiendas del gate O4 (2026-08-27)
+- **L12 nuevo en O5** (`GATE-O4.md` §5 D16, opción **c** elegida por el usuario). Es el **último lote
+  de código** de D-061: después va el cierre.
+- **Lo que SALE de D-061 hacia `D-062`:** el rediseño del popover del override (sacarlo a un portal
+  con `position: fixed` en vez de seguir corrigiendo la medición — va por su quinta corrección) y el
+  rediseño del modelo de edición de la grilla. Se planifica con `/nueva-implementacion` cuando el
+  usuario lo decida; el cierre de D-061 deja la cross-referencia.
+- **Camino crítico final:** `L02 → L04 → {L09, L10} → L11 → L12 → cierre`.
+- **La recuperación de un backfill interrumpido es relanzar el comando completo**, no
+  `--solo-parciales` (D15, enmienda la D13 del gate O3).
+- **El smoke visual va después de L12**, que es de verdad la última mano sobre esa pantalla dentro
+  de D-061.
+- Puerto de test reservado: **L12 → 3112**.

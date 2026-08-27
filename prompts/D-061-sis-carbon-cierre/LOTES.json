@@ -18,6 +18,10 @@
     "O4": {
       "estado": "cerrada",
       "gate": "GATE-O4.md"
+    },
+    "O5": {
+      "estado": "abierta",
+      "gate": null
     }
   },
   "lotes": {
@@ -396,6 +400,37 @@
         "CA-52",
         "CA-53",
         "CA-54"
+      ]
+    },
+    "L12": {
+      "ola": "O5",
+      "titulo": "Una sola definición de \"esta celda cambió\", y que el conjunto de editadas no mienta",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L11"
+      ],
+      "puro": true,
+      "puerto": 3112,
+      "territorio": [
+        "src/components/Combustibles/ConsumosGrid.jsx",
+        "src/components/Combustibles/override.js",
+        "src/components/Combustibles/override.test.js",
+        "src/components/Combustibles/ConsumosGrid.test.jsx",
+        "prompts/D-061-sis-carbon-cierre/cierres/L12.md"
+      ],
+      "tests": [
+        "src/components/Combustibles/override.test.js",
+        "src/components/Combustibles/ConsumosGrid.test.jsx"
+      ],
+      "criterios": [
+        "CA-55",
+        "CA-56",
+        "CA-57",
+        "CA-58"
       ]
     }
   },

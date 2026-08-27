@@ -23,7 +23,9 @@
 | O4 | L11 | Cerrar las fronteras que dejaron abiertas L09 y L10 | ✅ (CA-48/49/50 parciales → D16) | `cierres/L11.md` (`b30885d`, `f08f1bd`) | GATE-O4 |
 | O4 | L07 | Docs + cleanup (BIT-MODBD **2.5**, BIT-RF **2.1** + RF-076, architecture, glosario, DEPLOY, git rm) | ✅ | `cierres/L07.md` (`7f924f5`, `126f5ba`) | GATE-O4 |
 | — | GATE-O4 | 641/641 en verde, 0 violaciones, D14–D16; **9 de 13 hallazgos en la misma pantalla** | ✅ (decisión D16 + visto bueno pendientes) | | `GATE-O4.md` |
-| Cierre | — | ADR D-061 + CLAUDE.md conv. 35 + cross-ref D-060 + git rm scaffolding | ⬜ | | |
+| O5 | L12 | Una sola definición de "esta celda cambió" (H65/H66/H72) — **último lote de código** | ⬜ (O5 abierta) | — | — |
+| — | GATE-O5 | | ⬜ | | `GATE-O5.md` |
+| Cierre | — | ADR D-061 + CLAUDE.md conv. 35 + cross-ref D-060 y **D-062** + git rm scaffolding | ⬜ | | |
 
 Leyenda: ⬜ pendiente · 🟡 en curso · ✅ done (lote) / cerrada con visto bueno (ola) · ⛔ bloqueado.
 La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada gate.
@@ -154,3 +156,7 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   **La decisión D16 —O5 acotada, rediseño en D-062, o cerrar ya— queda del usuario.**
 - 2026-08-27 · **Los dos backfills murieron** (prod en 246 de 2.996 días). Falta relanzarlos con el
   comando completo (D15). Conviene correr solo prod.
+- 2026-08-27 12:05 · Visto bueno de GATE-O4 con la **opción (c) de D16**: **O5 abierta con L12**
+  (los tres altos que pueden perder datos o atascar), y **el rediseño de la grilla sale a `D-062`**
+  — el popover a un portal con `position: fixed` y el modelo de edición a una sola fuente de verdad.
+  L12 es el último lote de código de D-061; después va el cierre.
