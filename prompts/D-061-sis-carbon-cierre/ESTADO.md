@@ -16,7 +16,7 @@
 | O2 | L06 | Higiene D-055 (tests a TEST_PLANTA incl. `sis_concurrencia`, guard, residuos, seed TST en helpers) | ✅ | `cierres/L06.md` (`1955c48`, `0c9b572`) | GATE-O2 |
 | O2 | L08 | Correcciones del front COMB tras el code-review de la O1 | ✅ (CA-33/35 parciales → L09) | `cierres/L08.md` (`f14918b`, `9da067f`) | GATE-O2 |
 | — | GATE-O2 | 632/632 en verde y 0 skips, 0 violaciones, D7–D10, L09 y L10 nuevos | ✅ (visto bueno 2026-08-26 23:11) | | `GATE-O2.md` (`eb9d00e`) |
-| — | Backfill prod | Corrida contra `PortalG3` (integrador, con visto bueno) | ⬜ pendiente del usuario | | `GATE-O2.md` §5 D10 |
+| — | Backfill prod | Corrida contra `PortalG3` (2.996 días desde `2018-06-13`) | 🟡 en curso (PID 23504, arranque 2026-08-26 23:35, ETA ~3,3 días) | | `GATE-O2.md` §5 D10 |
 | O3 | L09 | El refetch preservado no puede convertirse en un borrado al guardar (front) | ⬜ (O3 abierta) | — | — |
 | O3 | L10 | Endurecer el descubrimiento del SIS y la cobertura del scrape manual | ⬜ (O3 abierta) | — | — |
 | — | GATE-O3 | | ⬜ | | `GATE-O3.md` |
@@ -105,5 +105,9 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   efímero `:3199` con el stub del SIS y el sweeper apagado) + vitest **160/160** + build; residuos
   cero; `/code-review` (15 hallazgos, 2 de pérdida de datos confirmados a mano) y `/security-review`
   (sin hallazgos ≥ 0,7); D7–D10; **L09 y L10 creados**, L07 movido a O4; prompt de L07 enmendado.
-  Commit `eb9d00e`. **Visto bueno a las 23:11; O3 abierta (L09, L10).** La corrida del backfill
-  contra prod (D10) NO quedó autorizada por ese visto bueno: espera confirmación propia.
+  Commit `eb9d00e`. **Visto bueno a las 23:11; O3 abierta (L09, L10)** (`80c77a1`).
+- 2026-08-26 23:35 · **Backfill de producción autorizado y lanzado** (D10): `PortalG3`,
+  `2018-06-13..2026-08-24` (2.996 días), `--concurrencia 6`, **PID 23504**, log en
+  `%LOCALAPPDATA%\Temp\bitacora-backfill\prod-2026-08.log`, ETA ~3,3 días. Arranque limpio
+  (2018-06-13 en 24/24, 0 errores). Los dry-run previos confirmaron que el CLI **no reescribe** los
+  74 días que prod ya tenía completos. Conteos finales: `/cerrar-implementacion`.

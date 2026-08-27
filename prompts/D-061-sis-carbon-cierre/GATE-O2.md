@@ -240,7 +240,7 @@ la dirección correcta. Tres notas sub-umbral quedan en §7 (H37, H41-nota) para
   `PLAN-OLAS.md`, `LOTES.json` (L09 y L10 en O3; L07 pasa a O4 y depende también de ellos), y la
   cabecera de `L07-docs-cleanup.md`.
 
-### D10 — La corrida del backfill contra producción (pendiente del visto bueno del usuario)
+### D10 — La corrida del backfill contra producción (autorizada y lanzada)
 - **Qué lo provoca:** `PLAN-OLAS.md` la deja como tarea del integrador tras GATE-O2, y la pregunta
   #11 de la fase 1 exige visto bueno explícito. Escribe sobre `PortalG3`.
 - **Foto de prod tomada por el gate (solo lectura, 2026-08-26):** `sis_scrape_log` GEC32 = **74
@@ -253,13 +253,48 @@ la dirección correcta. Tres notas sub-umbral quedan en §7 (H37, H41-nota) para
   que termine la de dev (~3,5 días más) y usarla como canario completo antes de tocar prod ·
   c) no correrla en este flujo: dejar el runbook en `DEPLOY.md` y que sea una tarea operativa
   aparte — **Recomendada:** a, con la condición de recalcular `--to` el día que se lance.
-- **Decidido:** **PENDIENTE DEL USUARIO** (ver §8). Razones para (a): la de dev ya lleva 89 días
-  sin un solo error de red y valida el camino completo; el CLI es resumible, `--to ≤ hoy-2` no pisa
-  al sweeper (D-060) y la ownership de D-029 protege toda celda editada a mano. Razón para dudar:
-  son ~3,3 días de proceso lanzado desde este equipo, que tiene que quedar encendido, y escribe en
-  la BD de producción.
-- **Qué cambia / qué NO cambia:** no toca código. Si se autoriza, `deploy/DEPLOY.md` (L07) documenta
-  el runbook con el comando exacto y el registro de arranque.
+- **Decidido:** **a — autorizada por el usuario y LANZADA el 2026-08-26 23:35** (Bogotá). Razones:
+  la corrida de dev llevaba 89 días sin un solo error de red y valida el camino completo; el CLI es
+  resumible, `--to ≤ hoy-2` no pisa al sweeper (D-060) y la ownership de D-029 protege toda celda
+  editada a mano. Se aceptó el costo: ~3,3 días de proceso lanzado desde el equipo de desarrollo,
+  que tiene que quedar encendido.
+- **Qué cambia / qué NO cambia:** no toca código. `deploy/DEPLOY.md` (L07) documenta el runbook con
+  el comando exacto y este registro de arranque.
+
+#### Registro de la corrida contra producción
+Antes de lanzar, dos verificaciones contra `PortalG3` (ninguna escribe):
+```
+$ DB_NAME=PortalG3 … --confirm-db PortalG3_dev --dry-run
+[backfill] --confirm-db debe ser exactamente el DB_NAME activo ("PortalG3"). Recibido: "PortalG3_dev".
+$ DB_NAME=PortalG3 … --confirm-db PortalG3 --from 2026-08-20 --to 2026-08-22 --dry-run --concurrencia 6
+[backfill] BD=PortalG3 rango=2026-08-20..2026-08-22 dry-run=true …
+[backfill] FIN en 1s — días=3 saltados(ya 24/24)=3 sin-log-omitidos=0 procesados=0 creados=0 …
+[backfill] conteo por año (celdas ALIM de GEC32): total=10777
+[backfill]   2026: 10777 celdas en 59 días
+```
+El `saltados=3 / procesados=0` es la prueba de que el CLI **no reescribe** lo que ya está 24/24.
+
+Comando exacto de la corrida (proceso desacoplado con `Start-Process … -WindowStyle Hidden`,
+`WorkingDirectory = Bit-cora-g3/server`):
+```
+DB_NAME=PortalG3 node --env-file=../.env scripts/backfill-carbon-gec32.js
+  --confirm-db PortalG3 --from 2018-06-13 --confirm-from 2018-06-13 --to 2026-08-24
+  --concurrencia 6 --log "%LOCALAPPDATA%\Temp\bitacora-backfill\prod-2026-08.log"
+```
+- **PID 23504**, arranque **2026-08-26 23:35:06** (Bogotá). Log:
+  `C:\Users\jcespedes\AppData\Local\Temp\bitacora-backfill\prod-2026-08.log`
+  (+ `.stdout.log` / `.stderr.log`, este último vacío).
+- Rango `2018-06-13..2026-08-24` = **2.996 días**; a ~95 s/día, **ETA ≈ 3,3 días**.
+- Primeras líneas, arranque limpio:
+```
+[backfill] BD=PortalG3 rango=2018-06-13..2026-08-24 dry-run=false full=false solo-parciales=false throttle=1500ms concurrencia=6
+[backfill] 2018-06-13: sin log → desde=1 ok=24 err=0 ultimo=24 completo=1 +0/~0/-0 (0%)
+```
+- **Es resumible:** si muere, se relanza con el mismo comando y salta lo que ya está 24/24.
+- **Qué vigilar:** cualquier `err>0` en una línea `[backfill] <fecha>` del log. Los conteos finales
+  por año los cierra `/cerrar-implementacion`.
+- **Estado de prod antes de la corrida** (foto del gate): 74 días de log, **74 completos, 0
+  incompletos**, 10.777 celdas ALIM en 59 días, con los 12 días sin fila de junio todavía ahí.
 
 ## 6. Hechos que cambian lo que dicen los documentos anteriores
 > Este bloque se copia **tal cual** al inicio de cada prompt de las olas siguientes (O3 y O4).
