@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { hashPassword } from '../utils/password.js';
-import { setupSessions, call, PLANTA_ID, deactivateSyntheticSessions } from './helpers.js';
+import { setupSessions, call, TEST_PLANTA, deactivateSyntheticSessions } from './helpers.js';
 import { getTurnoColombia } from '../utils/turno.js';
 
 // D-029: rol "Coordinador de carbón y maquinaria".
@@ -12,9 +12,14 @@ import { getTurnoColombia } from '../utils/turno.js';
 // Operación (el Coordinador y el Op. Carbón quedaron en solo-lectura). NO cierra turno, NO es
 // solo_lectura. La matriz de permisos se reconstruye idempotentemente en cada arranque (db.js,
 // bloque "matriz AS"); estos tests fijan ese contrato.
+//
+// D-061 (L06 · CA-25): la sesión y el POST de prueba viven en la planta-fixture 'TST', y el
+// `after()` limpia ahí. El POST del test 7 espera 403, así que "nunca escribió nada en GEC3" era
+// cierto por accidente: bastaba con que la matriz cambiara para que empezara a insertar en una
+// planta real, y el DELETE del cleanup ya apuntaba a GEC3 sin más acotador que una fecha fija.
 
 const NOMBRE_CARGO = 'Coordinador de carbón y maquinaria';
-const TEST_FECHA = '2026-04-16';   // fecha fija pasada, distinta de la del test de consumos
+const TEST_FECHA = '2026-04-18';   // fecha fija pasada, propia (no la comparte con otro suite)
 
 let _ctx;            // setupSessions(): { sesiones, usuarios, bitByCodigo }
 let sesionCoord;    // sesion_id del Coordinador
@@ -51,7 +56,7 @@ async function setupCoordinador() {
   // landmine que `consumos_combustible` y que `helpers.js` ya había resuelto para el resto.
   const ins = await db.request()
     .input('usuario_id', sql.Int, u.usuario_id)
-    .input('planta_id', sql.VarChar(10), PLANTA_ID)
+    .input('planta_id', sql.VarChar(10), TEST_PLANTA)
     .input('cargo_id', sql.Int, c.cargo_id)
     .input('turno', sql.TinyInt, getTurnoColombia())
     .query(`
@@ -77,19 +82,21 @@ async function permiso(codigoBitacora) {
 }
 
 before(async () => {
-  _ctx = await setupSessions();
+  _ctx = await setupSessions({ planta: TEST_PLANTA });
   const coord = await setupCoordinador();
   sesionCoord = coord.sesion_id;
 });
 
 after(async () => {
   const db = await getDB();
+  // Acotado a la planta-fixture DENTRO del statement (D-055/D-061): la fecha fija no acota nada
+  // desde que el backfill del SIS llena el histórico de carbón de las plantas reales.
   await db.request()
-    .input('p', sql.VarChar(10), 'GEC3')
+    .input('tp', sql.VarChar(10), TEST_PLANTA)
     .input('f', sql.Date, TEST_FECHA)
-    .query(`DELETE FROM bitacora.consumo_combustible WHERE planta_id=@p AND fecha=@f`);
-  // Este suite crea sesiones sintéticas en GEC3 (setupSessions + test_coord_cym). Desactivarlas SIEMPRE
-  // aquí para no dejarlas en el panel CONECTADOS de prod (D-030). Cubre las 4 TEST_USERS + test_coord_cym.
+    .query(`DELETE FROM bitacora.consumo_combustible WHERE planta_id=@tp AND fecha=@f`);
+  // Este suite crea sesiones sintéticas (setupSessions + test_coord_cym). Desactivarlas SIEMPRE
+  // aquí para no dejarlas en el panel CONECTADOS de prod (D-030). Cubre las TEST_USERS + test_coord_cym.
   await deactivateSyntheticSessions();
 });
 
@@ -139,12 +146,14 @@ test('6. Matriz: MAND es visible (global) pero NO creable por este rol', async (
 });
 
 test('7. Permiso runtime D-048: el Coordinador VE pero NO llena Consumos (GET 200, POST COMB → 403)', async () => {
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionCoord })).data;
-  assert.equal(cat.combustibles.length, 8, 'el catálogo GEC3 debe seguir visible para el Coordinador');
+  const cat = (await call('GET', `/api/combustibles/catalogo?planta_id=${TEST_PLANTA}`, { sesion_id: sesionCoord })).data;
+  assert.equal(cat.combustibles.length, 10, 'el catálogo de la fixture debe seguir visible para el Coordinador');
+  // El id sale por CÓDIGO: los combustibles de la fixture no comparten `combustible_id` con GEC3.
+  const alim1 = cat.combustibles.find((c) => c.codigo === 'ALIM_1').combustible_id;
   const { status } = await call('POST', '/api/combustibles/consumos', {
     sesion_id: sesionCoord,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 5, combustible_id: cat.combustibles[0].combustible_id, cantidad: 7.5 },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 5, combustible_id: alim1, cantidad: 7.5 },
     ]},
   });
   assert.equal(status, 403, 'D-048: el Coordinador ya no escribe COMB');

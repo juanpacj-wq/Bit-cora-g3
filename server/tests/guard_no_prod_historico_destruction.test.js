@@ -39,6 +39,15 @@ const TABLAS_PROTEGIDAS = [
   'registro_activo',
   'evento_dashboard',
   'mand_cierre_log',
+  // D-061 (L06 · CA-27): las dos tablas de la ingesta de carbón del SIS. Entran ahora porque el
+  // backfill histórico de GEC32 las está poblando con años de operación real (D-060/D-061) sobre
+  // la MISMA BD contra la que corre la suite (D-030): un `DELETE ... WHERE planta_id='GEC32' AND
+  // fecha=@f` de un test —el patrón exacto que tenían `consumos_combustible`, `sis_concurrencia` y
+  // `sis_scraper_ownership`— borraría 192 celdas de carbón real por cada corrida, y el log del día
+  // con ellas. A diferencia de `registro_historico` no hay auditoría que lo delate: la grilla
+  // simplemente aparece vacía ese día.
+  'consumo_combustible',
+  'sis_scrape_log',
 ];
 
 // Marcadores que prueban que el statement está acotado a datos de test. Basta uno.
@@ -153,4 +162,45 @@ test('meta: el detector dispara ante el patrón real que motivó D-055, y calla 
       .query(\`DELETE FROM bitacora.registro_historico WHERE bitacora_id = @mand AND planta_id = @p;\`);
   `;
   assert.equal(ofensoresEn(acotado).length, 0, 'no debe marcar el DELETE acotado a la planta-fixture');
+});
+
+// D-061 (L06 · CA-27): el mismo verificador bidireccional para las dos tablas del SIS. Va aparte y
+// con el patrón LITERAL que tenían los tests de carbón (planta real + fecha fija), porque "acotar
+// por fecha" es exactamente la falsa sensación de seguridad que el guard tiene que desmentir: la
+// fecha fija 2026-04-17 dejó de ser tierra de nadie el día que el backfill empezó a llenarla.
+test('meta: el detector cubre consumo_combustible y sis_scrape_log, y una fecha fija NO acota', () => {
+  const porFecha = `
+    const PLANTA = 'GEC32';
+    const FECHA = '2026-04-17';
+    await db.request()
+      .input('p', sql.VarChar(10), PLANTA)
+      .input('f', sql.Date, FECHA)
+      .query(\`DELETE FROM bitacora.consumo_combustible WHERE planta_id=@p AND fecha=@f\`);
+    await db.request()
+      .input('p', sql.VarChar(10), PLANTA)
+      .input('f', sql.Date, FECHA)
+      .query(\`DELETE FROM bitacora.sis_scrape_log WHERE planta_id=@p AND fecha=@f\`);
+  `;
+  const ofensores = ofensoresEn(porFecha);
+  assert.equal(ofensores.length, 2, `los dos DELETE deben marcarse: ${JSON.stringify(ofensores)}`);
+  assert.deepEqual(
+    ofensores.map((o) => o.tabla).sort(),
+    ['consumo_combustible', 'sis_scrape_log'],
+  );
+
+  // Un UPDATE del log también cuenta (el helper `setLog` de sis_scraper_ownership lo hace).
+  const updateSinAcotar = `
+    await db.request()
+      .input('p', sql.VarChar(10), 'GEC32')
+      .query(\`UPDATE bitacora.sis_scrape_log SET completo=0 WHERE planta_id=@p\`);
+  `;
+  assert.equal(ofensoresEn(updateSinAcotar).length, 1, 'un UPDATE del log sin acotador debe marcarse');
+
+  const acotadoAFixture = `
+    await db.request()
+      .input('tp', sql.VarChar(10), TEST_PLANTA)
+      .input('f', sql.Date, FECHA)
+      .query(\`DELETE FROM bitacora.consumo_combustible WHERE planta_id=@tp AND fecha=@f\`);
+  `;
+  assert.equal(ofensoresEn(acotadoAFixture).length, 0, 'acotado a la planta-fixture no debe marcarse');
 });

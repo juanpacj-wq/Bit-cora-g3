@@ -1,6 +1,6 @@
 import sql from 'mssql';
 import { randomBytes } from 'node:crypto';
-import { initDB, getDB, TEST_PLANTA_ID } from '../db.js';
+import { initDB, getDB, TEST_PLANTA_ID, seedCatalogoCombTest } from '../db.js';
 import { hashPassword } from '../utils/password.js';
 import { getTurnoColombia } from '../utils/turno.js';
 
@@ -189,6 +189,29 @@ const USER_CARGO = {
   admin:   'Administrador y Debugging',
 };
 
+// D-061 (L06 · enmienda G3 del GATE-O1): siembra la planta-fixture 'TST' y su catálogo de
+// combustibles, en ese orden y de forma idempotente.
+//
+// Existe porque `seedCatalogoCombTest` (db.js) se AUTO-OMITE si la fila 'TST' de `lov_bit.planta`
+// todavía no está, y esa fila la siembra el harness, no `initDB`. Sobre una BD virgen eso dejaba
+// el catálogo para el SEGUNDO arranque: las suites de COMB/SIS encontraban `combustibles: []` y
+// reventaban con un TypeError sin pista del motivo (hallazgo H4 del code-review de la O1).
+//
+// La usan `setupSessions({ planta: TEST_PLANTA })` y las suites del scraper, que operan sobre la
+// fixture SIN abrir sesiones de app (`sis_scraper_ownership`, `sis_concurrencia`) y por eso no
+// pueden apoyarse en `setupSessions` para tener catálogo.
+export async function ensurePlantaCombTest() {
+  const db = await getDB();
+  await db.request()
+    .input('tp', sql.VarChar(10), TEST_PLANTA_ID)
+    .query(`
+      MERGE lov_bit.planta AS t
+      USING (SELECT @tp AS planta_id) AS s ON t.planta_id = s.planta_id
+      WHEN NOT MATCHED THEN INSERT (planta_id, nombre, activa) VALUES (@tp, 'Test Synthetic', 1);
+    `);
+  return seedCatalogoCombTest(db);
+}
+
 export async function setupSessions({ planta = PLANTA_ID } = {}) {
   await initDB();
   const db = await getDB();
@@ -209,6 +232,13 @@ export async function setupSessions({ planta = PLANTA_ID } = {}) {
         USING (SELECT @planta AS planta_id) AS s ON t.planta_id = s.planta_id
         WHEN NOT MATCHED THEN INSERT (planta_id, nombre, activa) VALUES (@planta, 'Test Synthetic', 1);
       `);
+  }
+
+  // D-061 (L06 · enmienda G3): el catálogo de combustibles de 'TST' se siembra JUSTO DESPUÉS del
+  // MERGE de la planta, no antes: `initDB()` (arriba) lo omite mientras la fila no exista. Sin
+  // esto, una BD virgen deja sin catálogo a la primera corrida de COMB/SIS sobre la fixture.
+  if (planta === TEST_PLANTA) {
+    await seedCatalogoCombTest(db);
   }
 
   for (const u of TEST_USERS) {
@@ -316,6 +346,18 @@ export async function cleanupTestRegistros() {
       WHERE planta_id = @planta
         AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_activo)
         AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_historico);
+    `);
+  // D-061 (L06 · contrato C13): COMB y el scraper del SIS también dejan residuo en la BD, y hasta
+  // ahora nadie lo barría — cada suite limpiaba su propia (planta, fecha) y lo que se escapaba
+  // quedaba para siempre. Acotado a las DOS plantas-fixture y a nada más: un DELETE por fecha o
+  // global cascaría sobre el carbón real de GEC32 que el backfill de D-061 está poblando (D-055).
+  // `consumo_combustible` primero por si algún día hay FK hacia el log.
+  await db.request()
+    .input('tp', sql.VarChar(10), TEST_PLANTA_ID)
+    .input('tpr', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+    .query(`
+      DELETE FROM bitacora.consumo_combustible WHERE planta_id IN (@tp, @tpr);
+      DELETE FROM bitacora.sis_scrape_log      WHERE planta_id IN (@tp, @tpr);
     `);
   // D-030/D-044: desactivar TODA sesión sintética (es_sintetico=1), no solo los 4 TEST_USERS. La
   // whitelist vieja dejaba test_opcarbon/test_coord_cym ACTIVAS en GEC3 → panel CONECTADOS de prod

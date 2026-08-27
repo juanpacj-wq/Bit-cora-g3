@@ -15,6 +15,12 @@ const checks = [
   ['conformacion_turno de usuarios sintéticos', `SELECT COUNT(*) AS n FROM bitacora.conformacion_turno c JOIN lov_bit.usuario u ON u.usuario_id = c.usuario_id WHERE u.es_sintetico = 1`],
   ['disponibilidad_estado en planta de test', `SELECT COUNT(*) AS n FROM bitacora.disponibilidad_estado WHERE planta_id IN ('${TEST_PLANTA_ID}','TSR')`],
   ['evento_dashboard en planta de test', `SELECT COUNT(*) AS n FROM bitacora.evento_dashboard WHERE planta_id IN ('${TEST_PLANTA_ID}','TSR')`],
+  // D-061 (L06 · CA-28): COMB y el SIS. El gate de la O1 tuvo que contar estas dos tablas con una
+  // query a mano porque el script no las miraba, y son justo las que las suites de COMB/SIS
+  // escriben ahora sobre la fixture. `lov_bit.combustible` de 'TST' NO se cuenta: es un catálogo
+  // RESIDENTE (seed idempotente de db.js, igual que la fila 'TST' de lov_bit.planta), no residuo.
+  ['consumo_combustible en planta de test', `SELECT COUNT(*) AS n FROM bitacora.consumo_combustible WHERE planta_id IN ('${TEST_PLANTA_ID}','TSR')`],
+  ['sis_scrape_log en planta de test', `SELECT COUNT(*) AS n FROM bitacora.sis_scrape_log WHERE planta_id IN ('${TEST_PLANTA_ID}','TSR')`],
 ];
 
 let total = 0;

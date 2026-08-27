@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { hashPassword } from '../utils/password.js';
-import { setupSessions, call, PLANTA_ID, TEST_TAG, deactivateSyntheticSessions } from './helpers.js';
+import { setupSessions, call, TEST_PLANTA, TEST_TAG, deactivateSyntheticSessions } from './helpers.js';
 import { getTurnoColombia } from '../utils/turno.js';
 
 // D-027: tests del módulo Combustibles → Consumos (F26.B1).
@@ -12,10 +12,29 @@ import { getTurnoColombia } from '../utils/turno.js';
 // Permisos (D-048): escriben SOLO JdT + Ingeniero de Operación. El Operador de Carbón y Caliza y el
 // Ingeniero Químico son solo-lectura (9, 10 → GET 200 / POST 403); IngOp puede crear (9b); la matriz
 // completa de escritores queda fijada en (16). Los POST de setup usan un escritor (JdT/IngOp) a propósito.
+//
+// D-061 (L06 · CA-25): TODA ESCRITURA va a la planta-fixture 'TST', nunca a GEC3. La suite corre
+// contra la BD productiva (D-030) y este archivo insertaba y BORRABA `consumo_combustible` de GEC3
+// en una fecha fija; con el backfill del SIS poblando el histórico de carbón (D-061), un DELETE por
+// (planta real, fecha) deja de ser inocuo. Lo habilita el catálogo espejo de 'TST' (seed C12).
+// Lo que SÍ se queda mirando a las plantas reales son las lecturas puras (tests 1, 2, 12 y 13):
+// fijan el catálogo real y la migración F28.A1, no escriben una sola fila y por eso son seguras.
+//
+// Los `combustible_id` de 'TST' son DISTINTOS de los de GEC3/GEC32 (los sembró otro MERGE): todo id
+// se resuelve por `codigo` contra el catálogo de la fixture, jamás por índice ni hardcodeado.
 
 let ctx;                 // setupSessions output: { sesiones, usuarios, bitByCodigo }
 let sesionOpCarbon;      // sesion_id del Operador Carbón y Caliza (cargo no cubierto por setupSessions)
+let catalogoTst;         // catálogo de TEST_PLANTA (10 filas: ALIM_1..8, CALIZA, ACPM)
 const TEST_FECHA = '2026-04-15';  // fecha fija pasada, fuera del rango de fechas reales en BD
+
+// Id por CÓDIGO. Falla ruidosamente si el catálogo de la fixture no trae ese combustible: sin el
+// seed C12 el `.find(...)` devolvería undefined y el test moriría con un TypeError sin pista.
+function idDe(codigo) {
+  const fila = catalogoTst.find((c) => c.codigo === codigo);
+  assert.ok(fila, `el catálogo de ${TEST_PLANTA} debe traer ${codigo} (seed C12, D-061)`);
+  return fila.combustible_id;
+}
 
 // setupSessions() solo crea 4 cargos (jdt, ingOp, gerente, ingQuim). El cargo
 // "Operador de Planta - Carbón y Caliza" lo necesitamos para tests de permisos +
@@ -51,9 +70,13 @@ async function setupOperadorCarbon() {
   // corrida (tests 7 y 9). `helpers.js` ya había corregido esto para el resto de la suite; este
   // helper local se había quedado con el literal. Es la causa mecánica del flake de `consumos`
   // atribuido al "borde de turno": no hace falta cruzar el borde, basta con correr en T2.
+  //
+  // D-061 (L06): la sesión va sobre TEST_PLANTA, igual que las de `setupSessions`. Los endpoints de
+  // COMB no exigen `plantaMatch` (edición colaborativa cross-planta), pero dejar la sesión en GEC3
+  // la volvía a mostrar en el panel CONECTADOS de una planta real mientras vivía.
   const ins = await db.request()
     .input('usuario_id', sql.Int, u.usuario_id)
-    .input('planta_id', sql.VarChar(10), PLANTA_ID)
+    .input('planta_id', sql.VarChar(10), TEST_PLANTA)
     .input('cargo_id', sql.Int, c.cargo_id)
     .input('turno', sql.TinyInt, getTurnoColombia())
     .query(`
@@ -64,28 +87,39 @@ async function setupOperadorCarbon() {
   return { sesion_id: ins.recordset[0].sesion_id, usuario_id: u.usuario_id };
 }
 
-async function cleanConsumos(planta, fecha) {
+// D-061 (L06 · CA-25/CA-27): acotado a la planta-fixture DENTRO del statement, no por parámetro.
+// Sin planta como argumento no hay forma de llamarlo por error contra GEC3/GEC32 — que es como
+// este archivo borraba histórico real —, y el acotador queda léxicamente junto al DELETE, que es
+// lo que exige el guard `guard_no_prod_historico_destruction`.
+async function cleanConsumos(fecha) {
   const db = await getDB();
   await db.request()
-    .input('p', sql.VarChar(10), planta)
+    .input('tp', sql.VarChar(10), TEST_PLANTA)
     .input('f', sql.Date, fecha)
-    .query(`DELETE FROM bitacora.consumo_combustible WHERE planta_id=@p AND fecha=@f`);
+    .query(`DELETE FROM bitacora.consumo_combustible WHERE planta_id=@tp AND fecha=@f`);
 }
 
 before(async () => {
-  ctx = await setupSessions();
+  ctx = await setupSessions({ planta: TEST_PLANTA });
   const op = await setupOperadorCarbon();
   sesionOpCarbon = op.sesion_id;
+
+  const cat = await call('GET', `/api/combustibles/catalogo?planta_id=${TEST_PLANTA}`, { sesion_id: ctx.sesiones.jdt });
+  assert.equal(cat.status, 200, `el catálogo de ${TEST_PLANTA} debe existir (seed C12): ${JSON.stringify(cat.data)}`);
+  catalogoTst = cat.data.combustibles;
+  assert.equal(catalogoTst.length, 10, `${TEST_PLANTA} debe tener las 10 filas espejo de GEC32`);
 });
 
 after(async () => {
-  await cleanConsumos('GEC3', TEST_FECHA);
-  await cleanConsumos('GEC32', TEST_FECHA);
-  // Este suite crea sesiones sintéticas en GEC3 (setupSessions + test_opcarbon). Desactivarlas SIEMPRE
-  // aquí para no dejarlas en el panel CONECTADOS de prod (D-030). Cubre las 4 TEST_USERS + test_opcarbon.
+  await cleanConsumos(TEST_FECHA);
+  // Este suite crea sesiones sintéticas (setupSessions + test_opcarbon). Desactivarlas SIEMPRE
+  // aquí para no dejarlas en el panel CONECTADOS de prod (D-030). Cubre las TEST_USERS + test_opcarbon.
   await deactivateSyntheticSessions();
 });
 
+// Tests 1 y 2: LECTURA de los catálogos reales. Son la única red que fija la forma del catálogo de
+// GEC3 (6 alimentadores ALIM_A..F) y de GEC32 (8 alimentadores ALIM_1..8) — no escriben nada, así
+// que se quedan mirando la planta real a propósito.
 test('1. GET catalogo GEC3 devuelve 8 combustibles en orden correcto', async () => {
   const { status, data } = await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt });
   assert.equal(status, 200);
@@ -106,17 +140,16 @@ test('2. GET catalogo GEC32 devuelve 10 combustibles en orden correcto', async (
 });
 
 test('3. POST batch insert + update + delete en una transacción', async () => {
-  await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
-  const alimA = cat.combustibles[0].combustible_id;
-  const alimB = cat.combustibles[1].combustible_id;
-  const alimC = cat.combustibles[2].combustible_id;
+  await cleanConsumos(TEST_FECHA);
+  const alim1 = idDe('ALIM_1');
+  const alim2 = idDe('ALIM_2');
+  const alim3 = idDe('ALIM_3');
 
   const r1 = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 1, combustible_id: alimA, cantidad: 12.5 },
-      { periodo: 1, combustible_id: alimB, cantidad: 8.3 },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: alim1, cantidad: 12.5 },
+      { periodo: 1, combustible_id: alim2, cantidad: 8.3 },
     ]},
   });
   assert.equal(r1.status, 200);
@@ -124,10 +157,10 @@ test('3. POST batch insert + update + delete en una transacción', async () => {
 
   const r2 = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 1, combustible_id: alimA, cantidad: 15.0 },   // update
-      { periodo: 1, combustible_id: alimC, cantidad: 4.7 },    // insert
-      { periodo: 1, combustible_id: alimB, cantidad: null },   // delete
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: alim1, cantidad: 15.0 },   // update
+      { periodo: 1, combustible_id: alim3, cantidad: 4.7 },    // insert
+      { periodo: 1, combustible_id: alim2, cantidad: null },   // delete
     ]},
   });
   assert.equal(r2.status, 200);
@@ -135,19 +168,18 @@ test('3. POST batch insert + update + delete en una transacción', async () => {
   assert.equal(r2.data.resumen.actualizados, 1);
   assert.equal(r2.data.resumen.eliminados, 1);
 
-  const post = (await call('GET', `/api/combustibles/consumos?planta_id=GEC3&fecha=${TEST_FECHA}`, { sesion_id: ctx.sesiones.jdt })).data;
+  const post = (await call('GET', `/api/combustibles/consumos?planta_id=${TEST_PLANTA}&fecha=${TEST_FECHA}`, { sesion_id: ctx.sesiones.jdt })).data;
   const fila = post.celdas['1'];
-  assert.equal(fila[String(alimA)].cantidad, 15.0);
-  assert.equal(fila[String(alimC)].cantidad, 4.7);
-  assert.ok(!fila[String(alimB)], 'alimB debe estar borrado');
+  assert.equal(fila[String(alim1)].cantidad, 15.0);
+  assert.equal(fila[String(alim3)].cantidad, 4.7);
+  assert.ok(!fila[String(alim2)], 'alim2 debe estar borrado');
 });
 
 test('4. POST rechaza fecha futura con 400 fecha_futura', async () => {
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
   const { status, data } = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: '2099-12-31', celdas: [
-      { periodo: 1, combustible_id: cat.combustibles[0].combustible_id, cantidad: 1.0 },
+    body: { planta_id: TEST_PLANTA, fecha: '2099-12-31', celdas: [
+      { periodo: 1, combustible_id: idDe('ALIM_1'), cantidad: 1.0 },
     ]},
   });
   assert.equal(status, 400);
@@ -155,11 +187,12 @@ test('4. POST rechaza fecha futura con 400 fecha_futura', async () => {
 });
 
 test('5. POST rechaza combustible_id que no pertenece a la planta', async () => {
+  // El catálogo de GEC32 se LEE (no se escribe) solo para tomar prestado un id ajeno a la fixture.
   const catG32 = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC32', { sesion_id: ctx.sesiones.jdt })).data;
   const idGEC32 = catG32.combustibles[0].combustible_id;
   const { status, data } = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
       { periodo: 1, combustible_id: idGEC32, cantidad: 5.0 },
     ]},
   });
@@ -170,11 +203,10 @@ test('5. POST rechaza combustible_id que no pertenece a la planta', async () => 
 });
 
 test('6. POST rechaza cantidad negativa', async () => {
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
   const { status, data } = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 1, combustible_id: cat.combustibles[0].combustible_id, cantidad: -3.0 },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: idDe('ALIM_1'), cantidad: -3.0 },
     ]},
   });
   assert.equal(status, 400);
@@ -183,13 +215,12 @@ test('6. POST rechaza cantidad negativa', async () => {
 });
 
 test('7. GET consumos devuelve celdas pivot correctas', async () => {
-  await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
-  const idA = cat.combustibles[0].combustible_id;
-  const idB = cat.combustibles[1].combustible_id;
+  await cleanConsumos(TEST_FECHA);
+  const idA = idDe('ALIM_1');
+  const idB = idDe('ALIM_2');
   await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
       { periodo: 1, combustible_id: idA, cantidad: 10.0 },
       { periodo: 1, combustible_id: idB, cantidad: 5.5 },
       { periodo: 2, combustible_id: idA, cantidad: 11.0 },
@@ -197,7 +228,7 @@ test('7. GET consumos devuelve celdas pivot correctas', async () => {
   });
 
   // Lectura desde el Operador de Carbón y Caliza: sigue viendo COMB (puede_ver=1) aunque ya no escriba (D-048).
-  const { data } = await call('GET', `/api/combustibles/consumos?planta_id=GEC3&fecha=${TEST_FECHA}`, { sesion_id: sesionOpCarbon });
+  const { data } = await call('GET', `/api/combustibles/consumos?planta_id=${TEST_PLANTA}&fecha=${TEST_FECHA}`, { sesion_id: sesionOpCarbon });
   assert.equal(data.celdas['1'][String(idA)].cantidad, 10.0);
   assert.equal(data.celdas['1'][String(idB)].cantidad, 5.5);
   assert.equal(data.celdas['2'][String(idA)].cantidad, 11.0);
@@ -205,14 +236,13 @@ test('7. GET consumos devuelve celdas pivot correctas', async () => {
 });
 
 test('8. v_consumo_periodo calcula total_carbon_ton, caliza_ton, acpm_gal correctamente', async () => {
-  await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
-  const alims = cat.combustibles.filter((c) => c.tipo === 'ALIMENTADOR');
-  const caliza = cat.combustibles.find((c) => c.tipo === 'CALIZA');
-  const acpm = cat.combustibles.find((c) => c.tipo === 'ACPM');
+  await cleanConsumos(TEST_FECHA);
+  const alims = catalogoTst.filter((c) => c.tipo === 'ALIMENTADOR');
+  const caliza = catalogoTst.find((c) => c.tipo === 'CALIZA');
+  const acpm = catalogoTst.find((c) => c.tipo === 'ACPM');
   await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
       { periodo: 1, combustible_id: alims[0].combustible_id, cantidad: 10.0 },
       { periodo: 1, combustible_id: alims[1].combustible_id, cantidad: 5.5 },
       { periodo: 1, combustible_id: alims[2].combustible_id, cantidad: 3.2 },
@@ -221,13 +251,16 @@ test('8. v_consumo_periodo calcula total_carbon_ton, caliza_ton, acpm_gal correc
     ]},
   });
 
+  // La vista agrupa por (planta, fecha, periodo) y NO filtra plantas: la fixture entra en ella
+  // igual que GEC3/GEC32, así que el cálculo se sigue verificando sobre la vista real.
   const db = await getDB();
   const r = (await db.request()
-    .input('p', sql.VarChar(10), 'GEC3')
+    .input('p', sql.VarChar(10), TEST_PLANTA)
     .input('f', sql.Date, TEST_FECHA)
     .query(`SELECT total_carbon_ton, caliza_ton, acpm_gal FROM bitacora.v_consumo_periodo WHERE planta_id=@p AND fecha=@f AND periodo=1`)
   ).recordset[0];
 
+  assert.ok(r, `la vista debe tener fila para ${TEST_PLANTA} ${TEST_FECHA} p1`);
   assert.ok(Math.abs(Number(r.total_carbon_ton) - 18.7) < 0.001,
     `total_carbon esperado 18.7, recibido ${r.total_carbon_ton}`);
   assert.ok(Math.abs(Number(r.caliza_ton) - 0.8) < 0.001,
@@ -238,26 +271,25 @@ test('8. v_consumo_periodo calcula total_carbon_ton, caliza_ton, acpm_gal correc
 
 test('9. Permiso D-048: Operador Carbón y Caliza SOLO lee (GET 200, POST 403)', async () => {
   // Ve el catálogo (puede_ver=1)...
-  const cat = await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: sesionOpCarbon });
+  const cat = await call('GET', `/api/combustibles/catalogo?planta_id=${TEST_PLANTA}`, { sesion_id: sesionOpCarbon });
   assert.equal(cat.status, 200);
-  assert.equal(cat.data.combustibles.length, 8);
+  assert.equal(cat.data.combustibles.length, 10);
   // ...pero ya NO puede escribir: tras D-048 su puede_crear en COMB es 0 → 403.
   const post = await call('POST', '/api/combustibles/consumos', {
     sesion_id: sesionOpCarbon,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 23, combustible_id: cat.data.combustibles[0].combustible_id, cantidad: 1.0 },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 23, combustible_id: idDe('ALIM_1'), cantidad: 1.0 },
     ]},
   });
   assert.equal(post.status, 403);
 });
 
 test('9b. Permiso D-048: Ingeniero de Operación PUEDE crear (POST 200)', async () => {
-  await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.ingOp })).data;
+  await cleanConsumos(TEST_FECHA);
   const { status, data } = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.ingOp,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 23, combustible_id: cat.combustibles[0].combustible_id, cantidad: 1.0 },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 23, combustible_id: idDe('ALIM_1'), cantidad: 1.0 },
     ]},
   });
   assert.equal(status, 200, JSON.stringify(data));
@@ -265,52 +297,51 @@ test('9b. Permiso D-048: Ingeniero de Operación PUEDE crear (POST 200)', async 
 });
 
 test('10. Permiso: Ingeniero Químico solo ve (POST devuelve 403, GET 200)', async () => {
-  const cat = await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.ingQuim });
+  const cat = await call('GET', `/api/combustibles/catalogo?planta_id=${TEST_PLANTA}`, { sesion_id: ctx.sesiones.ingQuim });
   assert.equal(cat.status, 200);
-  assert.equal(cat.data.combustibles.length, 8);
+  assert.equal(cat.data.combustibles.length, 10);
 
   const post = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.ingQuim,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 1, combustible_id: cat.data.combustibles[0].combustible_id, cantidad: 1.0 },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: idDe('ALIM_1'), cantidad: 1.0 },
     ]},
   });
   assert.equal(post.status, 403);
 });
 
 test('11. modificado_por solo se setea si cantidad cambió (paridad D-019 con MAND)', async () => {
-  await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.ingOp })).data;
-  const alimA = cat.combustibles[0].combustible_id;
+  await cleanConsumos(TEST_FECHA);
+  const alim1 = idDe('ALIM_1');
 
   // Insert original como Ingeniero de Operación (escritor distinto del JdT que hará los cambios).
   await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.ingOp,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 1, combustible_id: alimA, cantidad: 10.0, detalle: `${TEST_TAG} inicial` },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: alim1, cantidad: 10.0, detalle: `${TEST_TAG} inicial` },
     ]},
   });
 
   // Cambio SOLO el detalle desde otro usuario (JdT). modificado_por debe seguir null.
   await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 1, combustible_id: alimA, cantidad: 10.0, detalle: `${TEST_TAG} cambio detalle` },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: alim1, cantidad: 10.0, detalle: `${TEST_TAG} cambio detalle` },
     ]},
   });
-  const sinCambio = (await call('GET', `/api/combustibles/consumos?planta_id=GEC3&fecha=${TEST_FECHA}`, { sesion_id: ctx.sesiones.jdt })).data;
-  assert.equal(sinCambio.celdas['1'][String(alimA)].modificado_por, null,
+  const sinCambio = (await call('GET', `/api/combustibles/consumos?planta_id=${TEST_PLANTA}&fecha=${TEST_FECHA}`, { sesion_id: ctx.sesiones.jdt })).data;
+  assert.equal(sinCambio.celdas['1'][String(alim1)].modificado_por, null,
     'modificado_por debe seguir null si solo cambió detalle (paridad D-019)');
 
   // Ahora cambio cantidad → modificado_por debe poblarse.
   await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 1, combustible_id: alimA, cantidad: 12.0 },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: alim1, cantidad: 12.0 },
     ]},
   });
-  const conCambio = (await call('GET', `/api/combustibles/consumos?planta_id=GEC3&fecha=${TEST_FECHA}`, { sesion_id: ctx.sesiones.jdt })).data;
-  const mod = conCambio.celdas['1'][String(alimA)].modificado_por;
+  const conCambio = (await call('GET', `/api/combustibles/consumos?planta_id=${TEST_PLANTA}&fecha=${TEST_FECHA}`, { sesion_id: ctx.sesiones.jdt })).data;
+  const mod = conCambio.celdas['1'][String(alim1)].modificado_por;
   assert.ok(mod !== null && typeof mod === 'object' && mod.usuario_id,
     `modificado_por debe ser objeto con usuario_id cuando cantidad cambia; recibido ${JSON.stringify(mod)}`);
 });
@@ -345,6 +376,8 @@ test('12. F26.B1 idempotente: flag presente + 18 combustibles + 1 fila COMB', as
 });
 
 test('13. F28.A1: GET catalogo expone cantidad_max por tipo (25/40/25000)', async () => {
+  // Lectura sobre GEC3: es la migración F28.A1 sobre datos REALES lo que se está fijando acá, no
+  // el seed de la fixture (que la espeja y queda cubierto por el test 14/15 al validar los topes).
   const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
   const alim = cat.combustibles.find((c) => c.tipo === 'ALIMENTADOR');
   const caliza = cat.combustibles.find((c) => c.tipo === 'CALIZA');
@@ -355,15 +388,14 @@ test('13. F28.A1: GET catalogo expone cantidad_max por tipo (25/40/25000)', asyn
 });
 
 test('14. POST rechaza ALIMENTADOR > 25 (cantidad_excede_max) y acepta exactamente 25', async () => {
-  await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
-  const alimA = cat.combustibles.find((c) => c.tipo === 'ALIMENTADOR').combustible_id;
+  await cleanConsumos(TEST_FECHA);
+  const alim1 = idDe('ALIM_1');
 
   // 25.001 → rechazo
   const over = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 1, combustible_id: alimA, cantidad: 25.001 },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: alim1, cantidad: 25.001 },
     ]},
   });
   assert.equal(over.status, 400);
@@ -373,8 +405,8 @@ test('14. POST rechaza ALIMENTADOR > 25 (cantidad_excede_max) y acepta exactamen
   // 25 exacto → OK (boundary inclusivo)
   const ok = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
-      { periodo: 1, combustible_id: alimA, cantidad: 25 },
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
+      { periodo: 1, combustible_id: alim1, cantidad: 25 },
     ]},
   });
   assert.equal(ok.status, 200);
@@ -382,14 +414,13 @@ test('14. POST rechaza ALIMENTADOR > 25 (cantidad_excede_max) y acepta exactamen
 });
 
 test('15. POST rechaza CALIZA > 40 y ACPM > 25000; acepta límites exactos', async () => {
-  await cleanConsumos('GEC3', TEST_FECHA);
-  const cat = (await call('GET', '/api/combustibles/catalogo?planta_id=GEC3', { sesion_id: ctx.sesiones.jdt })).data;
-  const caliza = cat.combustibles.find((c) => c.tipo === 'CALIZA').combustible_id;
-  const acpm = cat.combustibles.find((c) => c.tipo === 'ACPM').combustible_id;
+  await cleanConsumos(TEST_FECHA);
+  const caliza = idDe('CALIZA');
+  const acpm = idDe('ACPM');
 
   const over = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
       { periodo: 2, combustible_id: caliza, cantidad: 40.5 },
       { periodo: 2, combustible_id: acpm, cantidad: 25001 },
     ]},
@@ -402,7 +433,7 @@ test('15. POST rechaza CALIZA > 40 y ACPM > 25000; acepta límites exactos', asy
 
   const ok = await call('POST', '/api/combustibles/consumos', {
     sesion_id: ctx.sesiones.jdt,
-    body: { planta_id: 'GEC3', fecha: TEST_FECHA, celdas: [
+    body: { planta_id: TEST_PLANTA, fecha: TEST_FECHA, celdas: [
       { periodo: 2, combustible_id: caliza, cantidad: 40 },
       { periodo: 2, combustible_id: acpm, cantidad: 25000 },
     ]},
