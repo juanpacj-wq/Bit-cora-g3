@@ -381,7 +381,9 @@ la dirección correcta. Tres notas sub-umbral quedan en §7 (H37, H41-nota) para
   2. **El smoke visual de CA-12/CA-35** (arrastrado de GATE-O1 D4): **conviene hacerlo después de
      L09**, que vuelve a mover esa misma pantalla. El checklist está en `cierres/L03.md` y
      `cierres/L08.md` §"Para el gate".
-- **Visto bueno del usuario:** {{pendiente}}.
+- **Visto bueno del usuario:** dado el **2026-08-26 23:11** (Bogotá) — **O3 abierta** con L09 y L10.
+  La corrida del backfill contra prod (D10) queda **aparte**, pendiente de una confirmación propia:
+  el visto bueno del gate no la autoriza (PREGUNTAS #11 la congeló como decisión explícita).
 
 ## 9. Commit del gate
 `gate(D-061): O2 cerrada — 4 lotes, 632/632 en verde y 0 skips, 0 violaciones, L09 y L10 nuevos`
