@@ -10,7 +10,7 @@
 | O1 | L01 | Núcleo SIS: `planta_id` + `concurrencia`, `sis-lock`, `discover.js` | ✅ | `cierres/L01.md` (`939f1a8`, `ea8fcb8`) | GATE-O1 |
 | O1 | L02 | Backend COMB: catálogo TST, GET con `valor_sis`, vaciar = override 0, revertir | ✅ | `cierres/L02.md` (`ada04b0`, `c69f791`) | GATE-O1 |
 | O1 | L03 | Front: badge + tooltip + Revertir + auto-refresco con gavela + chip SIS | ✅ (CA-12/13 parciales → L08) | `cierres/L03.md` (`528b12d`, `882f3f8`) | GATE-O1 |
-| — | GATE-O1 | 607/608 en verde, 0 violaciones, D1–D6, L08 nuevo | ✅ (visto bueno pendiente) | | `GATE-O1.md` |
+| — | GATE-O1 | 607/608 en verde, 0 violaciones, D1–D6, L08 nuevo | ✅ (visto bueno 2026-08-26 19:32) | | `GATE-O1.md` |
 | O2 | L04 | Scrape manual asíncrono (job + 202/409 + estado) + CA-36 | ⬜ | — | — |
 | O2 | L05 | Backfill histórico (discover v2, `--concurrencia`, fixture, calibración, corrida dev) | ⬜ | — | — |
 | O2 | L06 | Higiene D-055 (tests a TEST_PLANTA incl. `sis_concurrencia`, guard, residuos, seed TST en helpers) | ⬜ | — | — |
@@ -71,4 +71,4 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
 - 2026-08-26 · O1 ejecutada en tres chats paralelos (L01-1542, L02-1542, L03-1542), 15:42–16:35.
 - 2026-08-26 · GATE-O1 (16:20–17:10, test-lock `GATE-O1`): suite 607/608 + vitest 126 + build;
   `/code-review` (15 hallazgos) y `/security-review` (sin hallazgos); D1–D6; L08 creado; prompts
-  de O2 enmendados. Commit `gate(D-061): O1 cerrada — …` (SHA en `git log`). Visto bueno: pendiente.
+  de O2 enmendados. Commit `125e0c9` `gate(D-061): O1 cerrada — …`. Visto bueno dado a las 19:32; O2 abierta (L04, L05, L06, L08).

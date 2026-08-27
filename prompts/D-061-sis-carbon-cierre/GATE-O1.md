@@ -262,7 +262,7 @@ ni el territorio de otro.
 
 - Pendiente del usuario además del visto bueno: smoke visual de CA-12 (D4) con el checklist de
   `cierres/L03.md` §"Para el gate", contra `npm run dev` + backend `:3002` de dev.
-- **Visto bueno del usuario:** pendiente (se pide al final del chat del gate, 2026-08-26).
+- **Visto bueno del usuario:** dado el 2026-08-26 19:32 (Bogotá) — O2 abierta con L04, L05, L06, L08.
 
 ## 9. Commit del gate
 `gate(D-061): O1 cerrada — 3 lotes, 607/608 en verde, 0 violaciones, L08 nuevo` (el SHA se anota en `ESTADO.md` § Bitácora: el expediente viaja dentro del mismo commit).
