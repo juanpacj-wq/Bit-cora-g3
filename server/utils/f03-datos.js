@@ -21,8 +21,9 @@
 //   3. **El T2 cruza medianoche** y el sistema lo fecha por su día de INICIO (D-045). El libro lo
 //      parte por medianoche: cada evento cae en el día de calendario en que ocurrió y aparece
 //      exactamente una vez en todo el libro (criterio 6b).
-//   4. **De Sala hay que excluir los asientos reflejados** (E4/E5) o el mismo evento de MAND sale
-//      TRES veces en la misma hoja: el original + su copia en SALAJDT + la de SALAING (respuesta 2).
+//   4. **De Sala hay que excluir los asientos reflejados** (E4/E5, y los de DISP desde D-063) o el
+//      mismo evento de MAND o de DISP sale TRES veces en la misma hoja: el original + su copia en
+//      SALAJDT + la de SALAING (respuesta 2).
 
 import sql from 'mssql';
 
@@ -298,8 +299,11 @@ async function eventosDisponibilidad(pool, { plantas, desde, hasta }) {
 // `SALAOP` NO entra: las cuatro fuentes del libro son MAND, DISP, SALAJDT y SALAING (§7.2).
 //
 // **El filtro de los reflejados es la línea que evita el triplicado** (respuesta 2): desde E4 cada
-// lote de MAND se copia a las DOS bitácoras de Sala, así que sin `origen_lote_id IS NULL` el mismo
-// evento saldría tres veces en la misma hoja. El libro lee siempre los ORIGINALES.
+// lote de MAND se copia a las DOS bitácoras de Sala, y desde D-063 también cada estado de DISP; el
+// libro ya lee el lote de MAND y el estado de DISP desde sus tablas base (fuentes 1 y 2), así que
+// sin `origen_bitacora IS NULL` el mismo evento saldría tres veces en la misma hoja. El libro lee
+// siempre los ORIGINALES. El marcador es el universal (`campos_extra.origen_bitacora`, D-063):
+// excluir por un puntero concreto (`origen_lote_id`) dejaba pasar las copias de DISP.
 async function eventosSala(pool, { plantas, desde, hasta, sala_ids }) {
   const ids = sala_ids.filter((id) => id != null);
   if (ids.length === 0) return [];
@@ -317,7 +321,7 @@ async function eventosSala(pool, { plantas, desde, hasta, sala_ids }) {
     WHERE r.bitacora_id IN (${enBitacoras})
       AND r.planta_id IN (${enPlantas})
       AND CAST(DATEADD(HOUR, -5, r.fecha_evento) AS DATE) BETWEEN @desde AND @hasta
-      AND JSON_VALUE(r.campos_extra, '$.origen_lote_id') IS NULL`;
+      AND JSON_VALUE(r.campos_extra, '$.origen_bitacora') IS NULL`;
 
   const r = await rq.query(`
     SELECT ${columnas} FROM bitacora.registro_activo r ${filtro}
