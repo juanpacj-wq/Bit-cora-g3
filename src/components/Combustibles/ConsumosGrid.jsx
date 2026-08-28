@@ -136,8 +136,19 @@ export default function ConsumosGrid({ bitacora, plantaId, puedeCrear, showToast
   //    perdía bajo un refresco que nadie pidió.
   const refetch = useCallback(async ({ preservarEdicion = false } = {}) => {
     if (!plantaId) return;
-    const seq = ++refetchSeqRef.current;
     const clave = claveRefetch(plantaId, fecha);
+    // D-061 GATE-O5 (H-G5/CA-59): una lectura que NACE apuntando a una coordenada que ya no es la
+    // actual no sale, y sobre todo no quema un número de secuencia. `onGuardar` y `onRevertir`
+    // llaman a `await refetch()` desde el `refetch` del render en que se hizo clic: si el operador
+    // cambió de fecha mientras el POST viajaba, esa llamada nace atada a la fecha vieja y el
+    // `++` de abajo invalidaba la lectura de la fecha NUEVA que ya estaba en vuelo. Las dos
+    // respuestas se descartaban —una por `seq`, la otra por `clave`— y no quedaba ninguna que
+    // aplicar. Antes eso dejaba en pantalla los números de la fecha anterior bajo la cabecera
+    // nueva; desde L12, que vacía los dos estados al cambiar de coordenada, deja la grilla VACÍA,
+    // sin error y sin spinner: en una fecha pasada no hay latido que la rescate y se lee como
+    // "ese día no hubo consumo".
+    if (clave !== claveActualRef.current) return;
+    const seq = ++refetchSeqRef.current;
     try {
       const r = await getConsumos(plantaId, fecha);
       // Obsoleta por adelantamiento (llegó otra lectura después) o por cambio de coordenada.

@@ -203,3 +203,19 @@ reporta — solo obliga a presupuestar ~58 min de suite en vez de ~30 mientras e
 - **El smoke visual va después de L12**, que es de verdad la última mano sobre esa pantalla dentro
   de D-061.
 - Puerto de test reservado: **L12 → 3112**.
+
+## Enmiendas del gate O5 (2026-08-28)
+- **No hay O6.** O5 era la última ola de código y se cierra con el reparto que tenía: un solo lote
+  (L12). Lo que sigue es `/cerrar-implementacion D-061`.
+- **El gate arregló código de lote** (`GATE-O5.md` §5 D17, opción **a** elegida por el usuario),
+  al revés que la D11 del gate O3: 2 líneas en `ConsumosGrid.jsx` y el criterio **CA-59**. La
+  diferencia con la D11 es que acá el test de regresión ya existía, es de front y el gate lo corrió
+  en las dos direcciones. Abrir una O6 para dos líneas contradecía el D16.
+- **Camino crítico ejecutado:** `L02 → L04 → {L09, L10} → L11 → L12 → cierre`. Sin cambios.
+- **D-062 hereda 13 hallazgos:** los 9 de este gate (H81–H89 y H-L12-3) y los 4 del popover de la
+  O4 (H67, H69, H70, **H75**). El rediseño son dos piezas: el popover a un portal con
+  `position: fixed` y el modelo de edición de la grilla a una sola fuente de verdad — con la
+  invariante "todo lo que escriba el buffer viene del operador o del snapshot" hecha estructural,
+  que hoy es una regla escrita y no un cerrojo.
+- **El smoke visual gana tres puntos** además de CA-12/CA-35: el parpadeo vacío al cambiar de fecha,
+  el chip del SIS desincronizado durante ese ~1 s y el `0.000` de Total Carbón mientras carga.

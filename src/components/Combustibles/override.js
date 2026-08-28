@@ -207,9 +207,12 @@ export function celdaEquivalente(celdaBuffer, celdaSnap) {
 // cuenta como ausencia, porque es lo que entrega un `<input type=number>` con basura adentro y
 // tratarlo como número lo haría distinto de sí mismo.
 //
-// Lo que NO se normaliza es el número: `'20'` y `20` son el mismo valor porque el driver de MSSQL
-// puede entregar un DECIMAL como texto (el mismo motivo por el que `mapCelda` pasa los dos lados de
-// `es_override` por `Number`).
+// Lo que NO se normaliza es el número: `'20'` y `20` son el mismo valor. **No es porque el server
+// mande texto** —`mapCelda` (`routes/combustibles.js:79`) ya hace `Number(row.cantidad)`, así que de
+// ese endpoint el `cantidad` llega siempre numérico—; es por robustez ante cualquier otro origen del
+// buffer. Ojo si alguien "simplifica" ese `Number` del backend: `totalCarbonPeriodo` y
+// `celdasInvalidas` filtran por `typeof v === 'number'`, así que un string se caería del Total
+// Carbón y se colaría por encima de `cantidad_max` sin que este predicado se entere.
 function cantidadNormalizada(v) {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
@@ -280,6 +283,17 @@ export function hayEdicion(buffer, snapshot) {
 // D-061 L12: el conjunto que recibe ya no se acumula, se deriva (`coordenadasEditadas`). La firma
 // no cambia: sigue tomándolo por parámetro para poder probarse con conjuntos armados a mano, y para
 // que el componente lo calcule UNA vez por Guardar en vez de una por tecla.
+//
+// D-061 GATE-O5 (H82): OJO, el párrafo de arriba describe lo que esta función GARANTIZA, no lo que
+// hoy la protege. Como el único llamador de producción le pasa `coordenadasEditadas(buffer,
+// snapshot)` —que es, por definición, el conjunto de coordenadas donde los dos difieren—, el
+// `continue` de abajo ya no puede dispararse ahí y el filtro es tautológico. La defensa contra H24
+// pasó a vivir entera en `reconciliarBuffer`, que siembra el buffer desde el snapshot nuevo y así
+// hace que una escritura del SIS aparezca en los DOS lados y no produzca diferencia. Es una sola
+// línea de defensa, no dos: si algún camino futuro escribe el buffer sin sembrarlo del snapshot
+// —un pegado masivo, una escritura optimista tras el Guardar—, lo que el SIS escribió por debajo
+// vuelve a viajar en el POST a nombre del operador. Esa invariante es lo que D-062 tiene que
+// volver estructural.
 //
 // Las tres formas del diff se conservan tal cual las lee el backend (C6):
 //   solo en snapshot ⇒ `cantidad: null`  (vaciar: override 0 si hay lectura SIS, DELETE si no)

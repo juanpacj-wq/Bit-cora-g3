@@ -136,12 +136,20 @@ let cuerpoGet;       // payload del GET cuando NO es manual
 let cuerpoRevertir;  // respuesta de C5
 let cuerpoGuardar;   // resumen del POST batch
 let fallaGet;        // D-061 L12 (CA-57): status con el que responde el GET cuando debe FALLAR
+let postDiferido;      // CA-59: cuando es true, el POST del batch queda en vuelo hasta que el test lo suelte
+let colaPost;          // los POST retenidos, en orden
+let revertirDiferido;  // CA-59: lo mismo para C5 (`onRevertir` también reanuda con un `await refetch()`)
+let colaRevertir;
 
 beforeEach(() => {
   llamadas = [];
   cola = [];
   modoManual = false;
   fallaGet = null;
+  postDiferido = false;
+  colaPost = [];
+  revertirDiferido = false;
+  colaRevertir = [];
   cuerpoGet = payload();
   cuerpoRevertir = { accion: 'restaurado', celda: celda({ cantidad: 17.25 }) };
   cuerpoGuardar = { resumen: { creados: 0, actualizados: 1, eliminados: 0 } };
@@ -152,10 +160,16 @@ beforeEach(() => {
       opciones,
       cuerpo: opciones?.body ? JSON.parse(opciones.body) : undefined,
     });
-    if (u.includes('/consumos/revertir')) return respuesta(cuerpoRevertir);
+    if (u.includes('/consumos/revertir')) {
+      if (revertirDiferido) { const d = diferido(); colaRevertir.push(d); return d.promesa; }
+      return respuesta(cuerpoRevertir);
+    }
     // El POST del batch va a la MISMA ruta que el GET (C6), así que el método es lo único que los
     // separa. Sin esta rama, un Guardar en modo manual quedaría retenido en la cola de los GET.
-    if (u.includes('/consumos') && opciones?.method === 'POST') return respuesta(cuerpoGuardar);
+    if (u.includes('/consumos') && opciones?.method === 'POST') {
+      if (postDiferido) { const d = diferido(); colaPost.push(d); return d.promesa; }
+      return respuesta(cuerpoGuardar);
+    }
     if (u.includes('/consumos')) {
       // El GET que revienta (CA-57). `api.get` lanza con todo lo que no sea 2xx, así que un 503 es
       // la forma más fiel de "la BD no está" sin tener que romper `fetch` entero.
@@ -1185,11 +1199,13 @@ describe('CA-56 · una celda que el server igualó deja de estar pendiente', () 
     });
     modoManual = false;
 
-    // Tiene que ganar el 30. Antes se veía el 25: X seguía marcada de la vez anterior y la
-    // reconciliación la restauraba desde el buffer viejo encima de la lectura nueva.
+    // Tiene que ganar el 22 (el escenario del prompt decía 30; se bajó a 22 porque `cantidad_max`
+    // de un alimentador es 25 y una celda fuera de rango apagaría Guardar por otro motivo). Antes se
+    // veía el 25: X seguía marcada de la vez anterior y la reconciliación la restauraba desde el
+    // buffer viejo encima de la lectura nueva.
     expect(inputDe(container, 3, 0).value).toBe('22');
     // Y sobre todo: el 25 no puede viajar en el POST. El backend lo escribiría a nombre del
-    // operador y la ownership de D-029 impediría que el scraper repusiera el 30.
+    // operador y la ownership de D-029 impediría que el scraper repusiera el 22.
     await click(guardar(container));
     expect(celdasDelPost()).toEqual([
       { periodo: 5, combustible_id: 1, cantidad: 9, detalle: null },
@@ -1378,5 +1394,55 @@ describe('CA-58 · la grilla se comporta igual cuando React repite el actualizad
       { periodo: 5, combustible_id: 1, cantidad: 9, detalle: null },
     ]);
     teardown();
+  });
+});
+
+// ── CA-59 (GATE-O5) ─────────────────────────────────────────────────────────────────────────────
+//
+// H-G5: `refetch` incrementaba `refetchSeqRef` ANTES de mirar si su propia coordenada seguía siendo
+// la actual. `onGuardar` y `onRevertir` reanudan con el `refetch` del render en que se hizo clic,
+// así que un cambio de fecha mientras el POST viaja hacía que esa llamada vieja cancelara la
+// lectura de la fecha nueva. Las dos respuestas se descartaban y no quedaba ninguna que aplicar:
+// con los estados vaciados por L12, la grilla queda EN BLANCO, sin error y sin spinner.
+describe('CA-59 · una lectura que nace obsoleta no puede cancelar a la que sí vale', () => {
+  // Deja el POST (o el revertir) en vuelo, cambia de fecha, y después suelta todo en orden.
+  // Devuelve el container ya con AYER pintado —o lo que haya quedado, que es lo que se afirma—.
+  async function cambiarDeFechaConLaEscrituraEnVuelo(container, reprops, soltarEscritura) {
+    modoManual = true;                      // el GET de AYER queda retenido
+    await reprops({ fecha: AYER });
+    expect(cola.length).toBe(1);            // GET#A: el de AYER, el que vale
+    await soltarEscritura();                // la escritura vuelve → `await refetch()` de HOY
+    const ayer = payload({ celdas: { 5: { 1: celda({ consumo_id: 501, cantidad: 7 }) } } });
+    await act(async () => { cola.shift().resolver(respuesta(ayer)); });
+    for (const d of cola.splice(0)) await act(async () => { d.resolver(respuesta(payload())); });
+  }
+
+  it('Guardar con un cambio de fecha en vuelo no deja la grilla en blanco', async () => {
+    const { container, reprops } = await render();
+    await teclear(inputDe(container, 3, 0), '22');   // algo que guardar (el snapshot tiene 20)
+    expect(guardar(container).disabled).toBe(false);
+
+    postDiferido = true;
+    await click(guardar(container));
+    await cambiarDeFechaConLaEscrituraEnVuelo(container, reprops, async () => {
+      await act(async () => { colaPost.shift().resolver(respuesta(cuerpoGuardar)); });
+    });
+
+    // La grilla muestra AYER. Antes del arreglo acá se leía '' en las 240 celdas.
+    expect(inputDe(container, 5, 0).value).toBe('7');
+    expect(inputDe(container, 3, 0).value).toBe('');
+    expect(container.querySelector('.comb-state.error')).toBe(null);
+  });
+
+  it('Revertir con un cambio de fecha en vuelo tampoco', async () => {
+    const { container, reprops } = await render();
+    revertirDiferido = true;
+    await click(revertires(container)[0]);
+    await cambiarDeFechaConLaEscrituraEnVuelo(container, reprops, async () => {
+      await act(async () => { colaRevertir.shift().resolver(respuesta(cuerpoRevertir)); });
+    });
+
+    expect(inputDe(container, 5, 0).value).toBe('7');
+    expect(container.querySelector('.comb-state.error')).toBe(null);
   });
 });

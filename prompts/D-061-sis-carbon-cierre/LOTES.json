@@ -20,8 +20,8 @@
       "gate": "GATE-O4.md"
     },
     "O5": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O5.md"
     }
   },
   "lotes": {
@@ -405,10 +405,10 @@
     "L12": {
       "ola": "O5",
       "titulo": "Una sola definición de \"esta celda cambió\", y que el conjunto de editadas no mienta",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L12-1657",
+      "claim_ts": "2026-08-27T16:57:47.049Z",
+      "done_ts": "2026-08-27T17:42:23.004Z",
       "motivo": null,
       "depende_de": [
         "L11"
