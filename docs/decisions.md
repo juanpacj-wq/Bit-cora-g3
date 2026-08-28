@@ -1634,21 +1634,172 @@ DELETE de celdas SIS-owned cuando la lectura de fin de hora da fuera de servicio
 (nadie la lee): prod se selecciona con `DB_NAME`. Tests: `sis_scraper_ownership` +4 (T7 horizonte
 de hoy sin P24 y `completo=false`, T8 `periodoDesde=24` = 1 fetch y 24/24, T9/T10 no contiguo o
 con errores ⇒ día completo), `sis_sweeper.test.js` nuevo (11, puros). Cross-ref: [[D-027]] (COMB),
-[[D-029]] (scraper SIS), [[D-034]] (`cantidad_max`, el scraper clampa), [[D-055]] (misma familia:
+[[D-061]] (la ingesta SIS completa; `D-029` se consumió documentando el rol Coordinador), [[D-034]] (`cantidad_max`, el scraper clampa), [[D-055]] (misma familia:
 un bug de horizonte temporal que solo se ve auditando datos).
 
 ---
 
-## D-061 — Ingesta de carbón GEC32 desde el SIS: cierre (override, revertir, scrape manual, backfill histórico) (EN CURSO, ver prompts/D-061-sis-carbon-cierre/)
+## D-061 — Ingesta del carbón de GEC32 desde el SIS: ownership, override, scrape manual y backfill histórico
 
-**Reserva** (2026-08-26): número consumido por la metodología v2. Documentará la ingesta SIS
-**completa** (el flujo v1 `prompts/D-029-sis-carbon-gec32/` nunca tuvo ADR: `D-029` se consumió con
-el rol Coordinador) — ownership "operador gana", sweeper HH:02 (D-060), `valor_sis`/override
-(incluido el override a 0), revertir, scrape manual asíncrono bajo mutex, backfill histórico con
-fecha de inicio descubierta, catálogo de la planta de test y la higiene D-055 de COMB. Sin
-migraciones; sin cambios cross-repo. El cierre reemplaza este stub por el ADR y corrige la
-cross-ref `[[D-029]]` de D-060 a `[[D-061]]`.
+**Fecha:** 2026-08-28
 
+**Contexto:** COMB nació humano ([[D-027]]) y desde [[D-029]] el scraper del SIS escribe las mismas
+celdas de GEC32, así que la fila de `consumo_combustible` pasó a tener **dos autores** sin que nada
+lo dijera: el GET no distinguía quién era dueño del número, "vaciar" borraba la fila y el siguiente
+scrape la reponía, y una corrección manual no tenía camino de vuelta al valor del medidor. En
+paralelo, `scrapeDia` estaba atada a GEC32 por una constante de módulo y con la fase de red
+estrictamente secuencial (~13 s/periodo × 24 = ~5,2 min/día), lo que volvía impracticable cargar el
+histórico; el único disparo era el tick horario del sweeper ([[D-060]]); tres suites de COMB/SIS
+borraban y reescribían tablas de plantas **reales** acotando solo por una fecha "vacía" (la deuda
+D-055 sobre COMB), premisa que el propio backfill invalidaba; y nada de esto tenía documentación
+permanente — `architecture.md` no nombraba el SIS y BIT-RF no nombraba COMB. Los flujos previos
+(D-029, D-060) **no dejaron ADR de la ingesta**: `D-029` se consumió documentando el rol Coordinador.
+
+**Decisión:** documentar y cerrar la ingesta completa, en seis piezas.
+
+**(a) Ownership y override, decididos en el backend.** La regla es *"operador gana"*: una celda es
+`sis_owned` si la creó el SISTEMA y ningún humano la tocó después. `sis_owned` y `es_override` se
+**derivan en SQL/Node y viajan en cada celda del GET** — el front pinta, no decide —, comparando
+ambos lados por `Number` una sola vez (el driver puede entregar dos `DECIMAL(12,3)` como string y
+`'12.500' !== '12.5'` sería un falso positivo). **Vaciar una celda que tiene `valor_sis` no la
+borra: la deja viva en `cantidad = 0` con `modificado_por` humano** — un override explícito que el
+scraper respeta —; solo se borra la que nunca tuvo lectura del SIS. `POST /consumos/revertir` es el
+único camino de vuelta y **devuelve la propiedad al SISTEMA** (`creado_por = SISTEMA`,
+`modificado_por = NULL`): dejar el rastro humano mantendría la celda congelada frente al scrape.
+Con `valor_sis = 0`, revertir **elimina** la fila, porque la representación canónica del SIS para un
+cero es la ausencia de fila. Tres desenlaces explícitos, `restaurado` / `eliminado` / `sin_cambios`,
+que se le dicen al operador tal cual en vez de un éxito genérico.
+
+**(b) Un scraper parametrizado y tres caminos serializados por un mutex.** `planta_id` y
+`concurrencia` (1..6) son parámetros de `scrapeDia`, con defaults que reproducen el comportamiento
+previo byte a byte; la concurrencia afecta **solo** la fase de red y las lecturas se ordenan por
+periodo antes de escribir, para que el resultado no dependa del orden en que conteste el SIS. El
+catálogo `ALIM_1..8` se resuelve **antes del primer fetch**: ése es el guard de "esta planta no tiene
+SIS". Hay tres procesos pidiéndole días al mismo historiador —el sweeper HH:02, el scrape manual y el
+CLI de backfill— y un **mutex de proceso sin cola** (`sis-lock.js`) serializa los dos primeros: quien
+llega con el lock tomado **no espera**, falla al instante (`409 scrape_en_curso` / el sweeper omite su
+tick entero). El CLI es otro proceso y su exclusión sigue siendo por rango de fechas.
+
+**(c) Scrape manual asíncrono.** Un día son ~5 min y el proxy corta a los 60 s, así que
+`POST /api/combustibles/sis/scrape` (gate `puede_crear`) valida y responde **202** con el estado
+inicial de un job en memoria, uno a la vez, que corre el rango día a día; un día que revienta se
+anota en `resultados[].error` y el job sigue. `GET /api/combustibles/sis/estado` expone `{ job, lock }`.
+Tope 31 días: más que eso es trabajo del CLI, no de un botón. **`GEC3` es planta válida de COMB pero
+no tiene SIS** (`400 planta_sin_sis`): el predicado de "tiene SIS" es más estricto que el de COMB.
+
+**(d) Backfill histórico con una fecha de inicio calibrada, no adivinada.** El SIS devuelve un `.xls`
+perfectamente válido con todo en cero cuando la unidad está parada, así que una parada larga es
+indistinguible de "el historiador no existía". Un candidato se declara sin datos **solo** si los
+`K = 6` sondeos repartidos en una ventana de `W = 60` días salen todos vacíos, sobre cuatro fases
+(ancla → coarse anual → fino mensual → barrido diario **ascendente**) y una confirmación final. El
+sondeo distingue **tres** estados (`datos` / `vacío` / `error`) y solo memoriza los dos primeros: un
+error se reintenta una vez y, si insiste, el descubrimiento **se detiene sin fecha**
+(`motivo: 'error-de-sondeo'`), porque una fecha equivocada es indistinguible de una correcta. El
+retorno es `{ fecha, motivo, sondeos }` con vocabulario cerrado, del que se derivan el texto al
+operador y el código de salida del CLI. `--from auto` **no escribe**: imprime y sale hasta que se le
+repite con `--confirm-from`. Resultado: **GEC32 arranca el `2018-06-13`** (58 sondeos; 0,13 MW y sin
+carbón — el primer carbón es del `2018-07-15`) y el histórico son **2.996 días**, casi el triple de lo
+estimado al planificar.
+
+**(e) Higiene D-055 sobre COMB.** Toda escritura de test de COMB/SIS se muda a la planta-fixture
+`'TST'`, que recibe catálogo `ALIM_1..8` propio por **seed idempotente en `initDB`** (no por
+migración: es una fixture, no schema) guardado por la existencia de la fila en `lov_bit.planta` — una
+fixture de test jamás puede tumbar el arranque de producción. El guard estático de D-055 cubre ahora
+las dos tablas del carbón y su meta-test fija que **acotar por fecha no acota**; el barrido y el
+contador de residuos aprenden las dos tablas.
+
+**(f) La grilla COMB: de un conjunto que hay que acordarse de depurar, a una función de dos estados.**
+Ésta fue la parte que no convergió a la primera y su historia es la lección del ADR. La pregunta que
+gobierna la pantalla —¿qué de esto lo cambió el operador?— se contestó al principio comparando buffer
+contra snapshot, así que **toda** celda que el SIS escribiera durante un GET aparecía como diferencia
+y el Guardar siguiente la mandaba al POST a nombre del operador; el backend la convertía en override 0
+o la borraba, y desde ahí la ownership impedía que el scraper la repusiera (**H24**). Se corrigió con
+un conjunto explícito de coordenadas tocadas más una reconciliación celda por celda. El conjunto,
+alimentado por eventos, resultó ser una invariante escrita en un comentario: una celda tocada y
+devuelta a su valor quedaba marcada para siempre (**H50**), y una que el server terminaba igualando
+tampoco se soltaba (**H65**) — el mismo daño, tres olas seguidas, cada arreglo cerrando la puerta por
+la que entró el anterior. El cierre fue **borrar el conjunto**: una coordenada está pendiente si y
+solo si su celda del buffer no es equivalente a la del snapshot **contra el que se editó**, y eso
+alcanza porque el buffer solo puede diferir del snapshot donde el operador escribió. `hayCambios`, el
+cuerpo del POST y la gavela salen de la misma función y ya no pueden discrepar. Dos detalles que la
+derivación obliga a hacer explícitos: el marco de referencia al reconciliar es el snapshot **viejo**,
+no el que acaba de llegar; y buffer y snapshot se vacían **juntos** al cambiar de coordenada. El
+auto-refresco (5 min, GEC32 viendo hoy) no puede pisar una edición **por construcción**: toda lectura
+lleva número de secuencia y coordenada, y se descarta sola si dejó de ser la última; con cambios sin
+guardar arranca una gavela visible de 10 min con salida explícita.
+
+**Alternativas descartadas** (una línea cada una, de los expedientes de los cinco gates):
+encolar en el mutex en vez de fallar rápido — encolar un request de varios minutos es peor que perder
+un tick, que vuelve en una hora; búsqueda **binaria** en el barrido diario del descubrimiento — se
+traga una parada posterior al inicio y salta por encima del inicio real; validar la planta contra
+`lov_bit.planta (activa=1)` o exigir `plantaMatch` en vez del conjunto explícito `{GEC3, GEC32, TST}` —
+cambian el contrato y son decisión de producto, no de gate (D5); no exportar `SIS_HOST` en el gate y
+aceptar 9 casos `skipped` — un verde mentiroso: 9 saltados se ven igual que 9 que pasan si nadie lee
+el conteo (D7); **bajar la concurrencia** del backfill y relanzar — costaría días de calendario para
+evitar un reintento de minutos (D13); recuperar un backfill interrumpido con `--solo-parciales` —
+**es exactamente el flag que se salta los días que hay que recuperar** (D15, que enmienda a D13);
+mantener la ingesta y el scraper standalone `js-scraper-carbon-g32/` **sincronizados** — la deuda
+AUD-36 se cerró por eliminación, no por sincronización; una ola más de corrección sobre la grilla —
+tres intentos con el mismo resultado bastaron para cambiar de estrategia (D16); y abrir una ola
+entera por el último hallazgo alto — dos líneas con su test ya escrito y rojo se arreglan en el gate
+(D17).
+
+**Consecuencias:**
+
+- **Operación.** El sweeper puede perder un tick mientras corre un scrape manual (vuelve en una
+  hora). El estado del job es **volátil** —un restart lo borra aunque el scrape haya terminado bien—
+  y la verdad persistente sigue siendo `bitacora.sis_scrape_log`, una fila por `(planta, fecha)`.
+  Job y mutex son **de proceso**: con varias instancias del backend cada una tendría el suyo (hoy hay
+  una sola, despliegue unificado). `SIS_SWEEPER_ENABLED` es un flag **de test, no de producción**:
+  solo el string exacto `'0'` apaga, para que ningún despliegue pierda la ingesta por omisión, y el
+  apagado se anuncia en el log de arranque porque un sweeper mudo es indistinguible de uno roto.
+- **El backfill.** Un día completo cuesta ~95 s con `--concurrencia 6` (4,2× más rápido que
+  secuencial, RSS plano) pero **sostenido sí produce errores** (~7-10 % de los días): esos días quedan
+  `completo = 0` y una segunda pasada del **mismo comando** los re-pide enteros. El criterio de
+  "terminado" es `COUNT(*) WHERE completo = 0` en cero **y** que el rango tenga tantas filas como
+  días — no que el proceso haya salido —, porque si la BD se cae el CLI loguea y sigue, y esos días
+  quedan **sin fila**: se recuperan **relanzando el comando completo**, nunca con `--solo-parciales`.
+  Runbook en `deploy/DEPLOY.md` §8. **La corrida histórica de producción está a medias y no es parte
+  de este cierre**: al 2026-08-28, `sis_scrape_log` de GEC32 en `PortalG3` tiene **368 de 2.996 días,
+  las 368 completas y 0 parciales** (murió dos veces por corte de BD). Es una tarea operativa
+  pendiente, con su comando exacto en el runbook.
+- **Límites que quedan dichos en voz alta.** `--from auto` es una **calibración asistida, no un
+  oráculo**: un hueco real de más de `ventanaDias` sigue siendo indistinguible del pre-inicio (GEC32
+  tiene uno, ago–oct 2018), y por eso su resultado se fija a mano en el comando de la corrida.
+  `GET /sis/estado` es **superficie de API sin consumidor de UI**: distinguir desde la pantalla un
+  sweeper apagado de uno roto **no está entregado**. Y el repo perdió su única verificación
+  independiente del parser `.xls` —el spot-check de **576/576 celdas** contra el parser CommonJS del
+  standalone— al retirar ese scraper: el resultado queda como registro histórico y **no se puede
+  repetir**.
+- **En el código.** `PLANTA_ID` deja de ser fuente de verdad y queda como default: cualquier planta
+  con catálogo `ALIM_1..8` es scrapeable, y el guard de "planta real" lo da quien llama, no el
+  scraper. El seed de `'TST'` sube el catálogo global de 18 a 28 filas — **cualquier aserción que
+  cuente `lov_bit.combustible` sin acotar planta se rompe** (pasó), y ese catálogo es un fixture
+  **residente**, no residuo. En la grilla, el precio de derivar la pertenencia es una relación que
+  hay que respetar al escribir código nuevo: **todo lo que escriba el buffer tiene que venir del
+  operador o del snapshot**. Y con cualquier celda sucia se apagan **todos** los botones Revertir,
+  no solo el de esa celda — deliberado, coherente con la gavela.
+- **Deuda declarada.** El discriminador de "hay harness" del test de cobertura del scrape
+  (`TEST_BASE_URL` presente) no distingue un efímero levantado para esos 5 casos de uno levantado
+  para los otros 636: una corrida canónica contra un efímero **sin** `SIS_HOST` vuelve a quedar roja
+  (H71). El rediseño de la grilla —el popover a un portal con `position: fixed`, en vez de una sexta
+  corrección de su medición, y el resto de la superficie de `override.js`— sale a **`D-062`** con 13
+  hallazgos heredados.
+- **Sin DDL, sin migración `F-NN` y sin cambios en el contrato cross-repo.** Documentación:
+  **BIT-MODBD v2.5 §4.9.1** (semántica de datos, tabla de ownership, override 0, tabla de decisión de
+  revertir), **BIT-RF v2.1 §4.9 / RF-076** (comportamiento prometido), `docs/architecture.md` (mapa de
+  módulos), `docs/domain-glossary.md` (SIS, SIS-owned, override, `valor_sis`, `sis_scrape_log`) y
+  `deploy/DEPLOY.md` §8 (runbook). Suite: **641 backend** (+64 desde el baseline de 577, 0 skips) y
+  **304 de front** (+206 en `Combustibles`). Cross-ref: [[D-027]] (COMB), [[D-029]] (scraper y rol
+  Coordinador), [[D-030]] (planta `'TST'`), [[D-032]] (el front ramifica por `codigo`), [[D-034]]
+  (`cantidad_max`, que el scraper clampa), [[D-055]] (higiene de tests sobre planta real),
+  [[D-060]] (P24 y `completo`), y `D-062` (rediseño de la grilla, pendiente de planificar).
+
+**Lección de método, que trasciende a este ADR:** cuando la corrección de una estructura depende de
+que **todos** los caminos se acuerden de tocarla, el problema no es la puerta que se dejó abierta
+sino que exista una puerta. Si la pertenencia se puede **calcular** desde estados que ya existen, se
+calcula. Tres olas cerraron el mismo defecto agregándole una puerta al conjunto; la cuarta lo cerró
+borrando el conjunto.
 ---
 
 ## Apéndice — Roadmap ejecutado: F1–F22
@@ -1681,6 +1832,13 @@ cross-ref `[[D-029]]` de D-060 a `[[D-061]]`.
 ---
 
 ## Próximas decisiones pendientes
+
+- **D-062 (rediseño de la grilla COMB) — a planificar.** Sale de [[D-061]] con 13 hallazgos ya
+  levantados: el popover del override a un **portal con `position: fixed`** en vez de una sexta
+  corrección de su medición (vive dentro de un `overflow:auto` que lo recorta — H67, H69, H70, H75),
+  las fronteras que el vaciado de coordenada no alcanza (`catalogo`, `sis`, `error` — H81, H84), el
+  dirty-check al cambiar de fecha o planta, que vive en `BitacorasGecelca3 → SelectorFecha` y no en
+  esta pantalla (H83), y la superficie de `override.js` (H82, H85–H88, H-L12-3).
 
 - **F15**: definir cómo el dashboard productivo va a renderizar el badge de disponibilidad por planta. Ver `dashboard-gen-gec3/docs/decisions.md` cuando se aborde.
 - **T3 (CIET `fecha_cerrada`): CERRADO 2026-05-13 — formato Bogotá.** El sweeper diario corre a 23:59:59 hora Bogotá (= 04:59 UTC del día siguiente); registrar `fecha_cerrada` en UTC desfasaría el día operativo (un cierre del 2026-05-13 23:59 Bogotá quedaría como 2026-05-14 04:59 UTC). Implementación: `server/utils/ciet.js:184-186` usa `fechaBogotaStr(fecha)` desde F19. Este es el único campo de la BD que NO es UTC; documentado como excepción justificada al patrón global "BD en UTC, presentación con offset Bogotá" (D-020).
