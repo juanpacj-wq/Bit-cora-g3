@@ -265,6 +265,13 @@ cambió el síntoma, y está arreglada. Eso es lo que hacía falta para poder ce
   1. **Los dos backfills siguen muertos**, con **prod en 246 de 2.996 días**. La recuperación es
      **relanzar el comando completo** (D15), y conviene correr **solo prod**. Los conteos finales
      los certifica `/cerrar-implementacion`.
+     > **ENMENDADO el 2026-08-28 07:20 por el propio gate.** El "246" venía del GATE-O4 y ya estaba
+     > viejo: hubo una reanudación el 2026-08-27 11:53 (PID 22548) que **también murió**, a las
+     > 16:07, en `2019-04-01 p11` (`fetch falló … This operation was aborted`). Medido contra
+     > `PortalG3` al cerrar este gate: `sis_scrape_log` de GEC32 tiene **368 filas, las 368
+     > `completo=1`, 0 parciales**, de `2018-06-13` a `2026-08-28`. O sea **368 de 2.996 días
+     > (12,3 %)** y ninguno a medias — el corte no dejó basura, dejó ausencia, que es justo lo que
+     > la D15 dice: se recupera relanzando el comando completo, no con `--solo-parciales`.
   2. **El smoke visual** de CA-12/CA-35, aplazado cuatro veces. **Ahora sí toca**: esta fue la
      última mano sobre la pantalla. Al checklist de `cierres/L03.md`, `L08.md` y `L09.md` hay que
      agregarle **tres puntos nuevos**: el parpadeo vacío al cambiar de fecha con la grilla llena

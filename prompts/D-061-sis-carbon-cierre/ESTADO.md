@@ -16,7 +16,7 @@
 | O2 | L06 | Higiene D-055 (tests a TEST_PLANTA incl. `sis_concurrencia`, guard, residuos, seed TST en helpers) | ✅ | `cierres/L06.md` (`1955c48`, `0c9b572`) | GATE-O2 |
 | O2 | L08 | Correcciones del front COMB tras el code-review de la O1 | ✅ (CA-33/35 parciales → L09) | `cierres/L08.md` (`f14918b`, `9da067f`) | GATE-O2 |
 | — | GATE-O2 | 632/632 en verde y 0 skips, 0 violaciones, D7–D10, L09 y L10 nuevos | ✅ (visto bueno 2026-08-26 23:11) | | `GATE-O2.md` (`eb9d00e`) |
-| — | Backfill prod | Corrida contra `PortalG3` (2.996 días desde `2018-06-13`) | 🟡 en curso (PID 23504, arranque 2026-08-26 23:35, ETA ~3,3 días) | | `GATE-O2.md` §5 D10 |
+| — | Backfill prod | Corrida contra `PortalG3` (2.996 días desde `2018-06-13`) | ⛔ **muerto por segunda vez** (2026-08-27 16:07, en `2019-04-01`). Medido el 2026-08-28: **368 de 2.996 días, las 368 `completo=1`, 0 parciales**. Relanzar el comando completo (D15) | | `GATE-O2.md` §5 D10 · `GATE-O5.md` §8 |
 | O3 | L09 | El refetch preservado no puede convertirse en un borrado al guardar (front) | ✅ (CA-37/39 parciales → L11) | `cierres/L09.md` (`2520640`, `fa25807`) | GATE-O3 |
 | O3 | L10 | Endurecer el descubrimiento del SIS y la cobertura del scrape manual | ✅ (CA-42/44/46 parciales → L11) | `cierres/L10.md` (`2805869`, `8cf415c`) | GATE-O3 |
 | — | GATE-O3 | 637/637 en verde, 0 violaciones, D11–D13, L11 nuevo con 3 altos | ✅ (visto bueno 2026-08-27 09:14) | | `GATE-O3.md` (`bb70a12`) |
@@ -24,7 +24,7 @@
 | O4 | L07 | Docs + cleanup (BIT-MODBD **2.5**, BIT-RF **2.1** + RF-076, architecture, glosario, DEPLOY, git rm) | ✅ | `cierres/L07.md` (`7f924f5`, `126f5ba`) | GATE-O4 |
 | — | GATE-O4 | 641/641 en verde, 0 violaciones, D14–D16; **9 de 13 hallazgos en la misma pantalla** | ✅ (decisión D16 + visto bueno pendientes) | | `GATE-O4.md` |
 | O5 | L12 | Una sola definición de "esta celda cambió" (H65/H66/H72) — **último lote de código** | ✅ | `cierres/L12.md` (`2244670`, `fb2a109`, `dbc3094`) | GATE-O5 |
-| — | GATE-O5 | 641/641 backend y **304/304** front, 0 violaciones, D17–D18; el único alto lo arregló el gate (CA-59) | ✅ (visto bueno pendiente) | | `GATE-O5.md` |
+| — | GATE-O5 | 641/641 backend y **304/304** front, 0 violaciones, D17–D18; el único alto lo arregló el gate (CA-59) | ✅ (visto bueno pendiente) | | `GATE-O5.md` (`e63567c`) |
 | Cierre | — | ADR D-061 + CLAUDE.md conv. 35 + cross-ref D-060 y **D-062** + git rm scaffolding | ⬜ | | |
 
 Leyenda: ⬜ pendiente · 🟡 en curso · ✅ done (lote) / cerrada con visto bueno (ola) · ⛔ bloqueado.
@@ -186,6 +186,11 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   **La decisión D16 —O5 acotada, rediseño en D-062, o cerrar ya— queda del usuario.**
 - 2026-08-27 · **Los dos backfills murieron** (prod en 246 de 2.996 días). Falta relanzarlos con el
   comando completo (D15). Conviene correr solo prod.
+- 2026-08-27 11:53 · Prod reanudado (PID 22548, `--to 2026-08-25`) y **muerto otra vez a las 16:07**
+  en `2019-04-01 p11` (`This operation was aborted`). Medido contra `PortalG3` el 2026-08-28:
+  `sis_scrape_log` de GEC32 en **368 filas, las 368 `completo=1`, 0 parciales**, `2018-06-13` →
+  `2026-08-28`. **368 de 2.996 días (12,3 %).** El corte deja ausencia, no basura: se recupera
+  relanzando el comando completo (D15), no con `--solo-parciales`.
 - 2026-08-27 12:05 · Visto bueno de GATE-O4 con la **opción (c) de D16**: **O5 abierta con L12**
   (los tres altos que pueden perder datos o atascar), y **el rediseño de la grilla sale a `D-062`**
   — el popover a un portal con `position: fixed` y el modelo de edición a una sola fuente de verdad.
