@@ -283,7 +283,13 @@ cambió el síntoma, y está arreglada. Eso es lo que hacía falta para poder ce
      (H71/H77) y la de H78.
   4. **`D-062`** hereda 9 hallazgos de este gate (H81–H89, H-L12-3) más los cuatro del popover de la
      O4 (H67, H69, H70, **H75**). El cierre de D-061 deja la cross-referencia.
-- **Visto bueno del usuario:** {{pendiente}}.
+- **Visto bueno del usuario:** dado el **2026-08-28 07:30** (Bogotá), al invocar
+  `/cerrar-implementacion D-061`. Con él queda cerrada la **O5** y con ella toda la línea de olas de
+  D-061. De los cuatro pendientes de arriba, el cierre resuelve el 3 (`CLAUDE.md`) y el 4 (la
+  cross-referencia a `D-062`); el **1 (backfill de prod)** queda **documentado y sin relanzar** por
+  decisión del usuario en el mismo momento — escribe sobre `PortalG3` durante ~3 días y merece una
+  acción propia y vigilada, no ir de polízon en un commit de cierre—, y el **2 (smoke visual)** queda
+  como checklist para el autor en el expediente del cierre.
 
 ## 9. Commit del gate
 `gate(D-061): O5 cerrada — 1 lote, 641/641 backend y 304/304 front, 0 violaciones, el último alto arreglado acá`
