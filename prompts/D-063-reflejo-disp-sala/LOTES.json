@@ -1,0 +1,130 @@
+{
+  "implementacion": "D-063",
+  "rama": "feat/reflejo-disp-sala-2026-08",
+  "claim_ttl_min": 240,
+  "olas": {
+    "O1": { "estado": "abierta", "gate": null },
+    "O2": { "estado": "pendiente", "gate": null }
+  },
+  "lotes": {
+    "L01": {
+      "ola": "O1",
+      "titulo": "Módulo de reflejo DISP en reflejo-sala.js (crear / actualizar / anular)",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [],
+      "puro": false,
+      "puerto": 3101,
+      "territorio": [
+        "server/utils/reflejo-sala.js",
+        "server/tests/reflejo_disponibilidad.test.js",
+        "prompts/D-063-reflejo-disp-sala/cierres/L01.md"
+      ],
+      "tests": ["tests/reflejo_disponibilidad.test.js"],
+      "criterios": ["CA-1", "CA-2", "CA-3", "CA-4"]
+    },
+    "L03": {
+      "ola": "O1",
+      "titulo": "Front: marcador origen_bitacora + estado Anulado en grilla de Sala e Históricos",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [],
+      "puro": true,
+      "puerto": 3103,
+      "territorio": [
+        "src/BitacorasGecelca3.jsx",
+        "src/components/historicos/HistoricoTable.jsx",
+        "src/components/grilla-solo-autor-gate.test.jsx",
+        "src/components/grilla-asiento-anulado.test.jsx",
+        "src/components/historicos/historico-anulado.test.jsx",
+        "prompts/D-063-reflejo-disp-sala/cierres/L03.md"
+      ],
+      "tests": [
+        "src/components/grilla-asiento-anulado.test.jsx",
+        "src/components/grilla-solo-autor-gate.test.jsx",
+        "src/components/historicos/historico-anulado.test.jsx"
+      ],
+      "criterios": ["CA-8", "CA-9"]
+    },
+    "L04": {
+      "ola": "O1",
+      "titulo": "Marcador universal origen_bitacora: helper + espejo SQL + 403 + exclusión F03 + guard",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [],
+      "puro": false,
+      "puerto": 3104,
+      "territorio": [
+        "server/middleware/permissions.js",
+        "server/routes/registros.js",
+        "server/utils/f03-datos.js",
+        "server/tests/registros_solo_autor.test.js",
+        "server/tests/f03_datos.test.js",
+        "server/tests/guard_marcador_reflejo.test.js",
+        "prompts/D-063-reflejo-disp-sala/cierres/L04.md"
+      ],
+      "tests": [
+        "tests/registros_solo_autor.test.js",
+        "tests/f03_datos.test.js",
+        "tests/guard_marcador_reflejo.test.js"
+      ],
+      "criterios": ["CA-5", "CA-6", "CA-7"]
+    },
+    "L02": {
+      "ola": "O2",
+      "titulo": "Enganches DISP: POST/PUT en registros.js, deshacer en disponibilidad.js, test HTTP sobre TSR, guard final",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": ["L01", "L04"],
+      "puro": false,
+      "puerto": 3102,
+      "territorio": [
+        "server/routes/registros.js",
+        "server/routes/disponibilidad.js",
+        "server/tests/disponibilidad_reflejo_http.test.js",
+        "server/tests/zzz_session_leak_guard.test.js",
+        "prompts/D-063-reflejo-disp-sala/cierres/L02.md"
+      ],
+      "tests": [
+        "tests/disponibilidad_reflejo_http.test.js",
+        "tests/zzz_session_leak_guard.test.js"
+      ],
+      "criterios": ["CA-10", "CA-11", "CA-12", "CA-13", "CA-14"]
+    },
+    "L05": {
+      "ola": "O2",
+      "titulo": "Docs: BIT-MODBD 2.6, BIT-RF 2.2 (RF-077), REQ-02, REQ-06, architecture",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": ["L01", "L03", "L04"],
+      "puro": true,
+      "puerto": 3105,
+      "territorio": [
+        "BIT-MODBD-2026-001.md",
+        "BIT-RF-2026-001.md",
+        "docs/architecture.md",
+        "docs/requerimientos/REQ-02-reflejo-bitacoras-sala.md",
+        "docs/requerimientos/REQ-06-excel-eventos-operacion.md",
+        "prompts/D-063-reflejo-disp-sala/cierres/L05.md"
+      ],
+      "tests": [],
+      "criterios": ["CA-15"]
+    }
+  },
+  "test_lock": { "sesion": null, "ts": null, "ttl_min": 45 }
+}

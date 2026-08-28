@@ -1802,6 +1802,12 @@ calcula. Tres olas cerraron el mismo defecto agregándole una puerta al conjunto
 borrando el conjunto.
 ---
 
+## D-063 — Reflejo de Disponibilidad a las bitácoras de Sala con copia anulada (EN CURSO, ver prompts/D-063-reflejo-disp-sala/)
+
+**Reservado el 2026-08-28.** Completa la mitad de REQ-02 que [[D-058]] dejó fuera: crear/editar un estado DISP se refleja en `SALAJDT` y `SALAING`; deshacer **anula** la copia (visible, con quién y cuándo) en vez de borrarla (RQ-02.12). Sin DDL. El ADR se redacta en el cierre desde los aportes de cada lote.
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
