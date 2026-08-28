@@ -139,6 +139,9 @@ describe('GrillaRegistros · gate solo-autor por fila (D-049)', () => {
 // canEditarRegistro con la condición nueva), así que la fila queda sin controles por el mismo camino
 // de D-049: acá se fija que además se ROTULA, y que el rótulo sale del payload
 // (`origen_bitacora_nombre`, resuelto del catálogo) y no de un literal del front (D-052).
+// D-063: el marcador es UNIVERSAL — `campos_extra.origen_bitacora` ('MAND' | 'DISP'); el puntero
+// (`origen_lote_id` / `origen_disponibilidad_id`) es solo dato. Las copias MAND reales traen ambas
+// claves; las de Disponibilidad traen `origen_disponibilidad_id` (número).
 function makeReflejado(overrides = {}) {
   return makeRegistro({
     registro_id: 42,
@@ -157,6 +160,25 @@ describe('GrillaRegistros · asiento reflejado de solo lectura (D-058 E6)', () =
     expect(container.querySelector('button[title="Eliminar"]')).toBeNull();
     expect(container.textContent).toContain('Operación 24h');
     expect(container.querySelector('span[title*="Corrígelo allá"]')).toBeTruthy();
+    teardown();
+  });
+
+  it('D-063: la copia de Disponibilidad se rotula igual, por el mismo marcador origen_bitacora', () => {
+    const { container, teardown } = renderGrilla({
+      registros: [makeReflejado({
+        registro_id: 43,
+        detalle: 'GEC3 F/L indisponible. Falla en el sistema de enfriamiento.',
+        campos_extra: JSON.stringify({ origen_bitacora: 'DISP', origen_disponibilidad_id: 5 }),
+        origen_bitacora_nombre: 'Disponibilidad',
+      })],
+    });
+    expect(container.querySelector('button[title="Editar"]')).toBeNull();
+    expect(container.querySelector('button[title="Eliminar"]')).toBeNull();
+    expect(container.querySelector('button[title="Ver detalle completo"]')).toBeTruthy();
+    const chip = container.querySelector('span[title*="Corrígelo allá"]');
+    expect(chip).toBeTruthy();
+    expect(chip.getAttribute('title')).toContain('Disponibilidad');
+    expect(container.textContent).toContain('Disponibilidad');
     teardown();
   });
 

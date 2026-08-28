@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { FileText, ChevronLeft, ChevronRight, ChevronDown, ChevronUp } from 'lucide-react';
+import { FileText, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Ban } from 'lucide-react';
 import { UsuariosPopover } from './UsuariosPopover';
 
 // F20: render Bogotá explícito (sin importar TZ del navegador).
@@ -8,6 +8,81 @@ const FECHA_FMT = new Intl.DateTimeFormat('es-CO', {
   day: '2-digit', month: '2-digit', year: 'numeric',
   hour: '2-digit', minute: '2-digit',
 });
+
+// ============================================================
+// D-063 (RQ-02.12): asiento reflejado y copia ANULADA — helpers compartidos por la grilla de
+// Sala (`RegistroRow` en BitacorasGecelca3.jsx) y por esta tabla de Históricos. Viven acá y no
+// en `src/utils/` porque el lote solo tenía territorio sobre estos dos archivos; son puros y
+// candidatos a mudarse a `src/utils/reflejo.js` sin cambiar ninguna firma.
+// ============================================================
+
+// `campos_extra` llega como string JSON (GET /activos, v_historico_busqueda), como objeto (ya
+// parseado por la grilla) o null. Cualquier cosa que no sea un objeto JSON → {} (nunca explota).
+function parseCamposReflejo(ce) {
+  if (!ce) return {};
+  if (typeof ce === 'object') return Array.isArray(ce) ? {} : ce;
+  try {
+    const v = JSON.parse(ce);
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+// Marcador UNIVERSAL (D-063 C3): una fila es asiento reflejado ⇔ `origen_bitacora` es una cadena
+// no vacía ('MAND' | 'DISP'). El puntero al origen (`origen_lote_id` / `origen_disponibilidad_id`)
+// es dato del backend, NUNCA criterio del front: un `origen_lote_id` suelto no marca nada.
+// Anulado ⇔ `anulado` es un objeto (lo escribe "deshacer" en Disponibilidad: quién y cuándo).
+export function estadoReflejo(camposExtra) {
+  const campos = parseCamposReflejo(camposExtra);
+  const reflejado = typeof campos.origen_bitacora === 'string' && campos.origen_bitacora.trim() !== '';
+  const a = campos.anulado;
+  const anulado = a && typeof a === 'object' && !Array.isArray(a) ? a : null;
+  return { reflejado, anulado };
+}
+
+// `dd/mm/aaaa HH:mm` en Bogotá explícito (D-020), armado por partes para no depender del literal
+// que cada ICU mete entre fecha y hora (es-CO devuelve "27/08/2026, 15:15"). `hourCycle:'h23'`
+// evita el "24:05" de medianoche que da `hour12:false` en algunos Node.
+const FECHA_HORA_BOGOTA_FMT = new Intl.DateTimeFormat('es-CO', {
+  timeZone: 'America/Bogota',
+  day: '2-digit', month: '2-digit', year: 'numeric',
+  hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+export function fechaHoraBogota(iso) {
+  if (!iso) return '';
+  const d = iso instanceof Date ? iso : new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const p = {};
+  for (const { type, value } of FECHA_HORA_BOGOTA_FMT.formatToParts(d)) p[type] = value;
+  return `${p.day}/${p.month}/${p.year} ${p.hour}:${p.minute}`;
+}
+
+// Tooltip del chip "Anulado": quién deshizo (nombre, o "usuario <id>" si el snapshot no lo trae),
+// su cargo si lo hay y cuándo en Bogotá. Mismo texto en la grilla y en Históricos.
+export function tituloAnulado(anulado) {
+  const a = anulado || {};
+  const quien = a.nombre || (a.por != null ? `usuario ${a.por}` : 'un usuario');
+  const cargo = a.cargo ? ` (${a.cargo})` : '';
+  const cuando = fechaHoraBogota(a.en);
+  return `Deshecho por ${quien}${cargo}${cuando ? ` el ${cuando}` : ''}`;
+}
+
+// Chip "Anulado" (hermano del chip de origen de D-058, en rojo suave). `compacto` usa el tamaño de
+// los badges de la tabla de Históricos y muestra siempre el rótulo; sin él, el tamaño de los chips
+// de la grilla (rótulo oculto en pantallas angostas, como "Bloqueado").
+export function ChipAnulado({ anulado, compacto = false }) {
+  const tamano = compacto ? 'px-2 py-0.5 rounded-md' : 'px-2.5 py-1.5 rounded-lg';
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 ${tamano} text-xs font-medium text-red-700 bg-red-50`}
+      title={tituloAnulado(anulado)}
+    >
+      <Ban size={14} />
+      <span className={compacto ? '' : 'hidden sm:inline'}>Anulado</span>
+    </span>
+  );
+}
 // fecha_cierre_operativo es un DATE calendario (día Bogotá del cierre, ya calculado en SQL
 // con DATEADD(HOUR,-5,...)). El driver lo serializa como medianoche UTC; formatearlo con
 // timeZone Bogotá le restaría 5h OTRA VEZ y mostraría el día anterior. Se lee en UTC tal cual.
@@ -50,7 +125,11 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {rows.map((r) => (
+                  {rows.map((r) => {
+                    // D-063: la copia anulada en Sala sigue visible en el histórico, tachada y
+                    // con quién la deshizo. Acá no hay nombre del origen (la vista no lo trae).
+                    const { anulado } = estadoReflejo(r.campos_extra);
+                    return (
                     <tr key={r.registro_id} className="odd:bg-white even:bg-gray-50/40 hover:bg-emerald-50/40 transition-colors">
                       <Td mono>{fmtFecha(r.fecha_evento)}</Td>
                       <Td>
@@ -67,7 +146,12 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
                       </Td>
                       <Td>{r.tipo_evento}</Td>
                       <Td className="max-w-xs">
-                        <DetalleCell texto={r.detalle} />
+                        {anulado && (
+                          <div className="mb-1">
+                            <ChipAnulado anulado={anulado} compacto />
+                          </div>
+                        )}
+                        <DetalleCell texto={r.detalle} anulado={!!anulado} />
                       </Td>
                       <Td><UsuariosPopover json={r.participantes} /></Td>
                       <Td><UsuariosPopover json={r.jdts_snapshot} /></Td>
@@ -83,7 +167,8 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
                         </span>
                       </Td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -108,14 +193,17 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
 // "Ver más"/"Ver menos" (reemplaza al hover con `title`, que era invisible en táctil/impresión).
 const DETALLE_PREVIEW_MAX = 160;
 
-export function DetalleCell({ texto }) {
+// D-063: `anulado` tacha y atenúa el texto (copia de Sala deshecha en su origen); el control
+// "Ver más"/"Ver menos" y el umbral no cambian.
+export function DetalleCell({ texto, anulado = false }) {
   const [expandido, setExpandido] = useState(false);
+  const tono = anulado ? 'line-through text-gray-400' : 'text-gray-700';
   if (!texto) return <span className="text-gray-300">—</span>;
   if (texto.length <= DETALLE_PREVIEW_MAX) {
-    return <div className="text-gray-700 whitespace-pre-wrap break-words">{texto}</div>;
+    return <div className={`${tono} whitespace-pre-wrap break-words`}>{texto}</div>;
   }
   return (
-    <div className="text-gray-700">
+    <div className={tono}>
       {expandido
         ? <div className="whitespace-pre-wrap break-words">{texto}</div>
         : <div className="line-clamp-2">{texto}</div>}
