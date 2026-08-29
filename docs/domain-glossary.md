@@ -129,13 +129,24 @@ Convenciones canónicas: unidad `GEC3`/`GEC32` (nunca `G3.0`/`G3.2`), potencia *
 
 ---
 
-## Asiento reflejado / tipo espejo (D-058)
+## Asiento reflejado / copia anulada / tipo espejo (D-058 + D-063)
 
-**Asiento reflejado** = la **copia** de un evento de Operación 24h en `SALAJDT` y `SALAING` (nunca `SALAOP`). Es un registro real de esa bitácora —cuenta en el contador, cierra por turno, viaja al histórico— pero **derivado**: se identifica por `campos_extra.origen_lote_id`, muestra un chip con su bitácora de origen y **no se edita ni se borra en su destino, tampoco por su autor** (`403 asiento_reflejado`). La única fuente de verdad es el origen.
+**Asiento reflejado** = la **copia** de un evento de **Operación 24h** (por lote) o de **Disponibilidad** (por estado) en `SALAJDT` y `SALAING` (nunca `SALAOP`). Es un registro real de esa bitácora —cuenta en el contador, cierra por turno, viaja al histórico— pero **derivado**: muestra un chip con su bitácora de origen y **no se edita ni se borra en su destino, tampoco por su autor** (`403 asiento_reflejado`). La única fuente de verdad es el origen.
+
+**Marcador vs. puntero (D-063).** Son dos cosas y se confunden fácil:
+
+| | Clave en `campos_extra` | Para qué sirve |
+|---|---|---|
+| **Marcador** | `origen_bitacora` — `"MAND"` o `"DISP"` (el `codigo` del origen, cadena no vacía) | **Lo único que decide si una fila es una copia.** Es el mismo para todos los orígenes, y es lo que leen los cinco consumidores: `canEditarRegistro`, el espejo SQL del `GET /activos`, la exclusión del libro F03, la grilla de Sala e Históricos. |
+| **Puntero** | `origen_lote_id` (GUID del lote, MAND) · `origen_disponibilidad_id` (INT del estado, DISP) | Solo el camino de vuelta al origen para corregir, borrar o anular. **No decide nada.** |
+
+D-058 marcaba por `origen_lote_id` porque MAND era el único origen; con la copia DISP —otro puntero— cada consumidor la habría dejado editable, publicable en el libro y sin rótulo. D-063 separó las dos ideas y un guard estático (`server/tests/guard_marcador_reflejo.test.js`) fija los cinco puntos.
+
+**Copia anulada** (D-063, RQ-02.12) = el asiento reflejado de un estado de disponibilidad **que se deshizo en su origen**. Deshacer **no la borra**: le agrega `campos_extra.anulado = { por, nombre, cargo, en }` y la copia sigue **visible, tachada y atenuada**, con un chip **"Anulado"** cuyo tooltip nombra quién la deshizo y cuándo (hora Bogotá), tanto en la grilla de Sala como en Históricos. El evento sí ocurrió durante el turno; borrarlo dejaría un hueco en la narrativa. `detalle`, el puntero y `fecha_evento` quedan intactos, y la anulación es **idempotente por SQL** (una segunda pasada no re-sella al primero). No existe el caso simétrico en MAND: ahí borrar el lote **sí borra** las copias.
 
 **Tipo espejo** = los `lov_bit.tipo_evento` que existen en `SALAJDT`/`SALAING` con los nombres literales de MAND y DISP (`Autorización`, `Pruebas`, `Redespacho`, `Cambio de Disponibilidad`) para que la copia tenga un tipo coherente con su bitácora. Van con **`seleccionable = 0`**: existen para el sistema, pero **nadie los puede elegir a mano** — si se pudieran, alguien crearía "una autorización" sin origen, indistinguible de un reflejo real e imposible de rastrear.
 
-> El reflejo de **Disponibilidad** todavía **no está cableado** (sus tipos espejo sí están sembrados): tiene ADR propio pendiente.
+> El reflejo de **Disponibilidad** lo cerró **D-063** sobre esos mismos tipos espejo ya sembrados: mismo módulo, mismo INSERT, con la **copia anulada** como única diferencia de fondo. Ver RF-077 y BIT-MODBD §7.11.
 
 ---
 

@@ -5,8 +5,8 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 2.5 |
-| Fecha | 2026-08-27 |
+| Versión | 2.6 |
+| Fecha | 2026-08-28 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
@@ -17,7 +17,7 @@
 > - **Nueva columna `lov_bit.tipo_evento.seleccionable BIT NOT NULL DEFAULT 1` (`F34.A1`, §2.5)** — idempotente, `WITH VALUES`, **sin tocar una sola fila de datos**. `0` = el tipo existe para el sistema (reflejo, histórico, filtros) pero **nadie lo puede elegir a mano**. Se llama `seleccionable` y no `activo` (que se confunde con "bitácora activa"). El filtro vive en `GET /api/catalogos/bitacoras/:id/tipos-evento` **y también** en los dos lookups `(tipo_evento_id, bitacora_id)` del `POST`/`PUT` genérico de `registros.js`: esconder una opción no impide postear su id.
 > - **8 tipos espejo sembrados con `seleccionable = 0`** (§2.5): `Autorización` · `Pruebas` · `Redespacho` · `Cambio de Disponibilidad` × `SALAJDT`/`SALAING`, con los nombres **literales** de sus catálogos de origen. Idempotentes por `(bitacora_id, nombre)`, se reconstruyen en cada arranque, quedan con `notificar_dashboard_tipo = NULL` y **no** cambian la matriz de permisos.
 > - **Nueva §7.11** — los asientos reflejados: `campos_extra` gana `origen_bitacora` y `origen_lote_id` en las copias de Sala (**sin DDL**, viajan tal cual al histórico); el vínculo es **por lote, nunca por `registro_id`** (no hay FK posible: la copia también migra al histórico); `fecha_evento` = hora de llamada pero `turno_id` = turno **ABIERTO**; `rowsAffected = 0` en la cascada **no es error**; y la copia es **solo lectura en su destino incluso para su autor** (`403 asiento_reflejado`, restricción y no bypass de D-049).
-> - **Sin migración de datos, sin cambios de contrato cross-repo**: `evento_dashboard` y `disponibilidad_dashboard` no se tocan. El reflejo de **DISP queda fuera** (sus tipos ya están sembrados) y tiene ADR propio pendiente. Ver D-058.
+> - **Sin migración de datos, sin cambios de contrato cross-repo**: `evento_dashboard` y `disponibilidad_dashboard` no se tocan. El reflejo de **DISP** no entró en D-058 (sus tipos ya estaban sembrados); lo cerró **D-063** en la v2.6 (§7.11). Ver D-058.
 >
 > **Cambios v2.2 (2026-07-22) — Operación 24h append-only (D-056):**
 > - **§7.9 actualizada** con el modelo de captura append-only de MAND: `POST /api/sala-de-mando/guardar` **solo INSERTA** (murió la máquina de 4 casos), varios registros pueden coexistir por `(tipo, periodo, día, planta)`, body y motivos de error nuevos (`hora_requerida`/`hora_invalida`/`hora_futura`/`lote_sin_celdas`; retirado `detalle_sin_celdas`). El pivote `GET /api/sala-de-mando` **se dio de baja** (404); lo reemplaza `GET /api/sala-de-mando/lotes` (listado del día, solo lectura, agrupado por `lote_id`).
@@ -1645,48 +1645,146 @@ Cada tabla operativa con columnas DATETIME2 expone columnas calculadas con sufij
 - **Tests de componentes RTL**: `HistoricoTable`, `EstadoActualCard`, `BarraEstado`, `SalaDeMandoGrid` no tienen tests automáticos de render con TZ override. Smoke manual con DevTools cubre el gap hoy.
 - **CI matrix con GH Actions**: el repo no tiene CI configurado. F21 dejó tests corriendo localmente (`npm test`). Cuando se agregue GH Actions, configurar matriz `TZ=UTC,America/Bogota,Asia/Tokyo` para detectar regresiones por uso accidental de `getHours()`/`getTimezoneOffset()` sin TZ explícito.
 
-### 7.11 Asientos reflejados en las bitácoras de Sala (D-058)
+### 7.11 Asientos reflejados en las bitácoras de Sala (D-058 + D-063)
 
-Un lote de Operación 24h se **copia** como registro real de `SALAJDT` **y** `SALAING` (nunca
-`SALAOP`), dentro de la MISMA transacción del `POST /guardar` · `PUT` · `DELETE` por lote
-(`server/utils/reflejo-sala.js`). Sin DDL: la copia es una fila normal de `registro_activo` y viaja
-al histórico como cualquier otra. Lo único nuevo son **dos claves de `campos_extra`**:
+Un evento de **Operación 24h** (por lote, D-058) o de **Disponibilidad** (por estado, D-063) se
+**copia** como registro real de `SALAJDT` **y** `SALAING` (nunca `SALAOP`), dentro de la MISMA
+transacción del endpoint que lo originó —`POST /api/sala-de-mando/guardar` · `PUT` · `DELETE` por
+lote para MAND; `POST`/`PUT /api/registros` rama DISP y `POST /api/disponibilidad/deshacer` para
+DISP— y siempre en `server/utils/reflejo-sala.js`. Sin DDL: la copia es una fila normal de
+`registro_activo` y viaja al histórico como cualquier otra. Lo único nuevo son **claves de
+`campos_extra`**: un **marcador**, universal, y un **puntero**, propio de cada origen.
+
+#### El marcador es uno solo; los punteros no deciden nada
 
 ```json
 { "origen_bitacora": "MAND", "origen_lote_id": "<GUID del lote de origen>" }
+{ "origen_bitacora": "DISP", "origen_disponibilidad_id": 123 }
 ```
 
-- **El vínculo es por `lote_id`, NUNCA por `registro_id`.** La copia *también* migra a
+- **`origen_bitacora`** (D-063) es el `codigo` de la bitácora de origen, cadena no vacía, y es lo
+  ÚNICO que decide si una fila es una copia. D-058 marcaba por `origen_lote_id` —el puntero de
+  MAND— y le alcanzaba porque MAND era el único origen; al llegar la copia DISP con otro puntero,
+  los **cinco** consumidores del predicado (`canEditarRegistro`, el espejo SQL del `GET /activos`,
+  la exclusión del libro F03, la grilla de Sala e Históricos) la habrían dejado editable,
+  publicable en el libro y sin rótulo. Los cinco leen hoy `origen_bitacora`, y un guard estático
+  (`server/tests/guard_marcador_reflejo.test.js`) los fija juntos.
+- **`origen_lote_id`** (GUID del lote) y **`origen_disponibilidad_id`** (INT de
+  `disponibilidad_estado`, guardado como **número**) son solo el camino de vuelta al origen para
+  corregir, borrar o anular. Un tercer origen (COMB, mañana) solo tiene que escribir su
+  `origen_bitacora` y su puntero: ningún consumidor cambia.
+- **El vínculo es por lote / por estado, NUNCA por `registro_id`.** La copia *también* migra a
   `registro_historico`, así que —igual que `evento_dashboard.registro_origen_id` (D-055 (c))— **no
   hay FK posible**: el padre tiene dos tablas. La integridad la sostienen el código y los tests.
-- **Cómo se buscan las copias** (siempre acotado por las tres condiciones, no solo por el lote —
-  sin el `IN`, el DML alcanzaría cualquier fila que mañana reuse la clave, p. ej. el reflejo de DISP):
+- **Nadie más escribe estas claves.** Las escribe solo `reflejo-sala.js`, por SQL directo. El
+  `POST`/`PUT` genérico arma `campos_extra` con `validateCamposExtra`, que únicamente acepta los
+  campos declarados en `definicion_campos`, y las bitácoras de Sala la tienen en `NULL`: no se
+  puede fabricar una copia desde un body, ni por devtools.
 
-  ```sql
-  FROM bitacora.registro_activo
-  WHERE JSON_VALUE(campos_extra, '$.origen_lote_id') = @lote_id
-    AND bitacora_id IN (@salajdt, @salaing)
-    AND planta_id = @planta_id
-  ```
+#### Cómo se buscan las copias
 
-- **`rowsAffected = 0` NO es error:** significa que el cierre de turno de Sala ya archivó las copias.
-  El histórico no se reescribe (RF-032) y la corrección del origen procede igual.
-- **`fecha_evento` = `hora_llamada` del lote** (narrativo: el asiento se lee donde el operador lo
-  espera) pero **`turno_id` = el turno ABIERTO** de la unidad al insertar (puntero de archivado,
-  §4.10 / D-045), o `NULL` si no hay ninguno. Son criterios distintos **a propósito**.
-- **Solo lectura en su destino, incluso para su autor** (que es el del origen):
-  `canEditarRegistro` y el espejo SQL del `GET /api/registros/activos` comparten el predicado
-  `JSON_VALUE(campos_extra,'$.origen_lote_id') IS NULL`; el `PUT`/`DELETE` responde
-  `403 asiento_reflejado`. Es una **restricción**, no un bypass de D-049.
+Siempre acotado por las **tres** condiciones —puntero, bitácora y planta—. Sin el `IN`, el DML
+alcanzaría cualquier fila que mañana reuse la clave; sin la planta, la de otra unidad:
+
+```sql
+-- MAND
+WHERE JSON_VALUE(campos_extra, '$.origen_lote_id') = @lote_id
+  AND bitacora_id IN (@salajdt, @salaing)
+  AND planta_id = @planta_id
+
+-- DISP
+WHERE JSON_VALUE(campos_extra, '$.origen_disponibilidad_id') = @id
+  AND planta_id = @planta_id
+  AND bitacora_id IN (@salajdt, @salaing)
+```
+
+`@id` viaja como **`NVARCHAR` y se compara texto con texto**, sin `CAST(… AS INT)`: `JSON_VALUE`
+devuelve `NVARCHAR` y SQL Server no garantiza el orden de evaluación de los predicados, así que un
+`CAST` en el `WHERE` podría caer sobre una fila ajena con valor no numérico y reventar el `UPDATE`
+entero. Comparar texto con texto no puede fallar, y la forma canónica está garantizada porque el
+único escritor de la clave la serializa con `JSON.stringify` desde un entero.
+
+- **`rowsAffected = 0` NO es error** —ni en MAND ni en DISP, ni al actualizar ni al anular—:
+  significa que el cierre de turno de Sala ya archivó las copias. El histórico no se reescribe
+  (RF-032) y la corrección del origen procede igual.
+
+#### Fecha, turno y estado de la copia
+
+- **`fecha_evento` es narrativo**: `hora_llamada` del lote (MAND) o `fecha_inicio_estado` del estado
+  (DISP). El asiento se lee donde el operador lo espera.
+- **`turno_id` es el puntero de archivado** (§4.10 / D-045): el turno **ABIERTO** de la unidad al
+  insertar, o `NULL` si no hay ninguno. Son criterios distintos **a propósito** — apuntar la copia
+  a un turno ya cerrado la dejaría viva en `registro_activo` para siempre. DISP está exenta de los
+  gates de turno (RN-02.d), así que la copia se crea igual sin turno abierto y espera al **rescate
+  de huérfanos** del siguiente cierre. Ese rescate exigía además `fecha_evento >= inicio_nominal`
+  del turno que cierra, lo que dejaba fuera a una copia retro-fechada (DISP la vuelve probable, pero
+  el hueco existe para MAND desde D-058): **D-063 le quita esa cota inferior** — *pendiente de
+  verificación en GATE-O2*.
+- **`estado` sigue siendo `'borrador'`**, como cualquier registro vivo, y **sin DDL**. El archivado
+  (`utils/turno-entidad.js`), el conteo de la pestaña, el `PUT`/`DELETE` genérico y los guards
+  filtran todos por `estado = 'borrador'`: un estado nuevo para "copia" habría que enseñárselo a
+  cada uno de ellos, y el marcador ya distingue lo que hay que distinguir.
 - La copia **no** publica al dashboard (RN-02.a) ni cuenta para presencia/conformación (RN-02.b), y
-  el generador del libro F03 la **excluye** (lee los originales; si no, el evento saldría tres veces).
-- ⚠️ `JSON_VALUE` **lanza** ante texto no-JSON (no devuelve `NULL`), y el espejo se evalúa por fila
-  del listado: una sola fila con `campos_extra` corrupto pondría la grilla en 500. Hoy es imposible
-  —todos los escritores guardan `JSON.stringify(objeto)` o `NULL`— y esa premisa sostiene las tres
-  consultas. Si algún día se persistiera `campos_extra` crudo del cliente, se caen juntas.
+  el generador del libro F03 la **excluye** por `JSON_VALUE(campos_extra,'$.origen_bitacora') IS
+  NULL` (lee los originales; si no, el evento saldría tres veces).
 
-**El reflejo de Disponibilidad queda FUERA de D-058** (sus 4 tipos espejo ya están sembrados): tiene
-ADR propio pendiente, porque agrega el estado "copia anulada" de RQ-02.12.
+#### Solo lectura en su destino, incluso para su autor
+
+`canEditarRegistro` y el espejo SQL del `GET /api/registros/activos` comparten el predicado
+`JSON_VALUE(campos_extra,'$.origen_bitacora') IS NULL`; el `PUT`/`DELETE` responde
+`403 asiento_reflejado` con `origen_bitacora` y `origen_bitacora_nombre` —el nombre sale del
+catálogo `lov_bit.bitacora` por `codigo` (D-052), no se hardcodea— y un mensaje que nombra ese
+origen. Es una **restricción**, no un bypass de D-049.
+
+#### Anular ≠ borrar: la copia DISP deshecha (D-063, RQ-02.12)
+
+`POST /api/disponibilidad/deshacer` borra el estado de `disponibilidad_estado` y reabre el anterior,
+pero su copia en Sala **no se borra: se marca anulada**. El evento sí ocurrió durante el turno;
+borrarlo dejaría un hueco en la narrativa. `campos_extra` gana una tercera clave:
+
+```json
+{
+  "origen_bitacora": "DISP",
+  "origen_disponibilidad_id": 123,
+  "anulado": { "por": 7, "nombre": "Juan Pérez", "cargo": "Ingeniero de Operación", "en": "2026-08-28T20:15:03.412Z" }
+}
+```
+
+`anulado` es un **objeto** con exactamente esas cuatro claves (`nombre` y `cargo` pueden ser `null`)
+y `en` es un ISO en **UTC**. Ese objeto obliga al `JSON_QUERY`:
+
+```sql
+UPDATE bitacora.registro_activo
+   SET campos_extra   = JSON_MODIFY(campos_extra, '$.anulado', JSON_QUERY(@a)),
+       modificado_por = @u,
+       modificado_en  = SYSUTCDATETIME()
+ WHERE JSON_VALUE(campos_extra, '$.origen_disponibilidad_id') = @id
+   AND planta_id   = @planta
+   AND bitacora_id IN (@salajdt, @salaing)
+   AND JSON_VALUE(campos_extra, '$.anulado.en') IS NULL
+```
+
+- **Sin `JSON_QUERY(@a)`** el objeto se guardaría como una cadena escapada
+  (`"anulado": "{\"por\":7,…}"`) y el front no podría leer `anulado.por`.
+- **La idempotencia vive SOLO en `AND JSON_VALUE(campos_extra,'$.anulado.en') IS NULL`**, nunca en
+  una lectura previa: `JSON_MODIFY` en modo lax **reemplaza sin fallar** una clave que ya existe, así
+  que una segunda anulación borraría quién deshizo de verdad. Fijado por el test `anular x2`.
+- **`detalle`, el puntero y `fecha_evento` quedan intactos**: la copia sigue narrando lo mismo, solo
+  gana la constancia. La grilla de Sala e Históricos la pintan tachada con un chip "Anulado" cuyo
+  tooltip nombra quién la deshizo y cuándo, en hora Bogotá (RF-077).
+- **La copia del estado N-1 restaurado no se toca.** Deshacer revive el estado anterior en
+  `disponibilidad_estado`, pero su copia en Sala nunca se anuló ni se borró: sigue viva y correcta.
+
+⚠️ `JSON_VALUE` **lanza** ante texto no-JSON (no devuelve `NULL`), y el espejo se evalúa por fila
+del listado: una sola fila con `campos_extra` corrupto pondría la grilla en 500. Hoy es imposible
+—todos los escritores guardan `JSON.stringify(objeto)` o `NULL`— y esa premisa sostiene todas las
+consultas de arriba, incluidas las de DISP. Si algún día se persistiera `campos_extra` crudo del
+cliente, se caen juntas.
+
+**D-063 cierra el reflejo de Disponibilidad** que D-058 había dejado fuera: los mismos 4 tipos
+espejo de `Cambio de Disponibilidad` ya sembrados, el mismo módulo y el mismo `INSERT` que MAND, con
+el estado "copia anulada" de RQ-02.12 como única diferencia de fondo. **Sin DDL y sin migración**
+(`F35.A1` quedó libre) y **sin cambios en el contrato cross-repo**. Ver **D-063**, RF-077 y REQ-02 §3.4.
 
 ---
 
@@ -1710,6 +1808,7 @@ ADR propio pendiente, porque agrega el estado "copia anulada" de RQ-02.12.
 | 2.3 | 2026-07-27 | **Asientos normalizados de operación (D-058).** §2.5: columna **`lov_bit.tipo_evento.seleccionable BIT NOT NULL DEFAULT 1`** (migración **`F34.A1`**, idempotente por `COL_LENGTH`, `WITH VALUES` → cero filas de datos tocadas) + seed de los **8 tipos espejo** (`Autorización` · `Pruebas` · `Redespacho` · `Cambio de Disponibilidad` × `SALAJDT`/`SALAING`, nombres **literales** del catálogo de origen) con `seleccionable = 0`, idempotentes por `(bitacora_id, nombre)` y reafirmados por un `UPDATE` complementario en cada arranque — que **no** fuerza `1` en el resto. El filtro `seleccionable = 1` se aplica en `GET /api/catalogos/bitacoras/:id/tipos-evento` **y** en los dos lookups del `POST`/`PUT` de `registros.js` (esconder no es impedir). **Nueva §7.11** — asientos reflejados: `campos_extra.origen_bitacora` + `origen_lote_id` en las copias de `SALAJDT`/`SALAING` (**sin DDL**), vínculo **por lote y nunca por `registro_id`** (la copia también migra al histórico → no hay FK posible, precedente D-055 (c)), búsqueda acotada por lote **+ planta + `bitacora_id IN`**, `rowsAffected = 0` **no es error** (las copias ya se archivaron; RF-032 intacto y la corrección del origen procede), `fecha_evento` = hora de llamada (narrativo) vs `turno_id` = turno **ABIERTO** (puntero de archivado, D-045), y solo lectura en destino **incluso para su autor** (`403 asiento_reflejado`, restricción — no bypass de D-049 — con `canEditarRegistro` y su espejo SQL cambiados juntos). **Sin migración de datos** y **sin cambios en el contrato cross-repo**. El reflejo de **DISP queda fuera** (tipos ya sembrados): ADR propio pendiente. |
 | 2.4 | 2026-08-25 | **Periodo 24 del carbón GEC32 (D-060).** **Nueva §4.9.1** documenta la ingesta SIS que faltaba en este modelo: columnas `valor_sis`/`sis_actualizado_en` de `consumo_combustible` y la tabla `bitacora.sis_scrape_log` (F27.A1). Semántica corregida: `completo = 1` ⇔ 24 periodos sin errores (antes se calculaba contra el horizonte de "hoy" y dejaba `completo=1, ultimo_periodo=23` → el P24 nunca se cargaba; 41 días en prod). Migración **F33.A1**: `UPDATE sis_scrape_log SET completo=0 WHERE completo=1 AND (ultimo_periodo IS NULL OR ultimo_periodo<>24 OR periodos_error>0)`; no toca `consumo_combustible`. Reparación de datos con `server/scripts/backfill-carbon-gec32.js` (resumible, guardrail `--confirm-db`). Sin cambios de DDL. |
 | 2.5 | 2026-08-27 | **Cierre de la ingesta SIS del carbón GEC32 (D-061).** **Sin DDL y sin migración `F-NN`.** §4.9.1 ampliada con lo que faltaba de la ingesta: la **tabla de ownership completa** de `aplicarCelda` (seis ramas, incluida la del **override 0**), el clamp a `cantidad_max` y el filtro de ruido de ≤ 0,5 t/h; `sis_owned`/`es_override` **derivados en el backend** y expuestos por celda en `GET /api/combustibles/consumos` junto al bloque `sis`; **vaciar una celda con `valor_sis` = override 0** en vez de DELETE (§4.9 puntos 2 y 5 corregidos, y la invariante de "celda vacía"); **tabla de decisión de `POST /api/combustibles/consumos/revertir`** (`restaurado` / `eliminado` / `sin_cambios`, con la devolución de la propiedad al SISTEMA); los **tres caminos** que le piden días al SIS (sweeper HH:02, job manual `POST /sis/scrape` con estado volátil, CLI de backfill) y el **mutex de proceso sin cola** `sis-lock` que serializa los dos primeros; la **concurrencia 1..6** de la fase de red (~95 s/día, `N=1` idéntico al previo) y su efecto en la reanudación; el **descubrimiento calibrado** (`discover.js`, K sondeos en W días, retorno `{ fecha, motivo, sondeos }`) con la fecha real de inicio de GEC32 —**`2018-06-13`**, primer carbón el **`2018-07-15`**, 2.996 días de histórico— y la advertencia de los huecos > 60 días; y el **seed idempotente del catálogo de `'TST'`** (10 filas espejo, guardado por la fila de `lov_bit.planta`, fixture residente que sube el catálogo global de 18 a 28). Runbook de la corrida histórica en `deploy/DEPLOY.md`. |
+| 2.6 | 2026-08-28 | **Reflejo de Disponibilidad a las bitácoras de Sala con copia anulada (D-063).** **Sin DDL y sin migración (`F35.A1` no consumida)** y **sin cambios en el contrato cross-repo** (`evento_dashboard` y `disponibilidad_dashboard` intactos). §7.11 reescrita y renombrada (**D-058 + D-063**): el **marcador** de asiento reflejado pasa de `origen_lote_id` —el puntero de MAND— al **universal `campos_extra.origen_bitacora`** (`codigo` del origen, cadena no vacía), y los punteros (`origen_lote_id` GUID / `origen_disponibilidad_id` INT) dejan de decidir nada; los **cinco** consumidores del predicado cambian juntos y un guard estático los fija. Documenta la copia DISP: `fecha_evento = fecha_inicio_estado` vs `turno_id` = turno **ABIERTO** (puntero de archivado), `estado` sigue `borrador` **a propósito** (archivado, conteo y guards filtran por ahí), predicado de búsqueda acotado por puntero + planta + `bitacora_id IN`, `@id` comparado **texto con texto** sin `CAST`, y `rowsAffected = 0` que **no es error** tampoco al actualizar o anular. Sección nueva **anular ≠ borrar** (RQ-02.12): deshacer un estado **no borra** la copia, le agrega `campos_extra.anulado {por, nombre, cargo, en}` con `JSON_MODIFY … JSON_QUERY` —sin `JSON_QUERY` quedaría como cadena escapada— e **idempotencia por SQL** (`AND JSON_VALUE(campos_extra,'$.anulado.en') IS NULL`), porque `JSON_MODIFY` en modo lax **reemplaza sin fallar**; `detalle`, puntero y `fecha_evento` intactos y la copia del N-1 restaurado **no se toca**. Se retira de §7.11 la nota que dejaba el reflejo de DISP fuera de alcance a la espera de un ADR propio: ese ADR es D-063. |
 
 ---
 

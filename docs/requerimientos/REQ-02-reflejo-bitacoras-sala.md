@@ -4,7 +4,7 @@
 |---|---|
 | **Código** | REQ-02 |
 | **Título** | Los eventos de Operación 24h y Disponibilidad se copian a las bitácoras de Sala de JdT e Ing. de Operación |
-| **Estado** | 🟢 **Implementado para Operación 24h por D-058** (2026-07-27) — el reflejo de **Disponibilidad** queda pendiente y tiene **ADR propio** (ver el aviso de §3.4). El bloqueante de plantilla (§8.1) está **resuelto**. |
+| **Estado** | 🟢 **Implementado** — Operación 24h por **D-058** (2026-07-27) y **Disponibilidad por D-063** (2026-08-28). Los bloqueantes de §8.1 y §8.2 están **resueltos**. |
 | **Origen** | `pendientes_Ernesto.md`: *"Sala de mando operativa debería mostrar los valores registrados en la bitácora operación 24hr y disponibilidad, para las bitácoras de jdt e ing de operación. (para jdt e ing de op, si cualquiera de los 2 crea, se envía a ambas)"* |
 | **Depende de** | [REQ-03](./REQ-03-operacion-24h-registros-unicos.md) — define qué es un "evento" en el nuevo modelo de Operación 24h y cuándo se edita/borra. |
 | **Relacionado** | [REQ-04](./REQ-04-historico-en-apartado.md) (la corrección que cascadea), [REQ-05](./REQ-05-asiento-cambio-despacho.md) (el asiento automático también se refleja). |
@@ -76,20 +76,30 @@ del turno, no de la persona.
 
 ### 3.4 Disponibilidad: qué acciones propagan
 
-> ⚠️ **PENDIENTE — fuera de D-058, con ADR propio.** D-058 cableó el reflejo **solo desde Operación
-> 24h**. Los 4 tipos espejo de `Cambio de Disponibilidad` **ya están sembrados** en `SALAJDT` y
-> `SALAING` (con `seleccionable = 0`), y el módulo `server/utils/reflejo-sala.js` es el único lugar
-> donde vive la mecánica — así que lo que falta es acotado y está localizado:
+> ✅ **Implementado por D-063** (2026-08-28). D-058 había cableado el reflejo **solo desde Operación
+> 24h** y dejado esta mitad afuera; D-063 la cierra en el mismo módulo
+> (`server/utils/reflejo-sala.js`) y con los mismos 4 tipos espejo de `Cambio de Disponibilidad` que
+> ya estaban sembrados en `SALAJDT` y `SALAING` con `seleccionable = 0`. Los tres puntos que
+> quedaban abiertos, resueltos:
 >
-> 1. Enganchar `crearReflejoLote`/`actualizarReflejoLote` en `POST`/`PUT` de disponibilidad
->    (`routes/registros.js` rama DISP y `routes/disponibilidad.js`), dentro de sus transacciones.
-> 2. Implementar **RQ-02.12** — `POST /api/disponibilidad/deshacer` **marca la copia como anulada,
->    no la borra**. Eso es lo que de verdad justifica un ADR aparte: agrega un **estado visual nuevo**
->    a la grilla de Sala (hoy solo existen "editable" y "reflejado de solo lectura") y una constancia
->    de quién deshizo.
-> 3. Decidir el borde de medianoche del estado que cruza el día (ver [REQ-06](./REQ-06-excel-eventos-operacion.md) §8.3, hoy resuelta **solo** para el libro).
+> 1. **Enganches.** `crearReflejoDisponibilidad` / `actualizarReflejoDisponibilidad` /
+>    `anularReflejoDisponibilidad` se llaman desde `routes/registros.js` (rama DISP del `POST` y del
+>    `PUT`) y `routes/disponibilidad.js` (deshacer), **dentro de la transacción del origen y sin
+>    `try/catch`** (RQ-02.9). *Los enganches quedan pendientes de verificación en GATE-O2; el módulo
+>    que ejecutan ya está verificado contra el código.*
+> 2. **RQ-02.12 — anular ≠ borrar.** `POST /api/disponibilidad/deshacer` marca la copia con
+>    `campos_extra.anulado = { por, nombre, cargo, en }` y devuelve `copias_anuladas`. El estado
+>    visual nuevo existe en las **dos** superficies de lectura: la grilla de Sala y Históricos pintan
+>    el asiento **tachado y atenuado** con un chip "Anulado" cuyo tooltip nombra quién lo deshizo y
+>    cuándo, en hora Bogotá. Es idempotente por SQL: una segunda pasada no re-sella al primero.
+> 3. **Borde de medianoche.** No hay tal borde para la copia: el asiento de DISP es un **instante**
+>    —`fecha_inicio_estado`—, no un intervalo, así que ninguna copia cruza el día. Lo que sí se parte
+>    por medianoche es el bloque T2 del **libro** F03, y eso ya estaba resuelto por D-058 por hora de
+>    calendario (ver [REQ-06](./REQ-06-excel-eventos-operacion.md) §8.2); el libro, además, no lee
+>    las copias.
 >
-> Mientras tanto, RQ-02.10, RQ-02.11 y RQ-02.12 **no están implementadas**.
+> RQ-02.10, RQ-02.11 y RQ-02.12 quedan **implementadas**. Sin DDL, sin migración y sin cambios en el
+> contrato cross-repo. Ver **D-063**, RF-077 y BIT-MODBD §7.11.
 
 - **RQ-02.10** — **Crear** un estado nuevo (la unidad cambia de estado) genera el asiento.
 - **RQ-02.11** — **Editar** el estado vigente (p. ej. corregir la hora de inicio) actualiza el asiento.
@@ -137,15 +147,37 @@ señala para que no se resuelvan por omisión:
    > drift es invisible hasta que alguien edita el registro. Existe el guard
    > `server/tests/guard_tipo_evento_coherente.test.js` — debe seguir pasando.
 
+   > **✅ Resuelto en D-058 y reusado por D-063.** Los **8 tipos espejo** (`Autorización` · `Pruebas` ·
+   > `Redespacho` · `Cambio de Disponibilidad` × `SALAJDT`/`SALAING`) se siembran en `server/db.js`
+   > con los nombres **literales** de sus catálogos de origen y `seleccionable = 0`: existen para el
+   > sistema, pero nadie los teclea (BIT-MODBD §2.5). D-063 no sembró ninguno —los 4 de `Cambio de
+   > Disponibilidad` ya estaban— y el módulo resuelve el tipo **por nombre en cada bitácora de
+   > destino**, nunca por un id hardcodeado. El guard sigue en verde.
+
 2. **Vínculo origen ↔ copia.** Hace falta poder ir del evento de origen a sus dos copias para
    cascadear. Igual que `evento_dashboard.registro_origen_id`, **no puede haber FK**: el origen vive
    en `registro_activo` y migra a `registro_historico` (dos padres posibles, ver D-055 hallazgo 4).
    La integridad se sostiene en código + test.
 
+   > **✅ Resuelto: un marcador y un puntero, que son cosas distintas.** El **marcador**
+   > `campos_extra.origen_bitacora` (`MAND` | `DISP`, D-063) es lo único que dice si una fila es una
+   > copia; el **puntero** —`origen_lote_id` (GUID) para MAND, `origen_disponibilidad_id` (INT) para
+   > DISP— solo sirve para volver al origen y cascadear. D-058 usaba el puntero de MAND como
+   > marcador, y por eso la copia DISP habría llegado editable y publicable en el libro. La búsqueda
+   > va siempre acotada por puntero **+ planta + `bitacora_id IN`**, y un guard estático
+   > (`server/tests/guard_marcador_reflejo.test.js`) fija los cinco puntos que la consultan.
+
 3. **Bloqueo de edición en destino.** El gate por fila de `GrillaRegistros` ya existe: el `GET
    /activos` expone el flag advisory `puede_editar` y la grilla pinta lápiz/basurero solo desde él
    (D-049). Basta con que el asiento reflejado venga con `puede_editar = false`. **El backend debe
    rechazar igual** (`PUT`/`DELETE /api/registros/:id`), no confiar en el front.
+
+   > **✅ Resuelto así, y con el rechazo del backend por delante.** `canEditarRegistro` y el espejo
+   > SQL del `GET /activos` comparten el predicado `JSON_VALUE(campos_extra, '$.origen_bitacora') IS
+   > NULL` y se cambian **juntos** (el guard lo exige); el `PUT`/`DELETE` responde
+   > `403 asiento_reflejado` con `origen_bitacora` + `origen_bitacora_nombre` y un mensaje que
+   > **nombra el origen real** —el nombre sale del catálogo, no del front (D-052)—. Vale también
+   > para la copia **anulada**: sigue teniendo marcador, así que sigue siendo de solo lectura.
 
 ### 5.2 Archivos a tocar
 
@@ -240,6 +272,15 @@ las bitácoras de Sala, ¿qué debe pasar?
   > el `GET /activos` lo resuelve del catálogo (`origen_bitacora_nombre`), porque el nombre visible de
   > una bitácora vive solo en el seed (D-052). Del `campos_extra` el front lee el **dato**, nunca la
   > etiqueta.
+- ¿Cómo se distingue una copia **anulada** de una viva?
+  > **Resuelto en D-063: tachado + chip.** El asiento anulado no se oculta ni se borra — se pinta
+  > con el `detalle` **tachado y atenuado** y un chip **"Anulado"** (icono `Ban`) junto al chip de
+  > origen, cuyo `title` dice **quién** lo deshizo y **cuándo** en hora Bogotá (`campos_extra.anulado`).
+  > Aparece en **todo modo de lectura**, incluida la grilla bloqueada por turno finalizado: es un
+  > estado de la fila, no una acción, y esconderlo ahí perdería el quién y el cuándo. Históricos lo
+  > marca igual pero **sin** el nombre del origen (`v_historico_busqueda` no lo expone). La
+  > editabilidad sigue viniendo solo de `puede_editar` (D-049).
+
 - ¿Los asientos reflejados deben poder filtrarse/ocultarse en la grilla de Sala?
   > **Sin implementar y sin decidir.** Hoy se listan mezclados con lo tecleado a mano. Con la adopción
   > actual (pocos eventos por turno) no hace falta; revisarlo si el volumen lo pide.
