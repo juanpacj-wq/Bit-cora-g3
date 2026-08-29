@@ -375,6 +375,13 @@ describe('D-063 L01 · anular (CA-3)', () => {
       const en = new Date(campos.anulado.en);
       assert.ok(!Number.isNaN(en.getTime()), '`en` es una fecha ISO parseable');
       assert.ok(en.getTime() >= t0 - 1000 && en.getTime() <= Date.now() + 1000, '`en` es el ahora del servidor');
+      // CA-20 (L07 / H10) — el MISMO instante en los dos sitios, no dos relojes. Antes `en` venía
+      // de `new Date()` (la app) y `modificado_en` de `SYSUTCDATETIME()` (el motor) en el mismo
+      // UPDATE: con deriva entre ambos, el tooltip de la copia anulada y la auditoría de la fila
+      // mostraban horas distintas para el mismo deshacer. Se compara al milisegundo porque eso es
+      // lo que un `Date` de JS distingue.
+      assert.equal(en.getTime(), c.modificado_en.getTime(),
+        '`anulado.en` y `modificado_en` son el mismo instante (un solo @en bindeado a los dos)');
     }
     await cleanReflejo();
   });
@@ -525,6 +532,106 @@ describe('D-063 L01 · guardas (CA-4)', () => {
     assert.ok(fallo, 'el reflejo NO puede tragarse el error: eso dejaría un origen sin copias');
     assert.equal(await contar('disponibilidad_estado', TEST_PLANTA_REFLEJO), 0, 'el origen se revirtió');
     assert.equal(await contar('registro_activo', TEST_PLANTA_REFLEJO), 0, 'ni el origen ni las copias: o los tres lados o ninguno');
+    await cleanReflejo();
+  });
+
+  // --- D-063 L07 (H14 del /code-review de la O1) — CA-21 -------------------------------------
+  test('guardas ×4 — un solo normalizador de id: las coerciones raras lanzan ANTES de escribir y el id en texto equivale al número (CA-21)', async () => {
+    await cleanReflejo();
+    const { origen } = await sembrarYReflejar({ evento: 'Indisponible', fecha: FECHA_T1 });
+    const salaAntes = await contarSala(TEST_PLANTA_REFLEJO);
+    assert.equal(salaAntes, 2, 'la siembra dejó las dos copias que vamos a custodiar');
+
+    // `Number(v)` + `Number.isInteger` aceptaba TODOS los de la primera fila: `true` → 1,
+    // `'1e2'` → 100, `[7]` → 7, `' 12 '` → 12. No son "el id 1" ni "el id 100": son entradas que
+    // habrían salido a buscar las copias de OTRO estado y, al no encontrarlas, habrían devuelto
+    // `copias: 0` — que el contrato C1 considera un resultado NORMAL. Por eso el fallo tiene que
+    // ser ruidoso y temprano, no un cero silencioso.
+    const basura = [
+      true, false, '1e2', [7], ' 12 ', '12 ', '+12', '0x10',
+      '-3', -3, 0, '0', '', 'abc', 1.5, NaN, Infinity, {}, null, undefined,
+      Number.MAX_SAFE_INTEGER + 2, String(Number.MAX_SAFE_INTEGER + 2),
+    ];
+
+    const base = {
+      planta_id: TEST_PLANTA_REFLEJO,
+      evento: 'Indisponible',
+      detalle: null,
+      fecha_inicio_estado: FECHA_T1,
+      creado_por: usuario_id,
+      modificado_por: usuario_id,
+      snapshots: SNAPSHOTS,
+    };
+
+    for (const v of basura) {
+      let etiqueta;
+      try {
+        etiqueta = JSON.stringify(v) ?? String(v);
+      } catch {
+        etiqueta = Object.prototype.toString.call(v);
+      }
+      const esperado = { name: 'TypeError', message: /disponibilidad_id inválido/ };
+      // Las TRES entradas del módulo comparten el normalizador: si una se quedara con el `Number()`
+      // viejo, este bucle la delata (hasta L07 el bloque vivía duplicado en dos sitios).
+      await assert.rejects(
+        enTx((tx) => crearReflejoDisponibilidad(tx, { ...base, disponibilidad_id: v })),
+        esperado, `crear con ${etiqueta}`);
+      await assert.rejects(
+        enTx((tx) => actualizarReflejoDisponibilidad(tx, { ...base, disponibilidad_id: v })),
+        esperado, `actualizar con ${etiqueta}`);
+      await assert.rejects(
+        enTx((tx) => anularReflejoDisponibilidad(tx, {
+          planta_id: TEST_PLANTA_REFLEJO, disponibilidad_id: v, anulado_por: { usuario_id },
+        })),
+        esperado, `anular con ${etiqueta}`);
+    }
+
+    // "ANTES de escribir" no es una figura retórica: ni una fila más, ni una menos, ni una anulada.
+    assert.equal(await contarSala(TEST_PLANTA_REFLEJO), salaAntes, 'ninguna coerción escribió ni borró en Sala');
+    for (const c of await copiasDe(origen.disponibilidad_id)) {
+      assert.equal(parseCampos(c).anulado, undefined, 'ninguna coerción alcanzó a anular una copia');
+      assert.equal(c.modificado_en, null, 'ni a sellarla: la copia sigue como nació');
+    }
+
+    // `'2542'` ≡ 2542. El texto es la forma en la que llegan los bodies y algunos drivers, y es la
+    // que viaja al predicado (`String(id)`), así que las dos tienen que alcanzar las MISMAS copias.
+    assert.deepEqual(
+      await enTx((tx) => anularReflejoDisponibilidad(tx, {
+        planta_id: TEST_PLANTA_REFLEJO,
+        disponibilidad_id: String(origen.disponibilidad_id),
+        anulado_por: { usuario_id },
+      })),
+      { copias: 2 }, 'el id en TEXTO alcanza las dos copias');
+
+    // `disponibilidad_estado` solo admite UN vigente por planta (UQ_disp_estado_vigente_por_planta),
+    // así que cada origen nuevo va tras su limpieza.
+    await cleanReflejo();
+    const segundo = await sembrarYReflejar({ evento: 'En Reserva', fecha: FECHA_T2 });
+    assert.deepEqual(
+      await enTx((tx) => anularReflejoDisponibilidad(tx, {
+        planta_id: TEST_PLANTA_REFLEJO,
+        disponibilidad_id: segundo.origen.disponibilidad_id,
+        anulado_por: { usuario_id },
+      })),
+      { copias: 2 }, 'el id en NÚMERO alcanza las dos copias: misma ruta, mismo resultado');
+
+    // Y crear con el id en texto guarda el puntero como NÚMERO (contrato C2), no como string: la
+    // normalización pasa por el mismo sitio en las tres funciones.
+    await cleanReflejo();
+    const tercero = await enTx(async (tx) => {
+      const o = await insertNuevoEstado(tx, {
+        planta_id: TEST_PLANTA_REFLEJO, estado: 'En Servicio', codigo: CODIGO_POR_EVENTO['En Servicio'],
+        fecha_inicio_estado: FECHA_T1, detalle: null, creado_por: usuario_id,
+      });
+      await crearReflejoDisponibilidad(tx, {
+        ...base, evento: 'En Servicio', disponibilidad_id: String(o.disponibilidad_id),
+      });
+      return o;
+    });
+    assertFormaDeCopias(await copiasDe(tercero.disponibilidad_id), {
+      disponibilidad_id: tercero.disponibilidad_id, creado_por: usuario_id,
+    });
+
     await cleanReflejo();
   });
 });

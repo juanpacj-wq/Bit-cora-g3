@@ -385,6 +385,37 @@ export async function borrarReflejoLote(tx, { planta_id, lote_id } = {}) {
 //      que se registró y con lo que se deshizo, y quién lo deshizo queda en la propia fila.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// D-063 L07 (H14) — Normalizador ÚNICO del puntero al origen. Vivía duplicado en
+// `normalizarDisponibilidad` (crear/actualizar) y en `anularReflejoDisponibilidad`, las dos copias
+// con `Number(valor)` + `Number.isInteger(...) && > 0`. Esa pareja coerciona antes de exigir forma,
+// así que aceptaba `true` -> 1, `'1e2'` -> 100, `[7]` -> 7 y `' 12 '` -> 12: una entrada rara
+// entraba como id válido y el UPDATE salía a buscar las copias de OTRO estado. Acá la forma se
+// exige ANTES de coercionar: entero seguro y positivo, o texto que sea SOLO dígitos.
+//
+// El `/^\d+$/` no es cosmético: este mismo id vuelve a texto en `PREDICADO_COPIAS_DISP`
+// (`String(id)`) para compararse contra lo que `JSON_VALUE` saca de `campos_extra`. Admitir
+// espacios, signos o notación científica rompería esa comparación literal en silencio -- y en
+// silencio de verdad, porque el resultado sería `copias: 0`, que el contrato C1 considera normal.
+// `Number.isSafeInteger` cierra el otro extremo: un id que no cabe en un `double` se serializaría
+// como `'1e+21'` y jamás encontraría su fila.
+function normalizarIdDisponibilidad(valor) {
+  if (typeof valor === 'number' && Number.isSafeInteger(valor) && valor > 0) return valor;
+  if (typeof valor === 'string' && /^\d+$/.test(valor)) {
+    const n = Number(valor);
+    if (Number.isSafeInteger(n) && n > 0) return n;
+  }
+  let visto;
+  try {
+    visto = typeof valor === 'bigint' ? `${valor}n` : JSON.stringify(valor) ?? String(valor);
+  } catch {
+    visto = Object.prototype.toString.call(valor);
+  }
+  throw new TypeError(
+    `reflejo-sala: disponibilidad_id inválido (${visto}); se espera un entero positivo `
+    + 'o su texto en dígitos (es el vínculo con el origen)',
+  );
+}
+
 // Núcleo compartido por CREAR y ACTUALIZAR: valida lo que una copia DISP no puede tener mal y
 // devuelve el id, la fecha, el texto y el turno ya normalizados. Una sola vez, por la misma razón
 // que `normalizarLote`: crear y editar no pueden redactar distinto el mismo estado.
@@ -392,10 +423,7 @@ function normalizarDisponibilidad({ disponibilidad_id, planta_id, evento, detall
   // El id se normaliza a NÚMERO acá y se escribe como número en `campos_extra` (contrato C2). Los
   // drivers y los bodies lo traen a veces como string; si se guardara así, el predicado de buscar
   // las copias tendría que adivinar la forma y `origen_disponibilidad_id: "123"` sería otro shape.
-  const id = Number(disponibilidad_id);
-  if (disponibilidad_id == null || !Number.isInteger(id) || id <= 0) {
-    throw new TypeError('reflejo-sala: disponibilidad_id es obligatorio (es el vínculo con el origen)');
-  }
+  const id = normalizarIdDisponibilidad(disponibilidad_id);
 
   // `fecha_evento` = `fecha_inicio_estado`, dato NARRATIVO (cuándo cambió la unidad de estado), no
   // el instante de la escritura. Es la fecha que el operador eligió y validó en el origen, así que
@@ -575,10 +603,7 @@ export async function actualizarReflejoDisponibilidad(tx, {
  */
 export async function anularReflejoDisponibilidad(tx, { planta_id, disponibilidad_id, anulado_por } = {}) {
   if (!plantaRefleja(planta_id)) return { copias: 0, omitido: 'planta_de_test' };
-  const id = Number(disponibilidad_id);
-  if (disponibilidad_id == null || !Number.isInteger(id) || id <= 0) {
-    throw new TypeError('reflejo-sala: disponibilidad_id es obligatorio (es el vínculo con el origen)');
-  }
+  const id = normalizarIdDisponibilidad(disponibilidad_id);
   if (!anulado_por?.usuario_id) {
     throw new TypeError('reflejo-sala: anulado_por.usuario_id es obligatorio (quién deshizo)');
   }
@@ -586,12 +611,21 @@ export async function anularReflejoDisponibilidad(tx, { planta_id, disponibilida
   const [salajdt, salaing] = await resolverBitacorasDestino(tx);
 
   // Contrato C2 (copia anulada): exactamente estas cuatro claves bajo `anulado`. `en` es la hora del
-  // SERVIDOR en ISO UTC — la misma fuente que `modificado_en`, que se sella en el mismo UPDATE.
+  // SERVIDOR en ISO UTC y es EL MISMO INSTANTE que `modificado_en`: un único `Date` de Node que
+  // viaja como `@en` a los dos sitios del UPDATE.
+  //
+  // D-063 L07 (H10): antes `en` salía de `new Date()` y `modificado_en` de `SYSUTCDATETIME()` en ese
+  // mismo UPDATE, y el comentario afirmaba que eran "la misma fuente". No lo eran: son dos relojes
+  // distintos (el de la app y el del motor), así que con deriva entre ellos la misma fila mostraba
+  // una hora en el tooltip de la copia anulada y otra en la auditoría. Manda el reloj de la app
+  // porque es el que se serializa DENTRO del JSON, y `JSON_MODIFY` no puede leer el
+  // `SYSUTCDATETIME()` de su propio UPDATE para meterlo ahí.
+  const en = new Date();
   const anulado = JSON.stringify({
     por: anulado_por.usuario_id,
     nombre: anulado_por.nombre_completo ?? null,
     cargo: anulado_por.cargo ?? null,
-    en: new Date().toISOString(),
+    en: en.toISOString(),
   });
 
   // `JSON_QUERY(@a)` y no `@a` a secas: sin él, `JSON_MODIFY` guardaría el objeto como un STRING
@@ -603,11 +637,12 @@ export async function anularReflejoDisponibilidad(tx, { planta_id, disponibilida
     .input('salaing', sql.Int, salaing)
     .input('a', sql.NVarChar(sql.MAX), anulado)
     .input('u', sql.Int, anulado_por.usuario_id)
+    .input('en', sql.DateTime2, en)
     .query(`
       UPDATE bitacora.registro_activo
       SET campos_extra   = JSON_MODIFY(campos_extra, '$.anulado', JSON_QUERY(@a)),
           modificado_por = @u,
-          modificado_en  = SYSUTCDATETIME()
+          modificado_en  = @en
       ${PREDICADO_COPIAS_DISP}
         AND JSON_VALUE(campos_extra, '$.anulado.en') IS NULL
     `);
