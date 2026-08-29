@@ -129,8 +129,8 @@ Violaciones: **ninguna**.
   archiva en el siguiente cierre, que es lo que "rescate" debería significar · b) que el reflejo,
   sin turno abierto, apunte al último turno CERRADO — no: lo archivaría nadie · c) deuda documentada
   — **Recomendada:** a, en un lote propio (L07) porque toca `cerrarTurno` (D-045).
-- **Decidido:** a **condicionado al visto bueno del usuario** (cambia una regla de D-045). Sin OK,
-  L07 ejecuta solo H10/H14 y H6 queda como deuda en el ADR.
+- **Decidido:** a — **OK del usuario el 2026-08-28** (cambia una regla de D-045; el ADR de D-063 lo
+  cross-referencia). L07 ejecuta CA-22.
 - **Enmiendas que produce:** L07 (nuevo); nota en L02 (su test de CA-14 abre turno; el caso "sin
   turno" no es suyo).
 
@@ -217,7 +217,7 @@ Violaciones: **ninguna**.
   `lotes.mjs` no tiene verbo para añadir lotes). L07 ejecuta D6 **solo con el OK del usuario**.
 - Para el cierre: reescribir `CLAUDE.md` conv. 32 (H12) al añadir la 36; checklist de smoke UI
   con D5; deudas H2/H17/H18 al ADR.
-- **Visto bueno del usuario:** pendiente (incluye el OK explícito a D6).
+- **Visto bueno del usuario:** dado el 2026-08-28 (O1 cerrada, O2 abierta con L02/L05/L06/L07, D6 aprobada).
 
 ## 9. Commit del gate
 `1784703` `gate(D-063): O1 cerrada — 3 lotes, 666/666 backend + 319/319 front, 0 violaciones` (+ este commit de docs con el SHA).

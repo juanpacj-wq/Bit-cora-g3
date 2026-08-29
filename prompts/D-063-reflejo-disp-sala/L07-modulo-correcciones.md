@@ -13,9 +13,8 @@
   (`cerrarTurno` rescata huérfanos solo con `ra.fecha_evento >= @ini` — `turno-entidad.js:357/385/394`
   — así que una copia creada sin turno ABIERTO, con `turno_id NULL` y `fecha_evento` narrativa
   anterior a la ventana, **nunca se archiva**: queda viva e imborrable en Sala).
-- **CA-22 (D6) solo se ejecuta si el usuario dio el OK explícito** en el visto bueno del gate O1
-  (`GATE-O1.md` §8). Si el OK no consta, haz CA-20 y CA-21, deja CA-22 como `no-aplica` con la
-  razón, y no toques `turno-entidad.js`.
+- **D6 tiene el OK explícito del usuario (2026-08-28, `GATE-O1.md` §5 D6 y §8): CA-22 se ejecuta.**
+  Las frases "solo con OK a D6" de abajo quedan satisfechas; no vuelvas a preguntar.
 - Contrato C1 **intacto**: mismas firmas y mismos retornos. `disponibilidad_id` sigue aceptando
   número o string numérico, ahora solo `/^\d+$/`. L02 consume estas funciones en paralelo: cambiar
   una firma o un retorno es un **bloqueo**, no una licencia.

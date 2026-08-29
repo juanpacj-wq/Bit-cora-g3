@@ -10,11 +10,11 @@
 | O1 | L01 | Módulo de reflejo DISP en `reflejo-sala.js` (crear / actualizar / anular) | ✅ | `cierres/L01.md` (`f11b76b`, `a0cca57`) | GATE-O1 |
 | O1 | L03 | Front: marcador `origen_bitacora` + estado "Anulado" (grilla + Históricos) | ✅ | `cierres/L03.md` (`e2216da`, `fd0f1af`) | GATE-O1 |
 | O1 | L04 | Marcador universal `origen_bitacora`: helper + espejo SQL + 403 + F03 + guard | ✅ | `cierres/L04.md` (`478218c`, `4a1b184`) | GATE-O1 |
-| — | GATE-O1 | 3 lotes · 666/666 backend · 319/319 front · 0 violaciones · CA-1…CA-9 `cumple` | ✅ (visto bueno pendiente) | | `GATE-O1.md` |
+| — | GATE-O1 | 3 lotes · 666/666 backend · 319/319 front · 0 violaciones · CA-1…CA-9 `cumple` | ✅ visto bueno 2026-08-28 | | `GATE-O1.md` |
 | O2 | L02 | Enganches DISP (POST/PUT/deshacer) + test HTTP sobre TSR + guard final | ⬜ | — | — |
 | O2 | L05 | Docs: BIT-MODBD 2.6, BIT-RF 2.2 (RF-077), REQ-02, REQ-06, architecture, glosario | ⬜ | — | — |
 | O2 | L06 | Front + guard: tooltip honesto en copia anulada, helpers en `src/utils/reflejo.js`, stripper (GATE-O1 D7) | ⬜ | — | — |
-| O2 | L07 | Módulo: reloj único, normalizador de id, rescate de huérfanos sin cota inferior (GATE-O1 D6/D7 — D6 con OK del usuario) | ⬜ | — | — |
+| O2 | L07 | Módulo: reloj único, normalizador de id, rescate de huérfanos sin cota inferior (GATE-O1 D6/D7 — D6 aprobada por el usuario) | ⬜ | — | — |
 | — | GATE-O2 | | ⬜ | | `GATE-O2.md` |
 | Cierre | — | ADR D-063 + `CLAUDE.md` conv. 36 + `git rm` del scaffolding | ⬜ | | |
 
@@ -54,4 +54,5 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
 - 2026-08-28 · Fase 2 cerrada: scaffolding + reservas commiteados (`7b7154d`).
 - 2026-08-28 · O1 abierta; 3 chats (L01, L03, L04), los tres `done` entre 18:16 y 18:41.
 - 2026-08-28 · GATE-O1 (`1784703`): suite 666/666 + front 319/319 + residuos 0; D1 aplicado en `helpers.js`;
-  prompts L02/L05 enmendados; a la espera del visto bueno para abrir O2.
+  prompts L02/L05 enmendados; L06/L07 creados.
+- 2026-08-28 · Visto bueno de la O1 y OK a D6; O2 abierta con 4 chats (L02, L05, L06, L07).
