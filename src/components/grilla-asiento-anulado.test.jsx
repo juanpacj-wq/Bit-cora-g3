@@ -107,7 +107,10 @@ function renderGrilla({ registros, bloqueado = false }) {
   return { container, teardown };
 }
 
-const chipOrigen = (c) => c.querySelector('span[title*="Corrígelo allá"]');
+// El chip de origen se reconoce por el PREFIJO del tooltip, que es común a la copia viva y a la
+// anulada; el resto del texto es justo lo que L06 ramifica, así que no puede ser el selector.
+const chipOrigen = (c) => c.querySelector('span[title^="Asiento generado en"]');
+const chipsOrigenVivos = (c) => c.querySelectorAll('span[title*="Corrígelo allá"]');
 const chipAnulado = (c) => c.querySelector('span[title^="Deshecho por"]');
 const detalleTachado = (c) => c.querySelector('p.line-through');
 
@@ -146,6 +149,7 @@ describe('GrillaRegistros · copia de Disponibilidad ANULADA (D-063 CA-8)', () =
     expect(p.className).toContain('text-gray-400');
     // Sigue siendo un asiento reflejado: chip de origen y ojo conservados, sin lápiz ni basurero.
     expect(chipOrigen(container)).toBeTruthy();
+    expect(chipsOrigenVivos(container).length).toBe(0);   // pero ya no promete "se actualiza sola" (e)
     expect(container.querySelector('button[title="Ver detalle completo"]')).toBeTruthy();
     expect(container.querySelector('button[title="Editar"]')).toBeNull();
     expect(container.querySelector('button[title="Eliminar"]')).toBeNull();
@@ -171,7 +175,7 @@ describe('GrillaRegistros · copia de Disponibilidad ANULADA (D-063 CA-8)', () =
     expect(chipAnulado(container)).toBeNull();
     expect(detalleTachado(container)).toBeNull();
     // Ambas siguen siendo reflejadas (dos chips de origen).
-    expect(container.querySelectorAll('span[title*="Corrígelo allá"]').length).toBe(2);
+    expect(chipsOrigenVivos(container).length).toBe(2);
     teardown();
   });
 
@@ -181,6 +185,46 @@ describe('GrillaRegistros · copia de Disponibilidad ANULADA (D-063 CA-8)', () =
     expect(chipAnulado(container)).toBeTruthy();
     expect(detalleTachado(container)).toBeTruthy();
     expect(container.querySelector('button[title="Editar"]')).toBeNull();
+    teardown();
+  });
+});
+
+describe('GrillaRegistros · tooltip del chip de origen, honesto en los dos estados (D-063 CA-17)', () => {
+  it('(e) copia ANULADA: el chip de origen no promete actualización; dice que el evento se deshizo', () => {
+    const { container, teardown } = renderGrilla({ registros: [makeCopiaAnulada()] });
+    const title = chipOrigen(container).getAttribute('title');
+    // La promesa vieja es FALSA acá: el evento de origen ya no existe, no hay nada que corregir allá.
+    expect(title).not.toContain('se actualiza sola');
+    expect(title).not.toContain('Corrígelo');
+    expect(title).toContain('se deshizo');
+    expect(title).toBe(
+      'Asiento generado en Disponibilidad. Su evento se deshizo allá; esta copia se conserva como constancia del turno.',
+    );
+    // El rótulo visible del chip no cambia: sigue siendo el nombre del origen (catálogo, D-052).
+    expect(chipOrigen(container).textContent).toContain('Disponibilidad');
+    teardown();
+  });
+
+  it('(e\') copia VIVA: el tooltip de siempre, intacto', () => {
+    const { container, teardown } = renderGrilla({ registros: [makeCopiaDisp()] });
+    expect(chipOrigen(container).getAttribute('title')).toBe(
+      'Asiento generado en Disponibilidad. Corrígelo allá y esta copia se actualiza sola.',
+    );
+    teardown();
+  });
+
+  it('(e\'\') ramifica por `anulado`, no por el origen: una copia MAND anulada dice lo mismo', () => {
+    const { container, teardown } = renderGrilla({
+      registros: [makeRegistro({
+        registro_id: 95,
+        campos_extra: JSON.stringify({ origen_bitacora: 'MAND', origen_lote_id: 'x', anulado: ANULADO }),
+        origen_bitacora_nombre: 'Operación 24h',
+        puede_editar: false,
+      })],
+    });
+    expect(chipOrigen(container).getAttribute('title')).toBe(
+      'Asiento generado en Operación 24h. Su evento se deshizo allá; esta copia se conserva como constancia del turno.',
+    );
     teardown();
   });
 });
@@ -219,7 +263,7 @@ describe('GrillaRegistros · el marcador es origen_bitacora, no el puntero (D-06
         makeRegistro({ registro_id: 91, puede_editar: false, campos_extra: JSON.stringify({ origen_bitacora: 'MAND', origen_lote_id: 'x' }), origen_bitacora_nombre: 'Operación 24h' }),
       ],
     });
-    expect(container.querySelectorAll('span[title*="Corrígelo allá"]').length).toBe(1);
+    expect(chipsOrigenVivos(container).length).toBe(1);
     expect(container.querySelectorAll('button[title="Editar"]').length).toBe(1);
     teardown();
   });

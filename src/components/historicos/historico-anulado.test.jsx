@@ -4,11 +4,15 @@
 // histórico con `campos_extra.anulado` (string JSON, vía v_historico_busqueda) y se ve tachada,
 // atenuada y con el chip "Anulado" (mismo tooltip que la grilla: quién y cuándo, Bogotá). Las filas
 // sin `anulado` se ven exactamente como hoy y un `campos_extra` corrupto no explota. Además fija los
-// helpers puros compartidos (`estadoReflejo`, `tituloAnulado`, `fechaHoraBogota`).
+// helpers puros compartidos, que desde L06 viven en `src/utils/reflejo.js` (una sola definición para
+// la grilla de Sala y para esta tabla; antes había dos parsers y tres formateadores — GATE-O1 H11).
 import { describe, it, expect } from 'vitest';
 import { createElement as h, act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { HistoricoTable, estadoReflejo, tituloAnulado, fechaHoraBogota } from './HistoricoTable.jsx';
+import { HistoricoTable } from './HistoricoTable.jsx';
+import {
+  estadoReflejo, tituloAnulado, fechaHoraBogota, parseCamposExtra, tituloOrigen,
+} from '../../utils/reflejo.js';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -156,6 +160,39 @@ describe('helpers puros del reflejo (D-063)', () => {
     expect(fechaHoraBogota(null)).toBe('');
     expect(fechaHoraBogota('')).toBe('');
     expect(fechaHoraBogota('no-es-fecha')).toBe('');
+  });
+
+  // El parser único (L06): sustituye a los DOS de la O1, que diferían justo en este borde. La
+  // versión de la grilla devolvía el array/número tal cual, y `{...[1]}` habría inventado la clave
+  // `'0'` entre los campos extra editables de la fila.
+  it('parseCamposExtra: objeto o {} — array, número, string suelta y JSON roto valen {}', () => {
+    expect(parseCamposExtra('[1]')).toEqual({});
+    expect(parseCamposExtra('7')).toEqual({});
+    expect(parseCamposExtra('"x"')).toEqual({});
+    expect(parseCamposExtra([1])).toEqual({});
+    expect(parseCamposExtra('{no es json')).toEqual({});
+    expect(parseCamposExtra(null)).toEqual({});
+    expect(parseCamposExtra(undefined)).toEqual({});
+    expect(parseCamposExtra('')).toEqual({});
+    expect(parseCamposExtra('null')).toEqual({});
+    // Lo que sí es un objeto pasa intacto, venga como string o ya parseado.
+    expect(parseCamposExtra('{"origen_bitacora":"DISP","origen_disponibilidad_id":123}'))
+      .toEqual({ origen_bitacora: 'DISP', origen_disponibilidad_id: 123 });
+    const obj = { a: 1 };
+    expect(parseCamposExtra(obj)).toBe(obj);
+  });
+
+  // GATE-O1 H9: la promesa "se actualiza sola" solo vale mientras el evento de origen existe.
+  it('tituloOrigen: promete corrección solo si la copia sigue viva', () => {
+    expect(tituloOrigen('Disponibilidad', null))
+      .toBe('Asiento generado en Disponibilidad. Corrígelo allá y esta copia se actualiza sola.');
+    expect(tituloOrigen('Disponibilidad', ANULADO))
+      .toBe('Asiento generado en Disponibilidad. Su evento se deshizo allá; esta copia se conserva como constancia del turno.');
+    // El nombre del origen es el que manda el backend (D-052): el helper nunca lo hardcodea.
+    expect(tituloOrigen('Operación 24h', null)).toContain('Operación 24h');
+    expect(tituloOrigen('su bitácora de origen', ANULADO)).toContain('su bitácora de origen');
+    // Un `anulado` falsy siempre cae en la rama viva (es lo que devuelve `estadoReflejo`).
+    expect(tituloOrigen('X', undefined)).toContain('se actualiza sola');
   });
 
   it('tituloAnulado: nombre o "usuario <id>", cargo entre paréntesis solo si viene, fecha solo si es válida', () => {

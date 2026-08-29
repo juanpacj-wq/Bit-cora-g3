@@ -16,7 +16,10 @@ import {
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 // D-063: marcador universal de reflejo + chip "Anulado", compartidos con la tabla de Históricos.
-import { ChipAnulado, estadoReflejo } from "./components/historicos/HistoricoTable";
+import {
+  ChipAnulado, estadoReflejo, parseCamposExtra, tituloOrigen,
+  CLASES_DETALLE_ANULADO, CLASES_DETALLE_VIVO,
+} from "./utils/reflejo.js";
 import TurnoTransicionModal from "./components/TurnoTransicionModal";
 import CierrePendientesModal from "./components/CierrePendientesModal";
 import LogoutModal from "./components/LogoutModal";
@@ -158,12 +161,6 @@ const parseDefinicionCampos = (def) => {
 
 const getCamposExtraEditables = (def) =>
   parseDefinicionCampos(def).filter((c) => c && c.tipo && c.tipo !== "auto");
-
-const parseCamposExtra = (ce) => {
-  if (!ce) return {};
-  if (typeof ce === "object") return ce;
-  try { return JSON.parse(ce) || {}; } catch { return {}; }
-};
 
 const labelCampo = (c) => c.label || c.campo;
 
@@ -1688,7 +1685,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
               </div>
             </>
           ) : (
-            <p className={`text-sm leading-relaxed ${anulado ? "line-through text-gray-400" : "text-gray-700"} ${expandido ? "" : "line-clamp-2"}`}>
+            <p className={`text-sm leading-relaxed ${anulado ? CLASES_DETALLE_ANULADO : CLASES_DETALLE_VIVO} ${expandido ? "" : "line-clamp-2"}`}>
               {reg.detalle || <span className="text-gray-400 italic">Sin descripción</span>}
             </p>
           )}
@@ -1764,10 +1761,12 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
               {/* D-058 (RQ-02.5) / D-063: el asiento reflejado se identifica por su ORIGEN y no ofrece
                   edición — se corrige en su bitácora de origen (Operación 24h o Disponibilidad) y la
                   corrección reescribe esta copia. Mismo patrón de chip que "Bloqueado"; el ojo de
-                  lectura sigue disponible al lado. */}
+                  lectura sigue disponible al lado. El tooltip ramifica por `anulado` (L06): si el
+                  evento de origen ya se deshizo no hay nada que corregir allá, y prometer que "se
+                  actualiza sola" mandaba al operador a buscar un evento que ya no existe. */}
               {esReflejado && (
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 bg-gray-50"
-                  title={`Asiento generado en ${origenNombre}. Corrígelo allá y esta copia se actualiza sola.`}>
+                  title={tituloOrigen(origenNombre, anulado)}>
                   <Lock size={14} />
                   <span className="hidden sm:inline">{origenNombre}</span>
                 </span>
