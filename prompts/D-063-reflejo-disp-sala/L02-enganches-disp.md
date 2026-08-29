@@ -6,8 +6,43 @@
 > enmienda en cabecera si hizo falta.
 
 ## ENMIENDAS Y HECHOS QUE CAMBIAN — léelo antes que el resto
-- (Lo rellena el gate O1. Si esta sección sigue vacía cuando arrancas, lee `GATE-O1.md` §6 y
-  reporta en tu cierre que el prompt no fue enmendado.)
+- **ENMIENDA G1 (GATE-O1, 2026-08-28) — léela antes que el resto.** Los tres lotes de la O1 cerraron con 666/666 + 319/319 y cero violaciones; las decisiones D1–D5 están en `GATE-O1.md` §5. Lo que sigue es la copia literal de `GATE-O1.md` §6:
+- **`registros.js` cambió de líneas (L04):** la rama DISP del POST va en `:187-299`
+  (`insertNuevoEstado` `:278`, `commit` `:291`); la rama DISP del PUT en `:516-644`
+  (`actualizarVigente` `:614`, `commit` `:638`). El helper `respAsientoReflejado(db, res, reg, accion)`
+  (`:85-111`) y el espejo SQL (`:152`) son de L04 y **no se tocan**; los 403 de PUT/DELETE ya llaman
+  `respAsientoReflejado` (`:676`, `:855`).
+- **Firmas reales de L01** (`server/utils/reflejo-sala.js`): `crearReflejoDisponibilidad(tx, {
+  planta_id, disponibilidad_id, evento, detalle, fecha_inicio_estado, creado_por, snapshots: {
+  ingenieros_snapshot, jdts_snapshot, jefes_snapshot } })` — la clave es **`jefes_snapshot`**
+  (mapear desde `jefes_planta_snapshot`; `gerentes_produccion_snapshot` no viaja);
+  `actualizarReflejoDisponibilidad(tx, { …, modificado_por })`; `anularReflejoDisponibilidad(tx, {
+  planta_id, disponibilidad_id, anulado_por: { usuario_id, nombre_completo, cargo } })` — la clave es
+  **`cargo`** (pasar `sesion.cargo_nombre`). Las tres aceptan `disponibilidad_id` numérico o string
+  numérico; el predicado compara **texto con texto** (`PREDICADO_COPIAS_DISP`, `@id NVarChar`).
+  `resolverTurnoAbierto(tx, …)` funciona con la transacción. `TSR` refleja aunque esté `activa=0`
+  (el módulo no pasa por `plantaCheck`) — pero el POST/PUT DISP siguen exigiendo `activa=1`, así
+  que el toggle de PREGUNTAS #4 sigue siendo necesario para el test HTTP.
+- **`campos_extra` de la copia DISP** es exactamente `{"origen_bitacora":"DISP","origen_disponibilidad_id":123}`
+  (número) y anulada suma `"anulado":{"por":<int>,"nombre":<string|null>,"cargo":<string|null>,"en":"<ISO UTC>"}`
+  como objeto. `JSON_MODIFY` **reemplaza** una clave existente sin fallar: la idempotencia de anular
+  vive SOLO en `AND JSON_VALUE(campos_extra,'$.anulado.en') IS NULL`.
+- **`permissions.js`** exporta además `origenDeAsientoReflejado(registro) → 'MAND'|'DISP'|null`.
+- **El 403 `asiento_reflejado`** ya no dice "Operación 24h": trae `origen_bitacora` +
+  `origen_bitacora_nombre` (nombre del catálogo por `codigo`) y el mensaje nombra ese origen. Mensajes:
+  editar → "Este asiento se generó en X. Corrígelo allá y se actualiza acá solo."; eliminar →
+  "Este asiento se generó en X. Elimínalo o deshazlo allá y esta copia lo refleja."
+- **Front:** los helpers `estadoReflejo`, `tituloAnulado`, `fechaHoraBogota`, `ChipAnulado` y la
+  prop `anulado` de `DetalleCell` viven en `src/components/historicos/HistoricoTable.jsx`
+  (exportados); la grilla los importa. El chip "Anulado" se muestra en todo modo de lectura,
+  incluida la grilla bloqueada. Históricos no muestra el nombre del origen.
+- **Guard `guard_marcador_reflejo`** audita `registros.js`: las ramas DISP que L02 escriba no pueden
+  usar `origen_lote_id` como marcador (regla A) — usar las funciones de L01, no SQL propio.
+- **`cleanupTestRegistros`** (gate, D1) ahora borra el CIET del sweeper MAND en `TEST_PLANTA`:
+  L02 no lo duplica en su limpieza de TSR.
+- **Baseline de suite:** 666/666 backend (con los dos tests nuevos ya enganchados) · 319/319 front.
+  `tests/disponibilidad_reflejo_http.test.js` (L02) va en `package.json` después de
+  `tests/disponibilidad_anios.test.js` — lo engancha el gate O2.
 
 ## 0. Puerta de arranque (obligatorio, primero)
 ```bash
@@ -126,7 +161,29 @@ compara bien con la forma que L01 eligió — usa la función de L01, no tu prop
      copias están en `registro_historico` con `campos_extra` intacto; deshacer después →
      `copias_anuladas: 0` y el histórico sin `anulado` (RF-032). POST DISP sobre `TEST_PLANTA`
      (usa `setupSessions({ planta: TEST_PLANTA })` o SQL) → cero copias (RN-02.e).
-4. Escribe los tests **antes o junto** con el código.
+4. **Tareas añadidas por el gate O1 (`GATE-O1.md` §7 — H7, H8, H9, H15, H16):**
+   - **H7 (CA-10):** el test afirma que las copias traen los snapshots REALES del origen —
+     `jefes_snapshot` de la copia = `jefes_planta_snapshot` del `disponibilidad_estado`, y
+     `jdts_snapshot`/`ingenieros_snapshot` iguales — con contenido no vacío (la sesión JdT de TSR
+     tiene que aparecer en `jdts_snapshot`; si el snapshot de TSR sale `[]` por la fixture, siembra
+     lo necesario o afirma la igualdad byte a byte y deja constancia). Un `'[]'` en la copia con
+     origen no vacío es el bug H7.
+   - **H8 (CA-12):** el test afirma `anulado.cargo` = nombre real del cargo de la sesión (léelo de
+     `lov_bit.cargo` por la sesión, no lo hardcodees) y `anulado.nombre` = nombre del usuario de la
+     fixture. `null` en cualquiera de los dos es el bug H8.
+   - **H9 (403 honesto):** en `respAsientoReflejado` (ya en `registros.js`, tu territorio en O2),
+     si el registro trae `campos_extra.anulado`, el `consejo` de editar/eliminar pasa a "Este asiento
+     quedó anulado al deshacer el evento en X y se conserva como constancia del turno; no se edita ni
+     se elimina." (tuteo). Caso en tu test: PUT y DELETE sobre una copia anulada → 403
+     `asiento_reflejado` con ese mensaje.
+   - **H15:** `Object.freeze(ACCION_REFLEJO)` y, en el helper, lanzar un `Error` claro
+     ("respAsientoReflejado: accion desconocida (…)") si `ACCION_REFLEJO[accion]` no existe — una
+     línea, sin test HTTP.
+   - **H16 (opcional, si te cabe):** añade `LEFT JOIN lov_bit.bitacora borigen ON borigen.codigo =
+     JSON_VALUE(ra.campos_extra, '$.origen_bitacora')` a los dos `check` del PUT/DELETE y haz el
+     helper síncrono (sin SELECT en la vía del 403). Si no cabe, dilo en `Para el gate` (queda como
+     deuda, no como parcial).
+5. Escribe los tests **antes o junto** con el código.
 
 ## 5. Criterios de aceptación y sus verificadores
 | CA | Criterio | Verificador (tuyo) |

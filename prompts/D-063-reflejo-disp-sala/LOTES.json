@@ -3,17 +3,23 @@
   "rama": "feat/reflejo-disp-sala-2026-08",
   "claim_ttl_min": 240,
   "olas": {
-    "O1": { "estado": "abierta", "gate": null },
-    "O2": { "estado": "pendiente", "gate": null }
+    "O1": {
+      "estado": "cerrada",
+      "gate": "GATE-O1.md"
+    },
+    "O2": {
+      "estado": "pendiente",
+      "gate": null
+    }
   },
   "lotes": {
     "L01": {
       "ola": "O1",
       "titulo": "Módulo de reflejo DISP en reflejo-sala.js (crear / actualizar / anular)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L01-1804",
+      "claim_ts": "2026-08-28T18:04:24.640Z",
+      "done_ts": "2026-08-28T18:28:06.996Z",
       "motivo": null,
       "depende_de": [],
       "puro": false,
@@ -23,16 +29,23 @@
         "server/tests/reflejo_disponibilidad.test.js",
         "prompts/D-063-reflejo-disp-sala/cierres/L01.md"
       ],
-      "tests": ["tests/reflejo_disponibilidad.test.js"],
-      "criterios": ["CA-1", "CA-2", "CA-3", "CA-4"]
+      "tests": [
+        "tests/reflejo_disponibilidad.test.js"
+      ],
+      "criterios": [
+        "CA-1",
+        "CA-2",
+        "CA-3",
+        "CA-4"
+      ]
     },
     "L03": {
       "ola": "O1",
       "titulo": "Front: marcador origen_bitacora + estado Anulado en grilla de Sala e Históricos",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L03-1804",
+      "claim_ts": "2026-08-28T18:04:29.193Z",
+      "done_ts": "2026-08-28T18:16:23.717Z",
       "motivo": null,
       "depende_de": [],
       "puro": true,
@@ -50,15 +63,18 @@
         "src/components/grilla-solo-autor-gate.test.jsx",
         "src/components/historicos/historico-anulado.test.jsx"
       ],
-      "criterios": ["CA-8", "CA-9"]
+      "criterios": [
+        "CA-8",
+        "CA-9"
+      ]
     },
     "L04": {
       "ola": "O1",
       "titulo": "Marcador universal origen_bitacora: helper + espejo SQL + 403 + exclusión F03 + guard",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L04-1804",
+      "claim_ts": "2026-08-28T18:04:37.537Z",
+      "done_ts": "2026-08-28T18:41:20.338Z",
       "motivo": null,
       "depende_de": [],
       "puro": false,
@@ -77,7 +93,11 @@
         "tests/f03_datos.test.js",
         "tests/guard_marcador_reflejo.test.js"
       ],
-      "criterios": ["CA-5", "CA-6", "CA-7"]
+      "criterios": [
+        "CA-5",
+        "CA-6",
+        "CA-7"
+      ]
     },
     "L02": {
       "ola": "O2",
@@ -87,7 +107,10 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L01", "L04"],
+      "depende_de": [
+        "L01",
+        "L04"
+      ],
       "puro": false,
       "puerto": 3102,
       "territorio": [
@@ -101,7 +124,13 @@
         "tests/disponibilidad_reflejo_http.test.js",
         "tests/zzz_session_leak_guard.test.js"
       ],
-      "criterios": ["CA-10", "CA-11", "CA-12", "CA-13", "CA-14"]
+      "criterios": [
+        "CA-10",
+        "CA-11",
+        "CA-12",
+        "CA-13",
+        "CA-14"
+      ]
     },
     "L05": {
       "ola": "O2",
@@ -111,7 +140,11 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L01", "L03", "L04"],
+      "depende_de": [
+        "L01",
+        "L03",
+        "L04"
+      ],
       "puro": true,
       "puerto": 3105,
       "territorio": [
@@ -120,11 +153,82 @@
         "docs/architecture.md",
         "docs/requerimientos/REQ-02-reflejo-bitacoras-sala.md",
         "docs/requerimientos/REQ-06-excel-eventos-operacion.md",
+        "docs/domain-glossary.md",
         "prompts/D-063-reflejo-disp-sala/cierres/L05.md"
       ],
       "tests": [],
-      "criterios": ["CA-15"]
+      "criterios": [
+        "CA-15"
+      ]
+    },
+    "L06": {
+      "ola": "O2",
+      "titulo": "Front + guard: tooltip honesto en copia anulada, helpers en src/utils/reflejo.js, stripper del guard (GATE-O1 D7)",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L03",
+        "L04"
+      ],
+      "puro": true,
+      "puerto": 3106,
+      "territorio": [
+        "src/utils/reflejo.js",
+        "src/BitacorasGecelca3.jsx",
+        "src/components/historicos/HistoricoTable.jsx",
+        "src/components/grilla-asiento-anulado.test.jsx",
+        "src/components/historicos/historico-anulado.test.jsx",
+        "server/tests/guard_marcador_reflejo.test.js",
+        "prompts/D-063-reflejo-disp-sala/cierres/L06.md"
+      ],
+      "tests": [
+        "src/components/grilla-asiento-anulado.test.jsx",
+        "src/components/historicos/historico-anulado.test.jsx",
+        "tests/guard_marcador_reflejo.test.js"
+      ],
+      "criterios": [
+        "CA-17",
+        "CA-18",
+        "CA-19"
+      ]
+    },
+    "L07": {
+      "ola": "O2",
+      "titulo": "Módulo: reloj único en anular, normalizador de id, rescate de huérfanos sin cota inferior (GATE-O1 D6/D7)",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [
+        "L01"
+      ],
+      "puro": false,
+      "puerto": 3107,
+      "territorio": [
+        "server/utils/reflejo-sala.js",
+        "server/tests/reflejo_disponibilidad.test.js",
+        "server/utils/turno-entidad.js",
+        "server/tests/turno-entidad.test.js",
+        "prompts/D-063-reflejo-disp-sala/cierres/L07.md"
+      ],
+      "tests": [
+        "tests/reflejo_disponibilidad.test.js",
+        "tests/turno-entidad.test.js"
+      ],
+      "criterios": [
+        "CA-20",
+        "CA-21",
+        "CA-22"
+      ]
     }
   },
-  "test_lock": { "sesion": null, "ts": null, "ttl_min": 45 }
+  "test_lock": {
+    "sesion": null,
+    "ts": null,
+    "ttl_min": 45
+  }
 }

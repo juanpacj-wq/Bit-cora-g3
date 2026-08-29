@@ -6,8 +6,43 @@
 > enmienda en cabecera si hizo falta.
 
 ## ENMIENDAS Y HECHOS QUE CAMBIAN — léelo antes que el resto
-- (Lo rellena el gate O1. Si sigue vacío cuando arrancas, lee `GATE-O1.md` §6 y repórtalo en tu
-  cierre.)
+- **ENMIENDA G1 (GATE-O1, 2026-08-28) — léela antes que el resto.** Los tres lotes de la O1 cerraron con 666/666 + 319/319 y cero violaciones; las decisiones D1–D5 están en `GATE-O1.md` §5. Lo que sigue es la copia literal de `GATE-O1.md` §6:
+- **`registros.js` cambió de líneas (L04):** la rama DISP del POST va en `:187-299`
+  (`insertNuevoEstado` `:278`, `commit` `:291`); la rama DISP del PUT en `:516-644`
+  (`actualizarVigente` `:614`, `commit` `:638`). El helper `respAsientoReflejado(db, res, reg, accion)`
+  (`:85-111`) y el espejo SQL (`:152`) son de L04 y **no se tocan**; los 403 de PUT/DELETE ya llaman
+  `respAsientoReflejado` (`:676`, `:855`).
+- **Firmas reales de L01** (`server/utils/reflejo-sala.js`): `crearReflejoDisponibilidad(tx, {
+  planta_id, disponibilidad_id, evento, detalle, fecha_inicio_estado, creado_por, snapshots: {
+  ingenieros_snapshot, jdts_snapshot, jefes_snapshot } })` — la clave es **`jefes_snapshot`**
+  (mapear desde `jefes_planta_snapshot`; `gerentes_produccion_snapshot` no viaja);
+  `actualizarReflejoDisponibilidad(tx, { …, modificado_por })`; `anularReflejoDisponibilidad(tx, {
+  planta_id, disponibilidad_id, anulado_por: { usuario_id, nombre_completo, cargo } })` — la clave es
+  **`cargo`** (pasar `sesion.cargo_nombre`). Las tres aceptan `disponibilidad_id` numérico o string
+  numérico; el predicado compara **texto con texto** (`PREDICADO_COPIAS_DISP`, `@id NVarChar`).
+  `resolverTurnoAbierto(tx, …)` funciona con la transacción. `TSR` refleja aunque esté `activa=0`
+  (el módulo no pasa por `plantaCheck`) — pero el POST/PUT DISP siguen exigiendo `activa=1`, así
+  que el toggle de PREGUNTAS #4 sigue siendo necesario para el test HTTP.
+- **`campos_extra` de la copia DISP** es exactamente `{"origen_bitacora":"DISP","origen_disponibilidad_id":123}`
+  (número) y anulada suma `"anulado":{"por":<int>,"nombre":<string|null>,"cargo":<string|null>,"en":"<ISO UTC>"}`
+  como objeto. `JSON_MODIFY` **reemplaza** una clave existente sin fallar: la idempotencia de anular
+  vive SOLO en `AND JSON_VALUE(campos_extra,'$.anulado.en') IS NULL`.
+- **`permissions.js`** exporta además `origenDeAsientoReflejado(registro) → 'MAND'|'DISP'|null`.
+- **El 403 `asiento_reflejado`** ya no dice "Operación 24h": trae `origen_bitacora` +
+  `origen_bitacora_nombre` (nombre del catálogo por `codigo`) y el mensaje nombra ese origen. Mensajes:
+  editar → "Este asiento se generó en X. Corrígelo allá y se actualiza acá solo."; eliminar →
+  "Este asiento se generó en X. Elimínalo o deshazlo allá y esta copia lo refleja."
+- **Front:** los helpers `estadoReflejo`, `tituloAnulado`, `fechaHoraBogota`, `ChipAnulado` y la
+  prop `anulado` de `DetalleCell` viven en `src/components/historicos/HistoricoTable.jsx`
+  (exportados); la grilla los importa. El chip "Anulado" se muestra en todo modo de lectura,
+  incluida la grilla bloqueada. Históricos no muestra el nombre del origen.
+- **Guard `guard_marcador_reflejo`** audita `registros.js`: las ramas DISP que L02 escriba no pueden
+  usar `origen_lote_id` como marcador (regla A) — usar las funciones de L01, no SQL propio.
+- **`cleanupTestRegistros`** (gate, D1) ahora borra el CIET del sweeper MAND en `TEST_PLANTA`:
+  L02 no lo duplica en su limpieza de TSR.
+- **Baseline de suite:** 666/666 backend (con los dos tests nuevos ya enganchados) · 319/319 front.
+  `tests/disponibilidad_reflejo_http.test.js` (L02) va en `package.json` después de
+  `tests/disponibilidad_anios.test.js` — lo engancha el gate O2.
 
 ## 0. Puerta de arranque (obligatorio, primero)
 ```bash
@@ -38,11 +73,11 @@ Falla si la O2 no está abierta o si L01/L03/L04 no están `done`. **Detente y r
 - `docs/architecture.md`
 - `docs/requerimientos/REQ-02-reflejo-bitacoras-sala.md`
 - `docs/requerimientos/REQ-06-excel-eventos-operacion.md`
+- `docs/domain-glossary.md` (añadido por el gate O1: H12)
 - `prompts/D-063-reflejo-disp-sala/cierres/L05.md`
 
 **NO tocas** nada más: `docs/decisions.md` y `CLAUDE.md` (cierre), `server/**` y `src/**` (L02
-vivo en esta ola; L01/L03/L04 cerrados), `docs/domain-glossary.md` (si crees que hace falta una
-entrada "asiento anulado", propónla en `Para el gate`), `ESTADO.md`, `PLAN-OLAS.md`.
+vivo en esta ola; L01/L03/L04 cerrados), `ESTADO.md`, `PLAN-OLAS.md`, y los archivos de L02/L06/L07 (vivos en esta ola).
 
 ## 3. Contrato
 > Consumes C1–C7 de `_CONTEXTO-BASE.md §6` para documentarlos **tal como quedaron** (el gate O1
@@ -91,12 +126,17 @@ endpoints donde `POST /api/disponibilidad/deshacer` deba ganar `copias_anuladas`
    tachado.
 5. **REQ-06 §8.3**: agrega al final "Desde D-063 la copia en Sala SÍ existe y queda anulada; el
    libro sigue sin mostrarla (lee la tabla base y excluye toda copia por `origen_bitacora`)".
-6. Verifica que los enlaces relativos que agregues existen (`ls` de cada ruta).
+6. **Glosario (H12 del `/code-review`, `GATE-O1.md` §7):** `docs/domain-glossary.md:134` define el
+   asiento reflejado como "se identifica por `campos_extra.origen_lote_id`" y solo "de un evento de
+   Operación 24h". Reescríbelo: marcador universal `origen_bitacora` (MAND o DISP), punteros
+   `origen_lote_id` / `origen_disponibilidad_id`, y el estado **anulado** (`campos_extra.anulado`,
+   visible, tachado, con quién y cuándo). Si hace falta, entrada nueva "Copia anulada".
+7. Verifica que los enlaces relativos que agregues existen (`ls` de cada ruta).
 
 ## 5. Criterios de aceptación y sus verificadores
 | CA | Criterio | Verificador (tuyo) |
 |---|---|---|
-| CA-15 | BIT-MODBD 2.6 (§7.11 ampliada + changelog), BIT-RF 2.2 (RF-077 + nota en RF-074 + changelog), architecture.md, REQ-02 (Estado, §3.4, §5.1, §8.3), REQ-06 §8.3 — todo consistente con `GATE-O1.md` §6 y los cierres. | `git diff --stat` acotado a tu territorio; `grep -n "RF-077" BIT-RF-2026-001.md` (≥ 3: sección, RF-074, changelog); `grep -n "2.6" BIT-MODBD-2026-001.md` en el changelog; ningún "pendiente"/"queda fuera" residual sobre DISP: `grep -n "ADR propio pendiente\|queda fuera" BIT-*.md docs/requerimientos/REQ-02*.md` vacío |
+| CA-15 | BIT-MODBD 2.6 (§7.11 ampliada + changelog), BIT-RF 2.2 (RF-077 + nota en RF-074 + changelog), architecture.md, REQ-02 (Estado, §3.4, §5.1, §8.3), REQ-06 §8.3, **glosario** (H12) — todo consistente con `GATE-O1.md` §6 y los cierres. | `git diff --stat` acotado a tu territorio; `grep -n "RF-077" BIT-RF-2026-001.md` (≥ 3: sección, RF-074, changelog); `grep -n "2.6" BIT-MODBD-2026-001.md` en el changelog; ningún "pendiente"/"queda fuera" residual sobre DISP: `grep -n "ADR propio pendiente\|queda fuera" BIT-*.md docs/requerimientos/REQ-02*.md` vacío |
 
 Revisión del gate O2: el integrador lee las secciones contra el código real.
 
@@ -118,7 +158,7 @@ grep -n "ADR propio pendiente\|queda fuera\|quedan fuera" BIT-MODBD-2026-001.md 
 
    <qué se documentó y contra qué evidencia (GATE-O1, cierres)>
    EOF
-   )" -- BIT-MODBD-2026-001.md BIT-RF-2026-001.md docs/architecture.md docs/requerimientos/REQ-02-reflejo-bitacoras-sala.md docs/requerimientos/REQ-06-excel-eventos-operacion.md prompts/D-063-reflejo-disp-sala/cierres/L05.md
+   )" -- BIT-MODBD-2026-001.md BIT-RF-2026-001.md docs/architecture.md docs/requerimientos/REQ-02-reflejo-bitacoras-sala.md docs/requerimientos/REQ-06-excel-eventos-operacion.md docs/domain-glossary.md prompts/D-063-reflejo-disp-sala/cierres/L05.md
    ```
 3. `node "../metodología de implementación/herramientas/lotes.mjs" --impl D-063 done L05 --sesion $LOTE_SESION`
 4. Mensaje final, **con esta forma exacta**:

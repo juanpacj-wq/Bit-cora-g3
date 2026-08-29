@@ -18,7 +18,7 @@ ya fijados), L05 (documenta los contratos de §6; el gate O2 corrige el drift si
 | Ola | Lotes | Por qué pueden ir juntos | Compartidos y su escritor |
 |---|---|---|---|
 | O1 | L01, L03, L04 | Tres raíces con territorios disjuntos: `utils/reflejo-sala.js` + su test (L01) / `src/**` + 3 vitest (L03) / `permissions.js` + `registros.js` (solo lecturas y 403) + `f03-datos.js` + 3 tests (L04). L04 es el **calibrador** del marcador universal: L01 escribe `origen_bitacora` en la copia y L03 lo lee, por contrato C2/C3, sin esperar a L04. | `registros.js` → L04 · `permissions.js` → L04 · `reflejo-sala.js` → L01 · `BitacorasGecelca3.jsx` → L03 |
-| O2 | L02, L05 | L02 consume C1 (L01) y C3/C4 (L04) ya verificados en GATE-O1, y engancha en `registros.js` (ahora libre) + `disponibilidad.js`. L05 documenta en `BIT-*`/`docs/` y no comparte ni un archivo con L02. | `registros.js`, `disponibilidad.js`, `zzz_session_leak_guard.test.js` → L02 · `BIT-*`, `docs/*` → L05 |
+| O2 | L02, L05, **L06**, **L07** | L02 consume C1 (L01) y C3/C4 (L04) ya verificados en GATE-O1, y engancha en `registros.js` (ahora libre) + `disponibilidad.js`. L05 documenta en `BIT-*`/`docs/` y no comparte ni un archivo con L02. **L06 y L07 los abrió el gate O1 (`GATE-O1.md` §5 D7)** con los hallazgos del `/code-review`: L06 vive en `src/**` + el guard estático (sin contratos nuevos: C2/C3/C7 intactos); L07 en `utils/reflejo-sala.js` + `utils/turno-entidad.js` + sus tests (C1 intacto: solo normalización interna, reloj único y el rescate de D6). Cuatro territorios disjuntos. | `registros.js`, `disponibilidad.js`, `zzz_session_leak_guard.test.js` → L02 · `BIT-*`, `docs/*` → L05 · `src/**`, `guard_marcador_reflejo.test.js` → L06 · `reflejo-sala.js`, `turno-entidad.js` → L07 |
 | Cierre | `/cerrar-implementacion D-063` | ADR D-063 (desde los aportes), `CLAUDE.md` conv. 36, REQ-02 §8 revisado, `git rm prompts/D-063-*`, suite completa + build, checklist de smoke UI. Runbook de despliegue: prod recibe F32/F33/F34 con este mismo deploy. | `decisions.md`, `CLAUDE.md` → integrador |
 
 ## Lotes
@@ -62,6 +62,22 @@ ya fijados), L05 (documenta los contratos de §6; el gate O2 corrige el drift si
 - **Criterios:** CA-15
 - **Tests que corre:** ninguno (`git diff --stat` acotado a su territorio; enlaces relativos válidos)
 - **Riesgo / nota:** el ADR D-063 y `CLAUDE.md` NO son suyos (cierre). Documenta la realidad de `GATE-O1.md` §6 (hechos que cambian) y los cierres de L01/L03/L04, no el plan. Si L02 pivota en O2, el gate O2 enmienda estos docs.
+
+### L06 — Front + guard: tooltip honesto en la copia anulada, helpers en `src/utils/reflejo.js`, stripper del guard (añadido en GATE-O1)
+- **Ola:** O2 · **Depende de:** L03, L04 · **Puro:** sí (vitest + build + guard estático) · **Puerto de test:** 3106 (reservado; no levanta backend)
+- **Territorio:** `src/utils/reflejo.js` (nuevo), `src/BitacorasGecelca3.jsx`, `src/components/historicos/HistoricoTable.jsx`, `src/components/grilla-asiento-anulado.test.jsx`, `src/components/historicos/historico-anulado.test.jsx`, `server/tests/guard_marcador_reflejo.test.js`
+- **Contratos:** ninguno nuevo (C2/C3/C7 intactos; los helpers cambian de módulo, no de firma)
+- **Criterios:** CA-17, CA-18, CA-19
+- **Tests que corre:** `npx vitest run src`, `npm run build`, `node --test tests/guard_marcador_reflejo.test.js`
+- **Riesgo / nota:** creado por el gate O1 con H9 (tooltip), H11/H4 (helpers duplicados y en la tabla hoja), H13 (stripper `--` en JS). Al mover los helpers a `src/utils/`, la regla D del guard debe aceptar imports relativos de cualquier profundidad **en el mismo commit** (por eso el guard entra a su territorio). Disjunto de L02/L05/L07.
+
+### L07 — Módulo: reloj único en anular, normalizador de id, y rescate de huérfanos sin cota inferior (añadido en GATE-O1)
+- **Ola:** O2 · **Depende de:** L01 · **Puro:** no · **Puerto de test:** 3107 (`SKIP_INITDB=1` para la parte HTTP de `turno-entidad.test.js` si la necesita; el test de módulo corre sin server)
+- **Territorio:** `server/utils/reflejo-sala.js`, `server/tests/reflejo_disponibilidad.test.js`, `server/utils/turno-entidad.js`, `server/tests/turno-entidad.test.js`
+- **Contratos:** C1 intacto (firmas iguales; `disponibilidad_id` sigue aceptando número o string numérico, ahora solo `/^\d+$/`)
+- **Criterios:** CA-20, CA-21, CA-22 (CA-22 **solo con el OK del usuario a D6**)
+- **Tests que corre:** `tests/reflejo_disponibilidad.test.js`, `tests/turno-entidad.test.js`, y `tests/sala_de_mando_batch.test.js` (regresión, sin editarlo)
+- **Riesgo / nota:** creado por el gate O1 con H10, H14 y H6 (D6). D6 toca `cerrarTurno` en tres sitios (`turno-entidad.js:357/385/394`): quitar `ra.fecha_evento >= @ini` del rescate y dejar `<= @ahora`. Corre en paralelo con L02, que **consume** `reflejo-sala.js` por contrato C1 sin editarlo: cambiar una firma es un bloqueo.
 
 ## Criterios de tamaño y reparto aplicados
 - Partición por dependencias, no por volumen: L01/L03/L04 son las tres raíces; L02 consume sus
