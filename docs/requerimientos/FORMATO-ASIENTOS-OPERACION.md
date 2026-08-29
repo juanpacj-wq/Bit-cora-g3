@@ -475,8 +475,9 @@ Ese escritor **emite pero no lee**, y un `.xlsx` de Excel viene en **deflate**. 
 - **El mapa de índices de estilo** del F03 vive en la cabecera del script y en la constante `S` de
   `server/utils/f03-libro.js` — el formato 2 necesita el suyo, medido igual, no adivinado.
 
-**Lo que sigue abierto del lado del texto:** el reflejo de **Disponibilidad** a las bitácoras de Sala
-(con su copia anulada, RQ-02.12) tiene ADR propio pendiente; sus 4 tipos espejo ya están sembrados.
+**Cerrado (D-063, 2026-08-29):** el reflejo de **Disponibilidad** a las bitácoras de Sala —con su
+copia anulada, RQ-02.12— quedó implementado sobre estas mismas plantillas y el mismo módulo, y ya no
+hay nada abierto del lado del texto. Ver **D-063** y RF-077.
 
 ---
 

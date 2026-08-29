@@ -238,8 +238,13 @@ export async function crearReflejoLote(tx, {
   // unidad —no de la hora del asiento— porque si apuntara a un turno ya CERRADO nadie archivaría la
   // copia jamás y quedaría viva en `registro_activo` para siempre, apareciendo en la bitácora de
   // Sala meses después; el rescate de huérfanos de D-045 tampoco la alcanzaría, porque solo levanta
-  // los de `turno_id IS NULL` en-ventana. Por eso NULL cuando no hay turno abierto (la ventana de
-  // transición de D-046): ahí sí lo levanta el rescate.
+  // los de `turno_id IS NULL`. Por eso NULL cuando no hay turno abierto (la gavela de D-046): ahí sí
+  // lo levanta el rescate.
+  //
+  // D-063 L07 (D6): ese rescate ya NO exige `fecha_evento >= inicio_nominal`. Antes este comentario
+  // decía "en-ventana", y con esa cota una copia retro-fechada nacida sin turno abierto no la
+  // alcanzaba NINGÚN cierre. Hoy la levanta el primer cierre que venga (ver `cerrarTurno` en
+  // `turno-entidad.js`); la cota SUPERIOR sí se mantiene.
   //
   // Esto NO contradice a D-055 (b), que resuelve el `turno_id` de una celda MAND por su PERIODO:
   // allá la celda pertenece a UN periodo; acá el asiento es del LOTE ENTERO, cuyos periodos pueden
@@ -617,9 +622,13 @@ export async function anularReflejoDisponibilidad(tx, { planta_id, disponibilida
   // D-063 L07 (H10): antes `en` salía de `new Date()` y `modificado_en` de `SYSUTCDATETIME()` en ese
   // mismo UPDATE, y el comentario afirmaba que eran "la misma fuente". No lo eran: son dos relojes
   // distintos (el de la app y el del motor), así que con deriva entre ellos la misma fila mostraba
-  // una hora en el tooltip de la copia anulada y otra en la auditoría. Manda el reloj de la app
-  // porque es el que se serializa DENTRO del JSON, y `JSON_MODIFY` no puede leer el
-  // `SYSUTCDATETIME()` de su propio UPDATE para meterlo ahí.
+  // una hora en el tooltip de la copia anulada y otra en la auditoría (deriva medida: 89 ms). Manda
+  // el reloj de la app porque es el que se serializa DENTRO del JSON.
+  //
+  // Precisión (D-063, cierre): la alternativa de usar el reloj del MOTOR sí es posible —un
+  // `DECLARE @now = SYSUTCDATETIME()` al inicio del batch y `@now` en los dos sitios funciona—; lo
+  // que la descarta es que obligaría a formatear el ISO en T-SQL para poder meterlo dentro de la
+  // cadena de `anulado`. No es que `JSON_MODIFY` no pueda leerlo.
   const en = new Date();
   const anulado = JSON.stringify({
     por: anulado_por.usuario_id,
