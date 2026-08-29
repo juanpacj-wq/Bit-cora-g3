@@ -220,4 +220,4 @@ Violaciones: **ninguna**.
 - **Visto bueno del usuario:** pendiente (incluye el OK explícito a D6).
 
 ## 9. Commit del gate
-(se completa con el SHA al commitear)
+`1784703` `gate(D-063): O1 cerrada — 3 lotes, 666/666 backend + 319/319 front, 0 violaciones` (+ este commit de docs con el SHA).

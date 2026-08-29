@@ -53,5 +53,5 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
 - 2026-08-28 · Fase 1 cerrada: 2 rondas + reparto (`PREGUNTAS-D-063.md`).
 - 2026-08-28 · Fase 2 cerrada: scaffolding + reservas commiteados (`7b7154d`).
 - 2026-08-28 · O1 abierta; 3 chats (L01, L03, L04), los tres `done` entre 18:16 y 18:41.
-- 2026-08-28 · GATE-O1: suite 666/666 + front 319/319 + residuos 0; D1 aplicado en `helpers.js`;
+- 2026-08-28 · GATE-O1 (`1784703`): suite 666/666 + front 319/319 + residuos 0; D1 aplicado en `helpers.js`;
   prompts L02/L05 enmendados; a la espera del visto bueno para abrir O2.
