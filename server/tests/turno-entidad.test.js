@@ -275,9 +275,11 @@ describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
     assert.equal(await extenderTurno(pool, A.turno_unidad_id, { ahora: new Date('2026-04-11T11:00:00Z') }), null);
   });
 
-  // --- D-045 (huérfanos): cerrarTurno debe archivar también los BORRADORES sin turno_id (legacy
-  //     pre-write-gate) cuya fecha_evento cae en la ventana del turno, y NO los de otra ventana. ---
-  test('cerrarTurno archiva borradores HUÉRFANOS (turno_id NULL) en-ventana; deja fuera los de otra ventana', async () => {
+  // --- D-045 (huérfanos) + D-063 L07/D6: cerrarTurno archiva también los BORRADORES sin turno_id.
+  //     La cota INFERIOR se retiró (H6): un huérfano con fecha anterior a la ventana no lo alcanzaba
+  //     este cierre ni ningún otro —el turno de su fecha ya cerró— y quedaba vivo para siempre. La
+  //     cota SUPERIOR sigue: un borrador con fecha futura todavía tiene su turno por delante. ---
+  test('cerrarTurno archiva borradores HUÉRFANOS (turno_id NULL) en-ventana y ANTERIORES; deja fuera los de fecha futura', async () => {
     await limpiarTurnos();
     const A = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
     // Bitácora visible (no DISP/MAND/CIET) con al menos un tipo_evento.
@@ -304,8 +306,9 @@ describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
     }
 
     // Ventana T1 2026-04-10 = [11:00Z, 23:00Z). Cierre a 16:00Z.
-    const dentro = await insertHuerfano('2026-04-10T12:00:00Z'); // en-ventana → debe archivar
-    const fuera = await insertHuerfano('2026-04-10T10:00:00Z');  // antes de inicio_nominal → NO
+    const dentro = await insertHuerfano('2026-04-10T12:00:00Z');  // en-ventana → archiva
+    const anterior = await insertHuerfano('2026-04-10T10:00:00Z'); // antes de inicio_nominal → archiva (D6)
+    const futuro = await insertHuerfano('2026-04-10T18:00:00Z');   // posterior a @ahora → NO
 
     const res = await cerrarTurno(pool, A.turno_unidad_id, {
       motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID, ahora: new Date('2026-04-10T16:00:00Z'),
@@ -320,12 +323,76 @@ describe('turno-entidad · cabecera (BD, TEST_PLANTA)', () => {
     const raDentro = (await q(dentro).query(`SELECT 1 AS x FROM bitacora.registro_activo WHERE registro_id=@r`)).recordset;
     assert.equal(raDentro.length, 0, 'huérfano en-ventana ya no está en registro_activo');
 
-    // fuera → sigue como borrador, NO archivado.
-    const raFuera = (await q(fuera).query(`SELECT estado FROM bitacora.registro_activo WHERE registro_id=@r`)).recordset;
-    assert.equal(raFuera.length, 1);
-    assert.equal(raFuera[0].estado, 'borrador', 'huérfano fuera de ventana NO se archiva');
-    const histFuera = (await q(fuera).query(`SELECT 1 AS x FROM bitacora.registro_historico WHERE registro_id=@r`)).recordset;
-    assert.equal(histFuera.length, 0);
+    // anterior → D-063 L07 (D6): ANTES esta misma línea afirmaba lo contrario ('huérfano fuera de
+    // ventana NO se archiva'). Con la cota inferior puesta, este registro no lo rescataba este
+    // cierre ni ninguno posterior —cada cierre futuro lo deja más atrás—, así que se quedaba vivo
+    // en la grilla para siempre; y si era una copia reflejada, encima imborrable (403). Rescatarlo
+    // y atribuirlo al turno que lo encuentra (COALESCE) es lo que "rescate" significa.
+    const histAnterior = (await q(anterior).query(`SELECT turno_id FROM bitacora.registro_historico WHERE registro_id=@r`)).recordset;
+    assert.equal(histAnterior.length, 1, 'huérfano ANTERIOR a la ventana también se archiva (D6)');
+    assert.equal(histAnterior[0].turno_id, A.turno_unidad_id, 'atribuido al turno que lo rescata');
+    const raAnterior = (await q(anterior).query(`SELECT 1 AS x FROM bitacora.registro_activo WHERE registro_id=@r`)).recordset;
+    assert.equal(raAnterior.length, 0, 'ya no queda vivo en registro_activo');
+
+    // futuro → sigue como borrador. La cota SUPERIOR no se tocó: su turno aún no llega.
+    const raFuturo = (await q(futuro).query(`SELECT estado FROM bitacora.registro_activo WHERE registro_id=@r`)).recordset;
+    assert.equal(raFuturo.length, 1);
+    assert.equal(raFuturo[0].estado, 'borrador', 'huérfano con fecha FUTURA NO se archiva');
+    const histFuturo = (await q(futuro).query(`SELECT 1 AS x FROM bitacora.registro_historico WHERE registro_id=@r`)).recordset;
+    assert.equal(histFuturo.length, 0);
+  });
+
+  // --- D-063 L07 — CA-22: el escenario REAL de H6, con la bitácora de Sala y la fecha narrativa ---
+  //     Una copia reflejada nace con `fecha_evento` = la hora del evento (narrativa, puede ser de
+  //     hace días) y con `turno_id` = el turno ABIERTO de la unidad... o NULL si no hay ninguno
+  //     (RN-02.d: DISP está exenta de los gates de turno; también pasa en MAND desde D-058). Esa
+  //     combinación —NULL + fecha vieja— era la que ningún cierre alcanzaba.
+  test('CA-22 — una copia de Sala con turno_id NULL y fecha de hace 3 días se archiva en el siguiente cierre de su planta', async () => {
+    await limpiarTurnos();
+    const sala = (await pool.request().query(`
+      SELECT TOP 1 b.bitacora_id AS bid,
+             (SELECT TOP 1 tipo_evento_id FROM lov_bit.tipo_evento te WHERE te.bitacora_id = b.bitacora_id) AS te
+      FROM lov_bit.bitacora b
+      WHERE b.codigo = 'SALAJDT' AND b.oculta = 0
+        AND EXISTS (SELECT 1 FROM lov_bit.tipo_evento te WHERE te.bitacora_id = b.bitacora_id)`)).recordset[0];
+    assert.ok(sala?.bid, 'la fixture necesita la bitácora SALAJDT con al menos un tipo de evento');
+
+    // Turno de HOY-en-el-test: la ventana T1 del 2026-04-10 empieza a las 11:00Z.
+    const A = await abrirTurnoSiFalta(pool, P, 1, '2026-04-10', new Date('2026-04-10T15:00:00Z'));
+
+    // La copia: 3 días ANTES del inicio de la ventana, sin turno, con el marcador de reflejo.
+    const copia = (await pool.request()
+      .input('b', sql.Int, sala.bid).input('p', sql.VarChar(10), P)
+      .input('fe', sql.DateTime2, new Date('2026-04-07T14:00:00Z'))
+      .input('te', sql.Int, sala.te).input('u', sql.Int, USUARIO_SISTEMA_ID)
+      .query(`
+        INSERT INTO bitacora.registro_activo
+          (bitacora_id, planta_id, fecha_evento, turno, detalle, campos_extra, tipo_evento_id, estado,
+           ingenieros_snapshot, jdts_snapshot, jefes_snapshot, creado_por, turno_id)
+        OUTPUT INSERTED.registro_id
+        VALUES (@b, @p, @fe, 1, 'COPIA HUERFANA TEST',
+                '{"origen_bitacora":"DISP","origen_disponibilidad_id":999999}',
+                @te, 'borrador', '[]', '[]', '[]', @u, NULL)`)).recordset[0].registro_id;
+
+    const res = await cerrarTurno(pool, A.turno_unidad_id, {
+      motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID, ahora: new Date('2026-04-10T16:00:00Z'),
+    });
+    assert.equal(res.cerrado.estado, 'CERRADO');
+
+    const q = (rid) => pool.request().input('r', sql.Int, rid);
+    const hist = (await q(copia).query(`
+      SELECT turno_id, estado, campos_extra FROM bitacora.registro_historico WHERE registro_id=@r`)).recordset;
+    assert.equal(hist.length, 1, 'la copia retro-fechada SÍ pasa al histórico (antes de D6 no pasaba nunca)');
+    assert.equal(hist[0].turno_id, A.turno_unidad_id, 'atribuida al turno que la rescata');
+    assert.equal(hist[0].estado, 'cerrado');
+    assert.equal(
+      JSON.parse(hist[0].campos_extra).origen_bitacora, 'DISP',
+      'el marcador de reflejo viaja intacto al histórico (se copia campos_extra tal cual)',
+    );
+    const viva = (await q(copia).query(`SELECT 1 AS x FROM bitacora.registro_activo WHERE registro_id=@r`)).recordset;
+    assert.equal(viva.length, 0, 'y deja de estar viva en Sala: era imborrable a mano (403)');
+
+    await limpiarTurnos();
   });
 
   // --- D-045 (reabrir): des-cierre. REGRESIÓN del bug de fecha_operativa: la columna DATE vuelve de la

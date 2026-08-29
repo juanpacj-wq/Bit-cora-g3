@@ -275,15 +275,14 @@ export async function cerrarTurno(pool, turno_id, {
         UPDATE bitacora.turno_unidad
         SET estado = 'CERRADO', fin_real = @ahora, motivo_cierre = @motivo,
             cerrado_por = @cerrado_por, cerrado_en = @ahora
-        OUTPUT INSERTED.turno_unidad_id, INSERTED.planta_id, INSERTED.fecha_operativa, INSERTED.turno,
-               INSERTED.inicio_nominal
+        OUTPUT INSERTED.turno_unidad_id, INSERTED.planta_id, INSERTED.fecha_operativa, INSERTED.turno
         WHERE turno_unidad_id = @id AND estado <> 'CERRADO'
       `);
     if (!upd.recordset[0]) {
       await tx.commit();
       return { cerrado: null, sucesor: null, archivados: [], conformados: 0 };
     }
-    const { planta_id, fecha_operativa, turno, inicio_nominal } = upd.recordset[0];
+    const { planta_id, fecha_operativa, turno } = upd.recordset[0];
 
     // 2) Cerrar el lapso de presencia de los participantes AÚN activos en este turno (para que
     //    duracion_min/fin_sesion queden completos al congelar). Espejo de acumularPresenciaSesiones,
@@ -335,17 +334,27 @@ export async function cerrarTurno(pool, turno_id, {
 
     // 4) Archivar los registros del turno a registro_historico, preservando registro_id + turno_id.
     //    Criterio combinado: (a) registros ESTAMPADOS con este turno (turno_id = @id) — el camino normal;
-    //    (b) BORRADORES HUÉRFANOS (turno_id NULL) de la unidad cuya fecha_evento cae en la ventana de este
-    //    turno [inicio_nominal, ahora]. (b) rescata legacy pre-write-gate: un borrador creado cuando la
-    //    unidad NO tenía turno abierto se insertaba con turno_id=NULL y, archivando SÓLO por turno_id,
-    //    quedaba huérfano para siempre (nunca pasaba al histórico). El write-gate ya evita crear nuevos
-    //    NULL, pero esto garantiza que un cierre no deje NINGÚN borrador visible atrás. MAND/DISP quedan
-    //    fuera (codigo NOT IN + oculta) — incluido CIET, que es oculta=1. Los huérfanos se atribuyen a
-    //    este turno (COALESCE(turno_id, @id)) en el histórico. Se capturan los conteos por bitácora.
+    //    (b) BORRADORES HUÉRFANOS (turno_id NULL) de la unidad con fecha_evento <= ahora. (b) rescata
+    //    legacy pre-write-gate: un borrador creado cuando la unidad NO tenía turno abierto se insertaba
+    //    con turno_id=NULL y, archivando SÓLO por turno_id, quedaba huérfano para siempre (nunca pasaba
+    //    al histórico). MAND/DISP quedan fuera (codigo NOT IN + oculta) — incluido CIET, que es
+    //    oculta=1. Los huérfanos se atribuyen a este turno (COALESCE(turno_id, @id)) en el histórico.
+    //    Se capturan los conteos por bitácora.
+    //
+    //    D-063 L07 (D6/H6, con OK del usuario 2026-08-28): (b) ya NO exige `fecha_evento >=
+    //    inicio_nominal`. La cota inferior contradecía el propósito del propio rescate: un huérfano
+    //    con fecha ANTERIOR a la ventana no lo alcanzaba este cierre, y tampoco ningún otro — el turno
+    //    al que sí pertenecía su fecha ya cerró (o nunca existió), y los cierres futuros lo dejarán
+    //    cada vez más atrás. Quedaba vivo en Sala para siempre y, si es una copia reflejada, además
+    //    imborrable (403 asiento_reflejado). El caso llega solo: una copia se retro-fecha con la hora
+    //    NARRATIVA del evento (D-058 para MAND, D-063 para DISP) y nace con turno_id NULL cuando no
+    //    hay turno ABIERTO. La cota SUPERIOR se mantiene: un borrador con fecha futura todavía tiene
+    //    su turno por delante. Atribuir el huérfano viejo al turno que lo encuentra es exactamente lo
+    //    que "rescate" significa; la alternativa era dejarlo fuera del histórico. Cambia una regla de
+    //    D-045 (ver el ADR de D-063).
     const archivadosRes = await new sql.Request(tx)
       .input('id', sql.Int, turno_id)
       .input('planta', sql.VarChar(10), planta_id)
-      .input('ini', sql.DateTime2, inicio_nominal)
       .input('ahora', sql.DateTime2, ahora)
       .query(`
         SELECT ra.bitacora_id, b.nombre, COUNT(*) AS n
@@ -355,7 +364,7 @@ export async function cerrarTurno(pool, turno_id, {
           AND b.oculta = 0 AND b.codigo NOT IN ('DISP','MAND')
           AND (ra.turno_id = @id
                OR (ra.turno_id IS NULL AND ra.planta_id = @planta
-                   AND ra.fecha_evento >= @ini AND ra.fecha_evento <= @ahora))
+                   AND ra.fecha_evento <= @ahora))
         GROUP BY ra.bitacora_id, b.nombre;
       `);
     const archivados = archivadosRes.recordset.map((r) => ({
@@ -365,7 +374,6 @@ export async function cerrarTurno(pool, turno_id, {
     await new sql.Request(tx)
       .input('id', sql.Int, turno_id)
       .input('planta', sql.VarChar(10), planta_id)
-      .input('ini', sql.DateTime2, inicio_nominal)
       .input('cerrado_por', sql.Int, cerrado_por)
       .input('ahora', sql.DateTime2, ahora)
       .query(`
@@ -383,7 +391,7 @@ export async function cerrarTurno(pool, turno_id, {
           AND b.oculta = 0 AND b.codigo NOT IN ('DISP','MAND')
           AND (ra.turno_id = @id
                OR (ra.turno_id IS NULL AND ra.planta_id = @planta
-                   AND ra.fecha_evento >= @ini AND ra.fecha_evento <= @ahora));
+                   AND ra.fecha_evento <= @ahora));
 
         DELETE ra
         FROM bitacora.registro_activo ra
@@ -392,7 +400,7 @@ export async function cerrarTurno(pool, turno_id, {
           AND b.oculta = 0 AND b.codigo NOT IN ('DISP','MAND')
           AND (ra.turno_id = @id
                OR (ra.turno_id IS NULL AND ra.planta_id = @planta
-                   AND ra.fecha_evento >= @ini AND ra.fecha_evento <= @ahora));
+                   AND ra.fecha_evento <= @ahora));
       `);
 
     // 5) CIET 'Cierre de turno' con el motivo. La sesión del CIET se arma desde la cabecera + el actor.
