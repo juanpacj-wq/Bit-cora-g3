@@ -15,7 +15,7 @@
 | O2 | L05 | Docs: BIT-MODBD 2.6, BIT-RF 2.2 (RF-077), REQ-02, REQ-06, architecture, glosario | ✅ | `cierres/L05.md` (`ca67a87`) | GATE-O2 |
 | O2 | L06 | Front + guard: tooltip honesto en copia anulada, helpers en `src/utils/reflejo.js`, stripper (GATE-O1 D7) | ✅ | `cierres/L06.md` (`717cbfd`) | GATE-O2 |
 | O2 | L07 | Módulo: reloj único, normalizador de id, rescate de huérfanos sin cota inferior (GATE-O1 D6 aprobada) | ✅ | `cierres/L07.md` (`6f7b505`, `096fcbd`) | GATE-O2 |
-| — | GATE-O2 | 4 lotes · 681/681 backend · 324/324 front · 0 violaciones · CA-10…CA-15, CA-17…CA-22 `cumple` | ✅ (visto bueno pendiente) | | `GATE-O2.md` |
+| — | GATE-O2 | 4 lotes · 681/681 backend · 324/324 front · 0 violaciones · CA-10…CA-15, CA-17…CA-22 `cumple` | ✅ visto bueno 2026-08-29 | | `GATE-O2.md` (`9dfbbe3`) |
 | Cierre | — | ADR D-063 + `CLAUDE.md` conv. 32 y 36 + comentarios (H35/H38) + `git rm` del scaffolding + runbook | ⬜ | | |
 
 Leyenda: ⬜ pendiente · 🟡 en curso · ✅ done (lote) / cerrada con visto bueno (ola) · ⛔ bloqueado.
@@ -66,4 +66,5 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
 - 2026-08-28/29 · Los cuatro lotes de la O2 `done` (L05/L06/L07 el 28 entre 20:43 y 21:15; L02 el 29 a las 02:20).
 - 2026-08-29 · GATE-O2: suite 681/681 + front 324/324 + residuos 0; compartidos arreglados
   (`helpers.js`, `residuos.js`, endurecimientos del test HTTP); avisos de L05 retirados de los docs;
-  a la espera del visto bueno para `/cerrar-implementacion D-063`.
+  visto bueno dado el 2026-08-29.
+- 2026-08-29 · Siguiente paso: `/cerrar-implementacion D-063` en un chat nuevo (lo abre el usuario).
