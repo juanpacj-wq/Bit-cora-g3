@@ -85,8 +85,7 @@ del turno, no de la persona.
 > 1. **Enganches.** `crearReflejoDisponibilidad` / `actualizarReflejoDisponibilidad` /
 >    `anularReflejoDisponibilidad` se llaman desde `routes/registros.js` (rama DISP del `POST` y del
 >    `PUT`) y `routes/disponibilidad.js` (deshacer), **dentro de la transacción del origen y sin
->    `try/catch`** (RQ-02.9). *Los enganches quedan pendientes de verificación en GATE-O2; el módulo
->    que ejecutan ya está verificado contra el código.*
+>    `try/catch`** (RQ-02.9). *Verificado en GATE-O2 (`tests/disponibilidad_reflejo_http.test.js`, 11 casos).*
 > 2. **RQ-02.12 — anular ≠ borrar.** `POST /api/disponibilidad/deshacer` marca la copia con
 >    `campos_extra.anulado = { por, nombre, cargo, en }` y devuelve `copias_anuladas`. El estado
 >    visual nuevo existe en las **dos** superficies de lectura: la grilla de Sala y Históricos pintan

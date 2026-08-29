@@ -48,6 +48,7 @@ import {
   call,
   setupSesionReflejo,
   deactivateSyntheticSessions,
+  cleanDispTestPlanta,
 } from './helpers.js';
 
 const DIR = dirname(fileURLToPath(import.meta.url));   // server/tests
@@ -361,9 +362,14 @@ describe('D-063 L02 · crear (CA-10)', () => {
     // esta planta — si algún día la BD no tuviera ninguno, este caso pierde su verificador de H7.
     assert.notEqual(copias[0].jdts_snapshot, '[]',
       'PRECONDICIÓN: la sesión JdT sobre TSR debe estar viva para que el snapshot tenga contenido');
-    assert.notEqual(origen.jefes_planta_snapshot, '[]',
-      'PRECONDICIÓN: la BD debe tener al menos un usuario con es_jefe_planta = 1; sin eso el assert de H7 '
-      + '(jefes_planta_snapshot → jefes_snapshot) no distingue un mapeo correcto de un "[]" por omisión');
+    // GATE-O2 (/code-review): `jefes` depende de un dato REAL de personal (`es_jefe_planta = 1`, singleton
+    // por UPN) que la fixture no controla; exigirlo como precondición dura pondría la suite en rojo por un
+    // cambio de personal y no por un bug. El filo de H7 lo da `jdts` (arriba, controlado por la fixture);
+    // si jefes viene vacío se avisa, no se falla.
+    if (origen.jefes_planta_snapshot === '[]') {
+      console.warn('[disponibilidad_reflejo_http] aviso: ningún usuario con es_jefe_planta = 1 — el mapeo '
+        + 'jefes_planta_snapshot → jefes_snapshot se verifica solo por igualdad ([] = [])');
+    }
     const jdts = JSON.parse(copias[0].jdts_snapshot);
     assert.ok(jdts.some((u) => u.usuario_id === sesion.usuario_id),
       `la sesión JdT de la fixture (#${sesion.usuario_id}) debe viajar en el jdts_snapshot de la copia`);
@@ -715,6 +721,11 @@ describe('D-063 L02 · archivado por turno y RN-02.e (CA-14)', () => {
     // DISP es cross-planta a propósito, así que la MISMA sesión (sobre TSR) puede postear en 'TST'
     // sin abrir una segunda sesión: `setupSessions` mataría la de esta fixture por sesión única
     // (D-035) y con ella la de las suites vecinas (la lección de D-055).
+    // GATE-O2 (/code-review): TST es compartida con disponibilidad/disponibilidad_anios/auth_middleware,
+    // que solo limpian en su after(); un vigente residual de una corrida interrumpida daría 409
+    // (mismo_estado / fecha_anterior_a_vigente) y culparía a RN-02.e. Se parte de TST vacía, como
+    // hacen todas las suites que escriben DISP en TST (D-041: única vía autorizada).
+    await cleanDispTestPlanta();
     const salaAntes = await contarSala(TEST_PLANTA);
     const post = await postDisp({
       evento: 'En Reserva', fecha: T_A, detalle: `${TEST_TAG} rn-02-e`, planta_id: TEST_PLANTA,

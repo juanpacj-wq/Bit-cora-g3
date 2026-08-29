@@ -1718,8 +1718,8 @@ entero. Comparar texto con texto no puede fallar, y la forma canónica está gar
   gates de turno (RN-02.d), así que la copia se crea igual sin turno abierto y espera al **rescate
   de huérfanos** del siguiente cierre. Ese rescate exigía además `fecha_evento >= inicio_nominal`
   del turno que cierra, lo que dejaba fuera a una copia retro-fechada (DISP la vuelve probable, pero
-  el hueco existe para MAND desde D-058): **D-063 le quita esa cota inferior** — *pendiente de
-  verificación en GATE-O2*.
+  el hueco existe para MAND desde D-058): **D-063 le quita esa cota inferior** (L07, verificado en
+  GATE-O2: `tests/turno-entidad.test.js` › CA-22 y el caso de huérfanos reescrito).
 - **`estado` sigue siendo `'borrador'`**, como cualquier registro vivo, y **sin DDL**. El archivado
   (`utils/turno-entidad.js`), el conteo de la pestaña, el `PUT`/`DELETE` genérico y los guards
   filtran todos por `estado = 'borrador'`: un estado nuevo para "copia" habría que enseñárselo a

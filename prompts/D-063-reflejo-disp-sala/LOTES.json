@@ -8,8 +8,8 @@
       "gate": "GATE-O1.md"
     },
     "O2": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O2.md"
     }
   },
   "lotes": {
@@ -102,10 +102,10 @@
     "L02": {
       "ola": "O2",
       "titulo": "Enganches DISP: POST/PUT en registros.js, deshacer en disponibilidad.js, test HTTP sobre TSR, guard final",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L02-0142",
+      "claim_ts": "2026-08-29T01:43:00.357Z",
+      "done_ts": "2026-08-29T02:23:01.025Z",
       "motivo": null,
       "depende_de": [
         "L01",
@@ -135,10 +135,10 @@
     "L05": {
       "ola": "O2",
       "titulo": "Docs: BIT-MODBD 2.6, BIT-RF 2.2 (RF-077), REQ-02, REQ-06, architecture",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L05-2043",
+      "claim_ts": "2026-08-29T01:43:04.857Z",
+      "done_ts": "2026-08-29T01:57:47.969Z",
       "motivo": null,
       "depende_de": [
         "L01",
@@ -164,10 +164,10 @@
     "L06": {
       "ola": "O2",
       "titulo": "Front + guard: tooltip honesto en copia anulada, helpers en src/utils/reflejo.js, stripper del guard (GATE-O1 D7)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L06-2043",
+      "claim_ts": "2026-08-29T01:43:15.861Z",
+      "done_ts": "2026-08-29T01:56:07.785Z",
       "motivo": null,
       "depende_de": [
         "L03",
@@ -198,10 +198,10 @@
     "L07": {
       "ola": "O2",
       "titulo": "Módulo: reloj único en anular, normalizador de id, rescate de huérfanos sin cota inferior (GATE-O1 D6/D7)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L07-2043",
+      "claim_ts": "2026-08-29T01:43:23.215Z",
+      "done_ts": "2026-08-29T02:13:11.562Z",
       "motivo": null,
       "depende_de": [
         "L01"
