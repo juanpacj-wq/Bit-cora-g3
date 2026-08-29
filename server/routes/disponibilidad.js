@@ -12,6 +12,7 @@ import {
   findVigente, findUltimoCerrado, eliminarPorId, restaurarComoVigente,
 } from '../utils/notificador.js';
 import { registrarDeshacerDisponibilidad } from '../utils/ciet.js';
+import { anularReflejoDisponibilidad } from '../utils/reflejo-sala.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { asyncH, loadAppSession } from './_middleware.js';
 import { getDispBitacoraId } from './_shared.js';
@@ -106,6 +107,8 @@ router.get('/metricas', asyncH(async (req, res) => {
 // POST /api/disponibilidad/deshacer { planta_id }  (F12/D-026)
 // Revierte el último cambio: borra el vigente y restaura el N-1 como vigente (o vacía la planta).
 // Emite CIET 'Deshacer disponibilidad'. AUD-11: plantaMatch (solo la propia unidad).
+// D-063 (RQ-02.12): además ANULA las copias del estado deshecho en las bitácoras de Sala y devuelve
+// cuántas alcanzó en `copias_anuladas`.
 router.post('/deshacer', asyncH(async (req, res) => {
   const sesion = req.sesion;
   const { planta_id } = req.body || {};
@@ -130,6 +133,32 @@ router.post('/deshacer', asyncH(async (req, res) => {
       return sendJSON(res, 422, { error: 'sin_vigente', mensaje: `${planta_id} no tiene estado vigente` });
     }
     const nMenos1 = await findUltimoCerrado(transaction, { planta_id });
+
+    // REQ-02 (RQ-02.12) — las copias de Sala se ANULAN, no se borran, y se anulan ANTES del DELETE
+    // del origen: el puntero `campos_extra.origen_disponibilidad_id` es lo único que las liga al
+    // estado (no hay FK, D-055 (c)), pero el id es IDENTITY y no se reusa, así que el orden es por
+    // claridad —primero el rastro, después el hecho— y no por dependencia.
+    //
+    // Por qué anular y no borrar: la bitácora de Sala es el relato del turno y ese relato se cuenta
+    // COMPLETO. Que la unidad se declaró indisponible y que luego se deshizo esa declaración son DOS
+    // hechos, y el segundo no borra al primero: la copia queda visible y tachada, con quién deshizo
+    // y cuándo. La del N-1 que vuelve a ser vigente no se toca: nunca dejó de ser cierta.
+    //
+    // Dentro de la transacción y sin `try/catch` propio (RQ-02.9): si anular falla, el deshacer
+    // tampoco queda. No publica al dashboard (RN-02.a) ni marca participante (RN-02.b), y la
+    // planta-fixture no refleja (RN-02.e, guard dentro del módulo). `copias = 0` NO es error — es lo
+    // ESPERADO cuando el cierre de turno ya archivó las copias, cuando ya estaban anuladas o cuando
+    // el estado es anterior a D-063 (el reflejo no es retroactivo, RQ-02.13: acá no se fabrica
+    // ninguna copia). `cargo` sale de `sesion.cargo_nombre`, que es como la sesión lo llama.
+    const { copias } = await anularReflejoDisponibilidad(transaction, {
+      planta_id,
+      disponibilidad_id: vigente.disponibilidad_id,
+      anulado_por: {
+        usuario_id: sesion.usuario_id,
+        nombre_completo: sesion.nombre_completo ?? null,
+        cargo: sesion.cargo_nombre ?? null,
+      },
+    });
 
     // DELETE el vigente (es el que se está deshaciendo).
     await eliminarPorId(transaction, { disponibilidad_id: vigente.disponibilidad_id });
@@ -162,6 +191,7 @@ router.post('/deshacer', asyncH(async (req, res) => {
       revertido: { registro_id_eliminado: vigente.disponibilidad_id, evento: vigente.estado },
       restaurado,
       ciet_registro_id: ciet.registro_id,
+      copias_anuladas: copias,
     });
   } catch (err) {
     try { await transaction.rollback(); } catch {}
