@@ -184,4 +184,4 @@ Con esto, **CA-1…CA-15 y CA-17…CA-22 confirmados**; queda **CA-16** (cierre:
 - **Visto bueno del usuario:** pendiente.
 
 ## 9. Commit del gate
-(se completa con el SHA al commitear)
+`9dfbbe3` `gate(D-063): O2 cerrada — 4 lotes, 681/681 backend + 324/324 front, 0 violaciones` (+ este commit de docs con el SHA).
