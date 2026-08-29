@@ -112,7 +112,7 @@ Violaciones: **ninguna**.
 - **Opciones:** a) dejar así · b) moverlos a `src/utils/reflejo.js` en el cierre — **Recomendada:** a
   ahora, b como opcional del cierre (la regla D del guard acepta el import relativo de un nivel; si
   se mueven a `src/utils/`, actualizar la regla D en el mismo commit).
-- **Decidido:** a. Anotado para el cierre.
+- **Decidido:** a. Anotado para el cierre. **SUPERADA en este mismo gate por D7:** el `/code-review` (H11) mostró que además hay dos parsers y tres formateadores duplicados, así que L06 los muda a `src/utils/reflejo.js` en la O2 y actualiza la regla D del guard en el mismo commit.
 
 ### D5 — Formato de fecha de la fila (`03:15 p. m.`) vs tooltip del chip (`15:15`) (sospecha de L03)
 - **Decidido:** no se toca en D-063; cosmético y fuera de alcance. Queda en el checklist de smoke UI
