@@ -28,6 +28,7 @@
 import sql from 'mssql';
 
 import { asientoLote, asientoDisponibilidad, asientoLiteralSala } from './asientos/index.js';
+import { esAsientoDeSistema, claveDeAgrupacion } from './asientos/sistema.js';
 import { fechaBogotaIso } from './turno.js';
 
 // Las unidades que cubre el libro (RQ-06.3 / decisión E: un solo archivo con las dos unidades
@@ -304,6 +305,10 @@ async function eventosDisponibilidad(pool, { plantas, desde, hasta }) {
 // sin `origen_bitacora IS NULL` el mismo evento saldría tres veces en la misma hoja. El libro lee
 // siempre los ORIGINALES. El marcador es el universal (`campos_extra.origen_bitacora`, D-063):
 // excluir por un puntero concreto (`origen_lote_id`) dejaba pasar las copias de DISP.
+//
+// Desde D-064 esta fuente trae además el ASIENTO DE SISTEMA — el único renglón del libro que no
+// tecleó nadie —, que llega repartido en cuatro filas y se COLAPSA a una. Es el segundo dedupe de
+// esta función y no reemplaza al primero: ver el lazo.
 async function eventosSala(pool, { plantas, desde, hasta, sala_ids }) {
   const ids = sala_ids.filter((id) => id != null);
   if (ids.length === 0) return [];
@@ -316,7 +321,7 @@ async function eventosSala(pool, { plantas, desde, hasta, sala_ids }) {
     return `@sala${i}`;
   }).join(', ');
 
-  const columnas = 'r.registro_id, r.planta_id, r.fecha_evento, r.detalle';
+  const columnas = 'r.registro_id, r.planta_id, r.fecha_evento, r.detalle, r.campos_extra';
   const filtro = `
     WHERE r.bitacora_id IN (${enBitacoras})
       AND r.planta_id IN (${enPlantas})
@@ -333,12 +338,37 @@ async function eventosSala(pool, { plantas, desde, hasta, sala_ids }) {
   const vistos = new Set();
   const eventos = [];
   for (const fila of r.recordset) {
-    if (vistos.has(fila.registro_id)) continue; // mismo dedupe que MAND (RN-06.d)
-    vistos.add(fila.registro_id);
-    const asiento = asientoLiteralSala({ planta_id: fila.planta_id, texto: fila.detalle });
+    // El ASIENTO DE SISTEMA (D-064) llega como CUATRO filas — dos bitácoras de Sala × dos unidades —
+    // que comparten `detalle`, `fecha_evento` y `campos_extra.clave_asiento`: son UN hecho (el
+    // despacho llegó), no cuatro. Deduplicar solo por `registro_id`, como se hacía, las habría
+    // impreso cuatro veces seguidas en la misma hoja. El dedupe pasa a ser la clave de agrupación
+    // cuando existe, y el `registro_id` cuando no — que es el caso de TODO lo tecleado y por eso
+    // los registros normales siguen sin colapsarse.
+    const deSistema = esAsientoDeSistema(fila.campos_extra);
+    const agrupacion = (deSistema && claveDeAgrupacion(fila.campos_extra)) || `id|${fila.registro_id}`;
+    if (vistos.has(agrupacion)) continue; // mismo dedupe que MAND (RN-06.d) cuando no hay clave
+    vistos.add(agrupacion);
+    // El asiento de sistema pasa LITERAL, sin `asientoLiteralSala`: ese le antepondría el prefijo de
+    // unidad (`GEC3 — …`) y este texto nombra a las DOS a la vez (`…de G3.0 y G3.2…`, RQ-05.5),
+    // así que prefijarlo con una sola sería mentir. Por eso el marcador existe: sin él no hay forma
+    // de distinguir esta fila de lo que escribió una persona.
+    //
+    // Y por eso el marcador es `origen_sistema` y NO `origen_bitacora` (D-063): el filtro de arriba
+    // excluye del libro todo lo que lleve `origen_bitacora`, así que reusar esa clave habría dejado
+    // el asiento FUERA del F03 — justo lo contrario de lo que pide RQ-05.9. Son dos reglas
+    // distintas que miran el mismo `campos_extra`: excluir copias reflejadas e incluir asientos de
+    // sistema. No las unifiques.
+    const asiento = deSistema
+      ? String(fila.detalle ?? '').trim()
+      : asientoLiteralSala({ planta_id: fila.planta_id, texto: fila.detalle });
     // Un registro sin texto no produce renglón: una fila con hora y descripción vacía es ruido en
     // el papel. El motor no lo normaliza ni le inventa contenido.
-    if (asiento) eventos.push(evento(fila.fecha_evento, asiento, `3|${fila.registro_id}`));
+    //
+    // La `clave` de orden sale de la AGRUPACIÓN, no del `registro_id`: las cuatro filas del asiento
+    // traen ids distintos y el `ORDER BY registro_id` no garantiza cuál gana el colapso, así que
+    // desempatar por id haría que la misma jornada se ordenara distinto según qué fila llegó
+    // primero. La clave de agrupación es determinística a partir de la fecha del despacho.
+    if (asiento) eventos.push(evento(fila.fecha_evento, asiento, `3|${agrupacion}`));
   }
   return eventos;
 }
