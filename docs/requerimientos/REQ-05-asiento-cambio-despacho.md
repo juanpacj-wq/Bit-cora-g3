@@ -1,249 +1,256 @@
-# REQ-05 — Asiento automático cuando cambia el despacho
+# REQ-05 — Asiento automático cuando llega el despacho del día siguiente
 
 | Campo | Valor |
 |---|---|
 | **Código** | REQ-05 |
-| **Título** | Generar asiento en el histórico de Operación 24h ante un cambio de despacho, venga del registro o del correo del CND |
-| **Estado** | 🟡 **Bloqueado** — falta la plantilla del asiento (ver §8.1) |
-| **Origen** | `pendientes_Ernesto.md`: *"cuando cambia despacho (redesp<>desp por correo o registro) crear histórico en op24hr con el formato en la imagen"* |
-| **Depende de** | [REQ-03](./REQ-03-operacion-24h-registros-unicos.md), [REQ-04](./REQ-04-historico-en-apartado.md), [REQ-02](./REQ-02-reflejo-bitacoras-sala.md) |
-| **Cross-repo** | ⚠️ **Requiere cambios en `dashboard-gen-gec3`** y actualizar `docs/interfaces-cross-repo.md`. |
+| **Título** | Asentar en las bitácoras de Sala y en el libro GENE-F03 la llegada del despacho económico del día siguiente publicado por XM |
+| **Estado** | 🟢 **Listo para planificar** — desbloqueado el 2026-08-31 con la plantilla y el alcance definitivos |
+| **Origen** | `pendientes_Ernesto.md`: *"cuando cambia despacho (redesp<>desp por correo o registro) crear histórico en op24hr con el formato en la imagen"* — **reformulado por el autor el 2026-08-31** (ver §1.1) |
+| **Depende de** | [REQ-02](./REQ-02-reflejo-bitacoras-sala.md) ✅ (D-058 + D-063), [REQ-04](./REQ-04-historico-en-apartado.md) ✅, [REQ-06](./REQ-06-excel-eventos-operacion.md) ✅ (D-058) |
+| **Cross-repo** | ⚠️ Requiere un cambio pequeño en `dashboard-gen-gec3` y una entrada nueva en `docs/interfaces-cross-repo.md`. **La comunicación es por la BD compartida, no por HTTP** (§5.1). |
 
 ---
 
 ## 1. Contexto y problema
 
-Cuando el CND cambia el despacho de un periodo, ese hecho debe quedar asentado en la bitácora de
-Operación 24h. Hoy no queda: si el ingeniero teclea el redespacho en la grilla, el número queda pero
-el **hecho** —"a tal hora el despacho de tal periodo cambió"— no se narra en ninguna parte; y si el
-cambio llega por correo del CND y nadie lo transcribe, no queda absolutamente nada.
+El F03 real registra a mano, todos los días, el momento en que llega el despacho económico que XM
+publica para el día siguiente. En la hoja del día se lee así:
 
-El objetivo es que el cambio de despacho produzca **siempre** un asiento legible en el histórico del
-apartado, sin importar por cuál de las dos vías llegó.
+```
+14:41  Se recibe del XM despacho económico de G3.0 y G3.2 para el 14-07-2026
+```
 
-### 1.1 Hallazgo clave: la ingesta del correo YA EXISTE
+![Renglón del despacho del día siguiente en el F03 real](./formatos/2026-07-F03-asiento-despacho-dia-siguiente.png)
 
-Durante el análisis se encontró que **el otro repositorio del workspace ya resuelve la parte más
-difícil de este requerimiento**, y lo hace bien:
+*Recorte del GENE-F03 real aportado por el autor el 2026-08-31; el renglón señalado es el que este
+requerimiento automatiza. Fuente en `docs/requerimientos/formatos/`.*
 
-`dashboard-gen-gec3/server/emailDispatch.js` es un servicio maduro que:
+Ese renglón hoy lo escribe una persona. El dato para escribirlo solo lo tiene el otro repositorio
+del workspace —`dashboard-gen-gec3` es quien vigila el portal de XM— y Bitácora, que es donde vive
+el libro y las bitácoras de Sala, no se entera de nada.
 
-- lee un buzón compartido por **Microsoft Graph API** (OAuth client-credentials, sin IMAP/SMTP),
-- corre **cada 5 minutos**,
-- filtra los correos cuyo asunto contiene `"Redespacho Periodo"` y extrae de él el **periodo** y la
-  **fecha**,
-- parsea la tabla HTML del cuerpo, identificando la planta por nombre (`GECELCA 3`, `GECELCA 32`,
-  `GUAJIRA 1`, `GUAJIRA 2`),
-- persiste en `dashboard.despacho_final` con `source='email'` y **trazabilidad completa al correo
-  original** (`email_id`, `email_date`, `email_subject`),
-- tiene **fallback** a la API de XM (`GeneProgRedesp`) y alerting por antigüedad de datos,
-- corre en **dos instancias** (buzón GECELCA y buzón Guajiras),
-- y ya expone el dato en `GET :3001/api/despacho-final/today`.
+### 1.1 Reformulación del 2026-08-31 (reemplaza el alcance anterior)
 
-**No hay que construir la ingesta de correos.** Lo que falta es que Bitácora se entere.
+Este requerimiento nació de una nota que mezclaba dos cosas. El autor las separó así:
+
+1. **El redespacho tecleado en Operación 24h ya está resuelto.** Cuando un ingeniero registra un
+   redespacho en la grilla, su asiento ya se copia correctamente a `SALAJDT` y `SALAING`. Lo cerró
+   **D-058** (motor de asientos + reflejo) y lo completó **D-063**. **No hay trabajo nuevo acá.**
+
+2. **Lo que falta es el despacho del día siguiente**, que es el objeto real de este documento.
+
+3. **El redespacho que llega por correo del CND queda FUERA POR COMPLETO.** La versión anterior de
+   este documento giraba alrededor de `emailDispatch.js`, de un canal HTTP nuevo y de conservar el
+   despacho original que el parser descarta. **Nada de eso aplica ya** (§7).
 
 ## 2. Comportamiento actual
 
 | Aspecto | Situación hoy |
 |---|---|
-| Registro manual de redespacho | El ingeniero lo teclea en la grilla de Operación 24h. Queda el número; no queda narración del cambio. |
-| Correo de redespacho | Lo procesa el dashboard (§1.1). **Bitácora no lo ve.** |
-| Comunicación entre repos | **Unidireccional: Bitácora → Dashboard.** `notifyDashboard()` hace un `POST /internal/eventos-changed` fire-and-forget al dashboard cuando cambia `evento_dashboard`; el dashboard lo reemite por WebSocket a sus clientes. Es **señal, no datos** (Contrato 3 de `docs/interfaces-cross-repo.md`). |
-| Lectura del dashboard hacia Bitácora | `GET :3002/api/eventos-dashboard` — el dashboard consulta a Bitácora, no al revés. |
-| Jerarquía de valores en el dashboard | `email > REDESP de Bitácora > fallback XM > archivo rDEC > simulado` (D-124 del otro repo). El correo **gana** sobre lo que registró el ingeniero. |
+| Redespacho tecleado en la grilla | ✅ Genera su asiento y se copia a las dos bitácoras de Sala (D-058, D-063). |
+| Llegada del despacho del día siguiente | El dashboard la detecta (`despachoscraper.js`, `#refreshTomorrow()`) pero **solo prende un flag en memoria y escribe un `console.log`**. No lo persiste. Al reiniciar el servicio, el dato se pierde. |
+| Lo que sí se persiste | `dashboard.despacho_programado`, pero es **el archivo de HOY** (`saveDespachoProgBulk(todayStr, …)`), no el de mañana. Su `created_at` cae hacia las 00:0x, no a la hora en que llegó el despacho del día siguiente. |
+| El libro GENE-F03 | Lee cuatro fuentes, entre ellas las dos bitácoras de Sala **excluyendo las copias** (`origen_bitacora IS NULL`). Un registro creado directamente en Sala ya entra al libro sin tocar el armado. |
 
 ## 3. Comportamiento requerido
 
-### 3.1 Dos disparadores
+### 3.1 El disparador
 
-- **RQ-05.1** — Se genera un asiento **cuando un ingeniero registra un redespacho** en la grilla de
-  Operación 24h.
-- **RQ-05.2** — Se genera un asiento **cuando llega un correo de redespacho** del CND.
-- **RQ-05.3** — **Solo la entrada en redespacho genera asiento.** La vuelta al despacho programado
-  (cuando termina el redespacho) **no** genera asiento.
+- **RQ-05.1** — El asiento se genera **cuando el dashboard detecta que XM publicó el archivo de
+  despacho del día siguiente**. Es el único disparador de este requerimiento.
+- **RQ-05.2** — El dashboard **persiste ese hecho** (fecha del despacho + instante de detección) en
+  su propio esquema. Hoy solo vive en memoria; ese es el cambio en el otro repositorio.
+- **RQ-05.3** — Bitácora **lee ese hecho de la base compartida** y crea el asiento. No hay endpoint
+  nuevo ni notificación HTTP (§5.1).
 
-### 3.2 Cómo se entera Bitácora del correo
+### 3.2 El asiento
 
-- **RQ-05.4** — **El dashboard le avisa a Bitácora.** Cuando el servicio de correo detecta un
-  redespacho nuevo, notifica a Bitácora en el momento.
-- **RQ-05.5** — Es el **espejo del canal que ya existe** en sentido contrario (Contrato 3). Se
-  implementa con el mismo criterio: notificación post-persistencia, fire-and-forget, con timeout
-  corto, que **nunca** bloquea ni hace fallar al emisor.
-- **RQ-05.6** — La notificación debe permitir a Bitácora identificar el evento sin ambigüedad:
-  planta, fecha, periodo, valor y referencia al correo de origen.
+- **RQ-05.4** — Texto **literal**, tomado del F03 real:
 
-### 3.3 El asiento automático
+  ```
+  Se recibe del XM despacho económico de G3.0 y G3.2 para el DD-MM-AAAA
+  ```
 
-- **RQ-05.7** — El autor del asiento generado por correo es el **usuario `SISTEMA`** (ya seedeado,
-  `activo=0`, nunca loguea — D-015; mismo patrón que el cierre automático de fin de día).
-- **RQ-05.8** — El asiento aparece en el **histórico del apartado de Operación 24h**
-  ([REQ-04](./REQ-04-historico-en-apartado.md)).
-- **RQ-05.9** — El asiento se **copia a `SALAJDT` y `SALAING`**, como cualquier otro evento de
-  Operación 24h ([REQ-02](./REQ-02-reflejo-bitacoras-sala.md)).
-- **RQ-05.10** — El asiento **NO llena la celda de la grilla** — la grilla es solo captura manual
-  (RQ-03.1) y el asiento no debe confundirse con un registro tecleado por un ingeniero.
-- **RQ-05.11** — El asiento **NO se publica al dashboard de generación**. El dato vino de él;
+  `DD-MM-AAAA` es la fecha **del despacho** (el día siguiente), con guiones. La notación `G3.0` /
+  `G3.2` se conserva tal cual está escrita a mano en el formato: es una **excepción deliberada** a la
+  convención de unidades `GEC3`/`GEC32` de [`FORMATO-ASIENTOS-OPERACION.md`](./FORMATO-ASIENTOS-OPERACION.md) §4,
+  porque acá el texto es una frase fija y no una plantilla parametrizada por unidad.
+- **RQ-05.5** — **Un solo asiento nombra a las dos unidades.** No se genera uno por unidad.
+- **RQ-05.6** — La **hora** del asiento es el instante en que el dashboard detectó el archivo. El
+  scraper reintenta cada 5 minutos, así que la hora tiene ese margen respecto a la publicación real
+  en XM; se acepta.
+- **RQ-05.7** — El **autor** es el usuario `SISTEMA` (ya seedeado, `activo = 0`, nunca loguea —
+  D-015; mismo patrón que el cierre automático de fin de día).
+
+### 3.3 Dónde aparece
+
+- **RQ-05.8** — Se crea **un registro en `SALAJDT` y otro en `SALAING`**, directamente. **No** pasa
+  por Operación 24h.
+- **RQ-05.9** — **No lleva `campos_extra.origen_bitacora`**: no es una copia reflejada sino un
+  registro original de Sala. Gracias a eso el libro GENE-F03 lo toma por la fuente que **ya existe**
+  (`eventosSala`, que excluye solo los reflejados) y no hace falta agregarle una quinta fuente.
+- **RQ-05.10** — **Las dos filas cuentan como UN renglón en el libro.** `eventosSala` deduplica hoy
+  únicamente por `registro_id`, así que sin una clave compartida el asiento saldría **dos veces** en
+  la misma hoja. Las dos filas llevan una **clave de agrupación común** en `campos_extra` y el
+  armado del libro las colapsa, con el mismo criterio con que agrupa las celdas de un lote de MAND
+  por `lote_id`.
+- **RQ-05.11** — El asiento **no llena ninguna celda** de la grilla de captura de Operación 24h.
+- **RQ-05.12** — El asiento **no se publica al dashboard de generación**: el dato vino de ahí y
   reenviarlo sería un ciclo.
-- **RQ-05.12** — El asiento se redacta con el **formato establecido** (§8.1).
 
-### 3.4 Duplicados e idempotencia
+### 3.4 Idempotencia y relleno del mes
 
-- **RQ-05.13** — El mismo correo **no puede generar dos asientos**. La notificación puede llegar más
-  de una vez (reintentos, reinicios del servicio) y el asiento debe ser **idempotente** respecto al
-  correo de origen.
-- **RQ-05.14** — Si el ingeniero ya registró manualmente el mismo redespacho y después llega el
-  correo, **son dos hechos distintos y ambos se asientan**: uno es "el ingeniero registró", el otro
-  es "llegó la notificación formal del CND". El asiento debe dejar clara la vía de origen.
+- **RQ-05.13** — **Un solo asiento por fecha de despacho.** El detector puede correr muchas veces
+  (reintentos cada 5 minutos, reinicios del servicio) y el asiento no se duplica.
+- **RQ-05.14** — **Relleno del mes en curso.** Para los días **ya pasados** del mes, y para el día
+  de hoy si el despacho ya llegó, se crean los asientos faltantes con **hora fija `15:00`**, porque
+  la hora real de esos días no existe como dato y nunca se guardó (§5.2). Esos asientos quedan
+  **marcados como hora estimada** para que nadie los lea como una medición.
+- **RQ-05.15** — El relleno es **idempotente** y no pisa un asiento que ya tenga hora real.
 
 ## 4. Reglas de negocio y casos borde
 
-- **RN-05.a** — Bitácora solo asienta redespachos de **sus** plantas (`GEC3`, `GEC32`). El buzón de
-  Guajiras (`TGJ1`, `TGJ2`) que también procesa el dashboard **se ignora**.
-- **RN-05.b** — La planta de test `TST` nunca recibe asientos automáticos (D-030).
-- **RN-05.c** — Si el dashboard está caído o la notificación se pierde, **Bitácora no se rompe**: el
-  asiento simplemente no se crea. La operación manual sigue funcionando. Debe haber forma de
-  detectar la pérdida (ver §8.2).
-- **RN-05.d** — El asiento automático **no** está sujeto al lock de Redespacho por periodo pasado
-  (RQ-03.17): no es una captura del operador, es el registro de un hecho ya ocurrido y notificado.
-- **RN-05.e** — El asiento automático **no** está sujeto a los bloqueos de turno finalizado/cerrado
-  (Operación 24h está exenta, RQ-03.18).
-- **RN-05.f** — El asiento automático se puede **borrar o corregir** desde el histórico (REQ-04) si
-  resultó errado, con las mismas reglas que cualquier otro lote.
+- **RN-05.a** — Solo se asientan las plantas de Bitácora: **`GEC3` y `GEC32`**. Los despachos de
+  `TGJ1` y `TGJ2`, que el dashboard también vigila, se ignoran.
+- **RN-05.b** — La planta de test `TST` nunca recibe asientos automáticos (D-030), y `TSR` tampoco.
+- **RN-05.c** — **Mejora degradable.** Si el dashboard no escribe el hecho —servicio caído, XM sin
+  publicar, columna sin migrar— Bitácora funciona exactamente como hoy y solo se pierde el asiento.
+  Nunca la operación. Mismo criterio que la mejora de texto por IA (D-047), que degrada sin
+  configuración.
+- **RN-05.d** — Si el despacho **no llega** un día, **no hay asiento** para ese día. No se inventa
+  un renglón.
+- **RN-05.e** — El asiento automático **no** está sujeto al bloqueo de turno finalizado ni al de
+  turno cerrado: no es una captura del operador, es el registro de un hecho ya ocurrido.
+- **RN-05.f** — **Zona horaria.** El motor de la base corre en **hora Bogotá**, no UTC
+  (`SYSDATETIME()` da 08:56 mientras `SYSUTCDATETIME()` da 13:56), y el esquema `dashboard` usa
+  `GETDATE()`. Bitácora guarda UTC (D-020). La conversión se hace **una sola vez y explícitamente**
+  al leer el hecho; no se asume que las dos columnas hablen el mismo idioma.
+- **RN-05.g** — El asiento pertenece al día en que **se recibió**, no al día del despacho que
+  anuncia: el renglón `14:41 … para el 14-07-2026` vive en la hoja del **13**.
 
 ## 5. Impacto técnico
 
-### 5.1 Brechas concretas (declaradas como riesgo, no resueltas acá)
+### 5.1 La comunicación cross-repo es por BD compartida
 
-1. **No existe canal Dashboard → Bitácora.** Hay que crearlo. El precedente (Contrato 3) da el
-   patrón: endpoint interno, no expuesto por nginx, con token opcional
-   (`INTERNAL_NOTIFY_TOKEN` en el otro sentido).
+**Los dos repositorios usan la misma base de datos**, con esquemas distintos: `bitacora` y `lov_bit`
+para Bitácora, `dashboard` para el dashboard. Verificado el 2026-08-31 consultando
+`dashboard.despacho_programado` con las credenciales de Bitácora.
 
-2. **`GET :3001/api/despacho-final/today` sirve solo HOY y desde memoria** del servicio
-   (`getMergedDespachoFinal()` combina el estado en RAM de las dos instancias), no desde la base de
-   datos. No hay endpoint por fecha arbitraria ni histórico de cambios del correo (el `MERGE` sobre
-   `dashboard.despacho_final` sobrescribe). Si Bitácora necesitara reconstruir asientos perdidos,
-   ese camino **no existe hoy**.
+Eso **elimina** el canal HTTP que planteaba la versión anterior de este documento, y con él la
+pregunta de las notificaciones perdidas: si Bitácora está caída cuando llega el despacho, lo asienta
+cuando vuelva, porque el hecho quedó escrito en la base. **No** se construye ningún endpoint nuevo,
+ningún token servicio-a-servicio y ninguna dependencia de red entre los dos procesos.
 
-3. **🔴 El despacho original se descarta en el parseo.** La fila del correo trae tres números —
-   código de unidad, **despacho original** y **redespacho** — y el parser guarda solo el tercero
-   (`emailDispatch.js:237`, `const valorMw = parseFloat(numbers[2])`). **Por lo tanto el "de X MW a
-   Y MW" hoy NO existe como dato.** Si la plantilla del asiento lo necesita —y probablemente lo
-   necesita, porque un asiento de *cambio* de despacho sin el valor anterior narra a medias— hay que
-   modificar el parser y agregar una columna en el otro repo. Es un cambio pequeño, pero es un
-   cambio real y hay que planearlo.
+Sigue valiendo la regla de propiedad: **cada repo escribe solo en su esquema**. El dashboard escribe
+el hecho en `dashboard`; Bitácora lo lee y escribe el asiento en `bitacora`. Ninguno escribe en el
+esquema del otro.
 
-4. **Red y despliegue.** El endpoint del dashboard no está proxeado por nginx para Bitácora. Hay
-   que revisar `deploy/` y CORS en el despliegue unificado.
+### 5.2 Hallazgos del 2026-08-31 que condicionan el trabajo
 
-5. **🔴 `docs/interfaces-cross-repo.md` está desactualizado respecto al código.** Antes de agregarle
-   un contrato nuevo hay que corregir lo que ya miente:
-   - documenta la respuesta como `{ items: [...] }` cuando el código devuelve `{ eventos: [...] }`;
-   - lista columnas `detalle` y `funcionariocnd` que el `SELECT` real **no** devuelve
-     (`server/routes/eventos-dashboard.js:71-72`);
-   - documenta `?tipo=&planta_id=` pero el endpoint **exige `fecha`** (400 si falta);
-   - no menciona el gate opcional `DASHBOARD_API_TOKEN` ni la exclusión de la planta `TST`.
+1. **La hora de llegada del despacho del día siguiente no existe como dato.** `#refreshTomorrow()`
+   detecta el archivo y solo hace `this.#foundTomorrow = true` más un `console.log`. Persistirlo es
+   el cambio en el otro repo, y es la razón por la que RQ-05.14 necesita una hora fija para el
+   pasado.
+2. **`dashboard.despacho_programado` está detenido.** La última fecha registrada es **2026-07-19**,
+   seis semanas atrás. Sea cual sea la causa, no se puede contar con esa tabla como fuente.
+3. **Bug de fecha en el otro repo, ajeno a este requerimiento pero contaminante.**
+   `getColombiaDate()` devuelve un `Date` cuyos campos locales son Bogotá, y después se le aplica
+   `.toISOString()`, que reaplica el offset UTC: pasadas las 19:00 Bogotá el "hoy" se corre al día
+   siguiente. Se ve en los datos (`fecha = 2026-07-03` insertada el 02 a las 21:59;
+   `fecha = 2026-06-30` insertada el 29 a las 19:16). **Conviene arreglarlo, pero es una decisión
+   aparte**: no se mezcla con este flujo sin declararlo.
+4. **`docs/interfaces-cross-repo.md` miente sobre el contrato que ya existe** y hay que corregirlo
+   antes de documentar el nuevo: dice que la respuesta es `{ items: [...] }` cuando el código
+   devuelve `{ eventos: [...] }`; lista columnas `detalle` y `funcionariocnd` que el `SELECT` real no
+   devuelve; documenta `?tipo=&planta_id=` cuando el endpoint **exige `fecha`** y responde 400 si
+   falta; y no menciona ni el gate `DASHBOARD_API_TOKEN` ni la exclusión de la planta `TST`.
 
-### 5.2 Archivos a tocar
-
-**En `Bit-cora-g3`:**
-
-| Archivo | Cambio |
-|---|---|
-| `server/routes/` | Endpoint interno receptor de la notificación del dashboard. |
-| `server/auth/app.js` | Montaje + allowlist (nace cerrado por `requireEntra`, D-037; este endpoint es servicio-a-servicio y necesita su propio gate por token). |
-| `server/utils/` | Generación del asiento automático (reutiliza el módulo de reflejo de REQ-02). |
-| `server/routes/mand.js` | Disparador del asiento cuando el registro es manual (RQ-05.1). |
-| `../docs/interfaces-cross-repo.md` | Corregir el Contrato 1 y documentar el contrato nuevo. |
+### 5.3 Archivos a tocar
 
 **En `dashboard-gen-gec3`:**
 
 | Archivo | Cambio |
 |---|---|
-| `server/emailDispatch.js` | Emitir la notificación al detectar redespacho nuevo; y —si la plantilla lo requiere— conservar el despacho original (`numbers[1]`). |
-| `server/db.js` | Columna para el despacho original, si aplica. |
-| `deploy/` | Conectividad hacia Bitácora. |
+| `server/db.js` | Tabla nueva en el esquema `dashboard` para el hecho: fecha del despacho (única) + instante de detección. |
+| `server/despachoscraper.js` | En `#refreshTomorrow()`, persistir la detección la primera vez que encuentra el archivo. |
 
-### 5.3 Riesgo de acoplamiento
+**En `Bit-cora-g3`:**
 
-Este es el único de los seis requerimientos que **acopla los dos repositorios en un sentido nuevo**.
-Conviene que el asiento automático sea una **mejora degradable**: si el canal no está configurado o
-el dashboard no responde, Bitácora funciona exactamente como hoy y solo se pierde el asiento
-automático — nunca la operación. Mismo criterio que se usó con la mejora de texto por IA (D-047),
-que degrada a 503 cuando no hay configuración.
+| Archivo | Cambio |
+|---|---|
+| `server/utils/asientos/` | Plantilla del texto de RQ-05.4. |
+| `server/utils/` | Lector del hecho + creación de las dos filas de Sala, idempotente. Enganchado a un barrido periódico (patrón del `mand-sweeper`). |
+| `server/utils/f03-datos.js` | Colapsar por la clave de agrupación de RQ-05.10 en `eventosSala`. |
+| `server/scripts/` | CLI del relleno del mes (RQ-05.14), resumible y con `--dry-run`, como el backfill de D-060. |
+| `../docs/interfaces-cross-repo.md` | Corregir el Contrato 1 y documentar el contrato nuevo por BD compartida. |
+
+### 5.4 Riesgo de acoplamiento
+
+Es el único requerimiento que acopla los dos repos en un sentido nuevo, pero el acoplamiento es
+**de datos y no de red**: una tabla del esquema `dashboard` que Bitácora lee. Si esa tabla no existe
+todavía, el lector no encuentra nada y no pasa nada (RN-05.c).
 
 ## 6. Criterios de aceptación
 
-1. **Dado** que un ingeniero registra un redespacho en la grilla, **cuando** miro el histórico del
-   apartado, **entonces** aparece el asiento del cambio de despacho.
-2. **Dado** que llega un correo de redespacho para GEC3, **cuando** miro el histórico, **entonces**
-   aparece el asiento, con autor `SISTEMA`, sin que nadie haya tecleado nada.
-3. **Dado** ese asiento automático, **cuando** miro `SALAJDT` y `SALAING`, **entonces** aparece
-   copiado en las dos.
-4. **Dado** ese asiento automático, **cuando** miro la grilla de captura, **entonces** las celdas
-   siguen vacías (el asiento no las llena).
-5. **Dado** ese asiento automático, **cuando** consulto lo publicado al dashboard, **entonces** no
-   se republicó nada por causa del asiento.
-6. **Dado** que la misma notificación llega dos veces, **entonces** existe **un solo** asiento.
-7. **Dado** que el ingeniero ya registró el redespacho manualmente y después llega el correo,
-   **entonces** existen **dos** asientos y cada uno indica su vía de origen.
-8. **Dado** un correo de redespacho de `TGJ1` o `TGJ2`, **entonces** Bitácora lo ignora.
-9. **Dado** que termina un redespacho y la unidad vuelve al despacho programado, **entonces** **no**
-   se genera asiento.
-10. **Dado** que el canal con el dashboard no está configurado o el dashboard está caído,
-    **entonces** Bitácora opera normalmente y solo deja de recibir asientos automáticos.
-11. **Dado** un asiento automático errado, **cuando** lo borro desde el histórico, **entonces** se
-    borra junto con sus dos copias.
-12. **Dado** `docs/interfaces-cross-repo.md`, **entonces** describe correctamente el shape real de
-    `GET /api/eventos-dashboard` y el contrato nuevo.
+1. **Dado** que XM publica el despacho del día siguiente y el dashboard lo detecta, **cuando** miro
+   `SALAJDT` y `SALAING`, **entonces** aparece el asiento en las dos, con autor `SISTEMA` y sin que
+   nadie haya tecleado nada.
+2. **Dado** ese asiento, **entonces** su texto es exactamente
+   `Se recibe del XM despacho económico de G3.0 y G3.2 para el DD-MM-AAAA`, con la fecha del día
+   siguiente.
+3. **Dado** ese asiento, **cuando** genero el libro GENE-F03 del mes, **entonces** aparece **una sola
+   vez** en la hoja del día en que se recibió, a la hora de detección.
+4. **Dado** que el detector corre varias veces el mismo día, **entonces** existe **un solo** asiento.
+5. **Dado** que corro el relleno del mes, **entonces** los días pasados quedan con su asiento a las
+   `15:00` marcado como hora estimada, sin pisar ninguno que ya tuviera hora real, y volver a
+   correrlo no duplica nada.
+6. **Dado** un despacho de `TGJ1` o `TGJ2`, **entonces** Bitácora no asienta nada.
+7. **Dado** que el día no llegó despacho, **entonces** no hay renglón para ese día.
+8. **Dado** que la tabla del dashboard no existe o el dashboard está caído, **entonces** Bitácora
+   opera normalmente y solo deja de recibir asientos automáticos.
+9. **Dado** el asiento, **cuando** miro la grilla de captura de Operación 24h, **entonces** las
+   celdas siguen vacías.
+10. **Dado** el asiento, **cuando** consulto lo publicado al dashboard, **entonces** no se republicó
+    nada por su causa.
+11. **Dado** `docs/interfaces-cross-repo.md`, **entonces** describe correctamente el shape real de
+    `GET /api/eventos-dashboard` y el contrato nuevo por BD compartida.
 
 ## 7. Fuera de alcance
 
-- Construir la ingesta de correos: **ya existe** en `dashboard-gen-gec3`.
+- **Todo lo relacionado con el redespacho por correo del CND.** `emailDispatch.js` no se toca, no se
+  conserva el despacho original que su parser descarta, y no se asienta nada que venga del buzón.
+- **El asiento del redespacho tecleado en la grilla**: ya funciona (D-058 + D-063).
 - Asentar el retorno al despacho programado.
-- Asentar redespachos de las plantas Guajira.
-- Reconstruir asientos de correos anteriores al despliegue.
-- Cambiar la jerarquía de valores del dashboard (D-124 del otro repo).
-- Que Bitácora lea el buzón directamente.
+- Asentar despachos de las plantas Guajira.
+- Reconstruir asientos de meses anteriores al mes en curso.
+- Arreglar el bug de `getColombiaDate()` del otro repo (§5.2 punto 3) y reactivar
+  `despacho_programado` (punto 2): son trabajos propios, se documentan acá pero no entran.
+- Construir un canal HTTP entre los repos: no hace falta (§5.1).
 
 ## 8. Preguntas abiertas
 
-### 8.1 🔴 BLOQUEANTE — plantilla del asiento
+### 8.1 ✅ RESUELTA (2026-08-31) — plantilla, origen, hora y relleno
 
-Falta el formato con que debe redactarse el asiento de cambio de despacho. En la nota original se
-menciona "el formato en la imagen", **pero esa imagen no está en el repositorio** (el `image.png` de
-la raíz es el mockup del botón de IA, sin relación).
+Las cuatro decisiones que bloqueaban este documento las cerró el autor:
 
-Falta definir: la redacción literal, y si distingue explícitamente la vía de origen (registro del
-ingeniero vs. correo del CND).
+- **Plantilla**: literal del F03, con `del XM` y la notación `G3.0` / `G3.2` (RQ-05.4).
+- **Dónde nace el asiento**: directamente en las dos bitácoras de Sala, no como registro de
+  Operación 24h (RQ-05.8). De ahí sale la exigencia de la clave de agrupación de RQ-05.10.
+- **Hora**: el instante en que el dashboard detecta el archivo, con el margen de 5 minutos del
+  reintento (RQ-05.6).
+- **Relleno del mes**: sí, con hora fija `15:00` marcada como estimada (RQ-05.14).
 
-**De la respuesta a esto depende la brecha 3 de §5.1**: si el formato incluye el valor anterior, hay
-que modificar el parser del otro repo.
+### 8.2 🟡 Quién puede corregir un asiento automático
 
-**Se trata en una sesión aparte.** Era el mismo bloqueo que [REQ-02](./REQ-02-reflejo-bitacoras-sala.md)
-y [REQ-04](./REQ-04-historico-en-apartado.md) — **los dos ya se resolvieron en D-058**, este no.
+El autor del asiento es `SISTEMA`, y en las bitácoras de Sala la edición está limitada **al autor**
+(D-049). Con eso, un asiento automático errado **no lo puede corregir ni borrar nadie** desde la
+interfaz.
 
-> **Qué cambió con D-058 (2026-07-27) y qué no.** Ya existen el **motor de asientos**
-> (`server/utils/asientos/`, server-side y puro) y las **convenciones canónicas** —unidad
-> `GEC3`/`GEC32`, potencia entera en `MW`, compactación de periodos, `detalle` al final—
-> especificadas en [`FORMATO-ASIENTOS-OPERACION.md`](./FORMATO-ASIENTOS-OPERACION.md). Agregar un
-> tipo de asiento es hoy **una plantilla más en `plantillas.js`**, no una arquitectura.
->
-> **Lo que sigue faltando es propio de este REQ:** la redacción del cambio de despacho, que es la
-> única que necesita **dos** valores (el anterior y el nuevo) — ninguna plantilla de D-058 los tiene,
-> y de ahí depende la brecha 3 de §5.1 (si hay que tocar el parser del otro repo). Sigue **bloqueado**.
+Hay que decidir si se acepta así —el asiento es un hecho del sistema y no se toca—, o si el gate
+`puede_crear` de esa bitácora habilita corregirlo, como pasa con MAND desde D-057.
 
-### 8.2 Pérdida de notificaciones
+### 8.3 🟡 Cada cuánto lee Bitácora
 
-El canal es fire-and-forget: si Bitácora está caída cuando llega el correo, el asiento se pierde y
-no hay forma de recuperarlo (§5.1 brecha 2). ¿Es aceptable, o hace falta un mecanismo de
-reconciliación (que Bitácora consulte al arrancar qué se perdió)?
-
-### 8.3 Granularidad de la notificación
-
-Un correo del CND puede traer varias plantas en la misma tabla. ¿Se notifica una vez por planta o
-una vez por correo con todas? Afecta la idempotencia (RQ-05.13).
-
-### 8.4 Visibilidad de la vía de origen
-
-¿El asiento debe distinguirse visualmente (icono/rótulo) según si vino del registro manual o del
-correo, o basta con que lo diga el texto?
+El hecho queda en la base, así que el lector puede ser un barrido periódico (patrón `mand-sweeper`)
+o correr al arrancar más una vez por hora. Falta fijar la cadencia: define cuánto puede tardar el
+asiento en aparecer después de que XM publica.
