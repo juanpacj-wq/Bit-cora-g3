@@ -347,6 +347,51 @@ export async function cleanupTestRegistros() {
         AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_activo)
         AND registro_origen_id NOT IN (SELECT registro_id FROM bitacora.registro_historico);
     `);
+  // D-063 (GATE-O1, hallazgo de L01 y L04): `cerrarDiaMand` sobre la planta-fixture —lo invocan DIRECTO
+  // dos tests de `sala_de_mando_batch` (el sweeper real solo corre GEC3/GEC32)— emite un CIET del usuario
+  // SISTEMA con `detalle = NULL` (`campos_extra.motivo = 'mand-sweeper-diario'`, literal de `ciet.js`), y
+  // ninguna limpieza lo alcanzaba: la de arriba filtra por `detalle LIKE @tag` (NULL nunca matchea) y
+  // `cleanMand` acota por la bitácora MAND, no CIET. Cada `npm test` dejaba 2 filas en `registro_activo`
+  // de TST y `npm run test:residuos` salía en exit 2. Acotado por TEST_PLANTA_ID (D-055) y por autor
+  // SISTEMA: jamás toca un CIET real de GEC3/GEC32.
+  await db.request()
+    .input('tp', sql.VarChar(10), TEST_PLANTA_ID)
+    .query(`
+      DELETE FROM bitacora.registro_activo
+      WHERE planta_id = @tp
+        AND creado_por = (SELECT usuario_id FROM lov_bit.usuario WHERE username = 'SISTEMA')
+        AND JSON_VALUE(campos_extra, '$.motivo') = 'mand-sweeper-diario';
+    `);
+  // D-063 (GATE-O2, hallazgo de L02): el CIET "Deshacer disponibilidad" también nace con
+  // `detalle = NULL`, pero con autor HUMANO (el fixture que deshace), así que el DELETE de arriba no lo
+  // alcanza y el de `detalle LIKE @tag` tampoco. En la suite completa lo barría de rebote
+  // `registros_solo_autor`; en corridas parciales (los bloques del gate) quedaban 3–6 filas por
+  // corrida. Acotado por TEST_PLANTA_ID + es_sintetico = 1 (D-044): jamás matchea un operador real.
+  await db.request()
+    .input('tp', sql.VarChar(10), TEST_PLANTA_ID)
+    .query(`
+      DELETE ra
+      FROM bitacora.registro_activo ra
+      INNER JOIN lov_bit.usuario u ON u.usuario_id = ra.creado_por
+      WHERE ra.planta_id = @tp AND u.es_sintetico = 1 AND ra.detalle IS NULL;
+    `);
+  // D-063 (GATE-O2, hallazgo de L07 + /code-review): las cabeceras `turno_unidad` que un test abre en una
+  // planta-fixture y no desmonta (`sala_de_mando_batch` deja una PROGRAMADO por corrida) se acumulaban sin
+  // que ninguna sonda las contara. Se borran SOLO las que no tienen dependientes (registros vivos o
+  // archivados, participantes, sesiones): con dependientes hay una suite a medias y la sonda de
+  // `residuos.js` la delata en vez de que este barrido rompa una FK. Acotado a TST/TSR por parámetro.
+  await db.request()
+    .input('tp', sql.VarChar(10), TEST_PLANTA_ID)
+    .input('tpr', sql.VarChar(10), TEST_PLANTA_REFLEJO)
+    .query(`
+      DELETE tu
+      FROM bitacora.turno_unidad tu
+      WHERE tu.planta_id IN (@tp, @tpr)
+        AND NOT EXISTS (SELECT 1 FROM bitacora.registro_activo     ra WHERE ra.turno_id = tu.turno_unidad_id)
+        AND NOT EXISTS (SELECT 1 FROM bitacora.registro_historico  rh WHERE rh.turno_id = tu.turno_unidad_id)
+        AND NOT EXISTS (SELECT 1 FROM bitacora.turno_participante  tp WHERE tp.turno_id = tu.turno_unidad_id)
+        AND NOT EXISTS (SELECT 1 FROM bitacora.sesion_activa       sa WHERE sa.turno_id = tu.turno_unidad_id);
+    `);
   // D-061 (L06 · contrato C13): COMB y el scraper del SIS también dejan residuo en la BD, y hasta
   // ahora nadie lo barría — cada suite limpiaba su propia (planta, fecha) y lo que se escapaba
   // quedaba para siempre. Acotado a las DOS plantas-fixture y a nada más: un DELETE por fecha o

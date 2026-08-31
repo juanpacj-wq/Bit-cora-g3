@@ -1,6 +1,11 @@
 import { useState } from 'react';
 import { FileText, ChevronLeft, ChevronRight, ChevronDown, ChevronUp } from 'lucide-react';
 import { UsuariosPopover } from './UsuariosPopover';
+// D-063 L06: el vocabulario del reflejo (parser, marcador, formateador Bogotá, chip y clases)
+// vive en `src/utils/reflejo.js` — una sola definición para la grilla de Sala y para esta tabla.
+import {
+  estadoReflejo, ChipAnulado, CLASES_DETALLE_ANULADO, CLASES_DETALLE_VIVO,
+} from '../../utils/reflejo.js';
 
 // F20: render Bogotá explícito (sin importar TZ del navegador).
 const FECHA_FMT = new Intl.DateTimeFormat('es-CO', {
@@ -8,6 +13,7 @@ const FECHA_FMT = new Intl.DateTimeFormat('es-CO', {
   day: '2-digit', month: '2-digit', year: 'numeric',
   hour: '2-digit', minute: '2-digit',
 });
+
 // fecha_cierre_operativo es un DATE calendario (día Bogotá del cierre, ya calculado en SQL
 // con DATEADD(HOUR,-5,...)). El driver lo serializa como medianoche UTC; formatearlo con
 // timeZone Bogotá le restaría 5h OTRA VEZ y mostraría el día anterior. Se lee en UTC tal cual.
@@ -50,7 +56,11 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {rows.map((r) => (
+                  {rows.map((r) => {
+                    // D-063: la copia anulada en Sala sigue visible en el histórico, tachada y
+                    // con quién la deshizo. Acá no hay nombre del origen (la vista no lo trae).
+                    const { anulado } = estadoReflejo(r.campos_extra);
+                    return (
                     <tr key={r.registro_id} className="odd:bg-white even:bg-gray-50/40 hover:bg-emerald-50/40 transition-colors">
                       <Td mono>{fmtFecha(r.fecha_evento)}</Td>
                       <Td>
@@ -67,7 +77,12 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
                       </Td>
                       <Td>{r.tipo_evento}</Td>
                       <Td className="max-w-xs">
-                        <DetalleCell texto={r.detalle} />
+                        {anulado && (
+                          <div className="mb-1">
+                            <ChipAnulado anulado={anulado} compacto />
+                          </div>
+                        )}
+                        <DetalleCell texto={r.detalle} anulado={!!anulado} />
                       </Td>
                       <Td><UsuariosPopover json={r.participantes} /></Td>
                       <Td><UsuariosPopover json={r.jdts_snapshot} /></Td>
@@ -83,7 +98,8 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
                         </span>
                       </Td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -108,14 +124,17 @@ export function HistoricoTable({ rows, loading, page, limit, total, onPageChange
 // "Ver más"/"Ver menos" (reemplaza al hover con `title`, que era invisible en táctil/impresión).
 const DETALLE_PREVIEW_MAX = 160;
 
-export function DetalleCell({ texto }) {
+// D-063: `anulado` tacha y atenúa el texto (copia de Sala deshecha en su origen); el control
+// "Ver más"/"Ver menos" y el umbral no cambian.
+export function DetalleCell({ texto, anulado = false }) {
   const [expandido, setExpandido] = useState(false);
+  const tono = anulado ? CLASES_DETALLE_ANULADO : CLASES_DETALLE_VIVO;
   if (!texto) return <span className="text-gray-300">—</span>;
   if (texto.length <= DETALLE_PREVIEW_MAX) {
-    return <div className="text-gray-700 whitespace-pre-wrap break-words">{texto}</div>;
+    return <div className={`${tono} whitespace-pre-wrap break-words`}>{texto}</div>;
   }
   return (
-    <div className="text-gray-700">
+    <div className={tono}>
       {expandido
         ? <div className="whitespace-pre-wrap break-words">{texto}</div>
         : <div className="line-clamp-2">{texto}</div>}

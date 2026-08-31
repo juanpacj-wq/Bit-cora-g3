@@ -206,8 +206,14 @@ anulados, o el archivo solo refleja el estado final correcto?
 > libro lee esa tabla, así que un evento deshecho simplemente no está. Esto **no contradice a
 > RQ-02.12** (que conserva la *copia en la bitácora de Sala* visible y marcada como anulada): son dos
 > superficies distintas — la bitácora narra el turno, incluido lo que se corrigió; el F03 consolida
-> el estado de la unidad. Ojo: RQ-02.12 **todavía no está implementada** (el reflejo de DISP quedó
-> fuera de D-058), así que hoy no hay copia que anular.
+> el estado de la unidad.
+>
+> **Actualización D-063 (2026-08-28):** RQ-02.12 ya está implementada, así que **desde D-063 la copia
+> en Sala SÍ existe y queda anulada** (visible, tachada, con quién la deshizo y cuándo). El libro
+> sigue **sin mostrarla**, y por partida doble: lee la tabla base `disponibilidad_estado` —donde el
+> evento deshecho ya no está— y además **excluye toda copia** de las bitácoras de Sala por
+> `campos_extra.origen_bitacora` (antes por el puntero `origen_lote_id`, que dejaba pasar la copia
+> DISP). La respuesta sigue siendo la misma; lo que cambió es que ahora hay algo que excluir.
 
 ### 8.4 ✅ RESUELTA por D-058 (por construcción) — lotes corregidos
 

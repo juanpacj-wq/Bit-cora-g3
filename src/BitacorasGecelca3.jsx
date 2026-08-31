@@ -15,6 +15,11 @@ import {
   Sparkles, Loader2, Undo2,
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
+// D-063: marcador universal de reflejo + chip "Anulado", compartidos con la tabla de Históricos.
+import {
+  ChipAnulado, estadoReflejo, parseCamposExtra, tituloOrigen,
+  CLASES_DETALLE_ANULADO, CLASES_DETALLE_VIVO,
+} from "./utils/reflejo.js";
 import TurnoTransicionModal from "./components/TurnoTransicionModal";
 import CierrePendientesModal from "./components/CierrePendientesModal";
 import LogoutModal from "./components/LogoutModal";
@@ -156,12 +161,6 @@ const parseDefinicionCampos = (def) => {
 
 const getCamposExtraEditables = (def) =>
   parseDefinicionCampos(def).filter((c) => c && c.tipo && c.tipo !== "auto");
-
-const parseCamposExtra = (ce) => {
-  if (!ce) return {};
-  if (typeof ce === "object") return ce;
-  try { return JSON.parse(ce) || {}; } catch { return {}; }
-};
 
 const labelCampo = (c) => c.label || c.campo;
 
@@ -1537,12 +1536,15 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
     && Number(reg.turno) !== turnoFromFechaLocal(toBogotaLocal(reg.fecha_evento));
   const hasExtras = camposExtraDef.length > 0;
   const camposExtraValores = parseCamposExtra(reg.campos_extra);
-  // D-058 (RQ-02.5): asiento REFLEJADO desde Operación 24h. Se identifica por el vínculo con su lote
-  // de origen (`origen_lote_id`, dato — no etiqueta) y se rotula con el nombre que el backend resuelve
-  // del catálogo (D-052: el nombre visible de una bitácora vive SOLO en el seed, nunca acá).
+  // D-058 (RQ-02.5) + D-063: asiento REFLEJADO desde otra bitácora (Operación 24h o Disponibilidad).
+  // Se identifica por el marcador UNIVERSAL `origen_bitacora` (D-063 C3) — nunca por el puntero al
+  // origen (`origen_lote_id` / `origen_disponibilidad_id`, dato del backend) — y se rotula con el
+  // nombre que el backend resuelve del catálogo (D-052: el nombre visible de una bitácora vive SOLO
+  // en el seed, nunca acá). `anulado` (objeto) es la copia de Disponibilidad que se DESHIZO en su
+  // origen: sigue visible, tachada y con constancia de quién (RQ-02.12).
   // Que no muestre lápiz ni basurero NO se decide en esta línea: eso lo manda `puede_editar`, el
   // espejo por fila de canEditarRegistro (D-049), que ya llega en 0 para estas filas.
-  const esReflejado = !!camposExtraValores.origen_lote_id;
+  const { reflejado: esReflejado, anulado } = estadoReflejo(camposExtraValores);
   const origenNombre = reg.origen_bitacora_nombre || "su bitácora de origen";
   const updateCampoExtra = (campo, valorRaw, tipo) => {
     let v = valorRaw;
@@ -1683,7 +1685,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
               </div>
             </>
           ) : (
-            <p className={`text-sm text-gray-700 leading-relaxed ${expandido ? "" : "line-clamp-2"}`}>
+            <p className={`text-sm leading-relaxed ${anulado ? CLASES_DETALLE_ANULADO : CLASES_DETALLE_VIVO} ${expandido ? "" : "line-clamp-2"}`}>
               {reg.detalle || <span className="text-gray-400 italic">Sin descripción</span>}
             </p>
           )}
@@ -1733,6 +1735,10 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
         </div>
 
         <div className="lg:col-span-2 flex items-center justify-end gap-2">
+          {/* D-063 (RQ-02.12): copia deshecha en su origen. Es un ESTADO de la fila, no una acción:
+              se muestra en todo modo de lectura (también con la grilla bloqueada) para que quién y
+              cuándo la anuló no se pierdan; el tachado del detalle va en la columna Descripción. */}
+          {!isEditing && anulado && <ChipAnulado anulado={anulado} />}
           {/* D-040: turno finalizado → solo lectura. Ninguna acción (editar/borrar/entrar en edición);
               la fila muestra un indicador de bloqueo y todos los datos quedan visibles en modo lectura. */}
           {bloqueado ? (
@@ -1752,12 +1758,15 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
             </>
           ) : (
             <>
-              {/* D-058 (RQ-02.5): el asiento reflejado se identifica por su ORIGEN y no ofrece
-                  edición — se corrige en Operación 24h y la corrección reescribe esta copia. Mismo
-                  patrón de chip que "Bloqueado"; el ojo de lectura sigue disponible al lado. */}
+              {/* D-058 (RQ-02.5) / D-063: el asiento reflejado se identifica por su ORIGEN y no ofrece
+                  edición — se corrige en su bitácora de origen (Operación 24h o Disponibilidad) y la
+                  corrección reescribe esta copia. Mismo patrón de chip que "Bloqueado"; el ojo de
+                  lectura sigue disponible al lado. El tooltip ramifica por `anulado` (L06): si el
+                  evento de origen ya se deshizo no hay nada que corregir allá, y prometer que "se
+                  actualiza sola" mandaba al operador a buscar un evento que ya no existe. */}
               {esReflejado && (
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 bg-gray-50"
-                  title={`Asiento generado en ${origenNombre}. Corrígelo allá y esta copia se actualiza sola.`}>
+                  title={tituloOrigen(origenNombre, anulado)}>
                   <Lock size={14} />
                   <span className="hidden sm:inline">{origenNombre}</span>
                 </span>

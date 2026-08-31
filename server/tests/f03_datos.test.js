@@ -182,25 +182,28 @@ async function seedLote({
   return lote_id;
 }
 
+// `campos_extra` arbitrario (objeto o string JSON) para sembrar cualquier shape de copia (contrato
+// C2 de D-063: MAND `{ origen_bitacora:'MAND', origen_lote_id }`, DISP `{ origen_bitacora:'DISP',
+// origen_disponibilidad_id }`). `origen_lote_id` se conserva como atajo del shape MAND.
 async function seedSala({
   bitacora = 'SALAJDT', planta = TEST_PLANTA_REFLEJO, fecha = DIA, hora, detalle,
-  origen_lote_id = null, historico = false,
+  origen_lote_id = null, campos_extra = null, historico = false,
 }) {
+  const extra = campos_extra ?? (origen_lote_id ? { origen_bitacora: 'MAND', origen_lote_id } : null);
   return insertarRegistro({
     tipo_evento_id: tipoSala[bitacora],
     planta,
     fecha_evento: instante(fecha, hora),
     detalle,
-    campos_extra: origen_lote_id
-      ? JSON.stringify({ origen_bitacora: 'MAND', origen_lote_id })
-      : null,
+    campos_extra: extra == null ? null : (typeof extra === 'string' ? extra : JSON.stringify(extra)),
     turno: 1,
     historico,
   });
 }
 
+// Devuelve el `disponibilidad_id` sembrado: es el PUNTERO que lleva la copia DISP (C2).
 async function seedDisponibilidad({ planta = TEST_PLANTA_REFLEJO, fecha = DIA, hora, estado, detalle = null }) {
-  await db.request()
+  const r = await db.request()
     .input('planta', sql.VarChar(10), planta)
     .input('estado', sql.VarChar(20), estado)
     .input('inicio', sql.DateTime2, instante(fecha, hora))
@@ -212,8 +215,10 @@ async function seedDisponibilidad({ planta = TEST_PLANTA_REFLEJO, fecha = DIA, h
     .query(`
       INSERT INTO bitacora.disponibilidad_estado
         (planta_id, estado, codigo, fecha_inicio_estado, fecha_fin_estado, detalle, creado_por)
+      OUTPUT INSERTED.disponibilidad_id
       VALUES (@planta, @estado, 0, @inicio, @fin, @detalle, @usuario)
     `);
+  return r.recordset[0].disponibilidad_id;
 }
 
 async function seedConformacion({
@@ -410,6 +415,49 @@ describe('D-058 E8 — fuentes incluidas y excluidas', () => {
     assert.equal(filas.filter((f) => /Copia reflejada/.test(f.asiento)).length, 0);
     assert.match(filas[0].asiento, /autorizando TSR a generar 80 MW/);
     assert.equal(filas[1].asiento, 'TSR — Evento propio del turno');
+  });
+
+  // D-063 L04 (CA-6): la copia DISP también es un asiento reflejado, y el libro ya lee el estado desde
+  // la tabla base `disponibilidad_estado` (fuente 2). Con la exclusión vieja por `origen_lote_id` las
+  // dos copias DISP entraban como texto literal de Sala y el estado salía TRES veces. Las copias se
+  // siembran con el shape C2 (`origen_bitacora:'DISP'` + puntero al `disponibilidad_id` real) y el
+  // estado vive en la misma planta-fixture; toda la limpieza DISP va por `limpiarFixtures` acotada
+  // por planta-fixture (D-041: tabla base, nunca la vista).
+  test('E8.8b (D-063) la copia DISP en Sala tampoco aparece: el estado sale UNA sola vez, desde la tabla base', async () => {
+    await limpiarFixtures();
+    const disponibilidad_id = await seedDisponibilidad({
+      hora: '14:20', estado: 'Mantenimiento', detalle: 'Parada programada.',
+    });
+    const copia = { origen_bitacora: 'DISP', origen_disponibilidad_id: disponibilidad_id };
+    await seedSala({ bitacora: 'SALAJDT', hora: '14:20', detalle: 'Copia DISP reflejada', campos_extra: copia });
+    await seedSala({ bitacora: 'SALAING', hora: '14:20', detalle: 'Copia DISP reflejada', campos_extra: copia });
+    await seedSala({ bitacora: 'SALAING', hora: '15:00', detalle: 'Evento propio del turno' });
+
+    const filas = filasDe(await armarMes(db, { mes: MES, ...soloFixture }), DIA, 1);
+    assert.equal(filas.length, 2, 'el estado (desde disponibilidad_estado) + el evento propio; ninguna copia');
+    assert.equal(filas.filter((f) => /Copia DISP reflejada/.test(f.asiento)).length, 0,
+      'ninguna copia DISP de Sala llega al libro');
+    assert.equal(filas[0].hora, '14:20');
+    assert.equal(filas[0].asiento, 'TSR F/L en mantenimiento programado. Parada programada.',
+      'el renglón es el del ESTADO, armado por el motor desde la tabla base');
+    assert.equal(filas[1].asiento, 'TSR — Evento propio del turno');
+  });
+
+  test('E8.8c (D-063) copias MAND y DISP conviven en Sala y ninguna se cuela: cada evento sale UNA vez', async () => {
+    await limpiarFixtures();
+    const lote_id = await seedLote({ hora: '10:00', periodos: [11], valor_mw: 80 });
+    const disponibilidad_id = await seedDisponibilidad({ hora: '10:30', estado: 'En Reserva' });
+    const copiaDisp = { origen_bitacora: 'DISP', origen_disponibilidad_id: disponibilidad_id };
+    for (const bitacora of ['SALAJDT', 'SALAING']) {
+      await seedSala({ bitacora, hora: '10:00', detalle: 'Copia MAND', origen_lote_id: lote_id });
+      await seedSala({ bitacora, hora: '10:30', detalle: 'Copia DISP', campos_extra: copiaDisp });
+    }
+
+    const filas = filasDe(await armarMes(db, { mes: MES, ...soloFixture }), DIA, 1);
+    assert.deepEqual(filas.map((f) => f.hora), ['10:00', '10:30'], 'dos originales, cero copias');
+    assert.match(filas[0].asiento, /autorizando TSR a generar 80 MW/);
+    assert.equal(filas[1].asiento, 'TSR disponible en reserva, sin generar.');
+    assert.equal(filas.filter((f) => /^TSR — Copia/.test(f.asiento)).length, 0);
   });
 
   test('E8.9 SALAOP no es una de las cuatro fuentes', async () => {

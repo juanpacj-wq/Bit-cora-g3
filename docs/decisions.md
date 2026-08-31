@@ -1469,7 +1469,9 @@ queda en fecha larga porque su estilo real (`numFmtId=164`) es fecha larga, no `
 las dos unidades —MAND (`registro_activo` ∪ `registro_historico`, agrupado por `lote_id`), DISP
 (tabla base, por `fecha_inicio_estado`), las dos bitácoras de Sala **con
 `origen_lote_id IS NULL`**— y el encabezado por `conformacion_turno` ∪ `turno_participante`. Sin esa
-exclusión un evento de MAND saldría **tres veces** en la misma hoja. Cada evento se ubica por su
+exclusión un evento de MAND saldría **tres veces** en la misma hoja. *(Enmienda [[D-063]]: esa
+exclusión hoy se hace por el **marcador** `origen_bitacora IS NULL`, no por el puntero — con
+`origen_lote_id` la copia de DISP se colaba y el estado salía dos veces.)* Cada evento se ubica por su
 **hora canónica** (MAND: `hora_llamada`, **nunca** `fecha_evento`; ausente en los migrados por
 `F32.A1` → derivada del primer periodo) y cae en el bloque **por hora de calendario**, no por
 `turno_id`: **el T2 se parte por medianoche** y cada evento aparece **exactamente una vez** en todo
@@ -1800,6 +1802,156 @@ que **todos** los caminos se acuerden de tocarla, el problema no es la puerta qu
 sino que exista una puerta. Si la pertenencia se puede **calcular** desde estados que ya existen, se
 calcula. Tres olas cerraron el mismo defecto agregándole una puerta al conjunto; la cuarta lo cerró
 borrando el conjunto.
+---
+
+## D-063 — Reflejo de Disponibilidad a las bitácoras de Sala, con copia anulada
+
+**Fecha:** 2026-08-29
+
+**Contexto:** [[D-058]] montó el motor de asientos y la copia a `SALAJDT`+`SALAING`, pero cableada
+**solo desde Operación 24h**; el reflejo de Disponibilidad quedó fuera con "ADR propio pendiente"
+(sus cuatro tipos espejo `Cambio de Disponibilidad` ya estaban sembrados con `seleccionable = 0`).
+Era la otra mitad de REQ-02 (RQ-02.10/11/12): un cambio de estado de la unidad es el hecho operativo
+más importante del turno y no dejaba rastro donde el ingeniero lo narra. DISP además trae un caso que
+MAND no tiene — **deshacer** —: allá borrar el lote borra sus copias, pero acá el evento *sí ocurrió*
+durante el turno. Y el predicado que identificaba una copia era el **puntero de MAND**
+(`campos_extra.origen_lote_id`), así que la copia de DISP, con otro puntero, habría nacido editable,
+publicable en el libro y sin chip en los cinco puntos que deciden eso. Ejecutado en **dos olas de
+lotes en chats paralelos** (7 lotes) sobre `feat/reflejo-disp-sala-2026-08`. **Sin DDL, sin migración
+(`F35.A1` queda libre) y sin tocar el contrato cross-repo** (`evento_dashboard` y
+`disponibilidad_dashboard` intactos, RN-02.a).
+
+**Decisión:**
+
+**(1) El mismo módulo y el mismo `INSERT` que MAND, con tres diferencias deliberadas.**
+`crearReflejoDisponibilidad` / `actualizarReflejoDisponibilidad` / `anularReflejoDisponibilidad`
+viven en `server/utils/reflejo-sala.js` y comparten `insertarCopias` con MAND (extraído sin cambio de
+comportamiento), con el motor de asientos como única fuente del texto. Difieren en tres cosas: **la
+planta de la copia es la del ORIGEN** (DISP es cross-planta: se opera una unidad y se declara la
+otra), **la hora narrativa es `fecha_inicio_estado`** —un instante, no un intervalo, así que ninguna
+copia cruza la medianoche— y **deshacer anula en vez de borrar**. Una copia DISP y una MAND tienen
+forma idéntica en BD: cierre de turno, conteo, grilla e histórico no las distinguen. *Descartado:* un
+módulo propio para DISP — la mecánica es literalmente la misma y dos módulos divergen el día que
+alguien toque uno.
+
+**(2) Deshacer ANULA, no borra (RQ-02.12).** La copia conserva `detalle`, puntero y `fecha_evento`, y
+gana `campos_extra.anulado = { por, nombre, cargo, en }`; sigue visible, **tachada y atenuada**, con
+un chip "Anulado" cuyo tooltip nombra quién la deshizo y cuándo en hora Bogotá. "Se declaró
+indisponible" y "se deshizo esa declaración" son **dos hechos**, no uno que reemplaza al otro: la
+bitácora de Sala cuenta el turno completo aunque la disponibilidad se corrija. **La idempotencia vive
+SOLO en el predicado SQL** (`AND JSON_VALUE(campos_extra,'$.anulado.en') IS NULL`), nunca en un `if`
+de JS: `JSON_MODIFY` en modo lax **reemplaza** una clave existente sin fallar, así que sin ese
+predicado una segunda pasada re-sellaría a otro autor. Y `JSON_QUERY(@a)`, no `@a` a secas, o el
+objeto quedaría guardado como cadena escapada. *Descartado:* borrar la copia como hace MAND — dejaba
+un hueco en la narrativa del turno. *Descartado:* agregar un renglón de corrección aparte — la
+bitácora muestra el estado actual del evento (D-058, decisión H del documento de formato).
+
+**(3) El marcador del asiento reflejado es UNIVERSAL; los punteros no deciden nada.** Una fila es
+copia si tiene `campos_extra.origen_bitacora` (el `codigo` del origen, cadena no vacía); los punteros
+—`origen_lote_id` GUID de MAND, `origen_disponibilidad_id` INT de DISP— son solo el camino de vuelta
+al origen. Los **cinco** consumidores del predicado cambian juntos y un guard estático los fija
+(`guard_marcador_reflejo.test.js`): el helper `esAsientoReflejado` de `permissions.js`, el espejo SQL
+del `puede_editar` en `GET /activos`, la exclusión del libro F03, la grilla de Sala e Históricos. El
+`403 asiento_reflejado` pasa a ser **origin-aware** (`origen_bitacora` + `origen_bitacora_nombre`
+resuelto del catálogo por `codigo`, D-052) y su mensaje nombra la bitácora real. Agregar un tercer
+origen (COMB) exige entonces solo escribir su marcador y su puntero: ningún consumidor cambia.
+*Descartado:* sumarle `origen_disponibilidad_id` a los cinco puntos — el tercer origen los volvería a
+tocar todos.
+
+**(4) Los enganches van DENTRO de la transacción del origen y sin `try/catch` propio; `copias = 0`
+nunca es error.** El reflejo no es un efecto lateral best-effort sino parte del mismo hecho (RQ-02.9):
+si falla, el estado de DISP tampoco queda. Del otro lado, cero copias es el caso **esperado** —ya
+archivadas, ya anuladas, o un estado anterior al despliegue—: la jerarquía es origen → copia y no al
+revés, y hacer depender la corrección de un estado del estado de su reflejo volvería incorregible un
+evento a las 18:01. Hereda el criterio de D-058 (5).
+
+**(5) `cerrarTurno` rescata los huérfanos SIN cota inferior — esto cambia una regla de [[D-045]].**
+Con OK explícito del usuario del 2026-08-28. El rescate exigía `fecha_evento >= inicio_nominal` del
+turno que cierra, lo que contradecía su propio propósito: un borrador huérfano (`turno_id IS NULL`)
+con fecha **anterior** a la ventana no lo alcanzaba este cierre **ni ningún otro** —el turno al que su
+fecha pertenecía ya cerró— y quedaba vivo en Sala para siempre; si además era una copia reflejada,
+**imborrable** por el 403 de (3). El caso llega solo: una copia se retro-fecha con la hora narrativa
+del evento y nace con `turno_id NULL` cuando no hay turno ABIERTO (la gavela de [[D-046]]).
+Preexistente para MAND desde D-058 (4); DISP lo volvía probable. La cota **superior** se mantiene: un
+borrador con fecha futura todavía tiene su turno por delante. El precio es de atribución —el huérfano
+viejo se archiva bajo el turno que lo encuentra, no bajo el de su fecha—, y es la única alternativa
+disponible, porque ese turno ya cerró. *Descartado:* apuntar la copia sin turno abierto al último
+turno CERRADO — no la archivaría nadie. *Descartado:* dejarlo como deuda documentada — el defecto ya
+estaba vivo en producción para MAND.
+
+**(6) Un solo reloj al anular, un solo normalizador de id, un solo vocabulario en el front.**
+`anulado.en` y `modificado_en` salen del **mismo** `Date` de Node bindeado como `@en`: eran dos
+relojes distintos (el de la app y el del motor) sellando la misma fila, y la deriva medida entre ellos
+fue de **89 ms**, así que el tooltip y la auditoría mostraban horas distintas.
+`normalizarIdDisponibilidad` es único para las tres funciones y exige la **forma** antes de coercionar
+(`/^\d+$/` + `Number.isSafeInteger`): `Number()` aceptaba `true`→1, `'1e2'`→100 y `[7]`→7, y una
+coerción rara daba `copias: 0`, que el contrato considera resultado normal. En el front, el
+vocabulario del reflejo (`parseCamposExtra`, `estadoReflejo`, `tituloOrigen`, `tituloAnulado`,
+`fechaHoraBogota`, `ChipAnulado`) vive en **`src/utils/reflejo.js`**, un módulo puro que no pertenece
+a ninguna vista, y lo importan la grilla de Sala e Históricos. *Descartado para el reloj:* un
+`DECLARE @now = SYSUTCDATETIME()` al inicio del batch — funciona, pero obliga a formatear el ISO en
+T-SQL para poder meterlo dentro del JSON; manda el reloj de la app porque es el que se serializa ahí.
+
+**(7) El texto que la copia le da al usuario ramifica por `anulado`.** Mientras el origen existe, el
+403 y el tooltip prometen la corrección ("corrígelo allá y esta copia se actualiza sola"); cuando se
+deshizo, la copia se declara **constancia del turno** y no se manda a nadie a buscar lo que ya no
+está. El 403 y el tooltip están redactados distinto a propósito (API vs UI) pero afirman el mismo
+hecho.
+
+**(8) La documentación distingue MARCADOR de PUNTERO, y DISP tiene RF propio.** Cinco documentos
+definían el asiento reflejado por el puntero de MAND —el modelado que este ADR desarmó—, así que un
+lector que los siguiera reintroducía el bug. El reflejo de DISP se especifica en **RF-077** y no como
+nota al pie de RF-074, porque agrega un concepto que MAND no tiene: la copia anulada. BIT-MODBD §7.11
+cubre los dos orígenes en una sola sección (D-058 + D-063) porque es el mismo módulo y el mismo
+`INSERT`. *Descartado:* reescribir las filas viejas del changelog — es inmutable; la retractación vive
+en las filas nuevas (BIT-MODBD **2.6**, BIT-RF **2.2**).
+
+**Consecuencias:**
+
+- `POST /api/disponibilidad/deshacer` gana `copias_anuladas: number` (informativo, **no** un control:
+  cero es válido). La vía del 403 dejó de ir a la BD por su cuenta —el rótulo del origen viaja en el
+  `check` por `LEFT JOIN borigen`—, a cambio de extender a dos sitios más la premisa "`campos_extra`
+  es JSON válido" (D-058 (g), deuda abajo).
+- **El primer cierre de turno tras desplegar archivará de golpe los huérfanos acumulados** de cada
+  unidad, por (5). Es el comportamiento correcto y conviene anticiparlo: no es una purga, es el
+  rescate poniéndose al día.
+- La fixture de reflejo `TSR` **tuvo que poder encenderse**: el módulo no pasa por `plantaCheck` pero
+  los endpoints sí, así que el camino HTTP no se puede probar con la planta apagada. Una sonda de
+  `residuos.js` y el guard de `zzz_session_leak_guard` hacen de la reapagada un invariante vigilado y
+  no una buena costumbre.
+- Suite al cierre: backend **681/681**, front **324/324**, `npm run build` verde, cero residuos en BD.
+  Tests nuevos: `reflejo_disponibilidad.test.js` (módulo), `disponibilidad_reflejo_http.test.js`
+  (camino HTTP sobre TSR), `guard_marcador_reflejo.test.js` (los cinco puntos + CRLF),
+  `grilla-asiento-anulado.test.jsx` e `historicos/historico-anulado.test.jsx` (front).
+- Lección de guards que dejó este flujo: **un stripper de comentarios demasiado ávido no produce
+  falsos positivos ruidosos sino falsos negativos mudos.** El guard cortaba `--` en cualquier posición
+  y un `for (let i = n; i--;)` escondía todo lo que viniera después en esa línea; ahora solo corta el
+  `--` a inicio de línea, que es como este repo escribe SQL. Y corregir un marcador en el código
+  obliga a **barrer `docs/` por el nombre viejo**: `architecture.md:259` quedó falso sin que ninguna
+  revisión lo señalara.
+- **Deudas documentadas, ninguna bloqueante:** (a) `origen_bitacora: ""` es la única divergencia
+  teórica helper↔SQL — no hay escritor que produzca ese shape y el cliente no puede inyectarlo;
+  (b) `JSON_VALUE` sin `ISJSON` en los predicados del reflejo y en el espejo (7 sitios ya) — candidata
+  a un `CHECK (ISJSON(campos_extra)=1)` con migración propia; (c) el `dispPeek` del `PUT` hace ambiguo
+  `registro_id` ↔ `disponibilidad_id` (preexistente D-026, latente); (d) "es copia anulada" se decide
+  de tres formas sin lector único — cabe un `esCopiaAnulada(extra)` junto a `origenDeAsientoReflejado`;
+  (e) `CLAVE_ORIGEN_REFLEJO` se exporta pero los SQL deletrean el literal — **deliberado**: el guard
+  vigila el string a propósito; (f) altitud en tests (`limpiarTurnosFixture`, `cleanReflejoTestPlanta`
+  y `stripComments` compartidos) y en `registros.js` (el `check` del PUT/DELETE duplicado); (g) la
+  `fechaHoraBogota` privada de Combustibles, con contrato de borde distinto (`null` vs `''`), sale a
+  **D-062** junto con los otros dos formateadores Bogotá.
+- *Descartado y registrado:* cablear el reflejo **dentro de `notificador.js`** en vez de en los
+  handlers. Se mantuvo la paridad con MAND (D-058) porque los `snapshots` y la `sesion` viven en el
+  handler; el precio es que un escritor DISP futuro que entre por `notificador.js` no reflejaría, y
+  por eso el guard exige un solo call site por función.
+- Cross-refs: [[D-058]] (el motor de asientos y el reflejo de MAND, que este ADR completa), [[D-045]]
+  (turno como entidad; **(5) modifica su regla de rescate**), [[D-046]] (la gavela sin turno abierto),
+  [[D-049]] (solo el autor; el 403 es restricción y no bypass), [[D-052]] (el nombre visible de una
+  bitácora vive en el seed), [[D-055]] (b) (por qué el `turno_id` de una celda MAND sí sale de su
+  periodo), [[D-026]] / [[D-041]] (DISP en tabla base con vistas de solo lectura), [[D-057]]
+  (`JSON_MODIFY` en modo lax borra la clave al setear `null`). BIT-MODBD **§7.11** (v2.6), BIT-RF
+  **RF-077** (v2.2), REQ-02 §3.4 / §8.3, REQ-06 §8.3.
+
 ---
 
 ## Apéndice — Roadmap ejecutado: F1–F22

@@ -6,7 +6,9 @@ import express from 'express';
 import sql from 'mssql';
 import { getDB } from '../db.js';
 import { sendJSON } from '../utils/http.js';
-import { hasPermisoBitacora, plantaMatch, canEditarRegistro, esAsientoReflejado } from '../middleware/permissions.js';
+import {
+  hasPermisoBitacora, plantaMatch, canEditarRegistro, esAsientoReflejado, origenDeAsientoReflejado,
+} from '../middleware/permissions.js';
 import { validateCamposExtra, computeCamposAuto } from '../utils/campos.js';
 import { periodoFromFechaBogota, turnoFromPeriodo, fechaBogotaStr } from '../utils/turno.js';
 import { resolverTurnoParaEscritura } from '../utils/turno-entidad.js';
@@ -25,6 +27,9 @@ const fechaDispBajoPiso = (fecha) =>
 import {
   snapshotJDTs, snapshotJefes, snapshotIngenieros, snapshotGerentesProduccion,
 } from '../utils/snapshots.js';
+import {
+  crearReflejoDisponibilidad, actualizarReflejoDisponibilidad,
+} from '../utils/reflejo-sala.js';
 import { broadcastConteoBitacoras } from '../utils/ws-conteo-bitacoras.js';
 import { notifyDashboard } from '../utils/notify-dashboard.js';
 import { asyncH, loadAppSession, bloquearSiTurnoFinalizado, respTurnoCerrado, respTurnoEnTransicion } from './_middleware.js';
@@ -72,6 +77,60 @@ function mapDispRowToLegacyShape(row, bitacoraId) {
   };
 }
 
+// D-058 (RQ-02.5/6) + D-063 (C4): 403 `asiento_reflejado` ORIGIN-AWARE, compartido por el PUT y el
+// DELETE genéricos. El asiento reflejado se corrige/deshace en su ORIGEN (MAND o DISP) y eso es lo
+// que hay que decirle a quien lo intenta acá: responderle "solo el autor puede editarlo" a quien ES
+// el autor sería falso y lo dejaría sin saber a dónde ir. El nombre del origen sale del catálogo
+// (D-052: el nombre visible vive SOLO en el seed; nunca un mapa hardcodeado de nombres acá) y lo
+// trae YA RESUELTO el `check` de cada handler con su `LEFT JOIN borigen`: el helper es SÍNCRONO y no
+// vuelve a la BD. La vía de RECHAZO no debería poder fallar por la BD cuando el dato ya viaja en la
+// misma fila con la que se tomó la decisión (D-063 L02, hallazgo H16 del gate O1).
+// Cuerpo con `codigo` estable (D-032) + `origen_bitacora` + `origen_bitacora_nombre`, para que el
+// front ramifique por código y rotule con el nombre vigente.
+//
+// `Object.freeze` (H15): el mapa es un catálogo CERRADO de dos acciones. Congelarlo impide que un
+// handler futuro le agregue una en caliente, y el `throw` de abajo convierte una acción desconocida
+// en un error legible del servidor en vez de un `TypeError` de destructuring — que saldría como 500
+// genérico justo en el camino donde quien escribe esperaba un 403 explicado.
+const ACCION_REFLEJO = Object.freeze({
+  editar: {
+    verbo: 'edita',
+    consejo: 'Corrígelo allá y se actualiza acá solo.',
+  },
+  eliminar: {
+    verbo: 'elimina',
+    consejo: 'Elimínalo o deshazlo allá y esta copia lo refleja.',
+  },
+});
+
+function respAsientoReflejado(res, reg, accion) {
+  const cfg = ACCION_REFLEJO[accion];
+  if (!cfg) throw new Error(`respAsientoReflejado: accion desconocida (${accion})`);
+  const { verbo, consejo } = cfg;
+  const origen = origenDeAsientoReflejado(reg);
+  const nombre = reg.origen_bitacora_nombre ?? null;
+  const rotulo = nombre ?? 'su bitácora de origen';
+  // D-063 L02 (H9 del gate O1): una copia ANULADA —la de un estado DISP que se DESHIZO (RQ-02.12)—
+  // ya no tiene origen vivo que corregir, así que el consejo normal ("corrígelo allá y se actualiza
+  // acá solo") sería una instrucción imposible: el estado que la generó fue eliminado y volver a
+  // deshacer alcanza al vigente, no a este. Lo honesto es decir por qué la copia sigue ahí: la
+  // bitácora de Sala cuenta el turno COMPLETO y la copia se conserva tachada como constancia
+  // (RQ-02.12), no como pendiente de nadie.
+  const anulado = !!parseExtra(reg.campos_extra)?.anulado;
+  return sendJSON(res, 403, {
+    error: anulado
+      ? `Este asiento quedó anulado en ${rotulo} y no se ${verbo} acá`
+      : `Este asiento se generó en ${rotulo} y no se ${verbo} acá`,
+    codigo: 'asiento_reflejado',
+    mensaje: anulado
+      ? `Este asiento quedó anulado al deshacer el evento en ${rotulo} y se conserva como `
+        + 'constancia del turno; no se edita ni se elimina.'
+      : `Este asiento se generó en ${rotulo}. ${consejo}`,
+    origen_bitacora: origen,
+    origen_bitacora_nombre: nombre,
+  });
+}
+
 const router = express.Router();
 router.use(loadAppSession);
 
@@ -91,9 +150,11 @@ router.get('/activos', asyncH(async (req, res) => {
   // D-049: `puede_editar` es el espejo por fila de canEditarRegistro (autor + misma planta +
   // puede_crear vigente del cargo de la sesión) para que la grilla pinte lápiz/basurero desde la
   // verdad del servidor. Es SOLO affordance de UI: el enforcement real sigue en PUT/DELETE.
-  // D-058 (RQ-02.5/6): se le suma la cuarta condición del helper — un asiento REFLEJADO desde
-  // Operación 24h no se edita en su destino. El helper y este espejo se cambian JUNTOS: es lo único
-  // que impide que la grilla ofrezca un lápiz que el backend va a rechazar.
+  // D-058 (RQ-02.5/6) + D-063: se le suma la cuarta condición del helper — un asiento REFLEJADO
+  // desde su bitácora de origen (MAND o DISP) no se edita en su destino. El MARCADOR es
+  // `campos_extra.origen_bitacora` (universal); `origen_lote_id`/`origen_disponibilidad_id` son
+  // punteros y NO deciden nada acá. El helper (`esAsientoReflejado`) y este espejo se cambian
+  // JUNTOS: es lo único que impide que la grilla ofrezca un lápiz que el backend va a rechazar.
   // `origen_bitacora_nombre` sale del catálogo por `codigo` (D-052: el nombre visible vive SOLO en el
   // seed, nunca hardcodeado en el front) — es lo que el chip de la fila muestra como origen.
   reqQ.input('ses_usuario', sql.Int, sesion.usuario_id);
@@ -109,7 +170,7 @@ router.get('/activos', asyncH(async (req, res) => {
            CAST(CASE WHEN r.creado_por = @ses_usuario
                       AND r.planta_id = @ses_planta
                       AND COALESCE(perm.puede_crear, 0) = 1
-                      AND JSON_VALUE(r.campos_extra, '$.origen_lote_id') IS NULL
+                      AND JSON_VALUE(r.campos_extra, '$.origen_bitacora') IS NULL
                  THEN 1 ELSE 0 END AS BIT) AS puede_editar
     FROM bitacora.registro_activo r
     INNER JOIN lov_bit.bitacora b ON b.bitacora_id = r.bitacora_id
@@ -246,6 +307,31 @@ router.post('/', asyncH(async (req, res) => {
         gerentes_produccion_snapshot,
         ingenieros_snapshot,
         creado_por: sesion.usuario_id,
+      });
+
+      // REQ-02 (RQ-02.10) — el estado se asienta en LAS DOS bitácoras de Sala (SALAJDT + SALAING)
+      // DENTRO de esta misma transacción y ANTES del commit: si el reflejo falla, el estado tampoco
+      // queda (RQ-02.9, atomicidad). Sin `try/catch` propio a propósito — tragarse el error dejaría
+      // un origen sin copias, que es exactamente la desincronización que REQ-02 elimina; el `catch`
+      // externo del handler ya hace `rollback` + `throw`.
+      //
+      // El reflejo NO publica al dashboard (RN-02.a: el contrato cross-repo se alimenta del ORIGEN)
+      // ni marca participante ni cuenta para la conformación de turno (RN-02.b). DISP está EXENTA de
+      // los gates de turno (RN-02.d), así que la copia se crea igual aunque la unidad no tenga turno
+      // ABIERTO — queda con `turno_id` NULL. La planta-fixture no refleja (RN-02.e): ese guard vive
+      // UNA sola vez, dentro de `crearReflejoDisponibilidad`, para que ningún enganche lo olvide.
+      await crearReflejoDisponibilidad(transaction, {
+        planta_id,
+        disponibilidad_id: row.disponibilidad_id,
+        evento,
+        detalle: detalle ?? null,
+        fecha_inicio_estado: fechaInicio,
+        creado_por: sesion.usuario_id,
+        // Los snapshots ya los calculó esta transacción: recalcularlos daría el mismo resultado con
+        // tres queries más, y con la guardia rotando podría dar OTRO. El mapeo de nombre es acá y no
+        // en el módulo: el ORIGEN la llama `jefes_planta_snapshot` y `registro_activo` la llama
+        // `jefes_snapshot`; pasarla sin mapear sella la copia con '[]' en silencio.
+        snapshots: { ingenieros_snapshot, jdts_snapshot, jefes_snapshot: jefes_planta_snapshot },
       });
 
       await transaction.commit();
@@ -584,6 +670,25 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
         modificado_por: sesion.usuario_id,
       });
 
+      // REQ-02 (RQ-02.11) — corregir el estado VIGENTE reescribe sus dos copias de Sala en la MISMA
+      // transacción, con el mismo criterio de atomicidad y las mismas exenciones que el alta (ver el
+      // POST): sin `try/catch` propio, sin dashboard (RN-02.a) y sin participante (RN-02.b).
+      //
+      // El texto se REGENERA con el motor, no se le agrega un renglón de corrección: la copia dice
+      // lo que el estado dice HOY, y quién la tocó vive en `modificado_por`/`modificado_en`.
+      // `copias = 0` NO es error y por eso no se mira: si el cierre de turno de Sala ya archivó las
+      // copias (o el estado es anterior a D-063, sin copias que actualizar), la corrección del
+      // ORIGEN procede igual — DISP está exenta de los gates de turno (RN-02.d) y hacerla depender
+      // del estado de su reflejo invertiría la jerarquía.
+      await actualizarReflejoDisponibilidad(transaction, {
+        planta_id: reg.planta_id,
+        disponibilidad_id: reg.disponibilidad_id,
+        evento: eventoNuevo,
+        detalle: detalleNuevo,
+        fecha_inicio_estado: fechaInicioNueva,
+        modificado_por: sesion.usuario_id,
+      });
+
       const after = await new sql.Request(transaction)
         .input('id', sql.Int, reg.disponibilidad_id)
         .query(`
@@ -610,9 +715,16 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
     .input('registro_id', sql.Int, registro_id)
     .query(`
       SELECT ra.registro_id, ra.estado, ra.bitacora_id, ra.planta_id, ra.creado_por,
-             ra.fecha_evento, ra.turno, ra.fecha_fin_estado, ra.campos_extra, b.codigo AS bitacora_codigo
+             ra.fecha_evento, ra.turno, ra.fecha_fin_estado, ra.campos_extra, b.codigo AS bitacora_codigo,
+             borigen.nombre AS origen_bitacora_nombre
       FROM bitacora.registro_activo ra
       INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+      -- D-063 L02 (H16): el rótulo de la bitácora de ORIGEN viaja con la fila que decide el 403, en
+      -- el mismo JOIN al catálogo que ya se estaba haciendo, y respAsientoReflejado deja de ir a la
+      -- BD por su cuenta en la vía de rechazo. LEFT y no INNER: la inmensa mayoría de las filas NO
+      -- son copias (sin origen_bitacora el JOIN no matchea) y eso no puede quitarlas del resultado.
+      LEFT JOIN lov_bit.bitacora borigen
+        ON borigen.codigo = JSON_VALUE(ra.campos_extra, '$.origen_bitacora')
       WHERE ra.registro_id = @registro_id
     `);
   if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
@@ -630,17 +742,10 @@ router.put('/:id(\\d+)', asyncH(async (req, res) => {
   if (reg.estado !== 'borrador') {
     return sendJSON(res, 409, { error: 'Solo se pueden editar registros en borrador' });
   }
-  // D-058 (RQ-02.5/6): el asiento reflejado se corrige en su ORIGEN. `canEditarRegistro` ya lo
-  // rechaza —es la MISMA condición, el enforcement no está partido— y acá solo se elige el `codigo`
-  // y el mensaje: responderle "solo el autor puede editarlo" a quien ES el autor sería falso y lo
-  // dejaría sin saber a dónde ir a corregirlo.
-  if (esAsientoReflejado(reg)) {
-    return sendJSON(res, 403, {
-      error: 'Este asiento se generó en Operación 24h y no se edita acá',
-      codigo: 'asiento_reflejado',
-      mensaje: 'Este asiento se generó en Operación 24h. Corrígelo allá y se actualiza acá solo.',
-    });
-  }
+  // D-058 (RQ-02.5/6) + D-063: el asiento reflejado se corrige en su ORIGEN (MAND o DISP).
+  // `canEditarRegistro` ya lo rechaza —es la MISMA condición, el enforcement no está partido— y acá
+  // solo se elige el `codigo` y el mensaje, que nombra el origen real (ver respAsientoReflejado).
+  if (esAsientoReflejado(reg)) return respAsientoReflejado(res, reg, 'editar');
   // D-049: solo el autor (con puede_crear vigente) edita. Código estable para que el front ramifique.
   if (!(await canEditarRegistro(sesion, reg))) {
     return sendJSON(res, 403, {
@@ -796,9 +901,13 @@ router.delete('/:id(\\d+)', asyncH(async (req, res) => {
     .input('registro_id', sql.Int, registro_id)
     .query(`
       SELECT ra.registro_id, ra.estado, ra.bitacora_id, ra.planta_id, ra.creado_por,
-             ra.campos_extra, b.codigo AS bitacora_codigo
+             ra.campos_extra, b.codigo AS bitacora_codigo,
+             borigen.nombre AS origen_bitacora_nombre
       FROM bitacora.registro_activo ra
       INNER JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+      -- D-063 L02 (H16): idem el PUT — el nombre del origen llega con la fila, no con una query aparte.
+      LEFT JOIN lov_bit.bitacora borigen
+        ON borigen.codigo = JSON_VALUE(ra.campos_extra, '$.origen_bitacora')
       WHERE ra.registro_id = @registro_id
     `);
   if (check.recordset.length === 0) return sendJSON(res, 404, { error: 'Registro no encontrado' });
@@ -815,17 +924,11 @@ router.delete('/:id(\\d+)', asyncH(async (req, res) => {
   if (reg.estado !== 'borrador') {
     return sendJSON(res, 409, { error: 'Solo se pueden eliminar registros en borrador' });
   }
-  // D-058 (RQ-02.5/6): el asiento reflejado se BORRA borrando su lote de origen, que cascadea a las
-  // dos copias (E5). Mismo criterio que el PUT: `canEditarRegistro` ya lo rechaza; acá solo se le
-  // pone nombre al motivo, porque el autor de la copia es el autor del origen y "solo el autor"
-  // sería una explicación falsa.
-  if (esAsientoReflejado(reg)) {
-    return sendJSON(res, 403, {
-      error: 'Este asiento se generó en Operación 24h y no se elimina acá',
-      codigo: 'asiento_reflejado',
-      mensaje: 'Este asiento se generó en Operación 24h. Elimina allá el lote y esta copia se va con él.',
-    });
-  }
+  // D-058 (RQ-02.5/6) + D-063: el asiento reflejado se BORRA (MAND: el lote cascadea a las dos
+  // copias) o se ANULA (DISP: deshacer las deja visibles y tachadas) desde su ORIGEN. Mismo criterio
+  // que el PUT: `canEditarRegistro` ya lo rechaza; acá solo se le pone nombre al motivo, porque el
+  // autor de la copia es el autor del origen y "solo el autor" sería una explicación falsa.
+  if (esAsientoReflejado(reg)) return respAsientoReflejado(res, reg, 'eliminar');
   // D-049: solo el autor (con puede_crear vigente) elimina. Código estable para que el front ramifique.
   if (!(await canEditarRegistro(sesion, reg))) {
     return sendJSON(res, 403, {
