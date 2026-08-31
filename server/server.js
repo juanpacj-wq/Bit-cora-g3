@@ -12,6 +12,10 @@ import { startTurnoSweeper, stopTurnoSweeper } from './utils/turno-sweeper.js';
 // F16: sweeper diario MAND.
 import { startMandSweeper, stopMandSweeper } from './utils/mand-sweeper.js';
 import { startSisSweeper, stopSisSweeper } from './utils/sis/sis-sweeper.js';
+// D-064: barrido c/5 min que asienta la llegada del despacho económico del día siguiente.
+import {
+  startDespachoXMSweeper, stopDespachoXMSweeper, sweeperHabilitado as despachoXMHabilitado,
+} from './utils/despacho-xm/sweeper.js';
 import { buildAuthApp, setBroadcastUsuariosActivos } from './auth/app.js';
 
 const PORT = parseInt(process.env.SERVER_PORT || '3002', 10);
@@ -41,6 +45,12 @@ initDB()
     startMandSweeper(db);
     if (SIS_SWEEPER_ENABLED) startSisSweeper(db);
     else console.log('[SIS] sweeper DESHABILITADO (SIS_SWEEPER_ENABLED=0)');
+    // D-064: la decisión vive en el módulo (función pura, testeable). Es el único sweeper que
+    // escribe FILAS en las bitácoras de Sala de plantas reales, así que en un backend de test viene
+    // apagado por defecto; el motivo se anuncia siempre.
+    const despachoXM = despachoXMHabilitado();
+    if (despachoXM.habilitado) startDespachoXMSweeper(db);
+    else console.log(`[despacho-xm] sweeper DESHABILITADO (${despachoXM.motivo})`);
     server.listen(PORT, () => {
       console.log(`[SERVER] Escuchando en puerto ${PORT}`);
     });
@@ -55,6 +65,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
     stopTurnoSweeper();
     stopMandSweeper();
     stopSisSweeper();
+    stopDespachoXMSweeper();
     process.exit(0);
   });
 }
