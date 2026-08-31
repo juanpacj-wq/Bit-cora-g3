@@ -417,4 +417,4 @@ léxicamente junto al statement; y el Contrato 4 del umbrella ya está escrito.
 
 ## 9. Commit del gate
 
-`gate(D-064): O1 cerrada — 3 lotes, 700/700 backend con stub, 324/324 front, 236/236 dashboard, 0 violaciones`
+`415b6e8` `gate(D-064): O1 cerrada — 3 lotes, 700/700 backend, 324/324 front, 236/236 dashboard, 0 violaciones`
