@@ -1952,6 +1952,26 @@ en las filas nuevas (BIT-MODBD **2.6**, BIT-RF **2.2**).
   (`JSON_MODIFY` en modo lax borra la clave al setear `null`). BIT-MODBD **§7.11** (v2.6), BIT-RF
   **RF-077** (v2.2), REQ-02 §3.4 / §8.3, REQ-06 §8.3.
 
+## D-064 — Asiento automático de la llegada del despacho del día siguiente (EN CURSO, ver `prompts/D-064-asiento-despacho-xm/`)
+
+> **Stub de reserva.** Número consumido el 2026-08-31 al cerrar la fase de planificación. El ADR
+> completo lo escribe `/cerrar-implementacion D-064`, armado desde los cierres de lote y los dos
+> gates. Fuente: `docs/requerimientos/REQ-05-asiento-cambio-despacho.md` (🟢, sin preguntas
+> abiertas). Decisiones congeladas en `prompts/D-064-asiento-despacho-xm/PREGUNTAS-D-064.md`.
+
+**En una frase:** cuando XM publica el despacho económico del día siguiente, el dashboard persiste
+el hecho en su propio esquema y Bitácora lo lee para dejar un asiento automático —autor `SISTEMA`—
+en las bitácoras de Sala del JdT y del Ing. de Operación, y por lo tanto en el libro GENE-F03.
+
+**Reservas consumidas:** `F36.A1` (seed del `tipo_evento` `'Despacho económico'`), convención
+**37** de `CLAUDE.md`, `BIT-MODBD` **v2.7**, `BIT-RF` **v2.3** / **RF-078**.
+
+**Ramas:** `feat/asiento-despacho-xm-2026-08` en los dos repos — `Bit-cora-g3` desde
+`feat/integrar-asientos-D-059` (`5cc84a2`), `dashboard-gen-gec3` desde `main` (`d8f8f5e`). Es el
+primer flujo del workspace que reparte lotes entre los **dos** repos y el umbrella.
+
+---
+
 ---
 
 ## Apéndice — Roadmap ejecutado: F1–F22
