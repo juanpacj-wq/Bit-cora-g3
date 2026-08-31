@@ -4,7 +4,7 @@
 |---|---|
 | **Código** | REQ-05 |
 | **Título** | Asentar en las bitácoras de Sala y en el libro GENE-F03 la llegada del despacho económico del día siguiente publicado por XM |
-| **Estado** | 🟢 **Listo para planificar** — desbloqueado el 2026-08-31 con la plantilla y el alcance definitivos |
+| **Estado** | 🟢 **Listo para planificar** — desbloqueado el 2026-08-31; plantilla, alcance y las dos preguntas de §8 cerradas por el autor. **Sin preguntas abiertas.** |
 | **Origen** | `pendientes_Ernesto.md`: *"cuando cambia despacho (redesp<>desp por correo o registro) crear histórico en op24hr con el formato en la imagen"* — **reformulado por el autor el 2026-08-31** (ver §1.1) |
 | **Depende de** | [REQ-02](./REQ-02-reflejo-bitacoras-sala.md) ✅ (D-058 + D-063), [REQ-04](./REQ-04-historico-en-apartado.md) ✅, [REQ-06](./REQ-06-excel-eventos-operacion.md) ✅ (D-058) |
 | **Cross-repo** | ⚠️ Requiere un cambio pequeño en `dashboard-gen-gec3` y una entrada nueva en `docs/interfaces-cross-repo.md`. **La comunicación es por la BD compartida, no por HTTP** (§5.1). |
@@ -107,6 +107,11 @@ Este requerimiento nació de una nota que mezclaba dos cosas. El autor las separ
   la hora real de esos días no existe como dato y nunca se guardó (§5.2). Esos asientos quedan
   **marcados como hora estimada** para que nadie los lea como una medición.
 - **RQ-05.15** — El relleno es **idempotente** y no pisa un asiento que ya tenga hora real.
+- **RQ-05.16** — **Bitácora lee cada 5 minutos**, la misma cadencia con la que el scraper del
+  dashboard reintenta contra XM (`RETRY_MS`). No tiene sentido leer más seguido que lo que tarda
+  el hecho en aparecer. En el peor caso el asiento se ve ~10 minutos después de que XM publicó
+  (hasta 5 en detectarlo, hasta 5 en leerlo), pero **eso no distorsiona la hora registrada**: el
+  asiento lleva el instante de detección (RQ-05.6), no el de lectura.
 
 ## 4. Reglas de negocio y casos borde
 
@@ -125,7 +130,13 @@ Este requerimiento nació de una nota que mezclaba dos cosas. El autor las separ
   (`SYSDATETIME()` da 08:56 mientras `SYSUTCDATETIME()` da 13:56), y el esquema `dashboard` usa
   `GETDATE()`. Bitácora guarda UTC (D-020). La conversión se hace **una sola vez y explícitamente**
   al leer el hecho; no se asume que las dos columnas hablen el mismo idioma.
-- **RN-05.g** — El asiento pertenece al día en que **se recibió**, no al día del despacho que
+- **RN-05.g** — **Nadie edita ni borra el asiento automático desde la interfaz.** Es un hecho del
+  sistema, no una captura de nadie: su autor es `SISTEMA` y en las bitácoras de Sala la edición
+  está limitada al autor (D-049), así que la restricción **sale sola de las reglas que ya existen**
+  y no hay que programar nada para conseguirla. **No se abre una excepción por `puede_crear`**
+  como la que MAND tiene desde D-057. Corregir un asiento errado es una intervención deliberada
+  por script, con constancia — no una acción de pantalla.
+- **RN-05.h** — El asiento pertenece al día en que **se recibió**, no al día del despacho que
   anuncia: el renglón `14:41 … para el 14-07-2026` vive en la hoja del **13**.
 
 ## 5. Impacto técnico
@@ -212,7 +223,10 @@ todavía, el lector no encuentra nada y no pasa nada (RN-05.c).
    celdas siguen vacías.
 10. **Dado** el asiento, **cuando** consulto lo publicado al dashboard, **entonces** no se republicó
     nada por su causa.
-11. **Dado** `docs/interfaces-cross-repo.md`, **entonces** describe correctamente el shape real de
+11. **Dado** un asiento automático, **cuando** un JdT o un Ing. de Operación lo mira en su
+    bitácora de Sala, **entonces** no tiene lápiz ni basurero, y un `PUT`/`DELETE` directo contra
+    la API tampoco lo deja tocar.
+12. **Dado** `docs/interfaces-cross-repo.md`, **entonces** describe correctamente el shape real de
     `GET /api/eventos-dashboard` y el contrato nuevo por BD compartida.
 
 ## 7. Fuera de alcance
@@ -240,17 +254,14 @@ Las cuatro decisiones que bloqueaban este documento las cerró el autor:
   reintento (RQ-05.6).
 - **Relleno del mes**: sí, con hora fija `15:00` marcada como estimada (RQ-05.14).
 
-### 8.2 🟡 Quién puede corregir un asiento automático
+### 8.2 ✅ RESUELTA (2026-08-31) — nadie corrige un asiento automático
 
-El autor del asiento es `SISTEMA`, y en las bitácoras de Sala la edición está limitada **al autor**
-(D-049). Con eso, un asiento automático errado **no lo puede corregir ni borrar nadie** desde la
-interfaz.
+**Se acepta tal cual: es un evento del sistema.** Su autor es `SISTEMA` y D-049 limita la edición al
+autor, así que nadie lo toca desde la interfaz y **no hay que programar nada** para lograrlo — la
+restricción ya sale de las reglas vigentes. No se abre la excepción por `puede_crear` que MAND tiene
+desde D-057. Ver RN-05.g.
 
-Hay que decidir si se acepta así —el asiento es un hecho del sistema y no se toca—, o si el gate
-`puede_crear` de esa bitácora habilita corregirlo, como pasa con MAND desde D-057.
+### 8.3 ✅ RESUELTA (2026-08-31) — Bitácora lee cada 5 minutos
 
-### 8.3 🟡 Cada cuánto lee Bitácora
-
-El hecho queda en la base, así que el lector puede ser un barrido periódico (patrón `mand-sweeper`)
-o correr al arrancar más una vez por hora. Falta fijar la cadencia: define cuánto puede tardar el
-asiento en aparecer después de que XM publica.
+**La misma cadencia con la que el dashboard nota el despacho** (`RETRY_MS`, 5 minutos). Leer más
+seguido no adelantaría nada, porque el hecho no existe antes. Ver RQ-05.16.
