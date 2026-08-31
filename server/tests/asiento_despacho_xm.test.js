@@ -6,6 +6,7 @@
 // inválida LANZA en vez de producir un renglón con la fecha equivocada.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   ORIGEN_DESPACHO_XM,
   BITACORAS_ASIENTO_SISTEMA,
@@ -204,4 +205,56 @@ test('las constantes del contrato C2 son las que importan L03, L04 y L05', () =>
   assert.equal(TIPO_EVENTO_DESPACHO_XM, 'Despacho económico');
   // El marcador no puede colisionar con el del reflejo (D-063), que es un valor de `codigo`.
   assert.equal(BITACORAS_ASIENTO_SISTEMA.includes(ORIGEN_DESPACHO_XM), false);
+  // Congelado: es un array exportado y un `.push()` de un consumidor lo contaminaría para todo el
+  // proceso. `Object.freeze` es superficial, pero acá el contenido son strings.
+  assert.equal(Object.isFrozen(BITACORAS_ASIENTO_SISTEMA), true, 'la constante tiene que ser inmutable');
 });
+
+// GATE-O1 (R7): el par de bitácoras está escrito DOS veces —acá y en `reflejo-sala.js`—, a
+// propósito: este módulo es puro y no importa de nadie. Pero una duplicación sin guard es drift
+// silencioso (la lección del espejo de nombres de D-052, que sí tiene su test). El día que entre una
+// tercera bitácora de Sala, o que SALAOP pase a recibir copias, este test falla y obliga a mirar las
+// dos listas en vez de dejar una vieja viva.
+test('el par de bitácoras es el mismo que el del reflejo (D-063): las dos listas no pueden divergir', async () => {
+  const { BITACORAS_REFLEJO } = await import('../utils/reflejo-sala.js');
+  assert.deepEqual(
+    [...BITACORAS_ASIENTO_SISTEMA].sort(),
+    [...BITACORAS_REFLEJO].sort(),
+    'BITACORAS_ASIENTO_SISTEMA y BITACORAS_REFLEJO se separaron: decide si es a propósito y actualiza las dos',
+  );
+});
+
+// GATE-O1 (R5): el escritor y el lector comparten normalizador. Sin esto, `Boolean('false')` daba
+// `true` al escribir y `esHoraEstimada` decía `false` al leer: la misma fila marcada de dos maneras.
+test('escribir y leer el flag no pueden divergir: un `false` en texto es false en las dos puntas', () => {
+  for (const negativo of ['false', 'FALSE', ' false ', '0', '']) {
+    const extra = camposExtraDespacho({ fecha_despacho: '2026-07-14', hora_estimada: negativo });
+    assert.equal(extra.hora_estimada, false, `un ${JSON.stringify(negativo)} no marca la hora como estimada`);
+    assert.equal(esHoraEstimada(extra), false);
+  }
+  for (const positivo of [true, 1, 'true', 'TRUE', '1']) {
+    const extra = camposExtraDespacho({ fecha_despacho: '2026-07-14', hora_estimada: positivo });
+    assert.equal(extra.hora_estimada, true, `un ${JSON.stringify(positivo)} sí la marca`);
+    assert.equal(esHoraEstimada(extra), true);
+  }
+});
+
+// GATE-O1 (R6): un solo productor del string de contrato. Si `camposExtraDespacho` volviera a
+// armarlo inline, el día que la clave cambie de forma se buscaría con una y se escribiría otra.
+test('la clave del campos_extra la produce claveAsientoDespacho, no un literal repetido', () => {
+  const fuente = io_leer();
+  assert.match(
+    fuente,
+    /clave_asiento:\s*claveAsientoDespacho\(/,
+    'camposExtraDespacho tiene que llamar a claveAsientoDespacho, no repetir el template de la clave',
+  );
+  for (const fecha of ['2026-01-05', '2026-07-14', '2026-12-31']) {
+    assert.equal(camposExtraDespacho({ fecha_despacho: fecha }).clave_asiento, claveAsientoDespacho(fecha));
+  }
+});
+
+// Lee el fuente del módulo para los guards estáticos de arriba. Va acá abajo y no arriba para no
+// meterle ruido de I/O al cuerpo de los tests puros: se llama una sola vez.
+function io_leer() {
+  return readFileSync(new URL('../utils/asientos/sistema.js', import.meta.url), 'utf8');
+}

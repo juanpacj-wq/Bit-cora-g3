@@ -51,6 +51,10 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
 - **GATE-O1 — una fila de sistema sin `clave_asiento` NO se colapsa** y ningún constraint lo impide:
   saldría cuatro veces en el libro sin que nada falle. La coherencia la sostiene
   `camposExtraDespacho`, no la BD (H5).
+- **GATE-O1 — escribir y leer un flag son la misma tabla o no son nada.** El escritor coaccionaba
+  `hora_estimada` con `Boolean` y el lector tenía su propia lista de afirmativos: un `'false'` de un
+  `JSON_VALUE` (que devuelve nvarchar) se escribía `true` y se leía `false`. Ahora los dos pasan por
+  `normalizarHoraEstimada`, con test que fija las dos puntas (R5).
 - **GATE-O1 — el colapso del libro tenía tres huecos que borraban un renglón sin error**, los tres
   encontrados por el `/code-review` y arreglados en el gate (D4): cruzaba días (la ventana de
   `armarMes` abre ±1 día y el recorte va después del dedupe), mezclaba el espacio de nombres de la
@@ -99,8 +103,8 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   script `test` los dos archivos nuevos (`asiento_despacho_xm`, `f03_despacho_xm`), 59 en total, con
   `zzz_session_leak_guard` último. **CA-2 y CA-3 confirmados `cumple`**; CA-1/4/7/8/12 quedan
   `parcial` por diseño del reparto (nadie escribe filas hasta L04). El `/code-review` (nivel high)
-  devolvió **14 hallazgos**, verificados uno por uno: **4 arreglados acá** (los tres del colapso en
-  `f03-datos.js` + el separador del ADR, D4, re-verificados con 56/56 y 98/98), **5 propuestos para
-  un lote `L06`** (D5, pendiente del usuario), 3 como deuda, 2 pasados a enmienda de la O2 y 2
-  rechazados con razón. Cinco decisiones (D1-D5) y siete hallazgos consolidados, ninguno bloqueante.
-  **O2 pendiente del visto bueno del usuario.**
+  devolvió **14 hallazgos**, verificados uno por uno: **9 arreglados en el gate** —los tres del
+  colapso en `f03-datos.js` y el separador del ADR (D4, re-verificados con 56/56 y 98/98), más las
+  cinco correcciones de `sistema.js` y de los tests (D5, 59/59)—, 3 como deuda documentada, 2
+  pasados a enmienda de la O2 y 2 rechazados con razón. Cinco decisiones (D1-D5) y siete hallazgos
+  consolidados, ninguno bloqueante. **O2 abierta con el visto bueno del usuario (L04 y L05).**

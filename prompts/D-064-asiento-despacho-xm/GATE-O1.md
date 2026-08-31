@@ -268,7 +268,7 @@ desde el principio —la O1 son las tres raíces del grafo y nadie escribe filas
   `tests 98 · pass 98 · fail 0`. Residuos: cero. También se corrigió el `---` duplicado de
   `docs/decisions.md` (R4).
 
-### D5 — Cinco correcciones menores: ¿lote L06 o gate? — **PENDIENTE DEL USUARIO**
+### D5 — Cinco correcciones menores, aplicadas en el gate
 
 - **Qué lo provoca:** los hallazgos **R5, R6, R7** (en `utils/asientos/sistema.js`, territorio de
   L02) y **R8, R9** (en `tests/f03_despacho_xm.test.js`, territorio de L03). Los cinco están
@@ -284,14 +284,41 @@ desde el principio —la O1 son las tres raíces del grafo y nadie escribe filas
     ("nunca lo edites a mano") y crear un chat entero para cuatro arreglos de pocas líneas es caro.
   - c) Dejarlos como deuda del cierre.
   **Recomendada: b**, por el costo/beneficio y porque la herramienta no soporta (a) sin editar el
-  JSON a mano; (a) es la ortodoxa y es enteramente razonable si prefieres trazabilidad por lote.
-- **Decidido:** _pendiente del visto bueno_.
-- **Qué se arreglaría, en cualquiera de las dos formas:** (R5) normalizar `hora_estimada` con la
-  misma tabla de negaciones que usa `esHoraEstimada`, para que un `'false'` de un `JSON_VALUE` no
-  marque como estimada una hora medida; (R6) `clave_asiento: claveAsientoDespacho(fecha)`, un solo
-  productor del string de contrato; (R7) congelar los arrays exportados y fijar con un test el espejo
-  contra `BITACORAS_REFLEJO`; (R8) `try/finally` que restaure el `seleccionable` pase lo que pase;
-  (R9) derivar el último día del mes con `diasDelMes` y extender la limpieza a la holgura ±1.
+  JSON a mano; (a) es la ortodoxa y sería lo correcto si algún chat vivo tocara esos archivos.
+- **Decidido: b** — el usuario, 2026-08-31. La O2 queda con **dos** lotes; `PLAN-OLAS.md` y
+  `LOTES.json` no cambian de forma.
+- **Qué se arregló:**
+  1. **(R5) Un solo normalizador del flag.** `normalizarHoraEstimada` es ahora la única tabla de
+     verdad y la usan **las dos puntas**: `camposExtraDespacho` al escribir y `esHoraEstimada` al
+     leer. Antes el escritor coaccionaba con `Boolean` —así que un `'false'` de un `JSON_VALUE`
+     (nvarchar) se escribía `true`— y el lector lo leía `false`: la misma fila marcada de dos
+     maneras. Mientras sea la misma función, no pueden divergir.
+  2. **(R6) Un solo productor de la clave.** `camposExtraDespacho` llama a `claveAsientoDespacho(fecha)`
+     en vez de repetir el template. Es el string con el que se busca antes de escribir y con el que
+     el libro colapsa; dos productores es exactamente el fallo que la propia función documenta.
+     Hay guard estático sobre el fuente, no solo el `assert` de igualdad.
+  3. **(R7) Constantes congeladas y espejo fijado.** `BITACORAS_ASIENTO_SISTEMA` va con
+     `Object.freeze` (era un array exportado: cualquier `.push()` lo contaminaba para todo el
+     proceso) y un test nuevo lo compara contra `BITACORAS_REFLEJO`. La duplicación sigue siendo
+     deliberada —el módulo es puro—, pero ahora una tercera bitácora de Sala rompe el test en vez de
+     dejar una lista vieja viva, que es la lección del espejo de nombres de D-052.
+  4. **(R8) `try/finally` alrededor del DML sobre el catálogo real.** El test sube `seleccionable = 1`
+     sobre `lov_bit.tipo_evento` —catálogo de producción, no fixture— y confiaba en que el `initDB()`
+     siguiente lo revirtiera. Ahora la reversión corre pase lo que pase (con `.catch(() => {})`, para
+     que el `finally` no tape el error real del test): ni un timeout de BD, ni un assert que falle,
+     ni un Ctrl+C dejan el tipo tecleable esperando el próximo arranque del backend.
+  5. **(R9) La ventana de limpieza se deriva y cubre la holgura.** `${MES}-31` solo era válido porque
+     marzo tiene 31 días; ahora el último día sale de `Date.UTC(y, m, 0)` y la ventana se abre ±1 día,
+     que es **exactamente** la que consulta `armarMes` (`2026-02-28` … `2026-04-01`, verificado). Un
+     residuo en los días de borde ya no puede entrar al lazo de `eventosSala` y volver intermitente el
+     test del colapso.
+- **Verificación (el gate la corrió, bajo test-lock, con efímero en 3199):**
+  `tests/asiento_despacho_xm.test.js` + `tests/guard_no_prod_historico_destruction.test.js` +
+  `tests/guard_marcador_reflejo.test.js` + `tests/f03_despacho_xm.test.js` + `tests/f03_datos.test.js`
+  → `tests 59 · pass 59 · fail 0`, con los tres casos nuevos en verde (espejo de bitácoras, no-
+  divergencia del flag, guard de la clave). Los dos guards estáticos siguen contentos con el DML
+  reescrito. Residuos: cero. Y `seleccionable` quedó en `0` en las dos bitácoras al terminar la
+  corrida (consultado directo a la BD).
 
 ## 6. Hechos que cambian lo que dicen los documentos anteriores
 
@@ -384,11 +411,11 @@ pasan a enmienda de la O2 y dos se rechazan con razón.
 | R2 | `f03-datos.js` | **`vistos.add` iba antes del guard `if (asiento)`**: una sola fila del asiento con `detalle` vacío reservaba la clave y **suprimía a las otras tres**, sin log. | ✔ (el `add` estaba 21 líneas antes del `if`) | **Arreglado en el gate** (D4) |
 | R3 | `f03-datos.js` | **El `Set` mezclaba dos espacios de nombres** (`id\|<n>` y la clave de agrupación, que es genérica): una `clave_asiento` con forma `id\|4722` se tragaba el registro tecleado 4722. | ✔ | **Arreglado en el gate** (D4) |
 | R4 | `docs/decisions.md` | Dos `---` seguidos antes del apéndice, en el stub del ADR. | ✔ (líneas 1973-1975) | **Arreglado en el gate** (D4) |
-| R5 | `sistema.js` | **`Boolean(hora_estimada)` convierte `'false'` y `'0'` en `true`**, contradiciendo a `esHoraEstimada` del mismo módulo, que los mapea a `false`. Marca una hora **medida** como inventada. | ✔ (la coacción está en el escritor; la tabla de negaciones solo en el lector) | **L06** (D5) |
-| R6 | `sistema.js` | **`camposExtraDespacho` re-implementa la clave inline** en vez de llamar a `claveAsientoDespacho`: dos productores del mismo string de contrato, y el modo de fallo es el que la propia función documenta (buscar con una clave y escribir otra). | ✔ | **L06** (D5) |
-| R7 | `sistema.js` | `BITACORAS_ASIENTO_SISTEMA` **duplica** `BITACORAS_REFLEJO` sin ningún guard que ate las dos listas (D-052 sí tiene uno para el espejo de nombres), y los arrays exportados no están congelados. | ✔ | **L06** (D5) |
-| R8 | `tests/f03_despacho_xm.test.js` | El test **sube `seleccionable = 1` sobre la fila real del catálogo** y depende de que el `initDB()` siguiente lo revierta, **sin `try/finally`**: si el test falla, la BD se cae o se interrumpe la corrida, el tipo queda tecleable hasta el próximo arranque. Y ningún guard cubre DML sobre `lov_bit.tipo_evento`. | ✔ | **L06** (D5) |
-| R9 | `tests/f03_despacho_xm.test.js` | `limpiarFixtures()` **hardcodea `'2026-03-31'`** (solo válido porque marzo tiene 31 días) y **no cubre la holgura ±1** que `armarMes` sí consulta. | ✔ | **L06** (D5) |
+| R5 | `sistema.js` | **`Boolean(hora_estimada)` convierte `'false'` y `'0'` en `true`**, contradiciendo a `esHoraEstimada` del mismo módulo, que los mapea a `false`. Marca una hora **medida** como inventada. | ✔ (la coacción está en el escritor; la tabla de negaciones solo en el lector) | **Arreglado en el gate** (D5) |
+| R6 | `sistema.js` | **`camposExtraDespacho` re-implementa la clave inline** en vez de llamar a `claveAsientoDespacho`: dos productores del mismo string de contrato, y el modo de fallo es el que la propia función documenta (buscar con una clave y escribir otra). | ✔ | **Arreglado en el gate** (D5) |
+| R7 | `sistema.js` | `BITACORAS_ASIENTO_SISTEMA` **duplica** `BITACORAS_REFLEJO` sin ningún guard que ate las dos listas (D-052 sí tiene uno para el espejo de nombres), y los arrays exportados no están congelados. | ✔ | **Arreglado en el gate** (D5) |
+| R8 | `tests/f03_despacho_xm.test.js` | El test **sube `seleccionable = 1` sobre la fila real del catálogo** y depende de que el `initDB()` siguiente lo revierta, **sin `try/finally`**: si el test falla, la BD se cae o se interrumpe la corrida, el tipo queda tecleable hasta el próximo arranque. Y ningún guard cubre DML sobre `lov_bit.tipo_evento`. | ✔ | **Arreglado en el gate** (D5) |
+| R9 | `tests/f03_despacho_xm.test.js` | `limpiarFixtures()` **hardcodea `'2026-03-31'`** (solo válido porque marzo tiene 31 días) y **no cubre la holgura ±1** que `armarMes` sí consulta. | ✔ | **Arreglado en el gate** (D5) |
 | R10 | `f03-datos.js` (SQL) | El filtro `JSON_VALUE(...'$.origen_bitacora')` **lanza 13609** con un `campos_extra` malformado y tumba el libro del mes; `eventosMand` **tiene el mismo hueco**. | ✔ | **Deuda** — es H4, decisión **D3**. El review confirma el diagnóstico y **amplía el alcance a `eventosMand`**. |
 | R11 | `f03-datos.js` | **La rama literal se activa para CUALQUIER `origen_sistema`**, no solo `DESPACHO_XM`: un segundo origen de sistema **por unidad** perdería el prefijo `GEC3 — ` sin que nadie lo decida. "No lleva prefijo" es una propiedad del TEXTO, no de "viene del sistema". | ✔ (el predicado es genérico a propósito) | **Deuda / ADR.** Hoy no hay segundo origen. El día que lo haya, el dato tiene que viajar en la fila (p. ej. `sin_prefijo_unidad`), no inferirse del marcador. |
 | R12 | `f03-datos.js` | **Falta el guard de coherencia de las 4 filas**, equivalente al `verificarCoherenciaDeLotes()` que D-056 (c) tiene para MAND: si las cuatro no coinciden en `detalle`/`fecha_evento`, el libro imprime las de la fila de menor id y descarta las otras sin avisar. | ✔ | **Enmienda a L04** (hecho 13 de §6): el guard va en `tests/despacho_xm.test.js`, que es su territorio. |

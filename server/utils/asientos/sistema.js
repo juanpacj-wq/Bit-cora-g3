@@ -32,7 +32,11 @@ export const ORIGEN_DESPACHO_XM = 'DESPACHO_XM';
 // Las dos bitácoras de Sala que reciben el asiento. Mismo par que `BITACORAS_REFLEJO`
 // (`utils/reflejo-sala.js`), repetido a propósito: este módulo es puro y no importa de nadie, y
 // el par es un dato del dominio, no una dependencia.
-export const BITACORAS_ASIENTO_SISTEMA = ['SALAJDT', 'SALAING'];
+// Congelado: es un array exportado y un `.push()` de cualquier consumidor lo contaminaría para
+// todo el proceso. El espejo contra `BITACORAS_REFLEJO` (`utils/reflejo-sala.js`) lo fija un test
+// —igual que D-052 hace con el espejo de nombres de bitácora—, porque acá la duplicación es
+// deliberada (este módulo es puro y no importa de nadie) y sin guard sería drift silencioso.
+export const BITACORAS_ASIENTO_SISTEMA = Object.freeze(['SALAJDT', 'SALAING']);
 
 // El nombre del tipo de evento que siembra la migración F36.A1 (contrato C6). El escritor resuelve
 // su `tipo_evento_id` por `(bitacora_id, nombre)`, NUNCA por un id fijo.
@@ -114,19 +118,37 @@ export function claveAsientoDespacho(fecha_despacho) {
  * donde una clave ausente que alguien leyó como `null` costó caro. Rigor de escritura; la
  * robustez de lectura (ausente → `false`) la ponen los predicados de abajo.
  *
- * Se coacciona con `Boolean` en vez de comparar contra `true` a propósito: si el llamador trae un
- * `1` de una columna BIT, marcar de más es inocuo (el renglón dice "hora estimada" y nadie lo lee
- * como medición), mientras que marcar de menos vende una hora inventada como si fuera medida.
+ * El flag pasa por `normalizarHoraEstimada`, **el mismo** que usa `esHoraEstimada` al leer: si el
+ * escritor coaccionara con `Boolean` y el lector tuviera su propia tabla, un `'false'` llegado de un
+ * `JSON_VALUE` (que devuelve nvarchar) se escribiría como `true` y se leería como `false`. Marcar de
+ * más una hora MEDIDA como inventada es tan malo como lo contrario: el renglón del libro diría que
+ * la hora no es de fiar cuando sí lo es.
  */
 export function camposExtraDespacho({ fecha_despacho, hora_estimada = false } = {}) {
   const [anio, mes, dia] = partesDeFecha(fecha_despacho, 'camposExtraDespacho');
   const fecha = `${anio}-${mes}-${dia}`;
   return {
     origen_sistema: ORIGEN_DESPACHO_XM,
-    clave_asiento: `${ORIGEN_DESPACHO_XM}|${fecha}`,
+    // La clave la produce `claveAsientoDespacho`, no un literal repetido acá: es EL string con el
+    // que se busca antes de escribir (idempotencia, RQ-05.13) y con el que el libro colapsa las
+    // cuatro filas (C5). Dos productores del mismo string es la receta exacta del fallo que esta
+    // función documenta —buscar con una clave y escribir otra— el día que la clave cambie de forma.
+    clave_asiento: claveAsientoDespacho(fecha),
     fecha_despacho: fecha,
-    hora_estimada: Boolean(hora_estimada),
+    hora_estimada: normalizarHoraEstimada(hora_estimada),
   };
+}
+
+// La ÚNICA tabla de verdad del flag, compartida por el escritor y el lector (ver
+// `camposExtraDespacho` y `esHoraEstimada`). Acepta lo que puede llegar de una columna BIT o de un
+// `JSON_VALUE` —que devuelve nvarchar—, y trata las negaciones explícitas como lo que son:
+// `'false'` y `'0'` son `false`, no `true` como daría un `Boolean` desnudo.
+function normalizarHoraEstimada(v) {
+  if (typeof v === 'string') {
+    const t = v.trim().toLowerCase();
+    return t === 'true' || t === '1';
+  }
+  return v === true || v === 1;
 }
 
 // Acepta el objeto ya parseado o el string crudo de la columna `campos_extra`. Un JSON inválido
@@ -179,14 +201,11 @@ export function claveDeAgrupacion(campos_extra) {
  * medición? Ausente → `false`.
  *
  * Tolera el `'true'`/`'1'` en texto porque el valor puede llegar de un `JSON_VALUE`, que devuelve
- * nvarchar — y ahí `Boolean('false')` daría `true`. Acá, al revés que al escribir, se lee lo que
- * la fila dice y nada más: solo los valores afirmativos conocidos.
+ * nvarchar — y ahí `Boolean('false')` daría `true`. Usa `normalizarHoraEstimada`, **el mismo** que
+ * aplica el escritor: mientras sean la misma función, escribir y leer no pueden divergir.
  */
 export function esHoraEstimada(campos_extra) {
   const obj = comoObjeto(campos_extra);
   if (!obj) return false;
-  const v = obj.hora_estimada;
-  if (v === true || v === 1) return true;
-  if (typeof v === 'string') return v.trim().toLowerCase() === 'true' || v.trim() === '1';
-  return false;
+  return normalizarHoraEstimada(obj.hora_estimada);
 }

@@ -147,6 +147,21 @@ async function seedSalaTecleado({ bitacora = 'SALAJDT', planta = TEST_PLANTA, ho
   });
 }
 
+// La ventana de limpieza se DERIVA del mes y se abre un día a cada lado (GATE-O1, R9). Dos razones:
+//   - `${MES}-31` solo era una fecha válida porque marzo tiene 31 días; con un mes de 30, o con
+//     febrero, el `sql.Date` recibía un día inexistente y la limpieza podía no borrar nada, dejando
+//     fixtures vivos que arrastran a los tests siguientes.
+//   - `armarMes` consulta de `mes-01 menos 1 día` a `último día más 1` (la holgura que le permite
+//     ubicar por hora canónica un evento del borde), así que un residuo en esos dos días entra al
+//     lazo de `eventosSala` aunque después `porDia` lo descarte. Limpiar solo el mes exacto dejaba
+//     una fuente de intermitencia difícil de reproducir.
+const [MES_ANIO, MES_NUM] = MES.split('-').map(Number);
+const ULTIMO_DIA = new Date(Date.UTC(MES_ANIO, MES_NUM, 0)).getUTCDate();          // día 0 del mes
+const DESDE_LIMPIEZA = new Date(Date.UTC(MES_ANIO, MES_NUM - 1, 1 - 1))            // siguiente = el
+  .toISOString().slice(0, 10);                                                     // último de este
+const HASTA_LIMPIEZA = new Date(Date.UTC(MES_ANIO, MES_NUM - 1, ULTIMO_DIA + 1))
+  .toISOString().slice(0, 10);
+
 // El DML de limpieza va acotado por planta-FIXTURE, con el acotador léxicamente junto al statement
 // (D-055): `@fixture` y `@fixture2` están ligados a TEST_PLANTA y TEST_PLANTA_REFLEJO. La ventana
 // de fechas es acotación ADICIONAL, no la acotación: acotar por fecha NO acota (D-061).
@@ -154,8 +169,8 @@ async function limpiarFixtures() {
   await db.request()
     .input('fixture', sql.VarChar(10), TEST_PLANTA)
     .input('fixture2', sql.VarChar(10), TEST_PLANTA_REFLEJO)
-    .input('desde', sql.Date, `${MES}-01`)
-    .input('hasta', sql.Date, `${MES}-31`)
+    .input('desde', sql.Date, DESDE_LIMPIEZA)
+    .input('hasta', sql.Date, HASTA_LIMPIEZA)
     .query(`
       DELETE FROM bitacora.registro_activo
         WHERE planta_id IN (@fixture, @fixture2)
@@ -215,14 +230,28 @@ describe('D-064 L03 — F36.A1, el tipo del asiento automático', () => {
   test('el UPDATE complementario devuelve el flag a 0 si alguien lo sube fuera del arranque', async () => {
     // Es la razón de ser de la segunda lista: el `NOT EXISTS` del INSERT ya no vuelve a tocar la
     // fila una vez creada, así que sin el UPDATE un seteo accidental quedaría vivo para siempre.
+    //
+    // El `try/finally` NO es ceremonia (GATE-O1, R8): esto es DML sobre el catálogo REAL de la BD,
+    // no sobre una fixture, y la suite corre contra la BD productiva (D-030). Entre el `UPDATE` y su
+    // reversión el tipo queda tecleable a mano, así que la ventana tiene que cerrarse pase lo que
+    // pase — si `initDB()` lanza por un timeout, si el assert falla, o si alguien corta la corrida,
+    // el flag NO puede quedar en 1 esperando el próximo arranque del backend.
     const t = tipoDe('SALAJDT', TIPO_EVENTO_DESPACHO_XM);
-    await db.request()
+    const volverACero = () => db.request()
       .input('id', sql.Int, t.tipo_evento_id)
-      .query(`UPDATE lov_bit.tipo_evento SET seleccionable = 1 WHERE tipo_evento_id = @id`);
-    await initDB();
-    const r = await db.request()
-      .input('id', sql.Int, t.tipo_evento_id)
-      .query(`SELECT seleccionable FROM lov_bit.tipo_evento WHERE tipo_evento_id = @id`);
+      .query(`UPDATE lov_bit.tipo_evento SET seleccionable = 0 WHERE tipo_evento_id = @id`);
+    let r;
+    try {
+      await db.request()
+        .input('id', sql.Int, t.tipo_evento_id)
+        .query(`UPDATE lov_bit.tipo_evento SET seleccionable = 1 WHERE tipo_evento_id = @id`);
+      await initDB();
+      r = await db.request()
+        .input('id', sql.Int, t.tipo_evento_id)
+        .query(`SELECT seleccionable FROM lov_bit.tipo_evento WHERE tipo_evento_id = @id`);
+    } finally {
+      await volverACero().catch(() => {});   // el finally no puede tapar el error real del test
+    }
     assert.equal(r.recordset[0].seleccionable, false,
       'el arranque no revirtió el seleccionable = 1: el tipo quedaría tecleable a mano');
   });
