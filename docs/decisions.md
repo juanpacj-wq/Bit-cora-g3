@@ -1972,8 +1972,6 @@ primer flujo del workspace que reparte lotes entre los **dos** repos y el umbrel
 
 ---
 
----
-
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |

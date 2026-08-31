@@ -8,7 +8,76 @@
 
 <!-- Lo rellena el gate de la O1, y lo completa L04 en su cierre (sección "Para el gate"). -->
 
-- _(pendiente: lo escribe `GATE-O1`)_
+**ENMIENDA G1 (GATE-O1, 2026-08-31) — léela antes que el resto.** La O1 cerró con los tres lotes
+`done`, cero violaciones de territorio y la suite sin degradación (700/700 backend con el stub del
+SIS, 324/324 front, 236/236 dashboard). Los contratos **C1, C2, C5 y C6 quedaron tal como los
+describe `_CONTEXTO-BASE.md`**; lo que sigue son los hechos que el gate verificó y que cambian —o
+precisan— lo que decían los documentos anteriores. Expediente completo: `GATE-O1.md`.
+
+1. **`utils/asientos/sistema.js` ya existe** y exporta las 7 del contrato C2 con los nombres y las
+   firmas exactas. **Impórtalo. No repliques** la validación de fecha ni el armado de la clave.
+2. **`claveAsientoDespacho(fecha)` LANZA `TypeError`** con fecha inválida —el contrato solo
+   documentaba el `@throws` de `asientoDespachoXM`; L02 lo extendió y el gate lo confirma—, y
+   `camposExtraDespacho` igual. Con un dato que viene de afuera (el lector, el CLI) tienes que
+   decidir qué haces con el throw: lo natural es **saltarte ese día y loguearlo**, nunca caerte.
+3. **`camposExtraDespacho(...)` devuelve el objeto ya normalizado** y su `clave_asiento` es idéntica
+   a la de `claveAsientoDespacho(fecha)` de la misma fecha: **búscala con esa función, no la armes a
+   mano**. `esAsientoDeSistema` / `claveDeAgrupacion` / `esHoraEstimada` aceptan el objeto **o** el
+   string crudo de la columna y **nunca lanzan**.
+4. **El libro colapsa por `campos_extra.clave_asiento`, y una fila de sistema SIN esa clave NO se
+   colapsa**: cae al desempate por `registro_id` y sale tantas veces como filas haya. **Ningún
+   constraint lo impide.** Si las 4 filas se escriben con el `campos_extra` armado a mano y una
+   clave distinta, el libro imprime cuatro renglones y **nada falla**.
+5. **El marcador no es inyectable por HTTP — verificado por el gate.** `validateCamposExtra`
+   (`utils/campos.js`, AUD-39) construye el JSON **solo** con las claves declaradas en
+   `lov_bit.bitacora.definicion_campos`, y `SALAJDT`/`SALAING` la tienen en **`NULL`** (reforzado en
+   cada arranque por el `MERGE` de `db.js`), así que el `POST`/`PUT` genérico **descarta entero**
+   cualquier `campos_extra` que mande un operador a una bitácora de Sala. Sumado al
+   `seleccionable = 0` del tipo (F36.A1), nadie puede teclear a mano algo que finja venir del
+   sistema. **No agregues ninguna defensa nueva por este lado.**
+6. **El tipo de evento existe y se llama exactamente `'Despacho económico'`** en `SALAJDT` y
+   `SALAING`, `orden = 5`, `seleccionable = 0`, sembrado por `F36.A1` en las **dos** listas de
+   `db.js`. Resuélvelo por `(bitacora_id, nombre)` con `TIPO_EVENTO_DESPACHO_XM`, **nunca por id
+   fijo**: los ids son distintos en cada BD (en `PortalG3_dev` se recrearon durante la verificación
+   bidireccional de L03).
+7. **`seleccionable = 0` también cierra el `POST`/`PUT` genérico** (sus dos lookups filtran
+   `seleccionable = 1`): **no puedes** escribir el asiento por `POST /api/registros` aunque
+   quisieras. Hay que insertar directo, como ya hace `reflejo-sala.js`.
+8. **El escritor del hecho es `saveDespachoRecibido(fechaDespacho)`** en
+   `dashboard-gen-gec3/server/db.js` (`'YYYY-MM-DD'`; devuelve `true` solo si esa llamada creó la
+   fila). La tabla se crea en el `initDB()` **de ese repo**, sin tabla de flags: **existe recién
+   cuando `dashboard-gen-gec3` se despliegue y arranque en esta rama**. Hasta entonces la consulta
+   de Bitácora falla con `Invalid object name`, que es **exactamente** el estado que C4 manda tratar
+   como `[]` sin lanzar. Y eso **no es un caso raro**: durante toda la O2 va a ser el estado normal
+   en `PortalG3_dev`, así que tus tests tienen que poder correr con la tabla ausente.
+9. **`detectado_en` es hora BOGOTÁ** (`DEFAULT GETDATE()`, motor en Bogotá). La conversión a UTC va
+   **una sola vez, en el lector** (`DATEADD(HOUR, 5, …)`), tal cual C4.
+10. **La ausencia de una fila NO prueba que no llegó el despacho.** Hay una ventana conocida en la
+    que el hecho se pierde —BD caída justo en la detección, sin reinicio ese día— y el gate decidió
+    **no** arreglarla (GATE-O1 §5, D2). **No cambia RN-05.d** (sin evidencia no se inventa un día),
+    pero no razones al revés ("no hay fila ⇒ no hubo despacho ⇒ nada que hacer") como si la ausencia
+    fuera una prueba.
+11. **El libro imprime el `detalle` LITERAL** de las filas de sistema: un espacio de más, un punto
+    final o un prefijo de unidad quedan tal cual en el formato controlado.
+12. **Las 4 filas tienen que compartir `fecha_evento` exacta.** El colapso agrupa por día Bogotá —el
+    gate lo acotó así (GATE-O1 §5, D4): antes valía para el mes entero y una fila caída en la
+    holgura de ±1 día que consulta `armarMes` borraba el renglón de las dos hojas—, y dentro del día
+    gana la de menor `registro_id`. Si las cuatro no comparten el día, el asiento sale **dos veces**,
+    una por día: feo, pero recuperable. Es el mismo cuidado del gotcha (b) de D-058: **la fecha se
+    decide una vez y se hereda**, nunca se recalcula por fila.
+13. **Falta el guard de coherencia de las 4 filas, y te toca a ti.** El libro imprime el `detalle` y
+    la hora de **una** de las cuatro —la de menor `registro_id`— y descarta las otras tres sin
+    avisar; ningún constraint sostiene que coincidan. Es exactamente lo que D-056 (c) resolvió para
+    los lotes de MAND con `verificarCoherenciaDeLotes()` en `sala_de_mando_batch.test.js`. **Escribe
+    el guard equivalente en tu archivo de test** (mismo `detalle`, mismo `fecha_evento`, misma
+    `clave_asiento` en las cuatro) y **usa un solo instante de Node bindeado como parámetro** para
+    las cuatro filas — nunca `GETDATE()` ni un `new Date()` por `INSERT`, que es la lección de
+    D-063 (b) con `anulado.en` (89 ms de deriva medidos entre el reloj de la app y el de la BD).
+14. **El gate arregló tres defensas del colapso en `f03-datos.js`** (R1-R3 del `/code-review`): la
+    agrupación va prefijada `sys|` y **acotada al día**, y la clave se reserva **después** del guard
+    de texto, para que una fila con `detalle` vacío no silencie a sus hermanas. No vuelvas a tocar
+    ese archivo: **ya no es territorio de nadie en la O2**.
+
 - **Antes de arrancar, lee `cierres/L04.md`**: L04 cerró justo antes que tú, en esta misma ola, y
   su cierre trae la firma real de `crearAsientoDespacho` y la decisión que tomó sobre el flag del
   sweeper.

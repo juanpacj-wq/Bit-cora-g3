@@ -3,17 +3,23 @@
   "rama": "feat/asiento-despacho-xm-2026-08",
   "claim_ttl_min": 240,
   "olas": {
-    "O1": { "estado": "abierta", "gate": null },
-    "O2": { "estado": "pendiente", "gate": null }
+    "O1": {
+      "estado": "cerrada",
+      "gate": "GATE-O1.md"
+    },
+    "O2": {
+      "estado": "pendiente",
+      "gate": null
+    }
   },
   "lotes": {
     "L01": {
       "ola": "O1",
       "titulo": "Persistir la llegada del despacho (repo dashboard-gen-gec3)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L01-1057",
+      "claim_ts": "2026-08-31T15:57:42.708Z",
+      "done_ts": "2026-08-31T16:11:36.482Z",
       "motivo": null,
       "depende_de": [],
       "puro": true,
@@ -24,16 +30,22 @@
         "server/despachoscraper.js",
         "server/__tests__/despachoscraper.test.js"
       ],
-      "tests": ["server/__tests__/despachoscraper.test.js"],
-      "criterios": ["CA-1", "CA-7", "CA-8"]
+      "tests": [
+        "server/__tests__/despachoscraper.test.js"
+      ],
+      "criterios": [
+        "CA-1",
+        "CA-7",
+        "CA-8"
+      ]
     },
     "L02": {
       "ola": "O1",
       "titulo": "Motor del asiento de sistema (puro)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L02-1057",
+      "claim_ts": "2026-08-31T15:57:22.438Z",
+      "done_ts": "2026-08-31T16:05:48.259Z",
       "motivo": null,
       "depende_de": [],
       "puro": true,
@@ -43,16 +55,20 @@
         "server/utils/asientos/sistema.js",
         "server/tests/asiento_despacho_xm.test.js"
       ],
-      "tests": ["tests/asiento_despacho_xm.test.js"],
-      "criterios": ["CA-2"]
+      "tests": [
+        "tests/asiento_despacho_xm.test.js"
+      ],
+      "criterios": [
+        "CA-2"
+      ]
     },
     "L03": {
       "ola": "O1",
       "titulo": "Catálogo del tipo de evento (F36.A1) y colapso en el libro F03",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L03-1057",
+      "claim_ts": "2026-08-31T15:57:29.629Z",
+      "done_ts": "2026-08-31T16:26:51.561Z",
       "motivo": null,
       "depende_de": [],
       "puro": false,
@@ -63,8 +79,12 @@
         "server/utils/f03-datos.js",
         "server/tests/f03_despacho_xm.test.js"
       ],
-      "tests": ["tests/f03_despacho_xm.test.js"],
-      "criterios": ["CA-3"]
+      "tests": [
+        "tests/f03_despacho_xm.test.js"
+      ],
+      "criterios": [
+        "CA-3"
+      ]
     },
     "L04": {
       "ola": "O2",
@@ -74,7 +94,11 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L01", "L02", "L03"],
+      "depende_de": [
+        "L01",
+        "L02",
+        "L03"
+      ],
       "puro": false,
       "puerto": 3104,
       "repo": "Bit-cora-g3",
@@ -85,8 +109,19 @@
         "server/server.js",
         "server/tests/despacho_xm.test.js"
       ],
-      "tests": ["tests/despacho_xm.test.js"],
-      "criterios": ["CA-1", "CA-4", "CA-6", "CA-7", "CA-8", "CA-9", "CA-10", "CA-11"]
+      "tests": [
+        "tests/despacho_xm.test.js"
+      ],
+      "criterios": [
+        "CA-1",
+        "CA-4",
+        "CA-6",
+        "CA-7",
+        "CA-8",
+        "CA-9",
+        "CA-10",
+        "CA-11"
+      ]
     },
     "L05": {
       "ola": "O2",
@@ -96,7 +131,9 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L04"],
+      "depende_de": [
+        "L04"
+      ],
       "puro": false,
       "puerto": 3105,
       "repo": "Bit-cora-g3",
@@ -104,9 +141,17 @@
         "server/scripts/relleno-asiento-despacho.js",
         "server/tests/relleno_despacho_xm.test.js"
       ],
-      "tests": ["tests/relleno_despacho_xm.test.js"],
-      "criterios": ["CA-5"]
+      "tests": [
+        "tests/relleno_despacho_xm.test.js"
+      ],
+      "criterios": [
+        "CA-5"
+      ]
     }
   },
-  "test_lock": { "sesion": null, "ts": null, "ttl_min": 45 }
+  "test_lock": {
+    "sesion": null,
+    "ts": null,
+    "ttl_min": 45
+  }
 }

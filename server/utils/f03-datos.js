@@ -345,9 +345,27 @@ async function eventosSala(pool, { plantas, desde, hasta, sala_ids }) {
     // cuando existe, y el `registro_id` cuando no — que es el caso de TODO lo tecleado y por eso
     // los registros normales siguen sin colapsarse.
     const deSistema = esAsientoDeSistema(fila.campos_extra);
-    const agrupacion = (deSistema && claveDeAgrupacion(fila.campos_extra)) || `id|${fila.registro_id}`;
+    const claveSistema = deSistema ? claveDeAgrupacion(fila.campos_extra) : null;
+    // La agrupación va PREFIJADA y ACOTADA AL DÍA, y las dos cosas son defensas, no adorno
+    // (hallazgos del gate de la O1):
+    //
+    //  - `sys|` vs `id|`: son dos espacios de nombres distintos y no pueden cruzarse.
+    //    `claveDeAgrupacion` devuelve CUALQUIER `clave_asiento` no vacía —es genérica a propósito,
+    //    para un segundo origen de sistema—, así que una clave con la forma `id|4722` se tragaría
+    //    el registro tecleado 4722 y su renglón desaparecería del libro sin error.
+    //  - El día: la ventana de `armarMes` se abre **±1 día** alrededor del mes y el recorte fino lo
+    //    hace `porDia` DESPUÉS de este lazo. Sin el día en la clave, una fila de la holgura podía
+    //    ganar el colapso y quedar descartada al bucketear, borrando el renglón de la hoja del mes
+    //    (y de la del mes vecino, donde tampoco entra). Con el día, dos filas de la misma clave en
+    //    días distintos salen cada una en su hoja: duplicar es recuperable, perder el renglón de un
+    //    formato controlado no.
+    //
+    // En el camino normal esto no cambia nada: las cuatro filas del asiento comparten
+    // `fecha_evento`, así que comparten día y colapsan igual.
+    const agrupacion = claveSistema
+      ? `sys|${partesBogota(new Date(fila.fecha_evento)).fecha}|${claveSistema}`
+      : `id|${fila.registro_id}`;
     if (vistos.has(agrupacion)) continue; // mismo dedupe que MAND (RN-06.d) cuando no hay clave
-    vistos.add(agrupacion);
     // El asiento de sistema pasa LITERAL, sin `asientoLiteralSala`: ese le antepondría el prefijo de
     // unidad (`GEC3 — …`) y este texto nombra a las DOS a la vez (`…de G3.0 y G3.2…`, RQ-05.5),
     // así que prefijarlo con una sola sería mentir. Por eso el marcador existe: sin él no hay forma
@@ -368,7 +386,15 @@ async function eventosSala(pool, { plantas, desde, hasta, sala_ids }) {
     // traen ids distintos y el `ORDER BY registro_id` no garantiza cuál gana el colapso, así que
     // desempatar por id haría que la misma jornada se ordenara distinto según qué fila llegó
     // primero. La clave de agrupación es determinística a partir de la fecha del despacho.
-    if (asiento) eventos.push(evento(fila.fecha_evento, asiento, `3|${agrupacion}`));
+    //
+    // El `vistos.add` va ACÁ, después del guard, y no antes de calcular el texto: si la fila de
+    // menor `registro_id` del asiento viniera con el `detalle` vacío, marcar la clave arriba habría
+    // suprimido a las otras tres —que sí traen el texto— y el hecho no saldría en el libro, sin un
+    // solo aviso. Reservar la clave solo cuando hay renglón que emitir es lo que hace que una fila
+    // muda no pueda silenciar a sus hermanas.
+    if (!asiento) continue;
+    vistos.add(agrupacion);
+    eventos.push(evento(fila.fecha_evento, asiento, `3|${agrupacion}`));
   }
   return eventos;
 }
