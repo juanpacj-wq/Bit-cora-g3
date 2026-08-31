@@ -12,8 +12,8 @@
 | O1 | L02 | Motor del asiento de sistema (puro) | `Bit-cora-g3` | ✅ | `cierres/L02.md` | — |
 | O1 | L03 | Tipo de evento (`F36.A1`) y colapso en el libro | `Bit-cora-g3` | ✅ | `cierres/L03.md` | — |
 | — | **GATE-O1** | 3 lotes · 0 violaciones · CA-2 y CA-3 confirmados | | ✅ | | `GATE-O1.md` |
-| O2 | L04 | Lector, creador del asiento y barrido | `Bit-cora-g3` | ⬜ | — | — |
-| O2 | L05 | CLI del relleno del mes | `Bit-cora-g3` | ⬜ | — | — |
+| O2 | L04 | Lector, creador del asiento y barrido | `Bit-cora-g3` | 🟡 abierta | — | — |
+| O2 | L05 | CLI del relleno del mes | `Bit-cora-g3` | 🟡 abierta (espera a L04) | — | — |
 | — | **GATE-O2** | | | ⬜ | | `GATE-O2.md` |
 | Cierre | — | ADR D-064 + `CLAUDE.md` 37 + `BIT-MODBD` v2.7 + `BIT-RF` v2.3/RF-078 + REQ-05 + `git rm` | | ⬜ | | |
 
