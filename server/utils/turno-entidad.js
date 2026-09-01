@@ -2,6 +2,7 @@ import sql from 'mssql';
 import { ventanaTurno, ventanaActual, getTurnoColombia, fechaBogotaStr } from './turno.js';
 import { USUARIO_SISTEMA_ID } from '../db.js';
 import { registrarEventoCierre } from './ciet.js';
+import { congelarCumplimiento } from './rotacion/cumplimiento.js';
 
 // D-045 — Dominio de la CABECERA de turno (bitacora.turno_unidad) + detalle vivo
 // (turno_participante). Lógica de estado puro + operaciones de BD idempotentes/atómicas.
@@ -331,6 +332,15 @@ export async function cerrarTurno(pool, turno_id, {
           );
       `);
     const conformados = conf.rowsAffected[0] || 0;
+
+    // 3b) D-065 (contrato C7): congelar el CUMPLIMIENTO plan-vs-real de la rotación (quién debía estar
+    //     vs quién estuvo, por rol) en la MISMA transacción, justo después de la conformación. Es
+    //     idempotente por la PK natural de rotacion_cumplimiento (NOT EXISTS) y `filas = 0` NO es
+    //     error: es el estado normal antes de la primera carga anual (ningún rol con patrón activo).
+    //     Sin try/catch A PROPÓSITO: si el congelado falla cae la transacción entera — un turno sellado
+    //     sin su cumplimiento es peor que un cierre que hay que reintentar. Hereda los mismos filtros
+    //     que la conformación (`es_sintetico` salvo unit tests, D-044; `es_observador` siempre, D-059).
+    await congelarCumplimiento(tx, { turno_id, fecha_operativa, planta_id, turno, incluirSinteticos });
 
     // 4) Archivar los registros del turno a registro_historico, preservando registro_id + turno_id.
     //    Criterio combinado: (a) registros ESTAMPADOS con este turno (turno_id = @id) — el camino normal;
