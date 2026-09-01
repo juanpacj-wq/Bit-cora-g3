@@ -25,6 +25,10 @@ externo aislado), L09.
 
 ## Olas
 
+> **Enmienda del GATE-O1 (2026-09-01):** la **O2 pasa de 3 a 4 lotes** con `L11`, el lote de
+> corrección de los hallazgos de la O1 (decisión D5 del `GATE-O1.md`, **sujeta al visto bueno**).
+> Y **L04 amplió territorio** con `server/middleware/auth.js` y `server/utils/sesion-contexto.js` (D3).
+
 | Ola | Lotes | Por qué pueden ir juntos | Compartidos y su escritor |
 |---|---|---|---|
 | **O1** | L01, L02, L03 | Las tres raíces del grafo. Ninguna depende de otra: el motor es puro, el DDL no lee el motor, y el cliente de Graph no toca BD de rotación. Territorios totalmente disjuntos | `server/db.js` → **L02** |
@@ -77,7 +81,9 @@ externo aislado), L09.
 
 ### L04 — Endpoints de configuración anual (superficie A)
 - **Ola:** O2 · **Depende de:** L01, L02, L03 · **Puro:** no · **Puerto:** **3114**
-- **Territorio:** `server/routes/rotacion.js` · `server/utils/rotacion/titulares.js` · `server/auth/app.js` · `server/tests/rotacion_endpoints.test.js`
+- **Territorio:** `server/routes/rotacion.js` · `server/utils/rotacion/titulares.js` · `server/auth/app.js` ·
+  **`server/middleware/auth.js`** · **`server/utils/sesion-contexto.js`** (ampliado por el GATE-O1, decisión D3) ·
+  `server/tests/rotacion_endpoints.test.js`
 - **Produce:** contrato **C4** · **Consume:** C1, C2, C3
 - **CA:** CA-7, CA-8, CA-9
 - **Tests:** `tests/rotacion_endpoints.test.js`
@@ -86,6 +92,10 @@ externo aislado), L09.
   nombres de archivo de esos routers son contrato (§5.3) y existen porque L05 y L06 los crean en la
   misma ola. Si al montar uno todavía no existe, **eso es coordinación de la ola, no un bloqueo**:
   el `import` se escribe igual y el gate verifica que los tres resuelvan.
+- **Ampliación del GATE-O1 (D3):** también lleva `puede_configurar_rotacion` hasta la sesión. Los
+  SELECT de `middleware/auth.js` y `utils/sesion-contexto.js` son **espejos declarados** — se cambian
+  juntos, y el shape se fija en `tests/rotacion_endpoints.test.js`. Sin esto el flag sale `undefined`
+  en `/api/me` y la pantalla de L07 no aparecería **sin ningún error** que lo delate.
 
 ### L05 — Toma de control del rol (superficie B, backend)
 - **Ola:** O2 · **Depende de:** L02 · **Puro:** no · **Puerto:** **3115**
@@ -110,6 +120,26 @@ externo aislado), L09.
   transacción entera cae — que es lo correcto, pero exige que `filas = 0` **no** sea error.
   La regla central de CA-15 (resolver **por `usuario_id`**, no por conteo de cargo) es lo que hace
   medible al módulo: no la pierdas.
+
+### L11 — Correcciones de la O1 (schema, cliente de Graph y tests)
+- **Ola:** O2 · **Depende de:** — (nadie) · **Puro:** no · **Puerto:** **3117**
+- **Territorio:** `server/db.js` · `server/utils/graph/cliente.js` · `server/utils/graph/directorio.js` ·
+  `server/tests/rotacion_correcciones.test.js` · `server/tests/rotacion_schema.test.js` ·
+  `server/tests/rotacion_sync_entra.test.js` · `server/tests/residuos.js`
+- **Produce:** nada nuevo (no toca ningún contrato) · **Consume:** —
+- **CA:** ninguno propio. Protege CA-3, CA-4, CA-5 y CA-6, que ya están confirmados
+- **Tests:** `tests/rotacion_correcciones.test.js` + los dos existentes que amplía
+- **Origen:** lo abrió el **GATE-O1**, decisión **D5**, para los 12 hallazgos confirmados del
+  `/code-review` que caen sobre territorios de lotes ya cerrados (L01/L02/L03) y que por eso no tienen
+  escritor en la O2. Lista completa en `GATE-O1.md §7` (CR-1…CR-15).
+- **Riesgo / nota:** agrega constraints a tablas contra las que **L04, L05 y L06 escriben en la misma
+  ola**. Dos reglas duras: (i) toda constraint o índice nuevo va como migración **`F37.A3` aditiva e
+  idempotente** (`ALTER TABLE … ADD CONSTRAINT` gateado), **jamás** editando el `CREATE TABLE` de
+  `F37.A1` — no serviría, porque su `IF OBJECT_ID` lo salta en cualquier BD donde las tablas ya
+  existan, que a estas alturas son todas; (ii) **no bloquea a nadie** y nadie lo bloquea, así que si
+  un índice nuevo choca con lo que inserta un test de otro lote, eso sale en el GATE-O2 y se resuelve
+  ahí. El hallazgo más serio es **CR-1**: el `MERGE` pisa `azure_upn` con `NULL` y el arranque
+  siguiente degrada al Jefe de Planta.
 
 ### L07 — Pantalla de configuración anual (superficie A, front)
 - **Ola:** O3 · **Depende de:** L04 · **Puro:** vitest, sin BD · **Puerto:** no levanta backend

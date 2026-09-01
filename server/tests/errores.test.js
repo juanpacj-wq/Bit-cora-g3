@@ -70,6 +70,22 @@ test('D-047: fallo del servicio IA (codigo custom del cliente Gemini) → 503 sa
   }
 });
 
+test('D-065: fallo del directorio de Entra (codigo del cliente de Graph) → 503 saneado', () => {
+  // El cliente de Graph (utils/graph/cliente.js) normaliza TODO fallo — falta de credencial, token 401,
+  // Graph 500, transporte caído — a este codigo. Sin la rama de clasificación salía 500 error_interno,
+  // y el front no podía distinguir "Entra no responde" de "se rompió algo". El mensaje NO debe filtrar
+  // el tenant, la URL de Graph ni el secret.
+  const err = Object.assign(new Error('[graph] HTTP 500 en /v1.0/servicePrincipals/abc/appRoleAssignedTo'),
+                            { codigo: 'entra_no_disponible' });
+  const { status, codigo } = clasificarError(err);
+  assert.equal(status, 503);
+  assert.equal(codigo, 'entra_no_disponible');
+  const msg = mensajeUsuario(err);
+  assert.equal(msg, ETIQUETAS.entra_no_disponible);
+  assert.doesNotMatch(msg, /graph|microsoft\.com|servicePrincipals|HTTP 500|client_secret/i,
+    'no debe filtrar el endpoint de Graph ni detalles técnicos');
+});
+
 test('toda etiqueta es texto amigable en español, no un slug', () => {
   for (const [codigo, texto] of Object.entries(ETIQUETAS)) {
     assert.ok(texto.length > 15 && /\s/.test(texto), `etiqueta ${codigo} parece un slug: "${texto}"`);

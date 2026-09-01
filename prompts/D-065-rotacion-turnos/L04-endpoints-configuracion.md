@@ -4,8 +4,95 @@
 
 ## ENMIENDAS Y HECHOS QUE CAMBIAN — léelo antes que el resto
 
-*(Lo rellena el GATE-O1. Si esta sección sigue vacía cuando abras el chat, avísale al integrador:
-significa que la O1 no se cerró y no deberías tener el `claim`.)*
+> Rellenado por el **GATE-O1** el 2026-09-01. La O1 cerró con los tres lotes `done`, cero
+> violaciones de territorio, **781/781** backend y **324/324** front. Expediente completo en
+> [`GATE-O1.md`](./GATE-O1.md).
+
+**ENMIENDA G1 — tu territorio creció.** Además de lo que dice tu §3, este lote lleva
+`puede_configurar_rotacion` hasta la sesión: `server/middleware/auth.js` y
+`server/utils/sesion-contexto.js` entran a tu territorio (decisión **D3** del `GATE-O1.md`).
+Son **espejos declarados** —cada archivo lo dice en un comentario— y se cambian **juntos**: agrega
+`CAST(c.puede_configurar_rotacion AS BIT) AS puede_configurar_rotacion` a los dos SELECT y fija el
+shape resultante en `tests/rotacion_endpoints.test.js`. `LOTES.json` y `PLAN-OLAS.md` ya lo reflejan.
+
+**ENMIENDA G2 — lee el punto 5 de los hechos como una prohibición, no como un consejo.** Es el
+único camino por el que este lote puede abrir una escalada de privilegio.
+
+### Hechos que cambian lo que dicen los documentos anteriores
+
+1. **El motor del patrón lanza SEIS códigos, no cuatro** (D1). A los cuatro de C1 —
+   `vector_invalido`, `desfase_imposible`, `desfase_ambiguo`, `turno_invalido`— se suman
+   **`fecha_invalida`** (el string no es un `'YYYY-MM-DD'` real: trae hora, es un `Date`, o es un 30
+   de febrero) y **`patron_invalido`** (el objeto `patron` no trae un `desfase` entero). Salen de
+   `diasEntre`/`diaDelCiclo`, así que **`grupoDeTurno` también los propaga**. Mapéalos a un `400` con
+   su slug, igual que a los otros cuatro, y **nunca** los dejes llegar crudos a la respuesta (D-032).
+2. **`utils/errores.js` YA clasifica `entra_no_disponible` → 503** (D2, hecho en este gate, con su
+   caso en `tests/errores.test.js`). No lo vuelvas a agregar y no lo toques.
+3. **`puede_configurar_rotacion` NO llega hoy a la sesión ni a `/api/me`**, y **L04 es quien lo
+   lleva** (D3): su territorio se amplió con `server/middleware/auth.js` y
+   `server/utils/sesion-contexto.js`. Agrega
+   `CAST(c.puede_configurar_rotacion AS BIT) AS puede_configurar_rotacion` a **los dos** SELECT —son
+   espejos declarados, con el comentario que lo dice— y fija el shape en tu propio test. Sin esto,
+   CA-19 (la pantalla de L07) es infalsable: el flag sale `undefined`, la pantalla no aparece y **no
+   hay ningún error** que lo delate.
+4. **El directorio que devuelve L03 viene deduplicado por `azure_oid`** con el rol resuelto por
+   `PRECEDENCE`: `personas.length` **no** es la suma de `grupos[].miembros` (hoy 89 vs 90 en el
+   tenant real, porque el Gerente de Producción está también en `USUARIO_CONSULTA`). Si necesitas el
+   conjunto completo de roles por persona, eso es **cambio de contrato**: pídelo, no lo derives.
+5. **`sincronizarDirectorio` acepta un parámetro `directorio` que salta Graph por completo, y ese
+   parámetro JAMÁS puede venir del cliente.** Existe para inyectar el directorio en los tests. Si el
+   endpoint de L04 dejara que algo derivado de `req.body` llegue a esa opción, un usuario autenticado
+   podría fabricar `personas` y reescribir `nombre_completo`/`azure_upn` de filas **arbitrarias** —
+   y `azure_upn` es entrada de `enforceSingletonFlag`, que en cada arranque pone `es_jefe_planta = 1`
+   a quien calce con `M365_JEFE_PLANTA_UPNS`: sería una escalada real de privilegio. Llámala
+   **exactamente** como `sincronizarDirectorio(pool, { por_usuario })`, y que `directorio` y
+   `fetchImpl` no aparezcan en el handler. (Lo levantó la revisión de seguridad de este gate como
+   riesgo hacia adelante; hoy no es explotable porque no hay endpoint.)
+6. **`sincronizarDirectorio` NO escribe** `activo` de una fila existente, ni `es_jefe_planta`, ni
+   `es_jdt_default`, ni `email`, ni el cargo — a propósito. No asumas que la sincronización "arregla"
+   ninguno de esos. Y **`por_usuario` no se persiste**: `lov_bit.usuario` no tiene columnas de
+   auditoría, así que solo va al log del server. Trazabilidad de quién sincronizó = tabla nueva =
+   schema, y el schema fue L02: eso sería una desviación, no una licencia.
+7. **`rotacion_cumplimiento.grupo` no lleva CHECK, y la razón que dio L02 resultó ser FALSA.** El
+   cierre de L02 lo dejó sin constraint creyendo que un `BETWEEN 1 AND 4` "rechazaría el caso
+   legítimo `NULL`" que L06 necesita escribir. **No es así**, y este gate lo midió contra la BD: un
+   `CHECK` solo rechaza cuando evalúa a `FALSE`, y con `NULL` evalúa a `UNKNOWN`.
+
+   ```
+   CHECK (grupo BETWEEN 1 AND 4) sobre columna NULLABLE:
+     ACEPTA   grupo = 3     ACEPTA   grupo = NULL
+     RECHAZA  grupo = 5     RECHAZA  grupo = 0
+   ```
+
+   O sea que se podía tener las dos cosas. Consecuencia para **L06**: hoy esa columna acepta `0`,
+   `5` y `200` en un registro congelado y append-only, y **nada te va a rechazar un grupo malo** —
+   no confíes en la BD para ese rango, valídalo tú. El CHECK se agrega en el lote de corrección
+   **L11** (ver `GATE-O1.md`, decisión D5); si L11 ya corrió cuando leas esto, la columna sí lo
+   tiene y `NULL` sigue siendo legítimo.
+8. **Nombres de constraint que el contrato no fijaba y ahora existen** (por si capturas una
+   violación por nombre): `CK_rotacion_patron_desfase`, `DF_rotacion_patron_activo`,
+   `DF_rotacion_patron_creado_en`, `CK_rotacion_asig_grupo`, `DF_rotacion_asig_creado_en`,
+   `CK_rotacion_control_accion`, `DF_rotacion_control_ocurrido_en`, `CK_rotacion_cumpl_turno`,
+   `CK_rotacion_cumpl_estado`, `DF_rotacion_cumpl_snapshot_en`. Los que C2 sí fijaba quedaron **tal
+   cual**. **Las FK van sin nombre** (inline con `REFERENCES`, como `turno_unidad`): captúralas por
+   número de error (547), no por nombre.
+9. **`rotacion_patron` y `rotacion_asignacion` tienen `creado_en_bogota`** además de `creado_en`. Un
+   `SELECT *` sobre ellas trae esa columna de más.
+10. **Las cuatro tablas están vacías en `PortalG3_dev` y `F37.A1` está aplicada** (una sola fila en
+    `migracion_aplicada`). En `PortalG3` (prod) nada de esto existe: llega con el despliegue. El flag
+    está en 1 exactamente para **`Administrador y Debugging`** y **`Gerente de Producción`**.
+11. **Corrección al `_CONTEXTO-BASE.md §7`** (el documento no se edita; vale este renglón): dice que
+    `server/tests/fixtures/` "no existe todavía". **Sí existe** y ya tenía tres archivos antes de
+    L01. No hubo colisión de nombres, pero no vayas a crear la carpeta creyendo que la estrenas.
+12. **`parsearVector` es estricto a propósito** (para L07 y para cualquiera que arme un vector):
+    tolera espacios (`' 4, 2 ,2,…'`) pero rechaza ceros a la izquierda (`'01'`), decimales y
+    negativos, para que `serializarVector(parsearVector(t)) === t` sea exacto. Si la pantalla arma el
+    vector desde ocho selectores de 1..4 esto no se nota nunca; si lo arma a mano, que no rellene con
+    ceros.
+13. **El oráculo del Excel NO protege de la aritmética de fechas frágil** (medido en L01): con
+    `new Date(str)` los 1.460 pares pasan igual, porque el offset se cancela en los dos extremos. Lo
+    que protege es el **parsing estricto**. Si alguien "simplifica" `msDelDiaIso`, el test que se
+    pone rojo es el de parsing, no el del oráculo — no lo toques.
 
 ## 0. Puerta de arranque (obligatorio, primero)
 

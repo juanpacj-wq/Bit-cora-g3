@@ -28,6 +28,7 @@ export const ETIQUETAS = {
   config_sistema: 'Hay un problema de configuración del sistema. Contacta a soporte.',
   ia_no_configurada: 'La mejora de texto con IA no está configurada en este servidor. Puedes seguir escribiendo la descripción manualmente.',
   ia_no_disponible: 'El servicio de mejora de texto con IA no está disponible en este momento. Intenta más tarde o escribe la descripción manualmente.',
+  entra_no_disponible: 'No se pudo consultar el directorio de Microsoft Entra en este momento. Intenta más tarde; si el problema continúa, contacta a soporte.',
   error_interno: 'Ocurrió un error inesperado. Intenta de nuevo; si el problema continúa, contacta a soporte.',
 };
 
@@ -80,7 +81,11 @@ export function clasificarError(err) {
   //      normaliza TODO fallo (timeout, HTTP≠200, respuesta malformada/anómala) a estos codigos
   //      custom — no ramificamos por TimeoutError/AbortError genéricos para no capturar aborts
   //      de otros fetches del proceso. 503 coherente con db_no_disponible.
-  if (err?.codigo === 'ia_no_disponible' || err?.codigo === 'ia_no_configurada') {
+  //      D-065 (GATE-O1): el cliente de Graph (utils/graph/cliente.js) normaliza IGUAL todo fallo del
+  //      directorio de Entra a `entra_no_disponible`. Sin esta rama caía al catch-all de abajo y salía
+  //      500 error_interno, no el 503 que el módulo de rotación promete cuando Graph no responde.
+  if (err?.codigo === 'ia_no_disponible' || err?.codigo === 'ia_no_configurada'
+      || err?.codigo === 'entra_no_disponible') {
     return { status: 503, codigo: err.codigo };
   }
 

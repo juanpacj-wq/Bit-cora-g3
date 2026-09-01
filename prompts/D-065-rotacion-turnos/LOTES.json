@@ -3,19 +3,31 @@
   "rama": "feat/rotacion-turnos-2026-08",
   "claim_ttl_min": 240,
   "olas": {
-    "O1": { "estado": "abierta", "gate": null },
-    "O2": { "estado": "pendiente", "gate": null },
-    "O3": { "estado": "pendiente", "gate": null },
-    "O4": { "estado": "pendiente", "gate": null }
+    "O1": {
+      "estado": "cerrada",
+      "gate": "GATE-O1.md"
+    },
+    "O2": {
+      "estado": "pendiente",
+      "gate": null
+    },
+    "O3": {
+      "estado": "pendiente",
+      "gate": null
+    },
+    "O4": {
+      "estado": "pendiente",
+      "gate": null
+    }
   },
   "lotes": {
     "L01": {
       "ola": "O1",
       "titulo": "Motor puro del patrón de rotación",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L01-1034",
+      "claim_ts": "2026-09-01T15:34:15.631Z",
+      "done_ts": "2026-09-01T15:44:13.127Z",
       "motivo": null,
       "depende_de": [],
       "puro": true,
@@ -25,16 +37,21 @@
         "server/tests/rotacion_patron.test.js",
         "server/tests/fixtures/rotacion-oraculo-2026.json"
       ],
-      "tests": ["tests/rotacion_patron.test.js"],
-      "criterios": ["CA-1", "CA-2"]
+      "tests": [
+        "tests/rotacion_patron.test.js"
+      ],
+      "criterios": [
+        "CA-1",
+        "CA-2"
+      ]
     },
     "L02": {
       "ola": "O1",
       "titulo": "Schema de rotación (F37.A1) y flag de cargo (F37.A2)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L02-1055",
+      "claim_ts": "2026-09-01T15:55:12.150Z",
+      "done_ts": "2026-09-01T16:16:34.179Z",
       "motivo": null,
       "depende_de": [],
       "puro": false,
@@ -43,16 +60,21 @@
         "server/db.js",
         "server/tests/rotacion_schema.test.js"
       ],
-      "tests": ["tests/rotacion_schema.test.js"],
-      "criterios": ["CA-3", "CA-4"]
+      "tests": [
+        "tests/rotacion_schema.test.js"
+      ],
+      "criterios": [
+        "CA-3",
+        "CA-4"
+      ]
     },
     "L03": {
       "ola": "O1",
       "titulo": "Cliente de Microsoft Graph y sincronización del directorio",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L03-1055",
+      "claim_ts": "2026-09-01T15:55:10.034Z",
+      "done_ts": "2026-09-01T16:22:21.782Z",
       "motivo": null,
       "depende_de": [],
       "puro": false,
@@ -62,8 +84,13 @@
         "server/utils/graph/directorio.js",
         "server/tests/rotacion_sync_entra.test.js"
       ],
-      "tests": ["tests/rotacion_sync_entra.test.js"],
-      "criterios": ["CA-5", "CA-6"]
+      "tests": [
+        "tests/rotacion_sync_entra.test.js"
+      ],
+      "criterios": [
+        "CA-5",
+        "CA-6"
+      ]
     },
     "L04": {
       "ola": "O2",
@@ -73,17 +100,29 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L01", "L02", "L03"],
+      "depende_de": [
+        "L01",
+        "L02",
+        "L03"
+      ],
       "puro": false,
       "puerto": 3114,
       "territorio": [
         "server/routes/rotacion.js",
         "server/utils/rotacion/titulares.js",
         "server/auth/app.js",
+        "server/utils/sesion-contexto.js",
+        "server/middleware/auth.js",
         "server/tests/rotacion_endpoints.test.js"
       ],
-      "tests": ["tests/rotacion_endpoints.test.js"],
-      "criterios": ["CA-7", "CA-8", "CA-9"]
+      "tests": [
+        "tests/rotacion_endpoints.test.js"
+      ],
+      "criterios": [
+        "CA-7",
+        "CA-8",
+        "CA-9"
+      ]
     },
     "L05": {
       "ola": "O2",
@@ -93,7 +132,9 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L02"],
+      "depende_de": [
+        "L02"
+      ],
       "puro": false,
       "puerto": 3115,
       "territorio": [
@@ -101,8 +142,16 @@
         "server/utils/rotacion/control.js",
         "server/tests/rotacion_control.test.js"
       ],
-      "tests": ["tests/rotacion_control.test.js"],
-      "criterios": ["CA-10", "CA-11", "CA-12", "CA-13", "CA-14"]
+      "tests": [
+        "tests/rotacion_control.test.js"
+      ],
+      "criterios": [
+        "CA-10",
+        "CA-11",
+        "CA-12",
+        "CA-13",
+        "CA-14"
+      ]
     },
     "L06": {
       "ola": "O2",
@@ -112,7 +161,10 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L01", "L02"],
+      "depende_de": [
+        "L01",
+        "L02"
+      ],
       "puro": false,
       "puerto": 3116,
       "territorio": [
@@ -121,8 +173,15 @@
         "server/utils/turno-entidad.js",
         "server/tests/rotacion_cumplimiento.test.js"
       ],
-      "tests": ["tests/rotacion_cumplimiento.test.js"],
-      "criterios": ["CA-15", "CA-16", "CA-17", "CA-18"]
+      "tests": [
+        "tests/rotacion_cumplimiento.test.js"
+      ],
+      "criterios": [
+        "CA-15",
+        "CA-16",
+        "CA-17",
+        "CA-18"
+      ]
     },
     "L07": {
       "ola": "O3",
@@ -132,7 +191,9 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L04"],
+      "depende_de": [
+        "L04"
+      ],
       "puro": true,
       "puerto": null,
       "territorio": [
@@ -140,8 +201,12 @@
         "src/components/Rotacion/configuracion-rotacion.test.jsx",
         "src/hooks/useRotacion.js"
       ],
-      "tests": ["src/components/Rotacion/configuracion-rotacion.test.jsx"],
-      "criterios": ["CA-19"]
+      "tests": [
+        "src/components/Rotacion/configuracion-rotacion.test.jsx"
+      ],
+      "criterios": [
+        "CA-19"
+      ]
     },
     "L08": {
       "ola": "O3",
@@ -151,7 +216,9 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L05"],
+      "depende_de": [
+        "L05"
+      ],
       "puro": true,
       "puerto": null,
       "territorio": [
@@ -159,8 +226,12 @@
         "src/components/Rotacion/popup-toma-control.test.jsx",
         "src/hooks/useTomaControl.js"
       ],
-      "tests": ["src/components/Rotacion/popup-toma-control.test.jsx"],
-      "criterios": ["CA-20"]
+      "tests": [
+        "src/components/Rotacion/popup-toma-control.test.jsx"
+      ],
+      "criterios": [
+        "CA-20"
+      ]
     },
     "L09": {
       "ola": "O3",
@@ -170,7 +241,9 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L06"],
+      "depende_de": [
+        "L06"
+      ],
       "puro": true,
       "puerto": null,
       "territorio": [
@@ -178,8 +251,12 @@
         "src/components/Rotacion/cumplimiento-rotacion.test.jsx",
         "src/hooks/useCumplimiento.js"
       ],
-      "tests": ["src/components/Rotacion/cumplimiento-rotacion.test.jsx"],
-      "criterios": ["CA-21"]
+      "tests": [
+        "src/components/Rotacion/cumplimiento-rotacion.test.jsx"
+      ],
+      "criterios": [
+        "CA-21"
+      ]
     },
     "L10": {
       "ola": "O4",
@@ -189,7 +266,11 @@
       "claim_ts": null,
       "done_ts": null,
       "motivo": null,
-      "depende_de": ["L07", "L08", "L09"],
+      "depende_de": [
+        "L07",
+        "L08",
+        "L09"
+      ],
       "puro": true,
       "puerto": null,
       "territorio": [
@@ -197,9 +278,45 @@
         "src/routing/appRoute.js",
         "src/routing/appRoute.test.js"
       ],
-      "tests": ["src/routing/appRoute.test.js"],
-      "criterios": ["CA-22"]
+      "tests": [
+        "src/routing/appRoute.test.js"
+      ],
+      "criterios": [
+        "CA-22"
+      ]
+    },
+    "L11": {
+      "ola": "O2",
+      "titulo": "Correcciones de la O1 (schema, cliente de Graph y tests)",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [],
+      "puro": false,
+      "puerto": 3117,
+      "territorio": [
+        "server/db.js",
+        "server/utils/graph/cliente.js",
+        "server/utils/graph/directorio.js",
+        "server/tests/rotacion_correcciones.test.js",
+        "server/tests/rotacion_schema.test.js",
+        "server/tests/rotacion_sync_entra.test.js",
+        "server/tests/residuos.js"
+      ],
+      "tests": [
+        "tests/rotacion_correcciones.test.js",
+        "tests/rotacion_schema.test.js",
+        "tests/rotacion_sync_entra.test.js"
+      ],
+      "criterios": [],
+      "nota": "Abierto por el GATE-O1 (decisión D5) para los 12 hallazgos confirmados del /code-review sobre territorios de lotes ya cerrados. Toda constraint nueva va como migracion F37.A3 aditiva e idempotente: NO modificar el CREATE TABLE de F37.A1 (el IF OBJECT_ID lo salta en toda BD donde las tablas ya existan). No bloquea a L04/L05/L06."
     }
   },
-  "test_lock": { "sesion": null, "ts": null, "ttl_min": 45 }
+  "test_lock": {
+    "sesion": null,
+    "ts": null,
+    "ttl_min": 45
+  }
 }
