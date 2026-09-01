@@ -51,6 +51,82 @@ const COLORS = {
   grayText: "#6c757d", white: "#ffffff",
 };
 
+// Color del PUNTO del chip de tipo de evento.
+//
+// Historia corta, porque explica por qué esto es un punto y no un chip de color: el chip nació
+// con un mapa de cuatro nombres —dos de los cuales ni existen en `lov_bit.tipo_evento`— y todo
+// lo demás caía en `grayBorder` (#dee2e6) usado a la vez como texto y como fondo: 1.27:1, o sea
+// invisible. El primer arreglo le dio a cada tipo su color saturado, y el resultado fue peor de
+// otra manera: cuatro renglones seguidos con cuatro rellenos distintos convierten una lista de
+// trabajo en un semáforo, y el tipo —que es un metadato— terminaba pesando más que la
+// descripción, que es el contenido.
+//
+// La forma correcta en una tabla densa: el chip es NEUTRO y uniforme (mismo gris para los 11
+// tipos, así la columna se recorre sin saltos) y el color queda reducido a un punto de 6 px.
+// Es el mismo vocabulario de `EstadoBadge` —píldora + punto + texto—, con una diferencia
+// deliberada: el badge de ESTADO conserva su color de fondo porque es el dato que manda; el de
+// TIPO lo cede. Dos badges en el renglón, una sola jerarquía.
+//
+// Los tonos NO son libres: un punto es un componente gráfico no textual, así que WCAG 1.4.11
+// pide ≥3:1 contra el fondo del chip (`bg-gray-100`, #f3f4f6). De cada familia está elegido el
+// tono más CLARO que pasa —el punto tiene que distinguirse, no pesar—. Los medidos: 3.23:1 el
+// más flojo (naranja), 4.56:1 el mejor. Si cambias un tono, vuelve a medirlo: los ámbar y los
+// teal de la banda 500 fallan (1.95:1 y 2.26:1) por vivos que se vean.
+const TIPO_PALETA = [
+  "#2563eb", "#7c3aed", "#b45309", "#0d9488",
+  "#e11d48", "#ea580c", "#4d7c0f", "#0284c7",
+];
+
+const TIPO_COLOR = {
+  "Evento General": "#15803d",
+  // Operación 24h y sus espejo en las bitácoras de Sala (D-058)
+  "Autorización": "#8b5cf6",
+  "Pruebas": "#b45309",
+  "Redespacho": "#0d9488",
+  // Disponibilidad (D-026 / D-063)
+  "Cambio de Disponibilidad": "#ea580c",
+  "Deshacer disponibilidad": "#f43f5e",
+  // Asiento de sistema (D-064)
+  "Despacho económico": "#3b82f6",
+  // Ciclo de turno (CIET)
+  "Cierre de turno": "#64748b",
+  "Finalización de turno": "#64748b",
+  "Extensión de turno": "#0284c7",
+  "Reapertura de turno": "#0284c7",
+  // Nombres heredados que ya no están en el catálogo; se conservan por si sobrevive una fila vieja
+  "Cambio de Estado": "#ea580c",
+  "Sincronización": COLORS.blueDark,
+};
+
+// Las columnas de la grilla de registros, en UN solo lugar.
+//
+// Antes el encabezado y la fila declaraban `grid-cols-12` por separado y repartían los mismos
+// doceavos a mano. Coincidían por convención, no por construcción: bastaba tocar un `col-span`
+// de un lado para que los títulos dejaran de caer sobre su columna. Y el reparto uniforme era
+// malo de por sí — `#` recibía 145 px para escribir "#1" mientras `Tipo` recibía los mismos 145
+// y partía "Cambio de Disponibilidad" en dos líneas, con la descripción dejando 600 px muertos
+// entre su texto y la columna de estado.
+//
+// Ahora los anchos salen del CONTENIDO: cada columna fija mide lo que su dato más largo necesita
+// —"#99", "01/09/2026, 08:35 a. m.", "Cambio de Disponibilidad", el badge "Borrador"— y la
+// descripción se lleva todo el sobrante con `1fr`, que es lo que cierra el hueco. `Acciones` usa
+// `max-content` sobre un mínimo porque su contenido varía: dos iconos, o el chip "Anulado"
+// además de ellos.
+//
+// El encabezado lleva `border border-transparent` a propósito: la fila es una tarjeta con borde
+// de 1 px, y sin ese borde fantasma el título arrancaría 1 px a la izquierda de su columna.
+const GRID_REGISTROS = "lg:grid-cols-[3rem_10.5rem_13rem_minmax(0,1fr)_7rem_minmax(10rem,max-content)]";
+const GRID_REGISTROS_EXTRAS = "lg:grid-cols-[3rem_10.5rem_13rem_minmax(0,1fr)_minmax(0,0.6fr)_7rem_minmax(10rem,max-content)]";
+const gridRegistros = (hasExtras) => (hasExtras ? GRID_REGISTROS_EXTRAS : GRID_REGISTROS);
+
+function colorDeTipo(nombre) {
+  if (TIPO_COLOR[nombre]) return TIPO_COLOR[nombre];
+  if (!nombre) return "#cbd5e1";                // sin tipo: el punto se apaga, no desaparece
+  let h = 0;
+  for (let i = 0; i < nombre.length; i += 1) h = (h * 31 + nombre.charCodeAt(i)) >>> 0;
+  return TIPO_PALETA[h % TIPO_PALETA.length];   // un tipo nuevo nace visible sin tocar este archivo
+}
+
 // Tema visual del header por unidad: azul = GEC3, verde = GEC32, para que sea obvio en qué
 // unidad se hizo login. En tema verde los acentos (badge de turno, avatar) se invierten a
 // azul — sobre el gradiente verde los acentos verdes se camuflan. Clases Tailwind como
@@ -1407,16 +1483,15 @@ export function GrillaRegistros({
           </div>
         ) : (
           <div className="space-y-3">
-            <div className="hidden lg:grid grid-cols-12 gap-3 px-4 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
-              <div className="col-span-1">#</div>
-              <div className="col-span-2">Fecha / Turno</div>
-              <div className="col-span-1">Tipo</div>
-              <div className={hasExtras ? "col-span-3" : "col-span-5"}>Descripción</div>
-              {hasExtras && (
-                <div className="col-span-2">{camposExtraDef.map(labelCampo).join(" / ")}</div>
-              )}
-              <div className="col-span-1">Estado</div>
-              <div className="col-span-2 text-right">Acciones</div>
+            <div className={`hidden lg:grid ${gridRegistros(hasExtras)} gap-3 px-4 py-2 border border-transparent text-xs font-semibold text-gray-400 uppercase tracking-wider`}>
+              <div>#</div>
+              <div>Fecha / Turno</div>
+              <div>Tipo</div>
+              <div>Descripción</div>
+              {hasExtras && <div>{camposExtraDef.map(labelCampo).join(" / ")}</div>}
+              <div>Estado</div>
+              {/* A la derecha, igual que sus botones: cada título cae sobre su propio contenido. */}
+              <div className="text-right">Acciones</div>
             </div>
             {regs.map((reg, idx) => {
               const rowId = reg.registro_id || reg._localId;
@@ -1516,13 +1591,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
   const tipoNombre = reg.tipo_evento_nombre
     || tiposEvento.find((t) => t.tipo_evento_id === reg.tipo_evento_id)?.nombre
     || "";
-  const tipoBorderColor = {
-    "Evento General": COLORS.greenPrimary,
-    "Cambio de Estado": "#fd7e14",
-    Redespacho: "#20c997",
-    Sincronización: COLORS.blueDark,
-  };
-  const borderColor = tipoBorderColor[tipoNombre] || COLORS.grayBorder;
+  const colorTipo = colorDeTipo(tipoNombre);
   const estadoDisplay = reg.estado === "borrador" ? "Borrador" : reg.estado === "cerrado" ? "Cerrado" : "Borrador";
   // Aviso suave contra typos de digitación en el datetime-local (ej. escribir 01/07 en un
   // navegador con locale MM/DD produce enero 7): fecha a más de 7 días de hoy se resalta
@@ -1562,17 +1631,18 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
   };
 
   return (
+    // El renglón NO lleva barra lateral de color por tipo: con cuatro tipos seguidos la lista se
+    // volvía un semáforo, el borde grueso ensuciaba las esquinas del `rounded-xl` y competía con
+    // el `border-emerald-400` del modo edición, que sí significa algo. El tipo se lee en su chip.
     <div className={`bg-white rounded-xl border transition-all ${
       isEditing ? "border-emerald-400 shadow-lg ring-2 ring-emerald-100" : "border-gray-200 hover:shadow-md hover:border-gray-300"
-    }`}
-      style={{ borderLeftWidth: "4px", borderLeftColor: borderColor }}
-    >
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 p-4 items-start">
-        <div className="lg:col-span-1 flex items-center gap-2">
+    }`}>
+      <div className={`grid grid-cols-1 ${gridRegistros(hasExtras)} gap-3 p-4 items-start`}>
+        <div className="flex items-center gap-2">
           <span className="text-lg font-bold text-gray-300">#{numero}</span>
         </div>
 
-        <div className="lg:col-span-2">
+        <div>
           <label className="text-xs text-gray-400 lg:hidden">Fecha / Turno</label>
           {isEditing ? (
             <div className="space-y-1.5">
@@ -1622,7 +1692,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
           )}
         </div>
 
-        <div className="lg:col-span-1">
+        <div>
           <label className="text-xs text-gray-400 lg:hidden">Tipo</label>
           {isEditing ? (
             <select
@@ -1636,14 +1706,21 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
               ))}
             </select>
           ) : (
-            <span className="inline-block px-2.5 py-1 rounded-lg text-xs font-semibold"
-              style={{ backgroundColor: borderColor + "18", color: borderColor }}>
+            // Mismo vocabulario que `EstadoBadge` (píldora + punto + texto), en neutro: el color
+            // vive solo en el punto. `items-start` + el margen del punto lo alinean con la PRIMERA
+            // línea cuando el nombre envuelve ("Cambio de Disponibilidad" parte en dos).
+            <span className="inline-flex items-start gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
+              <span
+                aria-hidden="true"
+                className="mt-[0.3125rem] w-1.5 h-1.5 shrink-0 rounded-full"
+                style={{ backgroundColor: colorTipo }}
+              />
               {tipoNombre || "—"}
             </span>
           )}
         </div>
 
-        <div className={hasExtras ? "lg:col-span-3" : "lg:col-span-5"}>
+        <div>
           <label className="text-xs text-gray-400 lg:hidden">Descripción</label>
           {isEditing ? (
             <>
@@ -1692,7 +1769,7 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
         </div>
 
         {hasExtras && (
-          <div className="lg:col-span-2">
+          <div>
             <label className="text-xs text-gray-400 lg:hidden">{camposExtraDef.map(labelCampo).join(" / ")}</label>
             {isEditing ? (
               <div className="space-y-1.5">
@@ -1729,12 +1806,12 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
           </div>
         )}
 
-        <div className="lg:col-span-1">
+        <div>
           <label className="text-xs text-gray-400 lg:hidden">Estado</label>
           <EstadoBadge estado={estadoDisplay} />
         </div>
 
-        <div className="lg:col-span-2 flex items-center justify-end gap-2">
+        <div className="flex items-center justify-end gap-2">
           {/* D-063 (RQ-02.12): copia deshecha en su origen. Es un ESTADO de la fila, no una acción:
               se muestra en todo modo de lectura (también con la grilla bloqueada) para que quién y
               cuándo la anuló no se pierdan; el tachado del detalle va en la columna Descripción. */}
