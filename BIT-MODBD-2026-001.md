@@ -5,8 +5,8 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 2.6 |
-| Fecha | 2026-08-28 |
+| Versión | 2.7 |
+| Fecha | 2026-08-31 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
@@ -96,10 +96,13 @@
    - 4.8 [`disponibilidad_estado` — máquina de estados DISP (D-026)](#48-disponibilidad_estado--máquina-de-estados-disp-d-026)
    - 4.9 [`consumo_combustible` — Consumos long-format + vista pivot (D-027)](#49-consumo_combustible--consumos-long-format--vista-pivot-d-027)
    - 4.9.1 [Ingesta automática desde el SIS (GEC32) — `valor_sis` + `sis_scrape_log`](#491-ingesta-automática-desde-el-sis-gec32--valor_sis--sis_scrape_log-d-029-f27a1-semántica-corregida-en-d-060-f33a1-ownership-override-y-backfill-cerrados-en-d-061)
-5. [Integración con el Dashboard (esquema `bitacora`)](#5-integración-con-el-dashboard-esquema-bitacora)
+5. [Integración con el Dashboard (esquemas `bitacora` y `dashboard`)](#5-integración-con-el-dashboard-esquemas-bitacora-y-dashboard)
+   - 5.3 [`dashboard.despacho_recibido` — llegada del despacho del día siguiente (D-064)](#53-dashboarddespacho_recibido-llegada-del-despacho-del-día-siguiente-bitácora--dashboard-d-064)
 6. [Vistas útiles](#6-vistas-útiles)
 7. [Notas de diseño](#7-notas-de-diseño)
    - 7.10 [Convención de zonas horarias (F19+F20+F21+F22)](#710-convención-de-zonas-horarias-f19f20f21f22)
+   - 7.11 [Asientos reflejados en las bitácoras de Sala (D-058 + D-063)](#711-asientos-reflejados-en-las-bitácoras-de-sala-d-058--d-063)
+   - 7.12 [Asientos de SISTEMA en las bitácoras de Sala (D-064)](#712-asientos-de-sistema-en-las-bitácoras-de-sala-d-064)
 8. [Historial de versiones](#8-historial-de-versiones)
 
 ---
@@ -1292,12 +1295,13 @@ deliberada**, no un permiso general. El respaldo es el rastro que la vuelve audi
 
 ---
 
-## 5. Integración con el Dashboard (esquema `bitacora`)
+## 5. Integración con el Dashboard (esquemas `bitacora` y `dashboard`)
 
-El esquema expone dos tablas-puente independientes hacia el Dashboard de Generación:
+Dos tablas-puente que **escribe Bitácora** en su propio esquema, y —desde D-064— una que **Bitácora lee** del esquema del otro repo en la misma base compartida:
 
 - **5.1 `evento_dashboard`** — eventos por hora/periodo (AUTH, REDESP, PRUEBA) emitidos desde MAND. Reemplaza la tabla v1.0 `autorizacion_dashboard` (renombrada en F5; vista compat `autorizacion_dashboard` sigue creándose idempotentemente en `initDB()` — F9 planeaba eliminarla pero el bloque DROP+CREATE quedó vivo. Sin consumidores activos al 2026-05-18).
 - **5.2 `disponibilidad_dashboard`** (F12) — estado vigente por planta (DISP). Separada deliberadamente: DISP no tiene periodo ni semántica horaria.
+- **5.3 `dashboard.despacho_recibido`** (D-064) — la llegada del despacho del día siguiente. **Va en la dirección contraria**: la escribe `dashboard-gen-gec3` en el esquema `dashboard` y Bitácora solo la **lee**. Es el único objeto de este documento que Bitácora no escribe.
 
 ### 5.1 `evento_dashboard` (eventos por periodo, MAND)
 
@@ -1416,6 +1420,46 @@ CREATE TABLE bitacora.disponibilidad_dashboard (
 | Histórico | El dashboard no lo necesita (un valor por celda 24h) | El dashboard solo ve el vigente; histórico vive en `registro_historico` |
 
 **Endpoint expuesto:** `GET /api/eventos-dashboard?tipo=DISP&planta_id=GEC3` (extendido en F12; el handler detecta `tipo='DISP'` y consulta `disponibilidad_dashboard` en lugar de `evento_dashboard`). Shape de respuesta: `{ eventos: [{ planta_id, evento, codigo, fecha_inicio_estado, jdts_snapshot, jefes_snapshot, actualizado_en }] }`.
+
+### 5.3 `dashboard.despacho_recibido` (llegada del despacho del día siguiente, Bitácora ⇐ Dashboard, D-064)
+
+Es el **primer objeto del esquema `dashboard` que este documento describe**, y por una razón: es el
+primero que **Bitácora lee**. Los dos contratos anteriores (§5.1 y §5.2) viven en `bitacora` y los
+escribe Bitácora; este va en la dirección contraria y viaja por la **base compartida**, no por HTTP.
+
+> **Los dos repos usan la misma base de datos** con esquemas distintos —`bitacora` + `lov_bit` para
+> Bitácora, `dashboard` para el dashboard de generación— (verificado por `sys.schemas` con las
+> credenciales de Bitácora, 2026-08-31). **Regla de propiedad, no negociable: cada repo escribe solo
+> en su esquema.** El dashboard escribe el hecho; Bitácora lo lee y escribe el asiento en `bitacora`.
+> Ninguno escribe en el esquema del otro, por más que la conexión lo permita.
+
+```sql
+-- La crea el initDB() de dashboard-gen-gec3, con SU patrón (sin tabla de flags de migración)
+IF OBJECT_ID('dashboard.despacho_recibido','U') IS NULL
+CREATE TABLE dashboard.despacho_recibido (
+  fecha_despacho DATE      NOT NULL PRIMARY KEY,      -- el día que ANUNCIA (mañana)
+  detectado_en   DATETIME2 NOT NULL DEFAULT GETDATE() -- hora BOGOTÁ (el motor de la BD corre en Bogotá)
+);
+```
+
+- **`fecha_despacho` es la PK, y de ahí sale la idempotencia del lado del escritor.** El scraper
+  (`server/despachoscraper.js`, `#refreshTomorrow()`) inserta con `WHERE NOT EXISTS` y **no pisa** un
+  `detectado_en` ya escrito: ni un reintento (cada `RETRY_MS`, 5 min), ni un reinicio, ni un segundo
+  tick. **La primera detección es la buena**, porque es la que se parece a la hora en que XM publicó.
+- **`detectado_en` está en hora BOGOTÁ, no UTC.** El motor de la base corre en Bogotá (`SYSDATETIME()`
+  da 08:56 mientras `SYSUTCDATETIME()` da 13:56) y el esquema `dashboard` usa `GETDATE()`. Bitácora
+  guarda UTC (§7.10, D-020), así que **`UTC = Bogotá + 5`** y la conversión se hace **una sola vez y
+  explícitamente en el lector** (`DATEADD(HOUR, 5, …)` en `utils/despacho-xm/lector.js`). No se
+  reparte entre dos módulos: dos conversiones parciales es el modo clásico de que el renglón termine
+  cinco horas corrido.
+- **Que la tabla NO exista es un estado válido y esperado**, no un error: nace con el `initDB()` del
+  **otro** repo. Hasta que ese repo se despliegue, la consulta falla con `Invalid object name`, el
+  lector devuelve `[]`, loguea **una vez** y Bitácora opera exactamente como hoy (RN-05.c). Ver §7.12.
+- **Bitácora nunca escribe acá**, y el asiento **no se republica** a `evento_dashboard` ni a
+  `disponibilidad_dashboard` (RQ-05.12): el dato vino de allá y reenviarlo sería un ciclo.
+
+Contrato completo —incluido el lado del escritor— en `<umbrella>/docs/interfaces-cross-repo.md`
+**Contrato 4**. Ver **D-064** y RF-078.
 
 ---
 
@@ -1786,6 +1830,138 @@ espejo de `Cambio de Disponibilidad` ya sembrados, el mismo módulo y el mismo `
 el estado "copia anulada" de RQ-02.12 como única diferencia de fondo. **Sin DDL y sin migración**
 (`F35.A1` quedó libre) y **sin cambios en el contrato cross-repo**. Ver **D-063**, RF-077 y REQ-02 §3.4.
 
+### 7.12 Asientos de SISTEMA en las bitácoras de Sala (D-064)
+
+Un **asiento de sistema** es una fila de `SALAJDT`/`SALAING` que **no la escribió nadie**: la escribe
+un barrido interno a partir de un hecho que ocurrió en otra parte. Hoy hay un solo origen —la llegada
+del despacho del día siguiente (§5.3, RF-078)— y el modelo está pensado para que un segundo origen no
+obligue a tocar el libro.
+
+**No confundirlo con el asiento reflejado de §7.11.** Son dos cosas distintas y su marcador es
+distinto **a propósito**:
+
+| | Asiento reflejado (§7.11, D-058/D-063) | Asiento de sistema (§7.12, D-064) |
+|---|---|---|
+| Marcador | `campos_extra.origen_bitacora` (`'MAND'` / `'DISP'`) | **`campos_extra.origen_sistema`** (`'DESPACHO_XM'`) |
+| Qué es | **Copia** de un registro que vive en otra bitácora | **Registro original** de Sala; no hay origen que copiar |
+| Libro GENE-F03 | **Excluido** (`eventosSala` filtra `origen_bitacora IS NULL`) | **Incluido**, y con el `detalle` **literal** |
+| Autor | El del origen | **`SISTEMA`** (§2.3.2) |
+| Editable | No (`403 asiento_reflejado`) | No — **sin código nuevo**: sale de D-049 (solo el autor) |
+
+Reusar `origen_bitacora` habría **excluido el asiento del libro**, que es justo donde tiene que salir,
+y lo habría vuelto inmutable por la vía del reflejo en vez de por la de la autoría.
+
+#### El `campos_extra` del asiento del despacho
+
+Las **cuatro** filas del mismo hecho lo comparten **carácter por carácter**:
+
+```json
+{
+  "origen_sistema": "DESPACHO_XM",
+  "clave_asiento":  "DESPACHO_XM|2026-07-14",
+  "fecha_despacho": "2026-07-14",
+  "hora_estimada":  false
+}
+```
+
+- **`clave_asiento`** es la clave de agrupación (RQ-05.10) y es **determinística**: la misma fecha
+  produce siempre la misma clave. De ahí sale **también** la idempotencia del lado de Bitácora. Lo
+  produce una sola función (`claveAsientoDespacho`), porque buscar con una clave y escribir otra es el
+  modo de fallo que el propio módulo documenta.
+- **`hora_estimada`** va **siempre presente** (`true`/`false`), nunca ausente — "AUSENTE ≠ `false`" es
+  la lección de D-056 (b) —, aunque todo consumidor trate la ausencia como `false` por si llegara una
+  fila vieja sin la clave. Escribir y leer el flag pasan por **el mismo normalizador**: un `'false'`
+  devuelto por `JSON_VALUE` (que da `nvarchar`) coaccionado con `Boolean` se escribiría `true` y se
+  leería `false`, o sea la misma fila marcada de dos maneras.
+- **Sin DDL.** `campos_extra` ya es `NVARCHAR(MAX) NULL` y las claves viajan al histórico como
+  cualquier otra.
+- **No es inyectable por HTTP.** `validateCamposExtra` (AUD-39) arma el JSON **solo** con las claves
+  declaradas en `lov_bit.bitacora.definicion_campos`, y `SALAJDT`/`SALAING` la tienen en **`NULL`**
+  (reafirmado por el `MERGE` en cada arranque): el `POST`/`PUT` genérico **descarta entero** cualquier
+  `campos_extra` que se mande a una bitácora de Sala.
+
+#### Cuatro filas, un renglón — y el colapso se acota AL DÍA
+
+Un hecho son **cuatro** filas: `SALAJDT`/`SALAING` × `GEC3`/`GEC32` (desviación consciente de RQ-05.8,
+que hablaba de dos: cada bitácora **y cada unidad** tiene su propio libro vivo). Se escriben **en una
+sola transacción** —o están las cuatro o no está ninguna— y comparten `detalle`, `fecha_evento` y
+`clave_asiento`; cada una resuelve su propio `turno_id` y su propia columna `turno`.
+
+`eventosSala` (`utils/f03-datos.js`) deduplica con esta clave:
+
+```
+sys|<día Bogotá de fecha_evento>|<clave_asiento>     ← fila de sistema con clave
+id|<registro_id>                                      ← todo lo demás (sin cambio)
+```
+
+Tres cosas que **no** son cosméticas, las tres encontradas por el `/code-review` del GATE-O1:
+
+1. **El día es parte de la clave.** La ventana de `armarMes` abre **±1 día** y el recorte por día se
+   hace **después** del dedupe: sin el día, una fila de la holgura ganaba el colapso y luego se
+   descartaba, y el renglón no salía **ni en esa hoja ni en la del mes vecino**. Con el día, dos filas
+   de la misma clave en días distintos salen cada una en su hoja: **duplicar es recuperable, perder el
+   renglón no**.
+2. **El prefijo `sys|` separa los espacios de nombres.** `claveDeAgrupacion` devuelve *cualquier*
+   `clave_asiento` (es genérica a propósito, para un segundo origen), así que una clave con forma
+   `id|4722` se tragaba el registro tecleado 4722.
+3. **La clave se reserva DESPUÉS de saber que hay texto.** Si la fila de menor `registro_id` viniera
+   con el `detalle` vacío, reservaba la clave y **silenciaba a sus tres hermanas**.
+
+⚠️ **La coherencia de las cuatro filas no la sostiene ningún constraint**, igual que la metadata de un
+lote de MAND (D-056 (c)): dentro del día gana la de **menor `registro_id`** y las otras se descartan
+**sin error ni log**. Un guard de test (`tests/despacho_xm.test.js`) exige que las cuatro coincidan en
+`detalle`, `fecha_evento` y `clave_asiento`, y el `INSERT` usa **un solo instante de Node bindeado
+como parámetro** para las cuatro — nunca `GETDATE()`/`new Date()` por fila (D-063 (b)). Y una fila de
+sistema **sin** `clave_asiento` no se colapsa: sale tantas veces como filas haya, sin que nada falle.
+
+⚠️ La fila de sistema pasa su **`detalle` literal**, sin el prefijo `GEC3 — ` que el motor de asientos
+(D-058) le antepone a lo que escribe una persona, porque el texto nombra las dos unidades a la vez.
+Hoy esa rama se activa para **cualquier** `origen_sistema`: el día que haya un segundo origen **por
+unidad**, el dato tiene que viajar en la fila (p. ej. `sin_prefijo_unidad`), no inferirse del marcador.
+
+#### Idempotencia: las DOS tablas, siempre
+
+Antes de escribir se busca `clave_asiento` en **`registro_activo` Y en `registro_historico`**; si
+aparece en cualquiera de las dos, no se escribe nada (`{ creado: false, filas: 0, motivo: 'ya_existe' }`).
+**Las dos**: un asiento de hace tres días ya lo archivó el cierre de turno, y buscarlo solo en la
+tabla activa lo duplicaría — es exactamente el caso del relleno del mes. La misma regla vale para
+**verificar** que un backfill terminó: si el reporte de cierre solo mira la activa, declara faltantes
+los días ya archivados y alguien los rellena de nuevo.
+
+Las dos consultas del creador van con **`ISJSON(campos_extra) = 1` antes de cada `JSON_VALUE`**: sin
+ese guard, **una sola** fila de Sala con `campos_extra` malformado impediría escribir **cualquier**
+asiento para siempre, con el sweeper logueando el error cada 5 minutos. (`f03-datos.js` **sigue sin
+ese guard** — deuda anterior a D-064, ver el ⚠️ de §7.11.)
+
+#### `fecha_evento`, `turno` y `turno_id`
+
+- **`fecha_evento`** = el instante de **detección** convertido a UTC, o —en el relleno— las **15:00
+  Bogotá del día anterior** al despacho que anuncia, con `hora_estimada: true`. El asiento pertenece
+  al día en que **se recibió**, no al día que anuncia (RN-05.h): el renglón `14:41 … para el
+  14-07-2026` vive en la hoja del **13**. Corolario contraintuitivo: **el asiento del día 1 de un mes
+  sale en el libro del mes ANTERIOR**.
+- **`turno`** (1|2) sí es el del evento, derivado de la hora Bogotá.
+- **`turno_id`** es el del turno **ABIERTO** de esa planta al momento de escribir, o `NULL` — puntero
+  de **archivado**, no narrativo (D-045, D-058 (c)). Nunca el turno que le tocaría a la hora del
+  evento: apuntarlo a uno ya cerrado dejaría la fila viva en `registro_activo` para siempre. Con
+  `turno_id = NULL` las levanta el rescate de huérfanos de D-063 (5).
+- **`estado`** queda en `'borrador'`, igual que las copias reflejadas: es por donde filtran el
+  archivado, el conteo y los guards.
+
+#### El tipo de evento (`F36.A1`)
+
+`'Despacho económico'`, `orden = 5`, **`seleccionable = 0`**, sembrado en `SALAJDT` **y** `SALAING`
+junto a los cuatro espejo de D-058 (§2.5). Va en las **dos** listas de `db.js` —el `INSERT`
+idempotente **y** el `UPDATE` complementario que corre en cada arranque—: en una sola de las dos, el
+flag se pierde en el siguiente restart. `seleccionable = 0` lo esconde del selector de la grilla **y**
+de los dos lookups del `POST`/`PUT` genérico, así que **nadie puede teclear a mano un asiento que
+finja venir del sistema** — y el escritor automático, por lo mismo, **no puede** entrar por
+`POST /api/registros`: inserta directo, como `reflejo-sala.js`. Se resuelve por `(bitacora_id,
+nombre)`, **nunca por id fijo**: los ids difieren entre bases.
+
+**Sin DDL nuevo y sin cambios en el contrato cross-repo existente** (`evento_dashboard` y
+`disponibilidad_dashboard` intactos). Ver **D-064**, RF-078, REQ-05 y §5.3.
+
 ---
 
 ## 8. Historial de versiones
@@ -1809,6 +1985,7 @@ el estado "copia anulada" de RQ-02.12 como única diferencia de fondo. **Sin DDL
 | 2.4 | 2026-08-25 | **Periodo 24 del carbón GEC32 (D-060).** **Nueva §4.9.1** documenta la ingesta SIS que faltaba en este modelo: columnas `valor_sis`/`sis_actualizado_en` de `consumo_combustible` y la tabla `bitacora.sis_scrape_log` (F27.A1). Semántica corregida: `completo = 1` ⇔ 24 periodos sin errores (antes se calculaba contra el horizonte de "hoy" y dejaba `completo=1, ultimo_periodo=23` → el P24 nunca se cargaba; 41 días en prod). Migración **F33.A1**: `UPDATE sis_scrape_log SET completo=0 WHERE completo=1 AND (ultimo_periodo IS NULL OR ultimo_periodo<>24 OR periodos_error>0)`; no toca `consumo_combustible`. Reparación de datos con `server/scripts/backfill-carbon-gec32.js` (resumible, guardrail `--confirm-db`). Sin cambios de DDL. |
 | 2.5 | 2026-08-27 | **Cierre de la ingesta SIS del carbón GEC32 (D-061).** **Sin DDL y sin migración `F-NN`.** §4.9.1 ampliada con lo que faltaba de la ingesta: la **tabla de ownership completa** de `aplicarCelda` (seis ramas, incluida la del **override 0**), el clamp a `cantidad_max` y el filtro de ruido de ≤ 0,5 t/h; `sis_owned`/`es_override` **derivados en el backend** y expuestos por celda en `GET /api/combustibles/consumos` junto al bloque `sis`; **vaciar una celda con `valor_sis` = override 0** en vez de DELETE (§4.9 puntos 2 y 5 corregidos, y la invariante de "celda vacía"); **tabla de decisión de `POST /api/combustibles/consumos/revertir`** (`restaurado` / `eliminado` / `sin_cambios`, con la devolución de la propiedad al SISTEMA); los **tres caminos** que le piden días al SIS (sweeper HH:02, job manual `POST /sis/scrape` con estado volátil, CLI de backfill) y el **mutex de proceso sin cola** `sis-lock` que serializa los dos primeros; la **concurrencia 1..6** de la fase de red (~95 s/día, `N=1` idéntico al previo) y su efecto en la reanudación; el **descubrimiento calibrado** (`discover.js`, K sondeos en W días, retorno `{ fecha, motivo, sondeos }`) con la fecha real de inicio de GEC32 —**`2018-06-13`**, primer carbón el **`2018-07-15`**, 2.996 días de histórico— y la advertencia de los huecos > 60 días; y el **seed idempotente del catálogo de `'TST'`** (10 filas espejo, guardado por la fila de `lov_bit.planta`, fixture residente que sube el catálogo global de 18 a 28). Runbook de la corrida histórica en `deploy/DEPLOY.md`. |
 | 2.6 | 2026-08-28 | **Reflejo de Disponibilidad a las bitácoras de Sala con copia anulada (D-063).** **Sin DDL y sin migración (`F35.A1` no consumida)** y **sin cambios en el contrato cross-repo** (`evento_dashboard` y `disponibilidad_dashboard` intactos). §7.11 reescrita y renombrada (**D-058 + D-063**): el **marcador** de asiento reflejado pasa de `origen_lote_id` —el puntero de MAND— al **universal `campos_extra.origen_bitacora`** (`codigo` del origen, cadena no vacía), y los punteros (`origen_lote_id` GUID / `origen_disponibilidad_id` INT) dejan de decidir nada; los **cinco** consumidores del predicado cambian juntos y un guard estático los fija. Documenta la copia DISP: `fecha_evento = fecha_inicio_estado` vs `turno_id` = turno **ABIERTO** (puntero de archivado), `estado` sigue `borrador` **a propósito** (archivado, conteo y guards filtran por ahí), predicado de búsqueda acotado por puntero + planta + `bitacora_id IN`, `@id` comparado **texto con texto** sin `CAST`, y `rowsAffected = 0` que **no es error** tampoco al actualizar o anular. Sección nueva **anular ≠ borrar** (RQ-02.12): deshacer un estado **no borra** la copia, le agrega `campos_extra.anulado {por, nombre, cargo, en}` con `JSON_MODIFY … JSON_QUERY` —sin `JSON_QUERY` quedaría como cadena escapada— e **idempotencia por SQL** (`AND JSON_VALUE(campos_extra,'$.anulado.en') IS NULL`), porque `JSON_MODIFY` en modo lax **reemplaza sin fallar**; `detalle`, puntero y `fecha_evento` intactos y la copia del N-1 restaurado **no se toca**. Se retira de §7.11 la nota que dejaba el reflejo de DISP fuera de alcance a la espera de un ADR propio: ese ADR es D-063. |
+| 2.7 | 2026-08-31 | **Asiento automático de la llegada del despacho del día siguiente (D-064).** **Nueva §5.3** — `dashboard.despacho_recibido` (`fecha_despacho DATE PK`, `detectado_en DATETIME2 DEFAULT GETDATE()`), el **primer objeto del esquema `dashboard` que entra a este documento** y el primero que Bitácora **lee** en vez de escribir: los dos repos comparten base con esquemas distintos, cada uno escribe **solo en el suyo**, y el contrato viaja **por la BD, no por HTTP** (sin endpoint, sin token, sin notificación — si Bitácora está caída, asienta cuando vuelva porque el hecho quedó escrito). `detectado_en` está en **hora Bogotá** (el motor de la BD corre en Bogotá y `dashboard` usa `GETDATE()`), así que **`UTC = Bogotá + 5`** y la conversión ocurre **una sola vez, en el lector**; que la tabla **no exista** es estado válido y esperado (nace con el `initDB()` del otro repo) → el lector devuelve `[]`, loguea una vez y Bitácora opera como hoy. **Nueva §7.12** — los asientos de **SISTEMA**, con la tabla que los distingue de los reflejados de §7.11: el marcador es **`campos_extra.origen_sistema`** (`'DESPACHO_XM'`) y **no** `origen_bitacora`, que los habría **excluido del libro F03** y vuelto copia de algo que no existe. Documenta el `campos_extra` de las **cuatro** filas (`SALAJDT`/`SALAING` × `GEC3`/`GEC32`, desviación consciente de RQ-05.8) con `clave_asiento` determinística y `hora_estimada` **siempre presente** (D-056 (b)) normalizada por la **misma** función al escribir y al leer; el colapso del libro por **`sys|<día Bogotá>|<clave_asiento>`** —el día es parte de la clave porque la holgura de ±1 de `armarMes` borraba el renglón de las dos hojas; el prefijo `sys|` separa el espacio de nombres del `id|<registro_id>` de lo tecleado— y las tres trampas que no sostiene ningún constraint (coherencia de las 4 filas por guard de test, fila sin clave que no colapsa, `detalle` **literal** para cualquier `origen_sistema`); la **idempotencia contra `registro_activo` Y `registro_historico`** (solo la activa duplica lo que el cierre de turno ya archivó) con `ISJSON(campos_extra) = 1` antes de cada `JSON_VALUE`; `fecha_evento` del día en que se **recibió** —el asiento del día 1 sale en el libro del mes **anterior**— frente a `turno_id` del turno **ABIERTO** o `NULL`; y **`F36.A1`**: `'Despacho económico'`, `orden = 5`, `seleccionable = 0` en las **dos** listas de `db.js` (`INSERT` + `UPDATE` complementario). §5 reencabezada. **Sin DDL nuevo en `bitacora`/`lov_bit`** (las claves viven en `campos_extra`, que ya es `NVARCHAR(MAX) NULL`) y **sin cambios en el contrato cross-repo existente** (`evento_dashboard` y `disponibilidad_dashboard` intactos). Ver D-064, RF-078 (v2.3), REQ-05 y `<umbrella>/docs/interfaces-cross-repo.md` Contrato 4. |
 
 ---
 

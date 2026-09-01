@@ -377,7 +377,14 @@ async function resolverCombBitacoraId(db) {
   }
 }
 
-async function resolverLiveBindings(db) {
+// Exportado desde el GATE-O2 de D-064: un proceso que NO es el server —un script de operación— abre
+// el pool con `getDB()` y se queda sin live bindings, porque el único que los resuelve es `initDB()`.
+// `USUARIO_SISTEMA_ID` en `null` hace que TODO escritor con autor SISTEMA lance
+// ("initDB no corrió"), y un CLI que falla día por día dentro de su try/catch sale con un resumen de
+// fallidos en vez de con un error de arranque. Un script de mantenimiento no debe correr DDL, seeds
+// ni migraciones solo para conseguir dos enteros: esto son dos SELECT, sin escritura, y lanza fuerte
+// si el seed no está. Es la misma llamada que hace el camino `SKIP_INITDB=1` de `initDB()`.
+export async function resolverLiveBindings(db) {
   await resolverUsuarioSistemaId(db);
   await resolverCombBitacoraId(db);
 }
@@ -1077,6 +1084,15 @@ export async function initDB() {
   // El cuarto se siembra aunque el reflejo de DISP quede fuera de este ADR: el seed se reconstruye
   // en CADA arranque, así que sembrarlo ahora evita volver a tocar este bloque cuando llegue.
   // Sembrar tipos NO cambia la matriz de permisos: el operador sigue tecleando en 'Evento General'.
+  //
+  // F36.A1 (D-064): el QUINTO tipo, 'Despacho económico', comparte este bloque pero NO es un espejo
+  // de reflejo — no copia ningún lote de otra bitácora: es el tipo del asiento que el sistema
+  // escribe solo cuando XM publica el despacho del día siguiente (RQ-05.4). Va acá porque necesita
+  // exactamente lo mismo que los espejo: existir en SALAJDT y SALAING con `seleccionable = 0`, que
+  // es lo que impide que alguien teclee a mano un asiento que finja venir del sistema. Esconder no
+  // es impedir, y esa es justo la mitad que aporta el flag.
+  // Sin migración en `migracion_aplicada`, igual que F34.A1: el seed es idempotente por
+  // construcción (`NOT EXISTS`) y se reconstruye en cada arranque, que es lo que se quiere.
   await db.request().batch(`
     INSERT INTO lov_bit.tipo_evento (bitacora_id, nombre, orden, seleccionable)
     SELECT b.bitacora_id, s.nombre, s.orden, 0
@@ -1085,7 +1101,8 @@ export async function initDB() {
       ('Autorización',             1),
       ('Pruebas',                  2),
       ('Redespacho',               3),
-      ('Cambio de Disponibilidad', 4)
+      ('Cambio de Disponibilidad', 4),
+      ('Despacho económico',       5)
     ) AS s(nombre, orden)
     WHERE b.codigo IN ('SALAJDT','SALAING')
       AND NOT EXISTS (
@@ -1095,15 +1112,20 @@ export async function initDB() {
   `);
 
   // UPDATE complementario (mismo patrón que el `oculta` de CIET, arriba): garantiza el flag en cada
-  // arranque, así un seteo accidental fuera-de-init queda revertido. Solo fuerza el 0 de las 8 filas
-  // espejo — deliberadamente NO fuerza `seleccionable = 1` en el resto, para no cerrarle la puerta a
-  // un tipo oculto futuro que no sea de este reflejo.
+  // arranque, así un seteo accidental fuera-de-init queda revertido. Solo fuerza el 0 de las 10
+  // filas ocultas (5 tipos × 2 bitácoras) — deliberadamente NO fuerza `seleccionable = 1` en el
+  // resto, para no cerrarle la puerta a un tipo oculto futuro que no sea de este reflejo.
+  //
+  // El nombre nuevo va en las DOS listas, esta y la del INSERT de arriba (D-064): solo en el INSERT,
+  // el tipo nace con el flag en 0 la primera vez y nadie se lo vuelve a forzar — el UPDATE que
+  // existe para revertir un seteo accidental no lo cubriría y el tipo podría volverse tecleable sin
+  // que nada falle; solo en el UPDATE, el tipo no se crea nunca.
   await db.request().batch(`
     UPDATE te SET seleccionable = 0
     FROM lov_bit.tipo_evento te
     INNER JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
     WHERE b.codigo IN ('SALAJDT','SALAING')
-      AND te.nombre IN ('Autorización','Pruebas','Redespacho','Cambio de Disponibilidad')
+      AND te.nombre IN ('Autorización','Pruebas','Redespacho','Cambio de Disponibilidad','Despacho económico')
       AND te.seleccionable <> 0;
   `);
 

@@ -4,10 +4,10 @@
 |---|---|
 | **Código** | REQ-05 |
 | **Título** | Asentar en las bitácoras de Sala y en el libro GENE-F03 la llegada del despacho económico del día siguiente publicado por XM |
-| **Estado** | 🟢 **Listo para planificar** — desbloqueado el 2026-08-31; plantilla, alcance y las dos preguntas de §8 cerradas por el autor. **Sin preguntas abiertas.** |
+| **Estado** | ✅ **Implementado** — **D-064** (2026-08-31), rama `feat/asiento-despacho-xm-2026-08` en los **dos** repos. Los 11 criterios de código de §6 confirmados en el cierre; **CA-12 cerrado** en `docs/interfaces-cross-repo.md`. **Pendiente de despliegue** (dashboard primero). Ver §8.4. |
 | **Origen** | `pendientes_Ernesto.md`: *"cuando cambia despacho (redesp<>desp por correo o registro) crear histórico en op24hr con el formato en la imagen"* — **reformulado por el autor el 2026-08-31** (ver §1.1) |
 | **Depende de** | [REQ-02](./REQ-02-reflejo-bitacoras-sala.md) ✅ (D-058 + D-063), [REQ-04](./REQ-04-historico-en-apartado.md) ✅, [REQ-06](./REQ-06-excel-eventos-operacion.md) ✅ (D-058) |
-| **Cross-repo** | ⚠️ Requiere un cambio pequeño en `dashboard-gen-gec3` y una entrada nueva en `docs/interfaces-cross-repo.md`. **La comunicación es por la BD compartida, no por HTTP** (§5.1). |
+| **Cross-repo** | ✅ **Contrato 4** de `docs/interfaces-cross-repo.md` (umbrella): `dashboard.despacho_recibido`, escrita por `dashboard-gen-gec3` y **leída** por Bitácora. **La comunicación es por la BD compartida, no por HTTP** (§5.1). |
 
 ---
 
@@ -86,12 +86,18 @@ Este requerimiento nació de una nota que mezclaba dos cosas. El autor las separ
 
 - **RQ-05.8** — Se crea **un registro en `SALAJDT` y otro en `SALAING`**, directamente. **No** pasa
   por Operación 24h.
+  > **Desviación consciente, implementada en D-064:** son **cuatro** filas, no dos —`SALAJDT` y
+  > `SALAING` **por cada unidad**, `GEC3` y `GEC32`—, porque cada bitácora **y cada planta** tiene
+  > su propio libro vivo y con dos filas el asiento no se vería en la Sala de una de las dos
+  > unidades. El espíritu de RQ-05.5 y RQ-05.10 se conserva intacto: un solo texto, un solo
+  > renglón en el libro. Las cuatro se escriben en **una** transacción.
 - **RQ-05.9** — **No lleva `campos_extra.origen_bitacora`**: no es una copia reflejada sino un
   registro original de Sala. Gracias a eso el libro GENE-F03 lo toma por la fuente que **ya existe**
   (`eventosSala`, que excluye solo los reflejados) y no hace falta agregarle una quinta fuente.
-- **RQ-05.10** — **Las dos filas cuentan como UN renglón en el libro.** `eventosSala` deduplica hoy
-  únicamente por `registro_id`, así que sin una clave compartida el asiento saldría **dos veces** en
-  la misma hoja. Las dos filas llevan una **clave de agrupación común** en `campos_extra` y el
+- **RQ-05.10** — **Las filas del asiento cuentan como UN renglón en el libro** (las **cuatro**, ver
+  la desviación de RQ-05.8). `eventosSala` deduplica hoy
+  únicamente por `registro_id`, así que sin una clave compartida el asiento saldría **cuatro veces**
+  en la misma hoja. Las dos filas llevan una **clave de agrupación común** en `campos_extra` y el
   armado del libro las colapsa, con el mismo criterio con que agrupa las celdas de un lote de MAND
   por `lote_id`.
 - **RQ-05.11** — El asiento **no llena ninguna celda** de la grilla de captura de Operación 24h.
@@ -265,3 +271,40 @@ desde D-057. Ver RN-05.g.
 
 **La misma cadencia con la que el dashboard nota el despacho** (`RETRY_MS`, 5 minutos). Leer más
 seguido no adelantaría nada, porque el hecho no existe antes. Ver RQ-05.16.
+
+### 8.4 ✅ CERRADA (2026-08-31) — lo que resolvió D-064, y lo que quedó anotado
+
+Este requerimiento llegó a la planificación **sin preguntas abiertas** (§8.1 a §8.3), así que la fase
+de descubrimiento solo tomó decisiones de implementación. Lo que el ADR **[D-064](../decisions.md)**
+resolvió y que este documento no decía:
+
+- **Cómo viaja el hecho entre los repos.** §5.1 sospechaba la base compartida; la planificación lo
+  **verificó** (`sys.schemas` devuelve `dashboard` con las credenciales de Bitácora) y de ahí salió el
+  contrato por tabla en vez de por HTTP, con la regla de propiedad "cada repo escribe solo en su
+  esquema". Elimina de paso la pregunta de las notificaciones perdidas de §5.4.
+- **Cuál es el marcador.** `campos_extra.origen_sistema = 'DESPACHO_XM'`, deliberadamente distinto de
+  `origen_bitacora` (que habría excluido el asiento del libro, RQ-05.9), más una `clave_asiento`
+  determinística `DESPACHO_XM|YYYY-MM-DD` que es a la vez la clave de colapso de RQ-05.10 y la de la
+  idempotencia de RQ-05.13/15.
+- **Cuántas filas.** **Cuatro**, no dos — ver la desviación anotada en RQ-05.8.
+- **Contra qué se verifica la idempotencia.** Contra `registro_activo` **y** `registro_historico`: solo
+  la activa duplicaría todos los días que el cierre de turno ya archivó, que es justo el caso de
+  RQ-05.14.
+- **Dónde vive la marca de hora estimada.** En `campos_extra.hora_estimada`, **siempre presente**
+  (`true`/`false`) y **no se pinta en el front**: la reporta el CLI. Un chip en la grilla sería otro
+  requerimiento.
+
+**Anotado, no resuelto acá** (todo con destino, ninguno silencioso):
+
+| Qué | Estado | Dónde vive |
+|---|---|---|
+| El hecho se pierde si la BD está caída justo en la detección (`#foundTomorrow` se prende antes de escribir) | **Aceptado, no se arregla** — lo mitigan el reinicio y el relleno con hora estimada | D-064 §Consecuencias; sigue valiendo RN-05.d |
+| La carrera entre el relleno y el barrido (se solapan 3 días, sin lock de rango) | **Cerrada en el runbook**, no en el código | `deploy/DEPLOY.md` §9 |
+| Una fila de Sala con `campos_extra` malformado tumba el libro del mes (`f03-datos.js` sin `ISJSON`) | **Deuda anterior a este REQ** (D-058/D-063); el creador de D-064 sí se blindó | D-064 §Consecuencias (a) |
+| El bug de `getColombiaDate()` + `.toISOString()` del otro repo | **Sigue fuera de alcance** (§7) — el camino de `#refreshTomorrow` no lo tiene (medido) | `dashboard-gen-gec3` |
+| Reactivar `dashboard.despacho_programado` | **Sigue fuera de alcance** (§7) — no es la fuente | — |
+
+**Los 12 criterios de §6:** los **11 de código** quedaron `cumple`, verificados por el gate y
+re-verificados en el cierre (suite backend **725/725**, front **324/324**, dashboard **236/236**, cero
+residuos). **CA-12** (contrato cross-repo documentado) se cerró en el cierre, al quitarle el "en
+implementación" al Contrato 4 y agregarle el orden de despliegue.

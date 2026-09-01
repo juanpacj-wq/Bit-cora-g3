@@ -273,6 +273,152 @@ GROUP BY YEAR(cc.fecha) ORDER BY 1;
 
 ---
 
+## 9. Asiento automático del despacho de XM (D-064)
+
+> **La regla que gobierna todo este bloque: PRIMERO el dashboard, DESPUÉS Bitácora.** No es una
+> recomendación. Con Bitácora arriba y el dashboard no, todo funciona **exactamente como hoy** —esa es
+> la degradación pedida, RN-05.c— pero el único rastro es **una línea** en `journalctl` y nadie va a
+> notar que el renglón no sale. Y el relleno del mes corrido antes que el dashboard deja el mes entero
+> con **hora estimada** aunque las horas reales de los últimos días fueran a estar disponibles.
+
+### 9.1 Orden de la puesta en marcha
+
+| # | Dónde | Qué | Cómo se sabe que quedó |
+|---|---|---|---|
+| 1 | `dashboard-gen-gec3` | Desplegar la rama con L01 y **reiniciar**. Su `initDB()` crea `dashboard.despacho_recibido` (patrón `IF OBJECT_ID … IS NULL`, **sin** tabla de flags). | `SELECT OBJECT_ID('dashboard.despacho_recibido','U')` **no** nulo. |
+| 2 | BD | Esperar a la primera detección real (XM publica hacia las 3 p.m.) **o** aceptar que el primer día quede con hora estimada. | `SELECT TOP 5 * FROM dashboard.despacho_recibido ORDER BY fecha_despacho DESC` |
+| 3 | `Bit-cora-g3` | Desplegar y **reiniciar**. `F36.A1` corre en el arranque y siembra el tipo `'Despacho económico'`. | `journalctl -u bitacora-api -n 200` sin errores + la query de 9.3. |
+| 4 | `Bit-cora-g3/server` | Correr **una sola vez** el relleno del mes en curso (§9.2), **con el sweeper apagado**. | La línea final del CLI (§9.2) y el conteo en la BD. |
+
+**Lo primero del smoke, y la única pieza que no se pudo probar antes:** que el `SELECT` del lector
+funcione contra la tabla **de verdad**. Hasta el paso 1 esa tabla no existe en ninguna base, así que
+en dev solo se ejercitó el camino de degradación. Después del paso 3, en el log tiene que **dejar de
+aparecer** la línea `[despacho-xm] no se pudo leer dashboard.despacho_recibido: Invalid object name …`.
+
+**Lo segundo del smoke:** que el **próximo cierre de turno real archive** las filas del relleno. Su
+`fecha_evento` cae fuera de la ventana del turno abierto (son días pasados), así que salen con el
+`turno_id` del turno **ABIERTO** al momento de escribir o con `NULL`; en el segundo caso las levanta
+el rescate de huérfanos de D-063. Los dos caminos están cubiertos por diseño, pero no se ejercitaron
+sin escribir en planta real.
+
+### 9.2 El relleno del mes en curso — una sola pasada
+
+**Apaga el barrido antes de correrlo.** El CLI recorre `[día 1, hoy]` y el sweeper barre
+`[hoy-2, hoy+1]`: **los tres últimos días los piden los dos**, ninguno toma lock de rango y son dos
+procesos distintos, así que un día podría salir duplicado. Dos formas, cualquiera sirve:
+
+```bash
+# (a) con el servicio detenido — la más simple si la ventana lo permite
+sudo systemctl stop bitacora-api
+
+# (b) o con el sweeper apagado en el unit, sin bajar el servicio
+sudo systemctl edit bitacora-api      # → Environment=DESPACHO_XM_SWEEPER_ENABLED=0
+sudo systemctl restart bitacora-api
+# el arranque lo confirma:  [despacho-xm] sweeper DESHABILITADO (DESPACHO_XM_SWEEPER_ENABLED=0)
+```
+
+El comando (desde `Bit-cora-g3/server`). **`DB_NAME` va DELANTE**: la variable del entorno prevalece
+sobre la del `--env-file`, y `DB_NAME_PROD` del `.env` **no la lee nadie** — es inerte (convención 35):
+
+```bash
+# 1. Ensayo. NO escribe una sola fila.
+DB_NAME=PortalG3 node --env-file=../.env scripts/relleno-asiento-despacho.js \
+  --confirm-db PortalG3 --dry-run --log /tmp/relleno-despacho-dry.log
+
+# 2. De verdad.
+DB_NAME=PortalG3 node --env-file=../.env scripts/relleno-asiento-despacho.js \
+  --confirm-db PortalG3 --log /tmp/relleno-despacho.log
+```
+
+Comprueba primero que el **guardrail** funciona: con un `--confirm-db` que no sea el `DB_NAME` activo
+tiene que **rechazar antes de abrir el pool**, sin tocar una conexión.
+
+> ⚠️ **El `--dry-run` NO prueba que el camino real funcione.** El ensayo nunca llega al escritor —pasó
+> limpio durante todo el desarrollo con el CLI roto por los live bindings (GATE-O2, R1)—. "El dry-run
+> salió bien" no es evidencia de nada más que de que el rango y los guardrails están bien.
+
+**Y "terminó" NO es que el proceso salga con 0.** El CLI le vuelve a **preguntar a la BD** qué días del
+mes tienen asiento —una consulta aparte, no el acumulador del bucle, y mirando las **dos** tablas— y
+nombra los que falten. Ese es el número que hay que leer:
+
+```
+[relleno] verificación (consultada a la BD): 31/31 días del mes con asiento — 3 con hora real, 28 con hora estimada
+[relleno] no queda ningún día del mes sin asiento.
+```
+
+- `[relleno] no queda ningún día del mes sin asiento.` → listo.
+- `[relleno] días del mes SIN asiento: …` y **exit 1**: **relanza el MISMO comando completo**. Es
+  resumible por la idempotencia del creador; no hay un flag de "solo los que faltan" y no hace falta.
+  (Con `--dry-run` o `--solo-con-hecho` la lista sale igual pero **no** hay exit 1: ahí quedan días
+  sin renglón a propósito.)
+- `[relleno] OJO: N asiento(s) quedaron con HORA ESTIMADA (15:00 Bogotá …)` → es lo esperado para los
+  días pasados: su hora real **nunca se guardó**. La marca vive en `campos_extra.hora_estimada` y
+  **no se pinta en el front**.
+
+Si prefieres la lectura estricta de RN-05.d —solo los días con fila en `dashboard.despacho_recibido`—
+agrega `--solo-con-hecho`: los días sin hecho se **omiten** y quedan sin renglón. Ten presente que la
+**ausencia de una fila no prueba que no llegó** el despacho (hay una ventana conocida en la que el
+hecho se pierde en el origen), así que esa opción puede dejar huecos legítimos.
+
+**Al terminar, vuelve a encender el sweeper** (`systemctl start` o revertir el `Environment=`), y
+confirma en el log que arrancó: `[despacho-xm] sweeper iniciado`.
+
+### 9.3 Verificación end-to-end
+
+```sql
+-- 1. El tipo de evento quedó sembrado por F36.A1, oculto y en las DOS Salas (esperado: 2 filas)
+SELECT b.codigo, te.nombre, te.orden, te.seleccionable
+FROM lov_bit.tipo_evento te
+JOIN lov_bit.bitacora b ON b.bitacora_id = te.bitacora_id
+WHERE te.nombre = N'Despacho económico';
+
+-- 2. Los asientos escritos, por día y por planta (esperado: 4 filas por día — 2 bitácoras × 2 unidades)
+SELECT CAST(DATEADD(HOUR,-5,ra.fecha_evento) AS DATE) AS dia_bogota,
+       ra.planta_id, b.codigo, COUNT(*) AS filas,
+       MAX(JSON_VALUE(ra.campos_extra,'$.hora_estimada')) AS hora_estimada
+FROM bitacora.registro_activo ra
+JOIN lov_bit.bitacora b ON b.bitacora_id = ra.bitacora_id
+WHERE ISJSON(ra.campos_extra) = 1
+  AND JSON_VALUE(ra.campos_extra,'$.origen_sistema') = 'DESPACHO_XM'
+GROUP BY CAST(DATEADD(HOUR,-5,ra.fecha_evento) AS DATE), ra.planta_id, b.codigo
+ORDER BY 1 DESC, 2, 3;
+
+-- 3. Ningún asiento se escapó a una planta que no sea GEC3/GEC32 (esperado: 0 filas)
+SELECT DISTINCT planta_id FROM bitacora.registro_activo
+WHERE ISJSON(campos_extra) = 1
+  AND JSON_VALUE(campos_extra,'$.origen_sistema') = 'DESPACHO_XM'
+  AND planta_id NOT IN ('GEC3','GEC32');
+```
+
+Y en la aplicación:
+
+- El renglón aparece en la grilla de **Sala de Mando — Jefe de Turno** y de **Ing. de Operación**, en
+  las dos unidades, **sin lápiz ni basurero** (autor `SISTEMA`; D-049).
+- El tipo `'Despacho económico'` **no** está en el selector al crear un registro a mano.
+- El libro **GENE-F03** del mes trae **un solo** renglón por día, con el texto literal y en el bloque
+  de turno de su hora. Ojo con el borde: **el asiento del día 1 sale en el libro del mes ANTERIOR**,
+  porque la detección ocurrió esa tarde. No es un error.
+- La grilla de captura de **Operación 24h** sigue **vacía**: el asiento no la toca.
+
+### 9.4 Qué mirar si el renglón no sale
+
+| Síntoma en `journalctl -u bitacora-api` | Qué significa |
+|---|---|
+| `[despacho-xm] sweeper DESHABILITADO (…)` | El barrido no está corriendo. Si el motivo es `AUTH_TEST_BYPASS=1`, **el servicio arrancó con el backdoor de test encendido**: eso es un problema mayor que el asiento. |
+| `[despacho-xm] no se pudo leer dashboard.despacho_recibido: Invalid object name …` | El dashboard **no se ha desplegado** con el DDL nuevo. Es el paso 1 de §9.1. |
+| Nada, ni una línea | El sweeper corre y no hay hecho que leer: XM no publicó, o el scraper del dashboard no lo detectó. Revisa `dashboard.despacho_recibido` directamente. |
+
+> **Ventana ciega conocida y aceptada** (no la busques como bug): si la BD está caída **justo** en el
+> instante de la detección, el hecho de ese día se pierde —`#foundTomorrow` se prende antes de
+> escribir—. Lo cubren cualquier reinicio del dashboard antes de medianoche y el relleno con hora
+> estimada. **La ausencia de una fila no prueba que no llegó el despacho.**
+
+> **El día que Bitácora corra en más de un proceso contra la misma base** (dos instancias tras nginx,
+> un `node -e` a mano en paralelo), este runbook deja de alcanzar: ahí el `sp_getapplock` por clave
+> dentro de `crearAsientoDespacho` pasa a ser obligatorio. Está anotado en D-064.
+
+---
+
 ## Verificación end-to-end
 
 - `https://pgen.gecelca.com.co/bitacora/` → pantalla de login (paso "microsoft").

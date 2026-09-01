@@ -150,6 +150,29 @@ D-058 marcaba por `origen_lote_id` porque MAND era el único origen; con la copi
 
 ---
 
+## Asiento de sistema / hora estimada (D-064)
+
+**Asiento de sistema** = una fila de `SALAJDT`/`SALAING` que **no la escribió nadie**: la pone un barrido interno a partir de un hecho ocurrido **fuera** de Bitácora. Hoy hay un solo origen —la llegada del despacho económico del día siguiente que publica XM y detecta el dashboard—, con el texto literal del F03: `Se recibe del XM despacho económico de G3.0 y G3.2 para el DD-MM-AAAA`. Su autor es **`SISTEMA`**, y por eso **nadie lo edita ni lo borra** (D-049 limita la edición al autor y `SISTEMA` nunca tiene sesión): no hizo falta programar nada para conseguirlo.
+
+**No es un asiento reflejado, y su marcador es otro a propósito:**
+
+| | Asiento **reflejado** (D-058/D-063) | Asiento **de sistema** (D-064) |
+|---|---|---|
+| Marcador | `campos_extra.origen_bitacora` (`"MAND"`/`"DISP"`) | **`campos_extra.origen_sistema`** (`"DESPACHO_XM"`) |
+| Qué es | **Copia** de un registro que vive en otra bitácora | **Registro original** de Sala; no hay origen que copiar |
+| Libro GENE-F03 | **Excluido** (se publicaría tres veces) | **Incluido**, con el `detalle` **literal** (sin el prefijo `GEC3 — `) |
+| Por qué no se edita | `403 asiento_reflejado` (el origen manda) | Autoría: el autor es `SISTEMA` |
+
+Reusar `origen_bitacora` habría **excluido el asiento del libro**, que es justo donde tiene que salir.
+
+**Clave de asiento** = `campos_extra.clave_asiento`, de la forma `DESPACHO_XM|YYYY-MM-DD` y **determinística**: la misma fecha de despacho produce siempre la misma clave. Hace dos trabajos a la vez — es la **clave de colapso** del libro (las **cuatro** filas del hecho, `SALAJDT`/`SALAING` × `GEC3`/`GEC32`, salen como **un** renglón, agrupadas por `sys|<día Bogotá>|<clave>`) y la **clave de idempotencia** (antes de escribir se busca en `registro_activo` **y** en `registro_historico`; en una sola de las dos, el relleno duplicaría todo lo que el cierre de turno ya archivó).
+
+**Hora estimada** = `campos_extra.hora_estimada`. `false` cuando la hora del asiento es la que el dashboard **midió** al detectar el archivo; `true` cuando es la **convención** de las **15:00 Bogotá** que usa el relleno del mes para los días cuya hora real nunca se guardó. Va **siempre presente** (nunca ausente) y **no se pinta en el front**: el único lugar donde se dice con todas las letras es el resumen del CLI (`[relleno] OJO: N asiento(s) quedaron con HORA ESTIMADA`). Por eso el relleno es una **pasada única de puesta al día**, no una rutina: un día que XM nunca publicó quedaría indistinguible de uno real.
+
+> El asiento pertenece al día en que **se recibió**, no al que anuncia: `14:41 … para el 14-07-2026` vive en la hoja del **13** — y, como corolario, **el asiento del día 1 de un mes sale en el libro del mes anterior**. Ver D-064, RF-078 y BIT-MODBD §5.3 / §7.12.
+
+---
+
 ## SIS
 
 **SIS** = el **historiador industrial interno** de la planta (`http://192.168.18.201`, HTTP plano, sin autenticación; hay una allowlist en `validarSisHost` y se puede apuntar a otro host con la variable `SIS_HOST`). Guarda las lecturas de sensores minuto a minuto y las exporta como `.xls` por rango horario.
