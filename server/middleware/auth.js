@@ -27,6 +27,10 @@ if (process.env.AUTH_TEST_BYPASS === '1' && process.env.NODE_ENV === 'production
 // (el botón del navbar, vía /api/me) leen EL MISMO objeto y no pueden divergir.
 // D-059: `es_observador` viaja en la sesión por la misma razón — el gate del server
 // (esObservador en permissions.js) y las affordances del front (/api/me) leen EL MISMO objeto.
+// D-065: `puede_configurar_rotacion` (F37.A2) viaja en la sesión por la misma razón — el gate de
+// los POST de /api/rotacion (routes/rotacion.js) y la sección de configuración del front leen EL
+// MISMO objeto. Sin esta línea el flag llega `undefined` al front, es falsy y la pantalla no
+// aparece para nadie, sin ningún error que lo delate.
 // ESPEJO: el SELECT final de utils/sesion-contexto.js devuelve este mismo shape — cambiar juntos.
 const SELECT_SESION = `
   s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
@@ -35,7 +39,8 @@ const SELECT_SESION = `
   c.nombre AS cargo_nombre, c.solo_lectura,
   CAST(c.puede_cerrar_turno   AS BIT) AS puede_cerrar_turno,
   CAST(c.puede_cambiar_unidad AS BIT) AS puede_cambiar_unidad,
-  CAST(c.es_observador        AS BIT) AS es_observador
+  CAST(c.es_observador        AS BIT) AS es_observador,
+  CAST(c.puede_configurar_rotacion AS BIT) AS puede_configurar_rotacion
   FROM bitacora.sesion_activa s
   INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
   INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id`;

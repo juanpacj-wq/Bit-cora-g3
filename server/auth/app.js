@@ -36,6 +36,9 @@ import bitacoraRouter from '../routes/bitacora.js';
 import registrosRouter from '../routes/registros.js';
 import turnoRouter from '../routes/turno.js';
 import iaRouter from '../routes/ia.js';
+import rotacionRouter from '../routes/rotacion.js';                          // D-065 L04 (superficie A)
+import rotacionControlRouter from '../routes/rotacion-control.js';           // D-065 L05 (superficie B)
+import rotacionCumplimientoRouter from '../routes/rotacion-cumplimiento.js'; // D-065 L06 (superficie C)
 import { estadoTurnoActual, acumularPresenciaSesiones } from '../utils/turno-entidad.js'; // D-045: turno en /api/me + presencia en logout
 import { puedeCerrarTurno } from '../middleware/permissions.js';
 import { detectRoles } from './roles.js';
@@ -321,6 +324,12 @@ export async function buildAuthApp() {
   app.use('/api/bitacora', bitacoraRouter);                // E10 (abrir, finalizar, counts, ...)
   app.use('/api/registros', registrosRouter);              // E10 (activos, POST/PUT/DELETE + rama DISP)
   app.use('/api/ia', iaRouter);                            // D-047 (mejorar-texto vía Gemini)
+  // D-065: los dos sub-prefijos van ANTES de /api/rotacion. Si /api/rotacion se montara primero,
+  // su loadAppSession correría también para /control y /cumplimiento y cualquier ruta que ese
+  // router no conozca respondería desde ahí; con este orden cada router decide solo lo suyo.
+  app.use('/api/rotacion/control', rotacionControlRouter);           // D-065 L05 (superficie B)
+  app.use('/api/rotacion/cumplimiento', rotacionCumplimientoRouter); // D-065 L06 (superficie C)
+  app.use('/api/rotacion', rotacionRouter);                          // D-065 L04 (superficie A)
 
   // ── 404: ninguna ruta ni router matcheó ──────────────────────────────────────────────────────
   app.use((req, res) => res.status(404).json({ error: 'Not Found' }));
