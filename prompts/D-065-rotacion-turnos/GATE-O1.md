@@ -303,7 +303,7 @@ Solo se marca `cumple` lo que el gate vio en verde él mismo, dentro de la suite
 ### D5 — Qué se hace con los 15 hallazgos del `/code-review` (**pendiente del visto bueno**)
 
 - **Qué lo provoca:** el `/code-review` de la ola devolvió 15 hallazgos; tras el triaje del gate,
-  **doce sobreviven** y tocan `utils/graph/directorio.js`, `utils/graph/cliente.js`, `db.js` y los
+  **trece sobreviven** y tocan `utils/graph/directorio.js`, `utils/graph/cliente.js`, `db.js` y los
   tests de L02/L03 — es decir, **territorios de lotes ya cerrados**, ninguno de los cuales tiene
   escritor en la O2. La regla del gate ("arreglo acá si es un compartido; si no, lote de corrección")
   no aplica directo: no son compartidos del §8, son territorio muerto.
@@ -327,11 +327,16 @@ Solo se marca `cumple` lo que el gate vio en verde él mismo, dentro de la suite
   y su prompt lleva la instrucción de que **toda constraint nueva va como migración `F37.A3`
   aditiva e idempotente**, nunca modificando el `CREATE TABLE` de `F37.A1` — que además no serviría,
   porque el `IF OBJECT_ID` lo salta en cualquier BD donde las tablas ya existan (todas, ya).
-- **Decidido: _pendiente del visto bueno del usuario_.** Agregar un lote cambia el reparto de la ola,
+- **Decidido: SÍ, va L11** (visto bueno del usuario, 2026-09-01). Agregar un lote cambia el reparto de la ola,
   y ese es el único punto de este gate donde no decido solo. `L11` queda escrito en `LOTES.json` y
   `PLAN-OLAS.md` en estado `pending`, dentro de la O2 —que sigue `pendiente`, así que **nadie puede
   reclamarlo** hasta el `ola-abrir O2`—. Si el visto bueno lo rechaza, se retira con una enmienda
-  encima de este expediente y los doce hallazgos pasan al cierre (opción d).
+  encima de este expediente y los trece hallazgos pasan al cierre (opción d).
+- **ENMIENDA (2026-09-01, tras el visto bueno):** el conteo original de esta decisión decía
+  "doce"; son **trece** (15 del `/code-review` menos CR-8, que va a L04, y CR-12, que no es
+  defecto). La tabla del §7 siempre listó los trece; el error estaba solo en la prosa y en el
+  mensaje del commit `2ab576b`.
+- **Visto bueno del usuario: DADO** el 2026-09-01. `L11` confirmado y la O2 abierta.
 - **Qué NO entra en L11, y por qué:** H3 (los sweepers bajo `AUTH_TEST_BYPASS`, decisión D4) sigue
   fuera de alcance — es de D-064 y precede a esta rama. CR-8 y CR-12 tampoco: el primero es trabajo
   de L04 que el cierre de L01 ya había anotado, el segundo es eficiencia sin defecto.
@@ -464,7 +469,7 @@ Destino `L11` = el lote de corrección de la decisión **D5**, sujeto al visto b
 
   Lo que **no** cambió: las dependencias de L04/L05/L06, sus puertos (3114/3115/3116) y los siete
   contratos del `_CONTEXTO-BASE.md`.
-- **Visto bueno del usuario:** {{pendiente}}.
+- **Visto bueno del usuario: DADO el 2026-09-01.** `L11` aprobado; `ola-abrir O2` ejecutado.
 
 | Lote | Título | Territorio |
 |---|---|---|
