@@ -483,7 +483,8 @@ export async function initDB() {
       solo_lectura        BIT          NOT NULL DEFAULT 0,
       puede_cerrar_turno  BIT          NOT NULL DEFAULT 0,
       puede_cambiar_unidad BIT         NOT NULL DEFAULT 0,
-      es_observador       BIT          NOT NULL DEFAULT 0
+      es_observador       BIT          NOT NULL DEFAULT 0,
+      puede_configurar_rotacion BIT    NOT NULL DEFAULT 0
     );
   `);
 
@@ -507,6 +508,21 @@ export async function initDB() {
     IF COL_LENGTH('lov_bit.cargo','es_observador') IS NULL
       ALTER TABLE lov_bit.cargo ADD es_observador BIT NOT NULL
         CONSTRAINT DF_cargo_es_observador DEFAULT 0;
+  `);
+
+  // F37.A2 — D-065: cargo.puede_configurar_rotacion — habilita la CONFIGURACIÓN ANUAL de la malla
+  // de rotación (patrón por rol + asignación de grupo por persona). Como todo flag de cargo, el
+  // VALOR lo fija el MERGE de abajo en CADA arranque; este ALTER solo garantiza que la columna
+  // EXISTA, y por eso va acá y no después: si el MERGE nombrara una columna inexistente, no falla
+  // la migración — falla el arranque entero del server.
+  //
+  // A diferencia de F37.A1 no deja fila en `bitacora.migracion_aplicada`: esta sección corre mucho
+  // antes de que esa tabla exista (la crea F16.A0 más abajo). La idempotencia la da el IF
+  // COL_LENGTH, igual que puede_cambiar_unidad (D-054) y es_observador (D-059).
+  await db.request().batch(`
+    IF COL_LENGTH('lov_bit.cargo','puede_configurar_rotacion') IS NULL
+      ALTER TABLE lov_bit.cargo ADD puede_configurar_rotacion BIT NOT NULL
+        CONSTRAINT DF_cargo_puede_configurar_rotacion DEFAULT 0;
   `);
 
   await db.request().batch(`
@@ -867,32 +883,47 @@ export async function initDB() {
   // es_observador=1 activa los cortes de invisibilidad; puede_cambiar_unidad=1 porque un rol de
   // consulta salta entre unidades sin riesgo de escritura. Sus permisos de bitácora los da la
   // matriz de abajo (puede_ver=1 y puede_crear=0 en todas).
+  //
+  // D-065: puede_configurar_rotacion=1 SOLO para 'Administrador y Debugging' y 'Gerente de
+  // Producción' — la malla de rotación se carga una vez al año y es una decisión de planeación, no
+  // de operación. El Gerente lo tiene SIN perder solo_lectura=1, y no hay contradicción: la malla
+  // NO es una bitácora, así que el flag no le abre escritura en ninguna. Los permisos de bitácora
+  // los sigue dando la matriz de §2.6 (puede_ver=1 / puede_crear=0 en todas), y D-039 queda
+  // intacto. Como el resto de flags de cargo, el valor vive acá y NO en un UPDATE suelto: este
+  // MERGE corre en cada arranque y su rama WHEN MATCHED es auto-correctora, así que un cambio
+  // manual en la BD se revierte al siguiente restart (convención 27). Habilitar o quitar el
+  // permiso = editar esta tabla de valores y redesplegar; nunca hardcodear el cargo_id ni el
+  // nombre del cargo en un endpoint ni en el front (convención 12).
   await db.request().batch(`
     MERGE lov_bit.cargo AS t
     USING (VALUES
-      ('Administrador y Debugging',            0, 1, 0, 0),
-      ('Gerente de Producción',                1, 0, 0, 0),
-      ('Ingeniero Jefe de Turno',              0, 1, 1, 0),
-      ('Ingeniero de Operación',               0, 1, 0, 0),
-      ('Ingeniero Químico',                    0, 0, 0, 0),
-      ('Operador de Planta - Caldera',         0, 0, 0, 0),
-      ('Operador de Planta - Analista',        0, 0, 1, 0),
-      ('Operador de Planta - Sala de Mando',   0, 0, 0, 0),
-      ('Operador de Planta - Planta de Agua',  0, 0, 0, 0),
-      ('Operador de Planta - Turbogrupo',      0, 0, 0, 0),
-      ('Operador Maquinaria Pesada',           0, 0, 0, 0),
-      ('Operador de Planta - Carbón y Caliza', 0, 0, 0, 0),
-      ('Coordinador de carbón y maquinaria',   0, 0, 0, 0),
-      ('USUARIO DE CONSULTA',                  1, 0, 1, 1)
-    ) AS s(nombre, solo_lectura, puede_cerrar_turno, puede_cambiar_unidad, es_observador)
+      ('Administrador y Debugging',            0, 1, 0, 0, 1),
+      ('Gerente de Producción',                1, 0, 0, 0, 1),
+      ('Ingeniero Jefe de Turno',              0, 1, 1, 0, 0),
+      ('Ingeniero de Operación',               0, 1, 0, 0, 0),
+      ('Ingeniero Químico',                    0, 0, 0, 0, 0),
+      ('Operador de Planta - Caldera',         0, 0, 0, 0, 0),
+      ('Operador de Planta - Analista',        0, 0, 1, 0, 0),
+      ('Operador de Planta - Sala de Mando',   0, 0, 0, 0, 0),
+      ('Operador de Planta - Planta de Agua',  0, 0, 0, 0, 0),
+      ('Operador de Planta - Turbogrupo',      0, 0, 0, 0, 0),
+      ('Operador Maquinaria Pesada',           0, 0, 0, 0, 0),
+      ('Operador de Planta - Carbón y Caliza', 0, 0, 0, 0, 0),
+      ('Coordinador de carbón y maquinaria',   0, 0, 0, 0, 0),
+      ('USUARIO DE CONSULTA',                  1, 0, 1, 1, 0)
+    ) AS s(nombre, solo_lectura, puede_cerrar_turno, puede_cambiar_unidad, es_observador,
+           puede_configurar_rotacion)
       ON t.nombre = s.nombre
     WHEN MATCHED THEN UPDATE SET
-      solo_lectura         = s.solo_lectura,
-      puede_cerrar_turno   = s.puede_cerrar_turno,
-      puede_cambiar_unidad = s.puede_cambiar_unidad,
-      es_observador        = s.es_observador
-    WHEN NOT MATCHED THEN INSERT (nombre, solo_lectura, puede_cerrar_turno, puede_cambiar_unidad, es_observador)
-      VALUES (s.nombre, s.solo_lectura, s.puede_cerrar_turno, s.puede_cambiar_unidad, s.es_observador);
+      solo_lectura              = s.solo_lectura,
+      puede_cerrar_turno        = s.puede_cerrar_turno,
+      puede_cambiar_unidad      = s.puede_cambiar_unidad,
+      es_observador             = s.es_observador,
+      puede_configurar_rotacion = s.puede_configurar_rotacion
+    WHEN NOT MATCHED THEN INSERT (nombre, solo_lectura, puede_cerrar_turno, puede_cambiar_unidad,
+                                  es_observador, puede_configurar_rotacion)
+      VALUES (s.nombre, s.solo_lectura, s.puede_cerrar_turno, s.puede_cambiar_unidad,
+              s.es_observador, s.puede_configurar_rotacion);
   `);
 
   // Eliminar cargo obsoleto 'Ingeniero de Planta de Agua' (no existe en el Excel 2026).
@@ -2928,6 +2959,132 @@ export async function initDB() {
       try { await tx.rollback(); } catch {}
       throw err;
     }
+  }
+
+  // ---------- F37.A1 — D-065: schema del módulo de Rotación de Turnos ----------
+  //
+  // Cuatro tablas nuevas en el esquema `bitacora`. Solo DDL: ninguna otra capa las lee ni las
+  // escribe todavía (los endpoints y la lógica llegan en la O2). Va al final de initDB porque las
+  // FK apuntan a `bitacora.turno_unidad` (F29.A1) además de a los catálogos de lov_bit.
+  //
+  // Convención TZ (D-020): la BD guarda UTC (SYSUTCDATETIME()) y la presentación en Bogotá sale de
+  // las columnas calculadas *_bogota, igual que turno_unidad/turno_participante (D-045).
+  //
+  // Por qué NO hay una tabla de días: el titular de cualquier fecha se DERIVA del patrón
+  // (`rotacion_patron`: vector por turno + desfase) cruzado con la asignación persona→grupo
+  // (`rotacion_asignacion`, con vigencia). Una carga anual basta y no queda tarea recurrente que
+  // mantener — es el mandato de simplicidad del requerimiento.
+  //
+  // `rotacion_control` es un log APPEND-ONLY: la pila LIFO de la toma de control se DERIVA
+  // ordenando por `rotacion_control_id` dentro de (turno_id, planta_id, cargo_id) — de ahí el
+  // índice IX_rotacion_control_pila. Una fila nunca se borra ni se actualiza: se apila la acción
+  // contraria, y por eso el log es también la auditoría de quién tomó qué rol y cuándo.
+  //
+  // `rotacion_cumplimiento` congela el resultado al cerrar el turno. Su PK natural
+  // (fecha_operativa, planta_id, turno, cargo_id) es LO QUE HACE IDEMPOTENTE ese congelado: un
+  // segundo cierre del mismo turno no puede duplicar la fila. `cargo_nombre` va congelado porque
+  // el nombre visible de un cargo puede cambiar (D-052) y el histórico no se reescribe.
+  //
+  // Idempotencia: cada statement lleva su propio IF OBJECT_ID / IF NOT EXISTS, así que el bloque
+  // corre en CADA arranque y se auto-repara aunque alguien hubiera borrado a mano el flag de
+  // `migracion_aplicada` (o una de las tablas). El flag es audit trail, no la guarda — mismo
+  // patrón que F22.D1 y F29.A1. El console.log sale solo la primera vez.
+  const f37A1Previa = await db.request().query(
+    `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F37.A1'`
+  );
+  await db.request().batch(`
+    IF OBJECT_ID('bitacora.rotacion_patron', 'U') IS NULL
+    CREATE TABLE bitacora.rotacion_patron (
+      rotacion_patron_id INT IDENTITY(1,1) PRIMARY KEY,
+      cargo_id     INT          NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+      fecha_inicio DATE         NOT NULL,
+      fecha_fin    DATE         NOT NULL,
+      vector_t1    VARCHAR(32)  NOT NULL,
+      vector_t2    VARCHAR(32)  NOT NULL,
+      desfase      TINYINT      NOT NULL
+          CONSTRAINT CK_rotacion_patron_desfase CHECK (desfase BETWEEN 0 AND 7),
+      activo       BIT          NOT NULL CONSTRAINT DF_rotacion_patron_activo DEFAULT 1,
+      creado_por   INT          NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+      creado_en    DATETIME2    NOT NULL
+          CONSTRAINT DF_rotacion_patron_creado_en DEFAULT SYSUTCDATETIME(),
+      creado_en_bogota AS DATEADD(HOUR, -5, creado_en),
+      CONSTRAINT UQ_rotacion_patron_natural UNIQUE (cargo_id, fecha_inicio),
+      CONSTRAINT CK_rotacion_patron_rango   CHECK (fecha_fin > fecha_inicio)
+    );
+
+    IF OBJECT_ID('bitacora.rotacion_asignacion', 'U') IS NULL
+    CREATE TABLE bitacora.rotacion_asignacion (
+      rotacion_asignacion_id INT IDENTITY(1,1) PRIMARY KEY,
+      usuario_id    INT       NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+      cargo_id      INT       NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+      grupo         TINYINT   NOT NULL
+          CONSTRAINT CK_rotacion_asig_grupo CHECK (grupo BETWEEN 1 AND 4),
+      vigente_desde DATE      NOT NULL,
+      vigente_hasta DATE      NOT NULL,
+      creado_por    INT       NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+      creado_en     DATETIME2 NOT NULL
+          CONSTRAINT DF_rotacion_asig_creado_en DEFAULT SYSUTCDATETIME(),
+      creado_en_bogota AS DATEADD(HOUR, -5, creado_en),
+      CONSTRAINT CK_rotacion_asig_rango CHECK (vigente_hasta >= vigente_desde)
+    );
+
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes
+                    WHERE name = 'IX_rotacion_asig_resolucion'
+                      AND object_id = OBJECT_ID('bitacora.rotacion_asignacion'))
+      CREATE INDEX IX_rotacion_asig_resolucion
+        ON bitacora.rotacion_asignacion(cargo_id, vigente_desde, vigente_hasta)
+        INCLUDE (usuario_id, grupo);
+
+    IF OBJECT_ID('bitacora.rotacion_control', 'U') IS NULL
+    CREATE TABLE bitacora.rotacion_control (
+      rotacion_control_id INT IDENTITY(1,1) PRIMARY KEY,
+      turno_id    INT          NOT NULL REFERENCES bitacora.turno_unidad(turno_unidad_id),
+      planta_id   VARCHAR(10)  NOT NULL REFERENCES lov_bit.planta(planta_id),
+      cargo_id    INT          NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+      usuario_id  INT          NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+      accion      VARCHAR(12)  NOT NULL
+          CONSTRAINT CK_rotacion_control_accion
+          CHECK (accion IN ('TOMAR', 'ABANDONAR', 'DESCARTAR')),
+      ocurrido_en DATETIME2    NOT NULL
+          CONSTRAINT DF_rotacion_control_ocurrido_en DEFAULT SYSUTCDATETIME(),
+      ocurrido_en_bogota AS DATEADD(HOUR, -5, ocurrido_en)
+    );
+
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes
+                    WHERE name = 'IX_rotacion_control_pila'
+                      AND object_id = OBJECT_ID('bitacora.rotacion_control'))
+      CREATE INDEX IX_rotacion_control_pila
+        ON bitacora.rotacion_control(turno_id, planta_id, cargo_id, rotacion_control_id);
+
+    IF OBJECT_ID('bitacora.rotacion_cumplimiento', 'U') IS NULL
+    CREATE TABLE bitacora.rotacion_cumplimiento (
+      fecha_operativa   DATE          NOT NULL,
+      planta_id         VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+      turno             TINYINT       NOT NULL
+          CONSTRAINT CK_rotacion_cumpl_turno CHECK (turno IN (1, 2)),
+      cargo_id          INT           NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+      cargo_nombre      VARCHAR(100)  NOT NULL,
+      grupo             TINYINT       NULL,
+      estado            VARCHAR(20)   NOT NULL
+          CONSTRAINT CK_rotacion_cumpl_estado
+          CHECK (estado IN ('PENDIENTE', 'PARCIAL', 'COMPLETO', 'CUBIERTO_POR_RELEVO')),
+      titulares_json    NVARCHAR(MAX) NOT NULL,
+      relevo_usuario_id INT           NULL REFERENCES lov_bit.usuario(usuario_id),
+      turno_id          INT           NOT NULL REFERENCES bitacora.turno_unidad(turno_unidad_id),
+      snapshot_en       DATETIME2     NOT NULL
+          CONSTRAINT DF_rotacion_cumpl_snapshot_en DEFAULT SYSUTCDATETIME(),
+      snapshot_en_bogota AS DATEADD(HOUR, -5, snapshot_en),
+      CONSTRAINT PK_rotacion_cumplimiento PRIMARY KEY (fecha_operativa, planta_id, turno, cargo_id)
+    );
+
+    IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo='F37.A1')
+      INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F37.A1');
+  `);
+  if (!f37A1Previa.recordset[0]) {
+    console.log(
+      '[F37.A1] schema de rotación creado: rotacion_patron, rotacion_asignacion, ' +
+      'rotacion_control, rotacion_cumplimiento.'
+    );
   }
 
   console.log('[DB] Conexión OK');
