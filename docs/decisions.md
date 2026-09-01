@@ -1954,6 +1954,10 @@ en las filas nuevas (BIT-MODBD **2.6**, BIT-RF **2.2**).
 
 ---
 
+## D-065 — Módulo de rotación de turnos: patrón por rol, cuadrilla desde Entra y cumplimiento plan-vs-real (EN CURSO, ver `prompts/D-065-rotacion-turnos/`)
+
+---
+
 ## Apéndice — Roadmap ejecutado: F1–F22
 
 | Fase | Tema | Estado |
