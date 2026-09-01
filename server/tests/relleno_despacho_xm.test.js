@@ -463,6 +463,44 @@ test('8. la verificación de cierre se la pregunta a la BD, no al contador', asy
   assert.equal(desdeReales.size, 0, 'ningún asiento de la fixture aparece consultando GEC3/GEC32');
 });
 
+// ── Regresión del GATE-O2 (hallazgo R1) ────────────────────────────────────────────────────────
+//
+// El bug que este caso fija: `main()` abría el pool con `getDB()` y nada más. Los live bindings
+// —`USUARIO_SISTEMA_ID` entre ellos— los resuelve `initDB()`, que en un script NO corre, así que
+// `crearAsientoDespacho` lanzaba "USUARIO_SISTEMA_ID no inicializado" en CADA día del mes. El
+// try/catch por día los contaba como `fallidos` y la corrida terminaba con un resumen de ceros y
+// exit 1, sin escribir un solo asiento; el `--dry-run` del ensayo pasaba limpio porque nunca llega
+// al escritor.
+//
+// Y la razón por la que NINGÚN caso de este archivo lo veía: el harness corre `setupSessions()` en
+// el `before`, que llama a `initDB()`. En el proceso del test el binding SIEMPRE está resuelto.
+// Por eso la verificación tiene que pasar por un proceso HIJO — es el único lugar donde se reproduce
+// el estado de arranque real del CLI. No escribe ni una fila: abre el pool, resuelve y lee.
+test('9. un proceso nuevo del CLI resuelve USUARIO_SISTEMA_ID antes de escribir', () => {
+  const scriptURL = new URL('../scripts/relleno-asiento-despacho.js', import.meta.url).href;
+  const snippet = `(async () => {
+    const { abrirPool } = await import(${JSON.stringify(scriptURL)});
+    const pool = await abrirPool();
+    const db = await import(${JSON.stringify(new URL('../db.js', import.meta.url).href)});
+    console.log('SISTEMA=' + db.USUARIO_SISTEMA_ID);
+    await pool.close();
+  })().catch((e) => { console.error('ERR ' + e.message); process.exit(1); });`;
+
+  const r = spawnSync(process.execPath, ['--env-file=../.env', '-e', snippet],
+    { cwd: RUTA_SERVER, encoding: 'utf8', timeout: 120_000 });
+
+  assert.equal(r.status, 0, `el arranque del CLI no puede fallar (stderr: ${r.stderr})`);
+  const m = /SISTEMA=(\S+)/.exec(r.stdout);
+  assert.ok(m, `el hijo tiene que imprimir el binding (stdout: ${r.stdout} · stderr: ${r.stderr})`);
+  assert.notEqual(m[1], 'null',
+    'USUARIO_SISTEMA_ID quedó en null: el CLI abrió el pool sin resolver los live bindings y '
+    + 'crearAsientoDespacho fallaría los 31 días del mes sin escribir nada');
+  assert.match(m[1], /^\d+$/, 'el binding tiene que ser el usuario_id de SISTEMA');
+
+  // Y el proceso del test, que sí pasó por initDB, ve el mismo usuario: el CLI no inventa un autor.
+  assert.equal(Number(m[1]), USUARIO_SISTEMA_ID);
+});
+
 // ── Helpers de escenario ───────────────────────────────────────────────────────────────────────
 
 // Mueve el asiento de un día a `registro_historico`, como haría el cierre de turno.

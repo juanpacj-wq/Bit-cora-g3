@@ -81,7 +81,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sql from 'mssql';
-import { getDB } from '../db.js';
+import { getDB, resolverLiveBindings } from '../db.js';
 import { crearAsientoDespacho, PLANTAS_DESPACHO } from '../utils/despacho-xm/asiento.js';
 import { leerDespachosRecibidos } from '../utils/despacho-xm/lector.js';
 import {
@@ -368,6 +368,26 @@ function salir(msg, code = 2) {
 const USO = 'Uso: node --env-file=../.env scripts/relleno-asiento-despacho.js --confirm-db <DB_NAME> '
   + '[--dry-run] [--solo-con-hecho] [--log RUTA]';
 
+/**
+ * Abre el pool Y resuelve los live bindings. Las dos cosas, siempre, porque este proceso NO es el
+ * server: `getDB()` solo conecta, y quien resuelve `USUARIO_SISTEMA_ID` es `initDB()`, que acá no
+ * corre. Sin esta llamada `crearAsientoDespacho` lanza "USUARIO_SISTEMA_ID no inicializado" en CADA
+ * día del mes, el try/catch por día los cuenta como `fallidos`, y la corrida termina con un resumen
+ * de ceros en vez de con un error de arranque — mientras el `--dry-run` del ensayo pasa limpio,
+ * porque nunca llega al escritor. Hallazgo R1 del GATE-O2.
+ *
+ * Se resuelven los bindings y NO se corre `initDB()` entero a propósito: un script de mantenimiento
+ * no debe aplicar DDL, seeds ni migraciones. Son dos SELECT y lanzan fuerte si el seed no está.
+ *
+ * Exportada para que el test de regresión pueda ejercitar exactamente este camino en un proceso
+ * hijo, que es el único lugar donde `initDB()` no corrió ya por el harness.
+ */
+export async function abrirPool() {
+  const pool = await getDB();
+  await resolverLiveBindings(pool);
+  return pool;
+}
+
 async function main() {
   let args;
   try {
@@ -400,7 +420,7 @@ async function main() {
   }
 
   const hoy = fechaBogotaStr(new Date());
-  const pool = await getDB();
+  const pool = await abrirPool();
   try {
     linea(`[relleno] BD=${dbName} mes=${hoy.slice(0, 7)} hasta=${hoy} plantas=${PLANTAS_DESPACHO.join(',')} `
       + `dry-run=${args['dry-run']} solo-con-hecho=${args['solo-con-hecho']}`);

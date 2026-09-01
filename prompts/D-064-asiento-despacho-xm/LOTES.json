@@ -8,8 +8,8 @@
       "gate": "GATE-O1.md"
     },
     "O2": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O2.md"
     }
   },
   "lotes": {
@@ -89,10 +89,10 @@
     "L04": {
       "ola": "O2",
       "titulo": "Lector del hecho, creador del asiento y barrido cada 5 min",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L04-1438",
+      "claim_ts": "2026-08-31T19:38:38.818Z",
+      "done_ts": "2026-08-31T20:17:59.997Z",
       "motivo": null,
       "depende_de": [
         "L01",
@@ -126,10 +126,10 @@
     "L05": {
       "ola": "O2",
       "titulo": "CLI del relleno del mes (resumible, --dry-run)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L05-1537",
+      "claim_ts": "2026-08-31T20:37:14.387Z",
+      "done_ts": "2026-08-31T21:25:21.450Z",
       "motivo": null,
       "depende_de": [
         "L04"

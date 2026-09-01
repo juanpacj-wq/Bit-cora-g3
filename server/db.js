@@ -377,7 +377,14 @@ async function resolverCombBitacoraId(db) {
   }
 }
 
-async function resolverLiveBindings(db) {
+// Exportado desde el GATE-O2 de D-064: un proceso que NO es el server —un script de operación— abre
+// el pool con `getDB()` y se queda sin live bindings, porque el único que los resuelve es `initDB()`.
+// `USUARIO_SISTEMA_ID` en `null` hace que TODO escritor con autor SISTEMA lance
+// ("initDB no corrió"), y un CLI que falla día por día dentro de su try/catch sale con un resumen de
+// fallidos en vez de con un error de arranque. Un script de mantenimiento no debe correr DDL, seeds
+// ni migraciones solo para conseguir dos enteros: esto son dos SELECT, sin escritura, y lanza fuerte
+// si el seed no está. Es la misma llamada que hace el camino `SKIP_INITDB=1` de `initDB()`.
+export async function resolverLiveBindings(db) {
   await resolverUsuarioSistemaId(db);
   await resolverCombBitacoraId(db);
 }
