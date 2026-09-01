@@ -491,7 +491,7 @@ ejecute.
 
 ## 9. Commit del gate
 
-`{{sha}}` `gate(D-064): O2 cerrada — 2 lotes, 724/724 backend, 324/324 front, 0 violaciones, 1 hallazgo bloqueante arreglado`
+`c51ed47` `gate(D-064): O2 cerrada — 2 lotes, 724/724 backend, 324/324 front, 0 violaciones, 1 hallazgo bloqueante arreglado`
 
 Archivos del commit: `server/package.json` · `server/db.js` ·
 `server/scripts/relleno-asiento-despacho.js` · `server/tests/relleno_despacho_xm.test.js` ·
