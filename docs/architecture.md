@@ -92,8 +92,17 @@ Bit-cora-g3/server/
 │   │   ├── sis-lock.js            Mutex de PROCESO sin cola entre sweeper y scrape manual.
 │   │   ├── sis-job.js             Job del scrape manual: uno a la vez, en memoria, bajo el mutex.
 │   │   └── discover.js            Sondeo calibrado de la primera fecha con datos (K en W días).
+│   ├── despacho-xm/           D-064 — el asiento automático de la llegada del despacho de XM.
+│   │   ├── lector.js              Lee dashboard.despacho_recibido (esquema del OTRO repo, misma BD).
+│   │   │                          Única conversión Bogotá→UTC del flujo; degrada a [] si no está.
+│   │   ├── asiento.js             crearAsientoDespacho: las 4 filas en UNA transacción, idempotente
+│   │   │                          por clave_asiento contra registro_activo Y registro_historico.
+│   │   └── sweeper.js             Barrido c/5 min sobre [hoy-2, hoy+1]. Nace APAGADO bajo
+│   │                              AUTH_TEST_BYPASS y anuncia el motivo en el log de arranque.
 │   └── ...
-├── scripts/backfill-carbon-gec32.js  CLI de backfill/reparación del carbón GEC32 (resumible).
+├── scripts/backfill-carbon-gec32.js     CLI de backfill/reparación del carbón GEC32 (resumible).
+├── scripts/relleno-asiento-despacho.js  D-064 — CLI del relleno del mes en curso (una pasada,
+│                                        resumible, --dry-run, --confirm-db, --solo-con-hecho).
 └── tests/                     node:test (helpers, auth, disponibilidad, mand batch, SIS)
 ```
 
@@ -360,6 +369,18 @@ Toda la lógica que se puede equivocar —formato de fecha Bogotá, política de
 - **Lo que se guarda es lo que el operador tocó**, no la diferencia entre dos estructuras: la grilla lleva el conjunto explícito de coordenadas editadas, `setCelda` es la **única** puerta de escritura del buffer, y cuando vuelve una lectura con una edición viva el buffer se reconcilia celda por celda contra el snapshot nuevo. Sin eso, un refresco de fondo convertía el Guardar siguiente en un borrado de lo que el SIS acababa de escribir. Cualquier camino nuevo que escriba el buffer sin pasar por `setCelda` quedaría fuera del conjunto y **sus cambios no se guardarían, en silencio**.
 - **Chip SIS**: `SIS 24/24 ✓` / `SIS n/24 · HH:mm` / `SIS · sin lectura`, alimentado por el bloque `sis` del GET. **No** se alimenta de `GET /sis/estado`, que hoy no tiene consumidor de UI.
 - No hay botón de scrape manual en la pantalla: el endpoint existe, la UI no lo expone.
+
+### Asiento automático del despacho de XM (D-064)
+
+No es una bitácora ni una pantalla: es un **escritor sin interfaz**. Cuando XM publica el despacho económico del día siguiente, el dashboard lo detecta y **persiste el hecho** en `dashboard.despacho_recibido` —esquema del otro repo, **misma base**—; un barrido de Bitácora lo lee cada 5 minutos y deja el renglón en las bitácoras de Sala.
+
+- **El canal es la BD, no HTTP.** No hay endpoint, ni token de servicio, ni notificación: cada repo escribe **solo en su esquema** y el hecho queda escrito, así que si Bitácora está caída cuando llega el despacho, lo asienta cuando vuelva. Contrato completo en `<umbrella>/docs/interfaces-cross-repo.md` (Contrato 4).
+- **Un hecho = cuatro filas = un renglón.** `SALAJDT`/`SALAING` × `GEC3`/`GEC32`, escritas en **una** transacción con `detalle`, `fecha_evento` y `campos_extra.clave_asiento` idénticos; `f03-datos.js` las colapsa por `sys|<día Bogotá>|<clave_asiento>`. La coherencia de las cuatro **no la sostiene ningún constraint**, sino un guard de test — si difieren, el libro imprime la de menor `registro_id` y descarta las otras sin avisar.
+- **El marcador es `campos_extra.origen_sistema`, no `origen_bitacora`.** Es un registro **original** de Sala, no una copia reflejada: con el marcador del reflejo habría quedado **excluido del libro F03**, que es justo donde tiene que salir.
+- **Autor `SISTEMA` ⇒ nadie lo edita**, sin código nuevo (D-049). `permissions.js` no se tocó, y el tipo `'Despacho económico'` (`F36.A1`) va con `seleccionable = 0`, así que tampoco se puede teclear a mano ni postear su id.
+- **Degrada en silencio y no bloquea nada** (RN-05.c): sin la tabla —el estado normal hasta que el dashboard se despliegue— el lector devuelve `[]`, loguea **una vez** y todo sigue como hoy. De ahí que el orden de despliegue sea **dashboard primero**.
+- **TZ:** `detectado_en` está en **Bogotá** (el motor de la BD corre en Bogotá y `dashboard` usa `GETDATE()`), Bitácora guarda **UTC**, y la conversión `+5 h` ocurre **una sola vez**, en el lector.
+- **Puesta al día:** `scripts/relleno-asiento-despacho.js` cubre el mes en curso en una pasada, con hora `15:00` marcada `hora_estimada: true` donde no hay medición. Se corre **con el sweeper apagado** (`DESPACHO_XM_SWEEPER_ENABLED=0` o el servicio detenido): los dos se solapan tres días y ninguno toma lock de rango.
 
 ### Otras bitácoras (formulario_especial=0)
 

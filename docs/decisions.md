@@ -1952,23 +1952,195 @@ en las filas nuevas (BIT-MODBD **2.6**, BIT-RF **2.2**).
   (`JSON_MODIFY` en modo lax borra la clave al setear `null`). BIT-MODBD **§7.11** (v2.6), BIT-RF
   **RF-077** (v2.2), REQ-02 §3.4 / §8.3, REQ-06 §8.3.
 
-## D-064 — Asiento automático de la llegada del despacho del día siguiente (EN CURSO, ver `prompts/D-064-asiento-despacho-xm/`)
+## D-064 — Asiento automático de la llegada del despacho del día siguiente (XM → Sala → GENE-F03)
 
-> **Stub de reserva.** Número consumido el 2026-08-31 al cerrar la fase de planificación. El ADR
-> completo lo escribe `/cerrar-implementacion D-064`, armado desde los cierres de lote y los dos
-> gates. Fuente: `docs/requerimientos/REQ-05-asiento-cambio-despacho.md` (🟢, sin preguntas
-> abiertas). Decisiones congeladas en `prompts/D-064-asiento-despacho-xm/PREGUNTAS-D-064.md`.
+**Fecha:** 2026-08-31
 
-**En una frase:** cuando XM publica el despacho económico del día siguiente, el dashboard persiste
-el hecho en su propio esquema y Bitácora lo lee para dejar un asiento automático —autor `SISTEMA`—
-en las bitácoras de Sala del JdT y del Ing. de Operación, y por lo tanto en el libro GENE-F03.
+**Contexto:** XM publica el despacho económico del día siguiente hacia las 3 p.m. El dashboard ya lo
+detectaba —`despachoscraper.js#refreshTomorrow()`, cada 5 minutos— pero **el dato solo vivía en
+memoria**: un reinicio del servicio lo borraba y ningún otro proceso podía verlo. Del otro lado, el
+renglón `Se recibe del XM despacho económico de G3.0 y G3.2 para el DD-MM-AAAA` lo escribía una
+persona a mano en las bitácoras de Sala, y de ahí en el libro **GENE-F03**. REQ-05 (🟢, sin preguntas
+abiertas) pedía automatizarlo. El descubrimiento que cambió el diseño se hizo en la planificación:
+**los dos repos usan la misma base de datos** con esquemas distintos (`bitacora`/`lov_bit` y
+`dashboard`, verificado por `sys.schemas` con las credenciales de Bitácora), así que el canal HTTP
+que REQ-05 §5.4 temía no hacía falta. Ejecutado en **dos olas de lotes en chats paralelos** (5 lotes,
+el primero en el **otro** repo) sobre `feat/asiento-despacho-xm-2026-08` en los dos repos. Es el
+primer flujo del workspace que reparte lotes entre `Bit-cora-g3`, `dashboard-gen-gec3` y el umbrella.
 
-**Reservas consumidas:** `F36.A1` (seed del `tipo_evento` `'Despacho económico'`), convención
-**37** de `CLAUDE.md`, `BIT-MODBD` **v2.7**, `BIT-RF` **v2.3** / **RF-078**.
+**Decisión:**
 
-**Ramas:** `feat/asiento-despacho-xm-2026-08` en los dos repos — `Bit-cora-g3` desde
-`feat/integrar-asientos-D-059` (`5cc84a2`), `dashboard-gen-gec3` desde `main` (`d8f8f5e`). Es el
-primer flujo del workspace que reparte lotes entre los **dos** repos y el umbrella.
+**(1) La comunicación cross-repo va por la BD compartida, y cada repo escribe SOLO en su esquema.**
+El dashboard persiste el hecho —y nada más que el hecho— en `dashboard.despacho_recibido`
+(`fecha_despacho DATE PK`, `detectado_en DATETIME2 DEFAULT GETDATE()`); Bitácora lo **lee** y escribe
+el asiento en `bitacora`. La PK es la idempotencia del lado del escritor: un reintento del scraper,
+un reinicio o un segundo tick **no pisan** el `detectado_en` de la primera detección, que es la que
+se parece a la hora en que XM publicó de verdad. **Ningún endpoint, ningún token servicio-a-servicio,
+ninguna notificación**: si Bitácora está caída cuando llega el despacho, lo asienta cuando vuelva,
+porque el hecho quedó **escrito**. *Descartado:* un endpoint HTTP en el dashboard con token de
+servicio — agrega un canal, un secreto y el problema de las notificaciones perdidas, para transportar
+un dato que ya está en la misma base. *Descartado:* reactivar `dashboard.despacho_programado`
+(detenida desde el 2026-07-19 y, además, guarda el archivo de **hoy**, no el de mañana).
+
+**(2) El vocabulario del asiento vive en un módulo puro aparte, y su marcador NO es
+`origen_bitacora`.** `server/utils/asientos/sistema.js` (sin BD, sin reloj, sin red) es la fuente
+única del texto, la clave de agrupación, el `campos_extra` y los predicados. El asiento se marca con
+**`campos_extra.origen_sistema = 'DESPACHO_XM'`**: reusar `origen_bitacora` —el marcador universal de
+las copias reflejadas de [[D-063]]— habría **excluido el asiento del libro F03** (`eventosSala` filtra
+`origen_bitacora IS NULL`) y lo habría vuelto inmutable por la vía del reflejo; esto **no** es una
+copia, es un registro original de Sala (RQ-05.9). La fecha se valida con **regex + round-trip contra
+`Date.UTC`** y **lanza** en los tres productores: `new Date('2026-02-30')` no falla, rueda al 2 de
+marzo, y un asiento mal fechado se queda en un libro mensual firmado que nadie contrasta contra XM
+tres meses después. *Descartado:* pasar el texto por el motor de [[D-058]] — `asientoLiteralSala` le
+habría antepuesto `GEC3 — ` porque `UNIDAD_YA_NOMBRADA` no reconoce `"Se recibe del XM…"` (medido), y
+el texto nombra **las dos** unidades a la vez.
+
+**(3) Cuatro filas, un solo renglón — y el colapso lo gobierna un dato de la fila, acotado AL DÍA.**
+El asiento se persiste como **cuatro** filas (`SALAJDT`/`SALAING` × `GEC3`/`GEC32`), **desviación
+consciente de RQ-05.8/RQ-05.10**, que hablaban de dos: cada bitácora **y cada unidad** tiene su propio
+libro vivo, y con dos filas el asiento no se vería en la Sala de una de las dos plantas. Las cuatro
+comparten `detalle`, `fecha_evento` y `campos_extra.clave_asiento` (`DESPACHO_XM|YYYY-MM-DD`,
+determinística), y el libro las deduplica por esa clave —`sys|<día Bogotá>|<clave>`— y por
+`registro_id` cuando no la hay, así que **lo tecleado sigue exactamente como estaba**. La fila de
+sistema además pasa su `detalle` **literal**, sin prefijo de unidad. *Descartado:* colapsar por
+`(texto, hora)` — dos registros tecleados iguales son dos hechos distintos. *Descartado:* agrupar por
+mes sin el día: la ventana de `armarMes` abre ±1 día y el recorte va **después** del dedupe, así que
+una fila de la holgura ganaba el colapso y el renglón desaparecía **de las dos hojas** (hallazgo R1
+del GATE-O1). El espacio de nombres va prefijado `sys|` porque una `clave_asiento` con forma
+`id|4722` se tragaba el registro tecleado 4722.
+
+**(4) El tipo de evento se siembra como los espejo, con `seleccionable = 0` y en las DOS listas.**
+`F36.A1` agrega `('Despacho económico', orden 5)` a `SALAJDT` y `SALAING`, junto a los cuatro espejo
+de [[D-058]]: al `INSERT` idempotente **y** al `UPDATE` complementario que corre en cada arranque —en
+una sola de las dos, el flag se pierde en el siguiente restart—. `seleccionable = 0` lo esconde del
+selector **y** de los dos lookups del `POST`/`PUT` genérico: nadie puede teclear a mano un asiento
+que finja venir del sistema. Se resuelve por `(bitacora_id, nombre)`, **nunca por id fijo** (los ids
+difieren entre bases).
+
+**(5) Lector, creador y barrido: la conversión de zona ocurre UNA vez y la idempotencia mira DOS
+tablas.** El **lector** (`utils/despacho-xm/lector.js`) hace la única conversión Bogotá→UTC del flujo
+(`DATEADD(HOUR, 5, …)`, porque el motor de la BD corre en Bogotá y el esquema `dashboard` usa
+`GETDATE()`) y **degrada a `[]` con un aviso una sola vez** si la tabla no está —estado normal hasta
+que el dashboard se despliegue—, sin lanzar nunca. El **creador** escribe las cuatro filas en **una**
+transacción, con el texto, la hora y el `campos_extra` calculados **una vez y heredados** (nunca
+`GETDATE()`/`new Date()` por `INSERT`, lección de [[D-063]] (b)), autor `SISTEMA`, y `turno_id` del
+turno **ABIERTO** de cada unidad —puntero de archivado, no narrativo ([[D-045]], [[D-058]] (c))— o
+`NULL`. Es **idempotente por `clave_asiento` contra `registro_activo` Y `registro_historico`**: un
+asiento de hace tres días ya fue archivado por el cierre de turno, y buscarlo solo en la tabla activa
+lo duplicaría — es justo el caso del relleno del mes. El **barrido** corre cada 5 minutos, la cadencia
+del scraper del otro repo, revisa `[hoy-2, hoy+1]` y aísla el fallo de cada día.
+
+**(6) Que nadie edite el asiento sale GRATIS de [[D-049]]: `permissions.js` no se tocó en toda la
+implementación.** El autor es `SISTEMA`, que nunca tiene sesión ([[D-015]]), y `canEditarRegistro` ya
+exige autoría. CA-11 se **verifica**, no se implementa (`git diff` sobre `permissions.js` en todo el
+rango sale vacío). *Descartado:* una excepción por cargo como la que MAND tiene desde [[D-057]] —
+sería reintroducir justo lo que D-049 prohíbe. Tampoco se agregó una excepción para los gates de
+turno finalizado o en transición: el asiento no entra por `POST /api/registros`, así que esos gates
+no aplican.
+
+**(7) Un sweeper que escribe filas de operación nace APAGADO bajo el backdoor de test, no detrás de
+un flag.** `sweeperHabilitado()` deriva de `bypassHabilitado(env)` (`AUTH_TEST_BYPASS === '1' &&
+NODE_ENV !== 'production'`) y **anuncia siempre el motivo en el log de arranque**. Es la segunda
+mitad de la lección de [[D-061]]: `SIS_SWEEPER_ENABLED` existía y el daño ocurrió igual, porque el
+apagado dependía de que alguien se acordara. Su corolario: **la lista de plantas de un escritor
+automático es un parámetro inyectable**, no una constante alcanzable solo por su `default` — el guard
+estático de D-061 solo ve DML literal en el test y una escritura que entra por el default de una
+función de producción le es invisible. Sin esto, el día que el dashboard se desplegara contra la misma
+base, cada `npm test` habría dejado 4 filas por día-hecho en las Salas de `GEC3`/`GEC32` con autor
+`SISTEMA`, imborrables una vez archivadas (RF-032).
+
+**(8) El relleno del mes es un CLI de una pasada que le pide el asiento al MISMO creador, y su
+"terminó" es una consulta.** `scripts/relleno-asiento-despacho.js` recorre el mes hasta hoy y no
+reimplementa nada, así que hereda gratis la idempotencia contra las dos tablas —lo único que vuelve
+seguro tocar días ya archivados—. Cuando el dashboard tiene la hora, **gana la hora medida**; cuando
+no, se usan las **15:00 Bogotá del día anterior** con `hora_estimada: true`, porque la hora real de
+esos días **nunca se guardó**. `hora_estimada` va **siempre presente** (`true`/`false`), nunca
+ausente —"AUSENTE ≠ `false`" es la trampa cara de [[D-056]] (b)—, aunque todo consumidor trate la
+ausencia como `false`. Guardrails los de [[D-061]] (`--confirm-db` validado **antes** de abrir el
+pool, `--dry-run`, `--log`, `--solo-con-hecho`). Y **un proceso que no es el server no tiene live
+bindings**: `USUARIO_SISTEMA_ID` lo resuelve solo `initDB()`, así que el CLI abre el pool con
+**`resolverLiveBindings(pool)`** —dos `SELECT`, sin escritura— y no con `initDB()` entero: un script
+de mantenimiento no aplica DDL, seeds ni migraciones para conseguir dos enteros.
+
+**Consecuencias:**
+
+- **El orden del despliegue es DASHBOARD PRIMERO, y es una instrucción, no una recomendación.** Con
+  Bitácora arriba y el dashboard no, todo funciona exactamente como hoy —esa es la degradación
+  pedida (RN-05.c, mismo criterio que [[D-047]])— pero el único rastro es **una línea** en
+  `journalctl` y nadie va a notar que el renglón no sale. Y el relleno corrido antes que el dashboard
+  deja el mes entero con hora estimada aunque las horas reales de los últimos días fueran a estar
+  disponibles. Runbook en `deploy/DEPLOY.md` §9.
+- **El relleno y el barrido se solapan tres días y ninguno toma lock de rango**, así que un día podría
+  salir duplicado. Se cierra **en el runbook** (correr el CLI con el servicio detenido o con
+  `DESPACHO_XM_SWEEPER_ENABLED=0`), no en el código: el relleno es una pasada única, y el colapso del
+  libro absorbe el duplicado —las dos tandas comparten clave **y** `fecha_evento`, así que el renglón
+  sale una sola vez y las 4 filas de más quedan invisibles salvo que alguien lea la tabla—. **El
+  disparador que obliga a reconsiderarlo:** si algún día corren **dos procesos de Bitácora contra la
+  misma base** (dos instancias tras nginx, un `node -e` a mano en paralelo), el `sp_getapplock` por
+  clave dentro de `crearAsientoDespacho` deja de ser opcional, porque ahí ya no hay runbook que valga.
+- **El asiento del día 1 de un mes sale en el libro del mes ANTERIOR, y es correcto**: su
+  `fecha_evento` es la tarde del último día del mes previo, porque ahí ocurrió la detección, y el F03
+  ordena por hora de calendario del evento ([[D-058]] (b)). Contraintuitivo para quien audite.
+- **La coherencia de las cuatro filas no la sostiene ningún constraint, sino un guard de test** —igual
+  que la metadata de un lote de MAND ([[D-056]] (c))—: si difieren en `detalle`, `fecha_evento` o
+  `clave_asiento`, el libro imprime la de menor `registro_id` y **descarta las otras sin avisar**. Y
+  una fila de sistema **sin** `clave_asiento` no se colapsa: saldría cuatro veces sin que nada falle.
+- **`hora_estimada` no se pinta en ningún lado y el texto es idéntico**, así que un día que XM nunca
+  publicó queda indistinguible de uno real salvo por `campos_extra` y por la línea `OJO: N asiento(s)
+  quedaron con HORA ESTIMADA` del CLI. Aceptable para una **pasada única** de puesta al día —para eso
+  existe— y **no** para una rutina mensual; la lectura estricta de RN-05.d es `--solo-con-hecho`.
+- **Hueco conocido y aceptado en el ORIGEN:** si la BD está caída en el instante de la detección, el
+  hecho de ese día se pierde —`#foundTomorrow = true` se prende **antes** de escribir, así que el tick
+  siguiente ya no vuelve a pasar—. No se arregla: mover el flag después de la escritura dejaría el
+  scraper bajando el archivo de XM cada 5 minutos con la BD abajo, y separar los dos guards le
+  cambiaría el significado a `detectado_en` (pasaría a ser la hora del reintento). Lo mitigan
+  cualquier reinicio antes de medianoche y el relleno con `hora_estimada`. **Corolario: la ausencia de
+  una fila NO prueba que no llegó el despacho** — sigue valiendo RN-05.d (sin evidencia no se inventa
+  un día), pero nadie debe razonar al revés.
+- **Deuda que este ADR nombra y no toca:** (a) **`f03-datos.js` sigue sin `ISJSON`** — una sola fila de
+  Sala con `campos_extra` malformado tumba el libro del mes entero (`JSON_VALUE` lanza,
+  `RequestError 13609`; `eventosMand` tiene el mismo hueco). Es **anterior** a este ADR (llegó con
+  D-058, se universalizó en D-063) y hoy no hay camino conocido para escribir esa fila —
+  `validateCamposExtra` descarta todo `campos_extra` no declarado y las Salas tienen
+  `definicion_campos = NULL`—; el creador de D-064 sí se blindó (`ISJSON = 1` en sus dos consultas),
+  porque ahí el efecto es peor: **ningún** asiento se escribiría nunca más. (b) La verificación de
+  cierre del CLI está acotada por planta mientras la idempotencia del creador es **global**: es el
+  sitio exacto a mirar si alguien amplía el relleno a meses pasados. (c) El `_` de `DESPACHO_XM` es
+  comodín de `LIKE` en el patrón del CLI. (d) `stopDespachoXMSweeper()` no corta un tick en vuelo
+  (mismo patrón que `sis-sweeper.js`; inocuo porque el único llamador hace `process.exit` en la línea
+  siguiente, pero **este es el único sweeper que escribe filas de operación**). (e) La rama del
+  `detalle` literal se activa para **cualquier** `origen_sistema`: el día que haya un segundo origen
+  **por unidad**, el dato tiene que viajar en la fila (p. ej. `sin_prefijo_unidad`), no inferirse del
+  marcador.
+- **Sin front, sin endpoints y sin cambios en el contrato cross-repo existente**: no se tocó un solo
+  archivo de `src/`, no se creó ni modificó un endpoint, y `evento_dashboard` /
+  `disponibilidad_dashboard` quedaron intactos (RQ-05.12). El asiento aparece en la grilla de Sala por
+  el camino que ya existe.
+- **Verificación del cierre (2026-08-31, bajo test-lock, contra `PortalG3_dev`):** backend
+  **725/725** (10 bloques, cero `fail`, cero `skipped` — con el stub del SIS en 3154, así que tampoco
+  aparece el rojo de la convención 35), front `npm run build` ✔ y vitest **324/324**, repo del
+  dashboard **236/236**, **cero residuos** (12/12 checks) y **cero asientos `DESPACHO_XM` en toda la
+  base, en ninguna planta**. Baseline heredado: 681/681 backend · 324/324 front. **`F36.A1` verificado
+  aplicado** en la BD tras el arranque (`Despacho económico`, orden 5, `seleccionable = 0`, en las dos
+  Salas) y la degradación capturada en vivo: `[despacho-xm] no se pudo leer
+  dashboard.despacho_recibido: Invalid object name … — se sigue sin asentar`.
+- **Lo que NO se pudo probar sin escribir en planta real, y es el smoke del despliegue:** (i) el
+  `SELECT` del lector contra la tabla **de verdad** —no existe hasta que el dashboard arranque en esta
+  rama—, y (ii) que el próximo cierre de turno real **archive** las filas del relleno, cuya
+  `fecha_evento` cae fuera de la ventana del turno abierto (con `turno_id = NULL` las levanta el
+  rescate de huérfanos de [[D-063]] (5), así que los dos caminos están cubiertos por diseño).
+- **El `--dry-run` no prueba que el camino real funcione**: el ensayo nunca llega al escritor, y pasó
+  limpio durante todo el lote con el CLI roto por los live bindings. Al desplegar, la evidencia es la
+  línea final del CLI (`no queda ningún día del mes sin asiento`) y el conteo en la BD.
+- Cross-refs: [[D-058]] (el motor de asientos y el libro F03 que este ADR consume y extiende),
+  [[D-063]] (el marcador `origen_bitacora`, del que este se separa a propósito), [[D-049]] (solo el
+  autor — de ahí sale CA-11 sin código), [[D-045]] (`turno_id` como puntero de archivado), [[D-020]]
+  (BD en UTC, presentación Bogotá), [[D-061]] (los guardrails del CLI y la lección del sweeper),
+  [[D-056]] (b) y (c) (AUSENTE ≠ `false`; la coherencia por guard de test), [[D-047]] (degradar sin
+  configuración), [[D-015]] (`SISTEMA` nunca loguea), [[D-052]] (el nombre visible vive en el seed),
+  [[D-030]] / [[D-055]] (ningún test escribe en planta real). BIT-MODBD **§5.3 y §7.12** (v2.7),
+  BIT-RF **RF-078** (v2.3), REQ-05 §3.3 / §6 / §8.4, y `docs/interfaces-cross-repo.md` **Contrato 4**
+  en el umbrella.
 
 ---
 
