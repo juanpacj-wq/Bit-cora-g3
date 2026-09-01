@@ -478,4 +478,4 @@ chat a la vez que los otros tres.
 
 ## 9. Commit del gate
 
-`{{sha}}` `gate(D-065): O1 cerrada — 3 lotes, 781/781 backend, 324/324 front, 0 violaciones`
+`2ab576b` `gate(D-065): O1 cerrada — 3 lotes, 781/781 backend, 324/324 front, 0 violaciones`
