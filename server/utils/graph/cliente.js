@@ -19,6 +19,8 @@
  * dependencias nuevas: `fetch` es nativo en Node >= 20.
  */
 
+import { createHash } from 'node:crypto';
+
 const LOGIN_HOST = 'https://login.microsoftonline.com';
 const GRAPH_HOST = 'https://graph.microsoft.com';
 const GRAPH_BASE = `${GRAPH_HOST}/v1.0`;
@@ -30,8 +32,17 @@ const MARGEN_EXPIRACION_MS = 60_000;
 // El directorio real cabe en una página con $top=999. El tope existe para que un @odata.nextLink
 // circular, o un tenant que crezca de golpe, no deje el proceso girando.
 const MAX_PAGINAS = 25;
-// El cuerpo más grande de verdad (transitiveMembers de un grupo de 14) pesa unos pocos KB.
+// Tope del cuerpo de UNA respuesta, contado sobre el stream MIENTRAS se lee (L11, CR-10). Graph
+// responde chunked, sin content-length, así que un tope que solo mirara la cabecera no dispararía
+// nunca. El cuerpo más grande de verdad (transitiveMembers de un grupo de 14) pesa unos pocos KB.
 const MAX_RESPUESTA_BYTES = 8 * 1024 * 1024;
+// 429: Graph estrangula las lecturas de directorio y manda `Retry-After` en segundos. Se honra UNA
+// sola vez y solo si la espera es corta; una espera larga se trata como fallo de esa petición (y
+// `directorio.js` omite esa asignación en vez de tumbar la lectura entera). Sin tope, un
+// Retry-After de minutos dejaría colgada la petición HTTP del administrador hasta el timeout.
+const MAX_REINTENTOS_429 = 1;
+const MAX_RETRY_AFTER_MS = 10_000;
+const RETRY_AFTER_DEFAULT_MS = 1_000;
 
 // tenant y client son GUIDs y se interpolan: el tenant en la URL del token, el client dentro de un
 // $filter de OData. Validarlos con charset estricto es lo que impide que un `.env` con un typo —o
@@ -84,8 +95,15 @@ export function leerConfigEntra() {
 }
 
 // Cache en memoria del token de app. La clave incluye tenant+client para que un cambio de
-// configuración (o un test que la mueva) no reutilice el token del anterior.
+// configuración (o un test que la mueva) no reutilice el token del anterior, y una HUELLA del
+// secreto (L11, CR-13): rotar M365_CLIENT_SECRET invalida la cache en el acto, en vez de seguir
+// sirviendo hasta 1 h el token minteado con el secreto retirado. Va hasheado para que el secreto
+// en claro no viva en memoria como clave.
 let cacheToken = null; // { clave, token, expiraEn }
+
+function huellaSecreto(secreto) {
+  return createHash('sha256').update(secreto).digest('hex').slice(0, 16);
+}
 
 /** Vacía la cache del token. La usan los tests; en producción el token expira solo. */
 export function limpiarCacheToken() {
@@ -98,7 +116,7 @@ export function limpiarCacheToken() {
  */
 export async function obtenerToken({ fetchImpl = fetch } = {}) {
   const { tenantId, clientId, clientSecret } = leerConfigEntra();
-  const clave = `${tenantId}|${clientId}`;
+  const clave = `${tenantId}|${clientId}|${huellaSecreto(clientSecret)}`;
 
   if (cacheToken && cacheToken.clave === clave && cacheToken.expiraEn > Date.now()) {
     return cacheToken.token;
@@ -146,8 +164,59 @@ export async function obtenerToken({ fetchImpl = fetch } = {}) {
   return token;
 }
 
+/** Espera que pide un 429, en ms; `null` si el header no es interpretable (no se reintenta). */
+function esperaRetryAfterMs(headers) {
+  const crudo = headers?.get?.('retry-after');
+  if (crudo == null || String(crudo).trim() === '') return RETRY_AFTER_DEFAULT_MS;
+  const segundos = Number(crudo);
+  // Formato fecha HTTP (raro en Graph): no se interpreta y por tanto no se reintenta.
+  if (!Number.isFinite(segundos) || segundos < 0) return null;
+  return segundos * 1000;
+}
+
+/**
+ * Lee el cuerpo como JSON contando los bytes SOBRE EL STREAM: si supera `MAX_RESPUESTA_BYTES` se
+ * cancela la lectura y se lanza, sin haber acumulado más de eso en memoria. Un transporte sin
+ * stream (un fixture de test que solo trae `json()`) se lee tal cual: no hay bytes que contar.
+ */
+async function leerJsonAcotado(resp) {
+  const cuerpo = resp.body;
+  if (!cuerpo || typeof cuerpo.getReader !== 'function') {
+    try {
+      return await resp.json();
+    } catch {
+      throw errEntra('respuesta no-JSON');
+    }
+  }
+
+  const lector = cuerpo.getReader();
+  const trozos = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await lector.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_RESPUESTA_BYTES) {
+        throw errEntra(`respuesta demasiado grande: supera ${MAX_RESPUESTA_BYTES} bytes`);
+      }
+      trozos.push(value);
+    }
+  } catch (e) {
+    try { await lector.cancel(); } catch { /* ya cerrado */ }
+    if (e?.codigo === 'entra_no_disponible') throw e;
+    throw errEntra(`lectura del cuerpo falló ${e?.name || 'Error'}`);
+  }
+
+  try {
+    return JSON.parse(Buffer.concat(trozos).toString('utf8'));
+  } catch {
+    throw errEntra('respuesta no-JSON');
+  }
+}
+
 /** Una petición GET a Graph. `url` absoluta o ruta que arranca en '/' (relativa a /v1.0). */
-async function graphFetch(url, { fetchImpl, token }) {
+async function graphFetch(url, { fetchImpl, token }, intento = 0) {
   const destino = url.startsWith('http') ? url : `${GRAPH_BASE}${url}`;
 
   // Un @odata.nextLink es una URL que viene en la respuesta: se sigue solo si sigue apuntando a
@@ -166,16 +235,23 @@ async function graphFetch(url, { fetchImpl, token }) {
     const causa = e?.cause?.code || e?.cause?.name;
     throw errEntra(`fetch falló ${e?.name || 'Error'}${causa ? ` (${causa})` : ''}`);
   }
+
+  // Estrangulado: se honra Retry-After una vez, si es corto (L11, CR-2).
+  if (resp.status === 429 && intento < MAX_REINTENTOS_429) {
+    const espera = esperaRetryAfterMs(resp.headers);
+    if (espera !== null && espera <= MAX_RETRY_AFTER_MS) {
+      try { await resp.body?.cancel?.(); } catch { /* sin cuerpo que soltar */ }
+      await new Promise((resolver) => setTimeout(resolver, espera));
+      return graphFetch(url, { fetchImpl, token }, intento + 1);
+    }
+  }
   if (!resp.ok) throw errEntra(`HTTP ${resp.status}`);
 
+  // Atajo barato cuando el servidor sí declara el tamaño; el tope real es el del stream de abajo.
   const cl = Number(resp.headers?.get?.('content-length'));
   if (Number.isFinite(cl) && cl > MAX_RESPUESTA_BYTES) throw errEntra(`respuesta demasiado grande: ${cl} bytes`);
 
-  try {
-    return await resp.json();
-  } catch {
-    throw errEntra('respuesta no-JSON');
-  }
+  return leerJsonAcotado(resp);
 }
 
 /** GET a Graph que devuelve un recurso único (ej. `/users/{id}`). */

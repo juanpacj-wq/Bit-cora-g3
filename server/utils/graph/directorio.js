@@ -26,6 +26,10 @@
  *    lo llena el login desde el id_token.
  *  · El cargo. `lov_bit.usuario` no tiene `cargo_id`: el cargo llega del App Role en cada login
  *    (D-031). El directorio devuelve `role`/`cargo_nombre` para que el módulo agrupe, y ahí queda.
+ *  · Un `NULL` encima de `azure_upn`/`azure_tid` que ya existían (L11, CR-1). Si Graph devuelve a
+ *    alguien sin `userPrincipalName` (soft-deleted, cuenta B2B, `$select` recortado por el tenant)
+ *    la fila conserva el UPN que tenía: `azure_upn` es la entrada de `enforceSingletonFlag`, y con
+ *    NULL ahí el siguiente arranque degradaría al Jefe de Planta hasta su próximo login.
  */
 
 import sql from 'mssql';
@@ -44,6 +48,16 @@ import {
 const MAX_NOMBRE = 200;
 const MAX_USERNAME = 50;
 const MAX_UPN = 200;
+
+/**
+ * Personas por transacción en `sincronizarDirectorio` (L11, CR-3). Cada `MERGE … WITH (HOLDLOCK)`
+ * toma un range lock sobre su clave de match que vive hasta el COMMIT: con las ~89 personas en UNA
+ * transacción se acumulaban ~89 range locks y el login de cualquiera de ellas esperaba a que
+ * terminara la sincronización entera — justo el bloqueo que el HOLDLOCK dice evitar. Por tramos,
+ * cada lock vive los milisegundos de su tramo y la protección anti-doble-INSERT (AUD-30) es la
+ * misma: sigue siendo el HOLDLOCK del MERGE, statement a statement.
+ */
+export const TRAMO_SYNC = 20;
 
 /**
  * Rol efectivo de una persona que está en varios grupos.
@@ -120,6 +134,14 @@ export async function leerDirectorioEntra({ fetchImpl = fetch } = {}) {
   const grupos = [];
   const porOid = new Map();
 
+  // Tolerancia POR ASIGNACIÓN (L11, CR-2). Entra conserva la appRoleAssignment de una persona
+  // borrada hasta 30 días: su GET /users/{id} responde 404, y un 429 puede caer en cualquier
+  // grupo. Antes, UNA de esas abortaba la lectura de las 89 personas. Ahora la asignación que
+  // falla se omite y se cuenta; las dos lecturas de arriba (SP y asignaciones) siguen siendo
+  // globales, porque sin ellas no hay nada que tolerar. El umbral está más abajo.
+  let intentadas = 0;
+  let omitidas = 0;
+
   for (const asignacion of asignaciones) {
     // Un appRoleId que no está entre los appRoles del SP es el "Default Access" de Entra.
     const role = valuePorRoleId.get(String(asignacion?.appRoleId)) || ROLE_DEFAULT_ACCESS;
@@ -131,11 +153,19 @@ export async function leerDirectorioEntra({ fetchImpl = fetch } = {}) {
       // `transitiveMembers/microsoft.graph.user` aplana los grupos anidados y descarta lo que no
       // sea persona. Un grupo vacío devuelve [] y eso NO es un error: COORDINADOR_CARBON_MAQUINARIA
       // y ADMINISTRADOR_DEBUGGING están vacíos hoy y así se reporta, sin ruido.
-      const miembros = await graphGetTodo(
-        `/groups/${principalId}/transitiveMembers/microsoft.graph.user`
-          + `?$select=id,displayName,userPrincipalName,accountEnabled&$top=999`,
-        { fetchImpl, token },
-      );
+      intentadas++;
+      let miembros;
+      try {
+        miembros = await graphGetTodo(
+          `/groups/${principalId}/transitiveMembers/microsoft.graph.user`
+            + `?$select=id,displayName,userPrincipalName,accountEnabled&$top=999`,
+          { fetchImpl, token },
+        );
+      } catch (e) {
+        if (e?.codigo !== 'entra_no_disponible') throw e;
+        omitidas++;
+        continue;
+      }
       grupos.push({
         nombre: String(asignacion.principalDisplayName || '').trim(),
         role,
@@ -150,13 +180,34 @@ export async function leerDirectorioEntra({ fetchImpl = fetch } = {}) {
       // accountEnabled — y sin UPN no hay `username` que insertar. Por eso hace falta este GET,
       // que no está entre los cuatro pasos medidos: sin él la única asignación directa del tenant
       // (el Gerente de Producción) entraría al directorio a medias.
-      const usuario = await graphGet(
-        `/users/${principalId}?$select=id,displayName,userPrincipalName,accountEnabled`,
-        { fetchImpl, token },
-      );
+      intentadas++;
+      let usuario;
+      try {
+        usuario = await graphGet(
+          `/users/${principalId}?$select=id,displayName,userPrincipalName,accountEnabled`,
+          { fetchImpl, token },
+        );
+      } catch (e) {
+        if (e?.codigo !== 'entra_no_disponible') throw e;
+        omitidas++;
+        continue;
+      }
       acumularPersona(porOid, usuario, role);
     }
     // Otro principalType (ServicePrincipal): no es una persona, se ignora.
+  }
+
+  // Umbral: si falla MÁS DE LA MITAD de las asignaciones, no es un directorio con huecos sino
+  // Graph fallando (token vencido a mitad de camino, permisos retirados, caída), y un directorio
+  // a medias que PARECE válido es peor que un 503: el administrador concluiría que la gente
+  // desapareció. Por debajo del umbral se tolera porque el consumidor es seguro: la
+  // sincronización solo escribe a quien SÍ vio; nunca desactiva ni borra a quien faltó.
+  if (omitidas > 0 && omitidas * 2 > intentadas) {
+    throw errEntra(`${omitidas} de ${intentadas} asignaciones fallaron`);
+  }
+  if (omitidas > 0) {
+    // Solo conteos: ni el id del principal ni el nombre del grupo.
+    console.warn(`[graph] directorio: ${omitidas} de ${intentadas} asignaciones omitidas por error de Graph`);
   }
 
   const personas = [...porOid.values()].map((p) => {
@@ -202,6 +253,11 @@ function resolverUsername(upn, oid, dueñoPorUsername) {
  * Aprovisiona/actualiza `lov_bit.usuario` por `azure_oid`. NUNCA crea una fila si ya existe una con
  * ese `azure_oid`; NUNCA hace match por nombre ni por username.
  *
+ * Escribe por tramos de `TRAMO_SYNC` personas, cada tramo en su propia transacción. Si un tramo
+ * falla, los anteriores quedan commiteados y se lanza: no es un problema porque la sincronización
+ * es idempotente (MERGE por oid) y la siguiente corrida completa lo que faltó; los conteos solo se
+ * devuelven cuando terminaron todos los tramos.
+ *
  * @param {import('mssql').ConnectionPool} pool
  * @param {{ por_usuario?: number|null, directorio?: object|null, fetchImpl?: Function }} opciones
  *   `directorio` permite pasar una lectura ya hecha (o capturada, en tests) y saltarse la red.
@@ -225,60 +281,65 @@ export async function sincronizarDirectorio(pool, { por_usuario = null, director
   let creados = 0;
   let actualizados = 0;
 
-  const tx = new sql.Transaction(pool);
-  await tx.begin();
-  try {
-    // Una sola lectura de los usernames ya tomados (la tabla tiene ~120 filas). Sirve para
-    // resolver colisiones sin ir a la BD por persona. Sin hints de lock: un UPDLOCK sobre toda la
-    // tabla bloquearía los logins mientras dura la sincronización.
-    const tomados = await new sql.Request(tx).query(
-      'SELECT username, azure_oid FROM lov_bit.usuario',
-    );
-    const dueñoPorUsername = new Map(
-      tomados.recordset.map((r) => [String(r.username).toLowerCase(), r.azure_oid]),
-    );
+  // Una sola lectura de los usernames ya tomados (la tabla tiene ~120 filas). Sirve para resolver
+  // colisiones sin ir a la BD por persona. Sin hints de lock: un UPDLOCK sobre toda la tabla
+  // bloquearía los logins mientras dura la sincronización.
+  const tomados = await pool.request().query('SELECT username, azure_oid FROM lov_bit.usuario');
+  const dueñoPorUsername = new Map(
+    tomados.recordset.map((r) => [String(r.username).toLowerCase(), r.azure_oid]),
+  );
 
-    for (const persona of personas) {
-      const oid = String(persona.azure_oid).trim();
-      const upn = String(persona.upn || '').trim().slice(0, MAX_UPN);
-      const nombre = (String(persona.nombre || '').trim() || upn || oid).slice(0, MAX_NOMBRE);
-      const username = resolverUsername(upn, oid, dueñoPorUsername);
+  for (let desde = 0; desde < personas.length; desde += TRAMO_SYNC) {
+    const tramo = personas.slice(desde, desde + TRAMO_SYNC);
 
-      const r = await new sql.Request(tx)
-        .input('oid', sql.VarChar(64), oid)
-        .input('upn', sql.VarChar(200), upn || null)
-        .input('tid', sql.VarChar(64), tenantId)
-        .input('nombre', sql.VarChar(200), nombre)
-        .input('username', sql.VarChar(50), username)
-        .input('activo', sql.Bit, persona.activo === false ? 0 : 1)
-        .query(`
-          -- HOLDLOCK como en provisionEntraUser (AUD-30): toma un range lock sobre la clave de
-          -- match para que esta sincronización y el primer login de la misma persona no vean los
-          -- dos "no existe" e intenten INSERT a la vez (violación de UQ_usuario_oid).
-          MERGE lov_bit.usuario WITH (HOLDLOCK) AS t
-          USING (VALUES (@oid)) AS s (azure_oid) ON t.azure_oid = s.azure_oid
-          WHEN MATCHED THEN UPDATE SET
-            nombre_completo = @nombre,
-            azure_upn       = @upn,
-            azure_tid       = @tid
-          WHEN NOT MATCHED THEN INSERT
-            (nombre_completo, username, email, password_hash, azure_oid, azure_upn, azure_tid,
-             es_jefe_planta, es_jdt_default, activo)
-            VALUES (@nombre, @username, NULL, NULL, @oid, @upn, @tid, 0, 0, @activo)
-          OUTPUT $action AS accion;
-        `);
+    const tx = new sql.Transaction(pool);
+    await tx.begin();
+    try {
+      for (const persona of tramo) {
+        const oid = String(persona.azure_oid).trim();
+        const upn = String(persona.upn || '').trim().slice(0, MAX_UPN);
+        const nombre = (String(persona.nombre || '').trim() || upn || oid).slice(0, MAX_NOMBRE);
+        const username = resolverUsername(upn, oid, dueñoPorUsername);
 
-      // $action es la fuente autoritativa: un conteo derivado de la lectura previa mentiría si un
-      // login aprovisionó a la misma persona entre esa lectura y este MERGE.
-      const accion = r.recordset[0]?.accion;
-      if (accion === 'INSERT') creados++;
-      else if (accion === 'UPDATE') actualizados++;
+        const r = await new sql.Request(tx)
+          .input('oid', sql.VarChar(64), oid)
+          .input('upn', sql.VarChar(200), upn || null)
+          .input('tid', sql.VarChar(64), tenantId)
+          .input('nombre', sql.VarChar(200), nombre)
+          .input('username', sql.VarChar(50), username)
+          .input('activo', sql.Bit, persona.activo === false ? 0 : 1)
+          .query(`
+            -- HOLDLOCK como en provisionEntraUser (AUD-30): toma un range lock sobre la clave de
+            -- match para que esta sincronización y el primer login de la misma persona no vean los
+            -- dos "no existe" e intenten INSERT a la vez (violación de UQ_usuario_oid).
+            MERGE lov_bit.usuario WITH (HOLDLOCK) AS t
+            USING (VALUES (@oid)) AS s (azure_oid) ON t.azure_oid = s.azure_oid
+            WHEN MATCHED THEN UPDATE SET
+              nombre_completo = @nombre,
+              -- L11 (CR-1): un UPN o tenant ausente en Graph NO borra el que la BD ya tiene.
+              -- azure_upn es la entrada de enforceSingletonFlag: con NULL acá, el siguiente
+              -- arranque degradaría al Jefe de Planta hasta su próximo login.
+              azure_upn       = COALESCE(@upn, t.azure_upn),
+              azure_tid       = COALESCE(@tid, t.azure_tid)
+            WHEN NOT MATCHED THEN INSERT
+              (nombre_completo, username, email, password_hash, azure_oid, azure_upn, azure_tid,
+               es_jefe_planta, es_jdt_default, activo)
+              VALUES (@nombre, @username, NULL, NULL, @oid, @upn, @tid, 0, 0, @activo)
+            OUTPUT $action AS accion;
+          `);
+
+        // $action es la fuente autoritativa: un conteo derivado de la lectura previa mentiría si
+        // un login aprovisionó a la misma persona entre esa lectura y este MERGE.
+        const accion = r.recordset[0]?.accion;
+        if (accion === 'INSERT') creados++;
+        else if (accion === 'UPDATE') actualizados++;
+      }
+
+      await tx.commit();
+    } catch (err) {
+      try { await tx.rollback(); } catch { /* rollback best-effort */ }
+      throw err;
     }
-
-    await tx.commit();
-  } catch (err) {
-    try { await tx.rollback(); } catch { /* rollback best-effort */ }
-    throw err;
   }
 
   // Solo conteos y el id de quien la disparó. Nunca nombres ni UPNs.

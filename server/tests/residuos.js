@@ -29,6 +29,18 @@ const checks = [
   // RESIDENTE (seed idempotente de db.js, igual que la fila 'TST' de lov_bit.planta), no residuo.
   ['consumo_combustible en planta de test', `SELECT COUNT(*) AS n FROM bitacora.consumo_combustible WHERE planta_id IN ('${TEST_PLANTA_ID}','TSR')`],
   ['sis_scrape_log en planta de test', `SELECT COUNT(*) AS n FROM bitacora.sis_scrape_log WHERE planta_id IN ('${TEST_PLANTA_ID}','TSR')`],
+  // D-065 (GATE-O1, CR-4/CR-5 → L11): las suites de rotación siembran usuarios de Entra y tocan un
+  // flag de cargo, y este script no miraba ni `lov_bit.usuario` ni `lov_bit.cargo`: el gate pudo
+  // decir "cero residuos" con razón y aun así no habría visto un fixture de Entra ni un flag
+  // colgado. Acotadores: el namespace de oids de fixture (`00000000-d065-…`, ningún oid real de
+  // Entra empieza por ceros) y el prefijo `test_rot` de username — NUNCA `nombre_completo`, que es
+  // como se alcanza a una persona real (D-055). `[_]` es el escape de `_` en LIKE de T-SQL.
+  ['usuarios de fixture de Entra (oid 00000000-d065-… o username test_rot%)', `SELECT COUNT(*) AS n FROM lov_bit.usuario WHERE azure_oid LIKE '00000000-d065-%' OR username LIKE 'test[_]rot%'`],
+  // El flag `puede_configurar_rotacion` vive en el MERGE de cargos de db.js y vale 1 SOLO para los
+  // dos cargos del contrato (§5.1); cualquier otro cargo con el flag es la ventana de CA-4(b) que
+  // quedó abierta por una corrida muerta. Este check SÍ mira cargos reales a propósito: es solo
+  // lectura y el residuo que busca está, por construcción, en una fila real.
+  ['cargos con puede_configurar_rotacion=1 fuera de los dos del contrato', `SELECT COUNT(*) AS n FROM lov_bit.cargo WHERE puede_configurar_rotacion = 1 AND nombre NOT IN ('Administrador y Debugging', 'Gerente de Producción')`],
 ];
 
 let total = 0;

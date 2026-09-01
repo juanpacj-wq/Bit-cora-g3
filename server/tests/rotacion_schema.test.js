@@ -16,13 +16,19 @@
 //          ese valor manual sobreviviría y el test se pone rojo.
 //
 // Escrituras: ninguna sobre datos de operación. La única es el `UPDATE` del caso CA-4(b) sobre
-// `lov_bit.cargo` (catálogo, no operación), acotado por nombre a un cargo concreto y revertido dos
-// veces: por el propio MERGE de `initDB()` — que es justo lo que se está probando — y otra vez en
-// el `after()` como red de seguridad. No siembra sesiones, ni registros, ni plantas: nada que
-// limpiar en `'TST'`/`TEST_TAG`, y nada que pueda tocar `'GEC3'`/`'GEC32'` (D-055).
+// `lov_bit.cargo` (catálogo, no operación), acotado por `.input()` a un cargo concreto. Ese cargo
+// es REAL y no puede ser sintético (L11, CR-5): el MERGE de cargos solo corrige las filas que
+// matchean por `nombre` con su tabla de valores, así que un cargo de fixture que no está en esa
+// tabla conservaría cualquier flag y el caso no probaría nada. Lo que sí se controla es la
+// VENTANA en que el cargo real queda con el flag en 1: el `try/finally` del propio caso lo baja
+// aunque un assert falle, el `before()` limpia un residuo de una corrida muerta antes de empezar,
+// el `after()` es la última red, y `npm run test:residuos` cuenta cualquier cargo con el flag
+// fuera de los dos del contrato. No siembra sesiones, ni registros, ni plantas: nada que limpiar
+// en `'TST'`/`TEST_TAG`, y nada que pueda tocar `'GEC3'`/`'GEC32'` (D-055).
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import sql from 'mssql';
 import { initDB, getDB } from '../db.js';
 
 // Los dos cargos que llevan el flag en 1 (contrato §5.1). Todo lo demás va en 0.
@@ -31,6 +37,27 @@ const CARGOS_CON_FLAG = ['Administrador y Debugging', 'Gerente de Producción'];
 // Cargo usado como conejillo del caso CA-4(b): NO lleva el flag, así que si tras `initDB()` sigue
 // en 1, el flag no está en el MERGE. Se elige uno estable del catálogo de 14.
 const CARGO_CONEJILLO = 'Ingeniero Químico';
+
+/** Baja el flag del conejillo. Acotado por `.input()` a UN cargo: nunca un UPDATE sin WHERE. */
+async function bajarFlagConejillo(pool) {
+  await pool.request()
+    .input('nombre', sql.VarChar(100), CARGO_CONEJILLO)
+    .query(`
+      UPDATE lov_bit.cargo SET puede_configurar_rotacion = 0
+      WHERE nombre = @nombre AND puede_configurar_rotacion = 1;
+    `);
+}
+
+/** Flag actual del conejillo, como entero. */
+async function flagConejillo(pool) {
+  const r = await pool.request()
+    .input('nombre', sql.VarChar(100), CARGO_CONEJILLO)
+    .query(`
+      SELECT CAST(puede_configurar_rotacion AS INT) AS flag
+      FROM lov_bit.cargo WHERE nombre = @nombre
+    `);
+  return r.recordset[0]?.flag;
+}
 
 const TABLAS = [
   'rotacion_patron',
@@ -62,6 +89,8 @@ before(async () => {
 
   await initDB();
   db = await getDB();
+  // Residuo de una corrida muerta a mitad del caso 14: se limpia ANTES de empezar (L11, CR-5).
+  await bajarFlagConejillo(db);
 
   const cols = await db.request().query(`
     SELECT TABLE_NAME AS tabla, COLUMN_NAME AS columna, DATA_TYPE AS tipo,
@@ -125,13 +154,9 @@ before(async () => {
 });
 
 after(async () => {
-  // Red de seguridad del caso CA-4(b): si el test murió a mitad, el conejillo podría haber quedado
-  // con el flag en 1. Acotado por nombre a UN cargo (nunca un UPDATE sin WHERE sobre el catálogo).
-  const pool = await getDB();
-  await pool.request().query(`
-    UPDATE lov_bit.cargo SET puede_configurar_rotacion = 0
-    WHERE nombre = '${CARGO_CONEJILLO}' AND puede_configurar_rotacion = 1;
-  `);
+  // Última red del caso CA-4(b): si el proceso murió entre el UPDATE y el `finally`, el conejillo
+  // podría haber quedado con el flag en 1.
+  await bajarFlagConejillo(await getDB());
 });
 
 // ───────────────────────────── CA-3 · F37.A1 ─────────────────────────────
@@ -255,6 +280,7 @@ test('F37.A1 · 7. los CHECK con nombre del contrato existen sobre su tabla', ()
     CK_rotacion_control_accion:  'rotacion_control',
     CK_rotacion_cumpl_turno:     'rotacion_cumplimiento',
     CK_rotacion_cumpl_estado:    'rotacion_cumplimiento',
+    CK_rotacion_cumpl_grupo:     'rotacion_cumplimiento',   // F37.A3 (L11, CR-9)
   };
   for (const [nombre, tabla] of Object.entries(esperado)) {
     const k = checks.get(nombre);
@@ -303,6 +329,14 @@ test('F37.A1 · 8. los dominios de los CHECK son los del contrato, ni más ni me
   const turno = norm(checks.get('CK_rotacion_cumpl_turno').definicion);
   assert.ok(turno.includes('[turno]=(1)') && turno.includes('[turno]=(2)'), `turno ∈ {1,2}: ${turno}`);
   assert.ok(!turno.includes('[turno]=(3)'), `no existe un turno 3 (convención 3): ${turno}`);
+
+  // grupo del cumplimiento ∈ [1,4] o NULL (F37.A3, CR-9). El GATE-O1 §6.7 midió que un CHECK
+  // sobre columna NULLABLE ya acepta NULL (evalúa a UNKNOWN, no a FALSE); el `IS NULL` explícito
+  // deja escrito en el catálogo que "sin patrón ese día" es un valor legítimo, no una omisión.
+  const cumplGrupo = norm(checks.get('CK_rotacion_cumpl_grupo').definicion);
+  assert.ok(cumplGrupo.includes('[grupo]ISNULL'), `acepta NULL explícitamente: ${cumplGrupo}`);
+  assert.ok(cumplGrupo.includes('[grupo]>=(1)'), `cota inferior: ${cumplGrupo}`);
+  assert.ok(cumplGrupo.includes('[grupo]<=(4)'), `cota superior: ${cumplGrupo}`);
 });
 
 test('F37.A1 · 9. la UNIQUE natural del patrón y la PK del cumplimiento', () => {
@@ -352,6 +386,12 @@ test('F37.A1 · 11. es idempotente: un segundo initDB() no falla ni duplica el f
   `);
   assert.equal(r.recordset[0].n, 1, 'F37.A1 debe aparecer UNA sola vez en migracion_aplicada');
 
+  // F37.A3 (L11) corre en el mismo arranque y con el mismo patrón: también una sola fila.
+  const r3 = await db.request().query(`
+    SELECT COUNT(*) AS n FROM bitacora.migracion_aplicada WHERE codigo = 'F37.A3'
+  `);
+  assert.equal(r3.recordset[0].n, 1, 'F37.A3 debe aparecer UNA sola vez en migracion_aplicada');
+
   // Y las tablas siguen siendo las mismas: el DDL guardado por IF OBJECT_ID no las recreó.
   const t = await db.request().query(`
     SELECT COUNT(*) AS n FROM sys.tables t
@@ -396,25 +436,24 @@ test('F37.A2 · 14. (b) un UPDATE manual NO sobrevive a initDB(): el flag vive e
   // Este es el test que la convención 27 pide de verdad. Si `puede_configurar_rotacion` estuviera
   // fuera del MERGE (por ejemplo en un `UPDATE … WHERE nombre IN (…)` suelto), el valor puesto a
   // mano acá seguiría en 1 después del arranque y este assert se pondría rojo.
-  await db.request().query(`
-    UPDATE lov_bit.cargo SET puede_configurar_rotacion = 1
-    WHERE nombre = '${CARGO_CONEJILLO}';
-  `);
+  //
+  // El cargo es real (ver cabecera): la ventana con el flag en 1 dura lo que tarda `initDB()`, y
+  // el `finally` lo baja pase lo que pase con los asserts (L11, CR-5).
+  let despues;
+  try {
+    await db.request()
+      .input('nombre', sql.VarChar(100), CARGO_CONEJILLO)
+      .query(`UPDATE lov_bit.cargo SET puede_configurar_rotacion = 1 WHERE nombre = @nombre;`);
+    assert.equal(await flagConejillo(db), 1, 'precondición: el UPDATE manual sí escribió');
 
-  const antes = await db.request().query(`
-    SELECT CAST(puede_configurar_rotacion AS INT) AS flag
-    FROM lov_bit.cargo WHERE nombre = '${CARGO_CONEJILLO}'
-  `);
-  assert.equal(antes.recordset[0].flag, 1, 'precondición: el UPDATE manual sí escribió');
+    await initDB(); // el mismo camino que corre el server al reiniciar
 
-  await initDB(); // el mismo camino que corre el server al reiniciar
-
-  const despues = await db.request().query(`
-    SELECT CAST(puede_configurar_rotacion AS INT) AS flag
-    FROM lov_bit.cargo WHERE nombre = '${CARGO_CONEJILLO}'
-  `);
+    despues = await flagConejillo(db);
+  } finally {
+    await bajarFlagConejillo(db);
+  }
   assert.equal(
-    despues.recordset[0].flag, 0,
+    despues, 0,
     `'${CARGO_CONEJILLO}' quedó con el flag en 1 tras el arranque. El MERGE de cargos es la fuente ` +
     'autoritativa y su rama WHEN MATCHED debe bajarlo a 0 (convención 27): el flag tiene que estar ' +
     'DENTRO del MERGE, no en un UPDATE aparte.'

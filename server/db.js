@@ -2992,6 +2992,18 @@ export async function initDB() {
   const f37A1Previa = await db.request().query(
     `SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = 'F37.A1'`
   );
+  // L11 (CR-15): qué tablas faltaban ANTES del DDL, para que el log de abajo diga la verdad. Si
+  // alguien borró el flag a mano (el escenario soportado de arriba) las tablas ya existen y no se
+  // crea nada: el log lo dice así, en vez de anunciar un "schema creado" que no ocurrió — y justo
+  // en el despliegue donde alguien lo está mirando para confirmarlo.
+  const F37A1_TABLAS = ['rotacion_patron', 'rotacion_asignacion', 'rotacion_control', 'rotacion_cumplimiento'];
+  const f37A1Existian = new Set((await db.request().query(`
+    SELECT t.name FROM sys.tables t
+    INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+    WHERE s.name = 'bitacora'
+      AND t.name IN ('rotacion_patron', 'rotacion_asignacion', 'rotacion_control', 'rotacion_cumplimiento')
+  `)).recordset.map((r) => r.name));
+  const f37A1Faltaban = F37A1_TABLAS.filter((t) => !f37A1Existian.has(t));
   await db.request().batch(`
     IF OBJECT_ID('bitacora.rotacion_patron', 'U') IS NULL
     CREATE TABLE bitacora.rotacion_patron (
@@ -3081,10 +3093,93 @@ export async function initDB() {
       INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F37.A1');
   `);
   if (!f37A1Previa.recordset[0]) {
-    console.log(
-      '[F37.A1] schema de rotación creado: rotacion_patron, rotacion_asignacion, ' +
-      'rotacion_control, rotacion_cumplimiento.'
-    );
+    if (f37A1Faltaban.length) {
+      console.log(`[F37.A1] schema de rotación creado: ${f37A1Faltaban.join(', ')}.`);
+    } else {
+      console.log(
+        '[F37.A1] flag de migración repuesto: las cuatro tablas de rotación ya existían, ' +
+        'no se creó ninguna.'
+      );
+    }
+  }
+
+  // ---------- F37.A3 — D-065 (L11): constraints que le faltaron a F37.A1 ----------
+  //
+  // Aditiva e idempotente: SOLO `ALTER TABLE … ADD CONSTRAINT`, cada uno gateado por su nombre en
+  // sys.objects. NO se edita el CREATE TABLE de F37.A1: ese bloque está gateado por IF OBJECT_ID y
+  // las cuatro tablas ya existen en toda BD viva, así que un cambio ahí se saltaría en silencio.
+  //
+  //  · CK_rotacion_cumpl_grupo (CR-9): `grupo IS NULL OR grupo BETWEEN 1 AND 4`. NULL sigue siendo
+  //    legítimo ("el rol no tenía patrón ese día", L06); lo que se rechaza es 0, 5 o 200 en un
+  //    registro congelado y append-only. El `IS NULL` es explícito por legibilidad: un CHECK solo
+  //    rechaza cuando evalúa a FALSE, así que `BETWEEN` a secas también dejaría pasar el NULL.
+  //  · UQ_turno_unidad_id_planta + FK_rotacion_control_turno_planta (CR-7): `turno_unidad` ya
+  //    determina la planta por su PK, pero nada ataba `rotacion_control.planta_id` a la del turno:
+  //    una fila podía nombrar el turno de GEC3 con planta_id = 'GEC32' y la pila LIFO devolvía
+  //    vacío en silencio — el drift invisible de D-053(iii). La FK compuesta lo vuelve un 547.
+  //  · UQ_turno_unidad_id_natural + FK_rotacion_cumpl_turno_natural (CR-7): lo mismo para
+  //    `rotacion_cumplimiento`, atando además (fecha_operativa, turno) a los del `turno_id`; su PK
+  //    natural y su turno_id no pueden nombrar turnos distintos.
+  //
+  // Por qué es seguro tocar `turno_unidad` (D-045): las dos UNIQUE nuevas son SUPERSETS de la PK
+  // (turno_unidad_id + otras columnas), así que ninguna fila presente o futura puede violarlas —
+  // no cambian qué escrituras acepta la tabla, solo agregan dos índices pequeños (~2 filas por día
+  // y planta). Las FK cuelgan de las tablas nuevas de F37.A1; las tablas de D-045 no ganan FK.
+  //
+  // El flag es audit trail, no la guarda (mismo patrón que F37.A1). El log de abajo lista SOLO lo
+  // que este arranque creó de verdad (CR-15): en un arranque normal no imprime nada.
+  const F37A3_CONSTRAINTS = [
+    'CK_rotacion_cumpl_grupo',
+    'UQ_turno_unidad_id_planta',
+    'UQ_turno_unidad_id_natural',
+    'FK_rotacion_control_turno_planta',
+    'FK_rotacion_cumpl_turno_natural',
+  ];
+  const f37A3Antes = new Set((await db.request().query(`
+    SELECT name FROM sys.objects
+    WHERE type IN ('C', 'UQ', 'F')
+      AND name IN ('CK_rotacion_cumpl_grupo', 'UQ_turno_unidad_id_planta', 'UQ_turno_unidad_id_natural',
+                   'FK_rotacion_control_turno_planta', 'FK_rotacion_cumpl_turno_natural')
+  `)).recordset.map((r) => r.name));
+  await db.request().batch(`
+    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'CK_rotacion_cumpl_grupo'
+                     AND parent_object_id = OBJECT_ID('bitacora.rotacion_cumplimiento'))
+      ALTER TABLE bitacora.rotacion_cumplimiento
+        ADD CONSTRAINT CK_rotacion_cumpl_grupo CHECK (grupo IS NULL OR grupo BETWEEN 1 AND 4);
+  `);
+  await db.request().batch(`
+    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'UQ_turno_unidad_id_planta'
+                     AND parent_object_id = OBJECT_ID('bitacora.turno_unidad'))
+      ALTER TABLE bitacora.turno_unidad
+        ADD CONSTRAINT UQ_turno_unidad_id_planta UNIQUE (turno_unidad_id, planta_id);
+
+    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'UQ_turno_unidad_id_natural'
+                     AND parent_object_id = OBJECT_ID('bitacora.turno_unidad'))
+      ALTER TABLE bitacora.turno_unidad
+        ADD CONSTRAINT UQ_turno_unidad_id_natural
+        UNIQUE (turno_unidad_id, fecha_operativa, planta_id, turno);
+  `);
+  await db.request().batch(`
+    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'FK_rotacion_control_turno_planta'
+                     AND parent_object_id = OBJECT_ID('bitacora.rotacion_control'))
+      ALTER TABLE bitacora.rotacion_control
+        ADD CONSTRAINT FK_rotacion_control_turno_planta
+        FOREIGN KEY (turno_id, planta_id)
+        REFERENCES bitacora.turno_unidad (turno_unidad_id, planta_id);
+
+    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'FK_rotacion_cumpl_turno_natural'
+                     AND parent_object_id = OBJECT_ID('bitacora.rotacion_cumplimiento'))
+      ALTER TABLE bitacora.rotacion_cumplimiento
+        ADD CONSTRAINT FK_rotacion_cumpl_turno_natural
+        FOREIGN KEY (turno_id, fecha_operativa, planta_id, turno)
+        REFERENCES bitacora.turno_unidad (turno_unidad_id, fecha_operativa, planta_id, turno);
+
+    IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo = 'F37.A3')
+      INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F37.A3');
+  `);
+  const f37A3Creadas = F37A3_CONSTRAINTS.filter((n) => !f37A3Antes.has(n));
+  if (f37A3Creadas.length) {
+    console.log(`[F37.A3] constraints de rotación creadas: ${f37A3Creadas.join(', ')}.`);
   }
 
   console.log('[DB] Conexión OK');

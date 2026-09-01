@@ -6,10 +6,16 @@
 // que no está entre los appRoles del SP, que es el "Default Access" de Entra. La llamada real se
 // verifica a mano una vez y se reporta en el cierre.
 //
-// Los usuarios que siembra van con `es_sintetico = 1` y los oids son GUIDs de fixture
-// (`00000000-d065-...`), imposibles de confundir con uno real. La limpieza borra exactamente esos
-// oids: `lov_bit.usuario` no es una tabla protegida por el guard de D-055, pero el criterio es el
-// mismo — nada acá puede alcanzar una fila de una persona real.
+// Todos los oids son GUIDs de fixture (`00000000-d065-...`), imposibles de confundir con uno
+// real, y ESE patrón es el acotador de la limpieza (más fuerte que `es_sintetico`): corre en el
+// `before()` además del `after()`, así que una corrida abortada se limpia en la siguiente.
+// Sobre `es_sintetico`, la verdad completa (L11, CR-4): las filas que este archivo siembra a mano
+// van con `es_sintetico = 1`; las que CREA el MERGE de `sincronizarDirectorio` nacen con
+// `es_sintetico = 0` —la sincronización es código de producción y no conoce fixtures— y solo el
+// seed de D-044 (`username LIKE 'test\_%'`) las marca en el siguiente `initDB()`. Por eso la
+// limpieza no se fía del flag. `lov_bit.usuario` no es una tabla protegida por el guard de D-055,
+// pero el criterio es el mismo: nada acá puede alcanzar una fila de una persona real, y
+// `npm run test:residuos` cuenta cualquier oid de fixture o username `test_rot%` que quede.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import sql from 'mssql';
@@ -134,13 +140,23 @@ before(async () => {
   await limpiarFixture();
 });
 
+/**
+ * Restaura una env var a su valor original. Si no existía, se BORRA (L11, CR-11): asignar
+ * `undefined` a `process.env` guarda el string literal 'undefined', y `entraConfigurado()`
+ * lo tomaría por una credencial presente.
+ */
+function restaurarEnv(nombre, valor) {
+  if (valor === undefined) delete process.env[nombre];
+  else process.env[nombre] = valor;
+}
+
 after(async () => {
   await limpiarFixture();
   // Este archivo no crea sesiones, pero la red de seguridad es barata y la exige la convención 28.
   await deactivateSyntheticSessions();
-  process.env.M365_TENANT_ID = envOriginal.tenant;
-  process.env.M365_CLIENT_ID = envOriginal.client;
-  process.env.M365_CLIENT_SECRET = envOriginal.secret;
+  restaurarEnv('M365_TENANT_ID', envOriginal.tenant);
+  restaurarEnv('M365_CLIENT_ID', envOriginal.client);
+  restaurarEnv('M365_CLIENT_SECRET', envOriginal.secret);
   limpiarCacheToken();
 });
 
