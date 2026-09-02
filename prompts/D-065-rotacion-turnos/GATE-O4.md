@@ -459,4 +459,4 @@ y la salvedad del §4), el runbook con las dos condiciones de invocación del §
 
 ## 9. Commit del gate
 
-`{{sha}}` `gate(D-065): O4 cerrada — 2 lotes, 897/897 backend, 414/414 front, 0 violaciones`
+`f23ae7b` `gate(D-065): O4 cerrada — 2 lotes, 897/897 backend, 414/414 front, 0 violaciones`
