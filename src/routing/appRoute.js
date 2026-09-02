@@ -9,6 +9,9 @@
 //   #/comb?fecha=YYYY-MM-DD       → COMB (fecha seleccionada)
 //   #/b/<codigo>                  → bitácora genérica (ej. #/b/AUTOR)
 //   #/historicos                  → vista de históricos
+//   #/rotacion                    → rotación de turnos: configuración anual (D-065)
+//   #/rotacion/cumplimiento?desde=YYYY-MM-DD&hasta=YYYY-MM-DD&planta=GEC3|GEC32
+//                                 → rotación de turnos: vista de cumplimiento (D-065)
 //   vacío / desconocido           → fallback (vista 'bitacoras', codigo null) → el caller cae a
 //                                    la primera bitácora permitida (comportamiento legacy).
 import { getTodayBogota, getCurrentMonthBogota } from '../utils/fecha';
@@ -48,9 +51,10 @@ export function mesValido(m) {
 }
 
 // parseHash('#/comb?fecha=2026-06-20') → { vista, codigo, params }
-// - vista:  'bitacoras' | 'historicos'
+// - vista:  'bitacoras' | 'historicos' | 'rotacion' | 'rotacion-cumplimiento'
 // - codigo: código de bitácora (MAND/DISP/COMB/AUTOR/…) o null si no aplica/desconocido
-// - params: { planta? } para DISP, { fecha? } para COMB (solo si pasan el validador)
+// - params: { planta? } para DISP, { fecha? } para COMB, { mes? } para MAND,
+//           { desde?, hasta?, planta? } para 'rotacion-cumplimiento' (solo si pasan el validador)
 export function parseHash(hashString) {
   const fallback = { vista: 'bitacoras', codigo: null, params: {} };
   const raw = String(hashString || '').replace(/^#/, '').replace(/^\/+/, '');
@@ -64,6 +68,25 @@ export function parseHash(hashString) {
   const query = new URLSearchParams(queryPart || '');
 
   if (head === 'historicos') return { vista: 'historicos', codigo: null, params: {} };
+
+  // D-065 (contrato C8): el módulo de rotación NO es una bitácora — son secciones propias del
+  // dashboard, como #/historicos, así que viajan en `vista` y `codigo` queda en null. La
+  // configuración anual (#/rotacion) no tiene subestado; el cumplimiento sí, y sus tres params se
+  // validan con los MISMOS helpers de siempre: un param inválido se descarta y el caller cae a su
+  // default (últimos 14 días + unidad de la sesión), nunca rompe la navegación.
+  if (head === 'rotacion') {
+    const sub = segments[1] ? segments[1].toLowerCase() : null;
+    if (!sub) return { vista: 'rotacion', codigo: null, params: {} };
+    if (sub !== 'cumplimiento') return fallback;
+    const paramsRot = {};
+    const desde = query.get('desde');
+    const hasta = query.get('hasta');
+    const plantaRot = query.get('planta');
+    if (fechaValida(desde)) paramsRot.desde = desde;
+    if (fechaValida(hasta)) paramsRot.hasta = hasta;
+    if (plantaValida(plantaRot)) paramsRot.planta = plantaRot;
+    return { vista: 'rotacion-cumplimiento', codigo: null, params: paramsRot };
+  }
 
   // Genérica: #/b/<codigo>. El código se normaliza a mayúsculas (los códigos de bitácora lo son) y
   // se traduce si es un código retirado (D-053).
@@ -96,6 +119,18 @@ export function parseHash(hashString) {
 // Solo serializa params válidos; un param inválido/ausente se omite (la URL queda limpia).
 export function buildHash({ vista, codigo, params } = {}) {
   if (vista === 'historicos') return '#/historicos';
+  // D-065: las dos secciones de rotación se identifican por `vista` (no tienen `codigo`), así que
+  // van ANTES del corte por `!codigo`. El orden de la query es fijo (desde, hasta, planta) para que
+  // buildHash sea determinista: el dashboard compara `buildHash(desired) === location.hash` antes de
+  // navegar, y un orden variable lo haría reescribir la URL en cada render.
+  if (vista === 'rotacion') return '#/rotacion';
+  if (vista === 'rotacion-cumplimiento') {
+    const partes = [];
+    if (fechaValida(params?.desde)) partes.push(`desde=${params.desde}`);
+    if (fechaValida(params?.hasta)) partes.push(`hasta=${params.hasta}`);
+    if (plantaValida(params?.planta)) partes.push(`planta=${params.planta}`);
+    return `#/rotacion/cumplimiento${partes.length ? `?${partes.join('&')}` : ''}`;
+  }
   if (!codigo) return '#/';
 
   const slug = SLUG_BY_CODIGO[codigo];
