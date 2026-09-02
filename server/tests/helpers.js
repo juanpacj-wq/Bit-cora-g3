@@ -390,7 +390,10 @@ export async function cleanupTestRegistros() {
         AND NOT EXISTS (SELECT 1 FROM bitacora.registro_activo     ra WHERE ra.turno_id = tu.turno_unidad_id)
         AND NOT EXISTS (SELECT 1 FROM bitacora.registro_historico  rh WHERE rh.turno_id = tu.turno_unidad_id)
         AND NOT EXISTS (SELECT 1 FROM bitacora.turno_participante  tp WHERE tp.turno_id = tu.turno_unidad_id)
-        AND NOT EXISTS (SELECT 1 FROM bitacora.sesion_activa       sa WHERE sa.turno_id = tu.turno_unidad_id);
+        AND NOT EXISTS (SELECT 1 FROM bitacora.sesion_activa       sa WHERE sa.turno_id = tu.turno_unidad_id)
+        -- D-065 (GATE-O2, hallazgo 2 de L06): dos dependientes más de turno_unidad (F37.A1 + F37.A3).
+        AND NOT EXISTS (SELECT 1 FROM bitacora.rotacion_control    rc WHERE rc.turno_id = tu.turno_unidad_id)
+        AND NOT EXISTS (SELECT 1 FROM bitacora.rotacion_cumplimiento cu WHERE cu.turno_id = tu.turno_unidad_id);
     `);
   // D-061 (L06 · contrato C13): COMB y el scraper del SIS también dejan residuo en la BD, y hasta
   // ahora nadie lo barría — cada suite limpiaba su propia (planta, fecha) y lo que se escapaba

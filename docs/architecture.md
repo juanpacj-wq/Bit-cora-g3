@@ -26,7 +26,7 @@ Frontend habla solo con `/api/*` (proxy de Vite en dev → `localhost:3002`).
 Dos esquemas en la base `bitacora_gec3`:
 
 - **`lov_bit`** (lista de valores / catálogos): `usuario`, `cargo`, `planta`, `bitacora`, `tipo_evento`, `cargo_bitacora_permiso`.
-- **`bitacora`** (transaccional): `registro_activo`, `registro_historico`, `sesion_activa`, `sesion_bitacora`, `evento_dashboard`, `disponibilidad_dashboard`, `mand_cierre_log`, `migracion_aplicada`.
+- **`bitacora`** (transaccional): `registro_activo`, `registro_historico`, `sesion_activa`, `sesion_bitacora`, `evento_dashboard`, `disponibilidad_dashboard`, `mand_cierre_log`, `migracion_aplicada`, y —desde D-065— `rotacion_patron`, `rotacion_asignacion`, `rotacion_control`, `rotacion_cumplimiento`.
 
 ### Tablas clave
 
@@ -40,6 +40,10 @@ Dos esquemas en la base `bitacora_gec3`:
 | `bitacora.disponibilidad_dashboard` | **Contrato hacia dashboard-gen-gec3 para DISP** (separado de `evento_dashboard` porque DISP no tiene periodo). PK = `planta_id` (una fila por planta, UPSERT en cada cambio). |
 | `bitacora.mand_cierre_log` | Idempotencia del sweeper diario MAND. PK `(fecha_cerrada, planta_id)`. |
 | `bitacora.migracion_aplicada` | Flags de migraciones idempotentes one-time. |
+| `bitacora.rotacion_patron` | **D-065** — la malla de 8 días por rol: `(fecha_inicio, vector_t1, vector_t2, desfase)`. **No materializa días**: el titular de cualquier fecha se calcula. El `desfase` lo deriva el motor, nunca lo digita nadie. UNIQUE natural **filtrada por `activo = 1`** (`F37.A4`), que es lo que permite que desactivar libere la fecha. |
+| `bitacora.rotacion_asignacion` | **D-065** — persona→grupo `G1..G4` **con vigencia**. Un relevo cierra `vigente_hasta` e **inserta** otra fila: el pasado no se reescribe. "Sin grupo" es la **ausencia** de fila. |
+| `bitacora.rotacion_control` | **D-065** — log **append-only** (`TOMAR`/`ABANDONAR`/`DESCARTAR`). La pila LIFO y el "ya respondí" se **derivan** de él; el principal no vive en ninguna columna. Es además la auditoría de relevos del turno. |
+| `bitacora.rotacion_cumplimiento` | **D-065** — el cruce plan-vs-real **congelado dentro de la transacción de `cerrarTurno`**. PK natural `(fecha_operativa, planta_id, turno, cargo_id)` = su idempotencia. `cargo_nombre` y `titulares_json` son snapshot (D-052). |
 
 ### Convención de columnas comunes (auditoría)
 
@@ -99,6 +103,18 @@ Bit-cora-g3/server/
 │   │   │                          por clave_asiento contra registro_activo Y registro_historico.
 │   │   └── sweeper.js             Barrido c/5 min sobre [hoy-2, hoy+1]. Nace APAGADO bajo
 │   │                              AUTH_TEST_BYPASS y anuncia el motivo en el log de arranque.
+│   ├── rotacion/              D-065 — quién DEBÍA estar en un turno.
+│   │   ├── patron.js              Motor PURO de la malla de 8 días (sin BD, sin red, sin reloj):
+│   │   │                          grupoDeTurno, derivarDesfase, desfaseDeContinuidad, parsearVector.
+│   │   │                          Fechas como 'YYYY-MM-DD'; ningún Date entra ni sale.
+│   │   ├── titulares.js           titularesDeTurno: patrón × asignación vigente, en UNA query.
+│   │   ├── control.js             La pila LIFO derivada del log, serializada con sp_getapplock.
+│   │   └── cumplimiento.js        Los 4 estados por usuario_id (no por conteo) + congelarCumplimiento,
+│   │                              que se compone con la transacción de cerrarTurno.
+│   ├── graph/                 D-065 — Microsoft Graph server-side (client_credentials).
+│   │   ├── cliente.js             Token cacheado, lectura acotada, degradación 503.
+│   │   └── directorio.js          MERGE sobre lov_bit.usuario **solo por azure_oid** (D-031),
+│   │                              por tramos, con umbral de tolerancia y `omitidas` en la respuesta.
 │   └── ...
 ├── scripts/backfill-carbon-gec32.js     CLI de backfill/reparación del carbón GEC32 (resumible).
 ├── scripts/relleno-asiento-despacho.js  D-064 — CLI del relleno del mes en curso (una pasada,
@@ -171,6 +187,12 @@ Bit-cora-g3/src/
 │   │   ├── SelectorFecha.jsx    Fecha controlada (default hoy Bogotá, futuro bloqueado).
 │   │   ├── combustibles.css     Piel "Blueprint Heatmap" (D-033), scopeada bajo `.comb-root`.
 │   │   └── colores.js           Rampa del heatmap compartida por `tint()` y la leyenda.
+│   ├── Rotacion/                D-065 — las tres superficies (secciones, NO bitácoras).
+│   │   ├── ConfiguracionRotacion.jsx  Superficie A: carga anual. Buffer interno tras un Guardar
+│   │   │                              explícito; reporta su suciedad con `onDirtyChange`.
+│   │   ├── PopupTomaControl.jsx       Superficie B: al iniciar sesión. `modoPopup()` (pura) decide
+│   │   │                              si se dibuja; el front NO opina sobre a quién le aplica.
+│   │   └── CumplimientoRotacion.jsx   Superficie C: solo lectura, controlada por la ruta (rango+unidad).
 │   ├── historicos/HistoricoTable.jsx
 │   └── BarraEstado.jsx            Filtros F11 (fecha+turno) — NO se renderiza para DISP. En MAND se renderiza pero oculta filtros/cierres (la grilla solo muestra HOY) y muestra contador "X registros" sincronizado con el badge.
 └── hooks/

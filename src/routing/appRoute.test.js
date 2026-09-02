@@ -68,6 +68,49 @@ describe('routing/appRoute — parseHash', () => {
     });
   });
 
+  // D-065 (contrato C8): las dos secciones del módulo de rotación. NO son bitácoras — viajan en
+  // `vista` y `codigo` queda en null, igual que #/historicos.
+  describe('rotación — las dos secciones nuevas (D-065)', () => {
+    beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-06-29T15:00:00.000Z')); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    test('#/rotacion → configuración anual, sin codigo y sin params', () => {
+      expect(parseHash('#/rotacion')).toEqual({ vista: 'rotacion', codigo: null, params: {} });
+      expect(parseHash('#/rotacion/')).toEqual({ vista: 'rotacion', codigo: null, params: {} });
+      // El head se normaliza a minúsculas, como el resto de las rutas.
+      expect(parseHash('#/ROTACION')).toEqual({ vista: 'rotacion', codigo: null, params: {} });
+    });
+
+    test('#/rotacion/cumplimiento sin params → vista sola (el caller pone su default)', () => {
+      expect(parseHash('#/rotacion/cumplimiento')).toEqual({ vista: 'rotacion-cumplimiento', codigo: null, params: {} });
+    });
+
+    test('#/rotacion/cumplimiento con los tres params válidos los conserva', () => {
+      expect(parseHash('#/rotacion/cumplimiento?desde=2026-06-15&hasta=2026-06-29&planta=GEC32')).toEqual({
+        vista: 'rotacion-cumplimiento', codigo: null,
+        params: { desde: '2026-06-15', hasta: '2026-06-29', planta: 'GEC32' },
+      });
+    });
+
+    test('cada param inválido se descarta por separado, sin romper la ruta', () => {
+      // Planta inexistente (GEC4 es el error clásico del dominio): se cae, los otros dos sobreviven.
+      expect(parseHash('#/rotacion/cumplimiento?desde=2026-06-15&hasta=2026-06-20&planta=GEC4')).toEqual({
+        vista: 'rotacion-cumplimiento', codigo: null, params: { desde: '2026-06-15', hasta: '2026-06-20' },
+      });
+      // Fecha futura y fecha mal formada: mismo criterio que COMB.
+      expect(parseHash('#/rotacion/cumplimiento?desde=2999-01-01&hasta=2026-06-20&planta=GEC3')).toEqual({
+        vista: 'rotacion-cumplimiento', codigo: null, params: { hasta: '2026-06-20', planta: 'GEC3' },
+      });
+      expect(parseHash('#/rotacion/cumplimiento?desde=15-06-2026&hasta=ayer&planta=GEC3')).toEqual({
+        vista: 'rotacion-cumplimiento', codigo: null, params: { planta: 'GEC3' },
+      });
+    });
+
+    test('sub-ruta desconocida bajo #/rotacion → fallback (no inventa una vista)', () => {
+      expect(parseHash('#/rotacion/no-existe')).toEqual({ vista: 'bitacoras', codigo: null, params: {} });
+    });
+  });
+
   describe('COMB — validación de fecha', () => {
     beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-06-29T15:00:00.000Z')); });
     afterEach(() => { vi.useRealTimers(); });
@@ -103,6 +146,27 @@ describe('routing/appRoute — buildHash', () => {
     test('fecha futura → sin query', () => { expect(buildHash({ vista: 'bitacoras', codigo: 'COMB', params: { fecha: '2999-01-01' } })).toBe('#/comb'); });
   });
 
+  describe('rotación (D-065)', () => {
+    beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-06-29T15:00:00.000Z')); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    test('configuración: sin query, y `codigo` no interviene', () => {
+      expect(buildHash({ vista: 'rotacion', codigo: null, params: {} })).toBe('#/rotacion');
+      expect(buildHash({ vista: 'rotacion' })).toBe('#/rotacion');
+    });
+    test('cumplimiento: orden fijo desde → hasta → planta', () => {
+      expect(buildHash({
+        vista: 'rotacion-cumplimiento', codigo: null,
+        params: { planta: 'GEC3', hasta: '2026-06-29', desde: '2026-06-15' },
+      })).toBe('#/rotacion/cumplimiento?desde=2026-06-15&hasta=2026-06-29&planta=GEC3');
+    });
+    test('cumplimiento: los params inválidos se omiten y la URL queda limpia', () => {
+      expect(buildHash({ vista: 'rotacion-cumplimiento', params: { desde: '2999-01-01', planta: 'X' } }))
+        .toBe('#/rotacion/cumplimiento');
+      expect(buildHash({ vista: 'rotacion-cumplimiento', params: {} })).toBe('#/rotacion/cumplimiento');
+    });
+  });
+
   describe('MAND con mes (D-058)', () => {
     beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-06-29T15:00:00.000Z')); });
     afterEach(() => { vi.useRealTimers(); });
@@ -124,6 +188,10 @@ describe('routing/appRoute — round-trip parse∘build', () => {
     { vista: 'bitacoras', codigo: 'COMB', params: { fecha: '2026-06-20' } },
     { vista: 'bitacoras', codigo: 'AUTOR', params: {} },
     { vista: 'historicos', codigo: null, params: {} },
+    // D-065
+    { vista: 'rotacion', codigo: null, params: {} },
+    { vista: 'rotacion-cumplimiento', codigo: null, params: {} },
+    { vista: 'rotacion-cumplimiento', codigo: null, params: { desde: '2026-06-15', hasta: '2026-06-29', planta: 'GEC32' } },
   ];
   test('build → parse devuelve la misma ruta', () => {
     for (const r of casos) {

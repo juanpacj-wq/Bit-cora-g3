@@ -169,13 +169,16 @@ export async function establecerContextoSesion(db, { usuario_id, planta_id, carg
         END
 
         -- ESPEJO de SELECT_SESION (middleware/auth.js): mismo shape de sesión — cambiar juntos (D-059).
+        -- D-065: puede_configurar_rotacion (F37.A2) viaja acá igual que allá; es lo que el front
+        -- recibe de select-context/cambiar-unidad y con lo que decide mostrar la configuración.
         SELECT s.sesion_id, s.usuario_id, s.planta_id, s.cargo_id, s.turno, s.activa,
                s.inicio_sesion, s.ultima_actividad, s.turno_finalizado_en,
                u.nombre_completo, u.username, u.es_jefe_planta, u.es_jdt_default,
                c.nombre AS cargo_nombre, c.solo_lectura,
                CAST(c.puede_cerrar_turno   AS BIT) AS puede_cerrar_turno,
                CAST(c.puede_cambiar_unidad AS BIT) AS puede_cambiar_unidad,
-               CAST(c.es_observador        AS BIT) AS es_observador
+               CAST(c.es_observador        AS BIT) AS es_observador,
+               CAST(c.puede_configurar_rotacion AS BIT) AS puede_configurar_rotacion
         FROM bitacora.sesion_activa s
         INNER JOIN lov_bit.usuario u ON u.usuario_id = s.usuario_id
         INNER JOIN lov_bit.cargo   c ON c.cargo_id   = s.cargo_id

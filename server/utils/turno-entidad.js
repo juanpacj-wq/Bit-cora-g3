@@ -2,6 +2,7 @@ import sql from 'mssql';
 import { ventanaTurno, ventanaActual, getTurnoColombia, fechaBogotaStr } from './turno.js';
 import { USUARIO_SISTEMA_ID } from '../db.js';
 import { registrarEventoCierre } from './ciet.js';
+import { congelarCumplimiento } from './rotacion/cumplimiento.js';
 
 // D-045 — Dominio de la CABECERA de turno (bitacora.turno_unidad) + detalle vivo
 // (turno_participante). Lógica de estado puro + operaciones de BD idempotentes/atómicas.
@@ -332,6 +333,15 @@ export async function cerrarTurno(pool, turno_id, {
       `);
     const conformados = conf.rowsAffected[0] || 0;
 
+    // 3b) D-065 (contrato C7): congelar el CUMPLIMIENTO plan-vs-real de la rotación (quién debía estar
+    //     vs quién estuvo, por rol) en la MISMA transacción, justo después de la conformación. Es
+    //     idempotente por la PK natural de rotacion_cumplimiento (NOT EXISTS) y `filas = 0` NO es
+    //     error: es el estado normal antes de la primera carga anual (ningún rol con patrón activo).
+    //     Sin try/catch A PROPÓSITO: si el congelado falla cae la transacción entera — un turno sellado
+    //     sin su cumplimiento es peor que un cierre que hay que reintentar. Hereda los mismos filtros
+    //     que la conformación (`es_sintetico` salvo unit tests, D-044; `es_observador` siempre, D-059).
+    await congelarCumplimiento(tx, { turno_id, fecha_operativa, planta_id, turno, incluirSinteticos });
+
     // 4) Archivar los registros del turno a registro_historico, preservando registro_id + turno_id.
     //    Criterio combinado: (a) registros ESTAMPADOS con este turno (turno_id = @id) — el camino normal;
     //    (b) BORRADORES HUÉRFANOS (turno_id NULL) de la unidad con fecha_evento <= ahora. (b) rescata
@@ -497,6 +507,15 @@ export async function reabrirTurno(pool, turno_id, { por_usuario, cargo_nombre =
     await new sql.Request(tx)
       .input('id', sql.Int, turno_id)
       .query(`DELETE FROM bitacora.conformacion_turno WHERE turno_id = @id`);
+
+    // 3b) D-065 (GATE-O2, hallazgo 1 de L06): el CUMPLIMIENTO congelado se borra por la misma razón
+    //     que la conformación. `congelarCumplimiento` es idempotente por NOT EXISTS sobre la PK: si la
+    //     fila vieja se quedara, el re-cierre NO la refrescaría y el titular que entró después de
+    //     reabrir seguiría PENDIENTE para siempre. `rotacion_control` NO se toca: es un log append-only
+    //     y la pila se deriva por turno_id (las tomas siguen valiendo mientras el turno viva).
+    await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .query(`DELETE FROM bitacora.rotacion_cumplimiento WHERE turno_id = @id`);
 
     // 4) Reabrir la cabecera.
     await new sql.Request(tx)

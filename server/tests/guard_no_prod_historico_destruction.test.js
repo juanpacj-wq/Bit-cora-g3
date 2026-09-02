@@ -48,6 +48,14 @@ const TABLAS_PROTEGIDAS = [
   // simplemente aparece vacía ese día.
   'consumo_combustible',
   'sis_scrape_log',
+  // D-065 (GATE-O2): las cuatro tablas de rotación. `rotacion_control` es el log append-only de los
+  // relevos (la auditoría entera de "quién tenía el control"), `rotacion_cumplimiento` el congelado
+  // de cada cierre, y patrón/asignaciones son la carga anual: un DELETE sin acotar de un test contra
+  // la BD del .env (D-030) borraría la configuración del año o el histórico de relevos.
+  'rotacion_control',
+  'rotacion_cumplimiento',
+  'rotacion_patron',
+  'rotacion_asignacion',
 ];
 
 // Marcadores que prueban que el statement está acotado a datos de test. Basta uno.
@@ -67,6 +75,10 @@ const ACOTADORES = [
   /@tag\b/,
   /\bes_sintetico\b/,
   /'test_%'/,
+  // D-065: el namespace de oids de fixture de Entra (ningún oid real empieza por ceros) y el prefijo
+  // de username de las suites de rotación; son los mismos acotadores que cuenta residuos.js.
+  /00000000-d065-/,
+  /\btest[\\[\]_]{1,4}rot/,
   // Statement acotado a UNA fila por su PK (`WHERE evento_id = @id`): no puede vaciar una tabla,
   // y en un test esa fila es la que el propio test insertó.
   /\b(registro_id|evento_id|disponibilidad_id|turno_unidad_id)\s*=\s*@/,

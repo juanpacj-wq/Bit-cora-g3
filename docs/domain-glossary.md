@@ -250,6 +250,64 @@ Seed idempotente: `username='SISTEMA'`, `activo=0`, `password_hash='!disabled!'`
 
 ---
 
+## Rotación de turnos: patrón, grupo, titular, principal (D-065)
+
+Vocabulario del módulo que responde **quién DEBÍA estar** en un turno — el complemento de la
+conformación de turno (D-045), que responde **quién estuvo**.
+
+**Malla** = el calendario de guardias de la Gerencia de Producción. Es un **ciclo de 8 días** que se
+repite, con **dos** mallas independientes (operadores e ingenieros). Su "año" **no es calendario**:
+va del **1-feb al 31-ene** siguiente.
+
+**Patrón** = la malla comprimida en una fila: `(fecha_inicio, vector_t1[8], vector_t2[8], desfase)`,
+uno por rol. **No hay una fila por día**: el grupo de cualquier fecha se **calcula**
+(`V_turno[((fecha − fecha_inicio) + desfase) mod 8]`), dentro o fuera del periodo cargado.
+
+**Vector** = los ocho grupos de un turno a lo largo del ciclo, como texto: `'1,1,3,3,4,4,2,2'`. Hay
+uno por turno (`vector_t1`, `vector_t2`). Su formato es un **invariante de BD**, no una validación de
+aplicación: una fila con el vector corrupto volvía imposible cerrar el turno en **las dos plantas**.
+
+**Desfase** = en qué índice del ciclo cae `fecha_inicio`. **Nadie lo digita:** lo **deriva** el motor
+de la fecha de arranque y de **los dos** grupos que trabajan ese día. Con `grupo_t1` solo hay siempre
+**dos** desfases posibles —`vector_t1` toma 4 valores en 8 índices—, y ante esa ambigüedad el motor
+responde **`desfase_ambiguo`** en vez de elegir uno.
+
+**Grupo (`G1`..`G4`)** = la cuadrilla a la que pertenece una persona dentro de un rol. Se asigna
+**con vigencia** (`vigente_desde`/`vigente_hasta`), así que un relevo **cierra** la fila viva e
+**inserta** otra: el titular de una fecha ya ocurrida no cambia. **"Sin grupo" es la AUSENCIA de
+asignación**, no un valor — y una persona sin grupo **ya es supernumeraria**.
+
+**Titular** = quien, según el patrón y su grupo, **debía** estar en `(fecha, turno, rol)`. Es un
+resultado calculado, nunca una fila guardada.
+
+**Principal** = quien **tiene el control** del rol en el turno en curso. Se **deriva** del log
+append-only `rotacion_control` en cada lectura: en el fondo de la pila está el **titular** —que no
+está en el log y por eso **no puede abandonar** (`409 titular_no_abandona`, la pila nunca queda
+vacía)— y encima las tomas vivas. `TOMAR` apila, `ABANDONAR` desapila **solo si es el tope**, y
+`DESCARTAR` marca "ya respondí" sin tocar la pila.
+
+**Estados del cumplimiento** — se resuelven **por `usuario_id`, nunca por conteo de cargo**: tres
+personas del rol que no son titulares dejan el turno en `PENDIENTE`, porque lo que se mide es si vino
+*quien* debía venir, no *cuántos*.
+
+| Estado | Qué significa |
+|---|---|
+| `PENDIENTE` | **Ningún titular** registró en la bitácora. **No** significa que el turno estuviera vacío. |
+| `PARCIAL` | Entró alguno de los titulares, pero no todos. |
+| `COMPLETO` | Entraron todos. |
+| `CUBIERTO_POR_RELEVO` | Un **no-titular** tomó el control del rol. **Gana sobre los otros tres.** |
+
+**Congelado** = la fila de `rotacion_cumplimiento` que escribe `cerrarTurno` **dentro de su misma
+transacción**, con `cargo_nombre` y `titulares_json` como snapshot (D-052). El turno **en curso** se
+deriva en vivo con la **misma** función que congela, así que el reporte no tiene dos verdades.
+
+> **`filas = 0` no es error.** Antes de la primera carga anual el módulo congela **cero** filas y la
+> vista dice "Sin datos en este rango" — mismo criterio que `copias = 0` en D-063. Es la diferencia
+> entre un módulo que aparece con la carga anual y uno que **volvería incerrable la planta** hasta
+> que alguien configure la malla. Ver D-065, RF-079 y BIT-MODBD §2.2 / §4.12 / §7.13.
+
+---
+
 ## Periodo / Hora / Turno
 
 Conceptos atados a hora Bogotá:

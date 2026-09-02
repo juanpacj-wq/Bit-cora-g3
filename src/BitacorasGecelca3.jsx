@@ -13,6 +13,7 @@ import {
   Settings, FileCheck, Edit3, Eye, XCircle, Check, Users, History,
   LayoutDashboard, MonitorCog, Menu, ArrowLeftRight,
   Sparkles, Loader2, Undo2,
+  Repeat, CalendarCheck,
 } from "lucide-react";
 import { HistoricoView } from "./components/historicos/HistoricoView";
 // D-063: marcador universal de reflejo + chip "Anulado", compartidos con la tabla de Históricos.
@@ -26,6 +27,12 @@ import LogoutModal from "./components/LogoutModal";
 import SalaDeMandoGrid from "./components/SalaDeMando/SalaDeMandoGrid";
 import DisponibilidadDashboard from "./components/Disponibilidad/DisponibilidadDashboard";
 import ConsumosGrid from "./components/Combustibles/ConsumosGrid";
+// D-065: las tres superficies del módulo de Rotación de Turnos. Las dos SECCIONES viven en `vista`
+// (no son bitácoras: no tienen fila en lov_bit.bitacora ni permiso por bitácora) y el POPUP se monta
+// junto a los modales, porque se dispara al entrar y no depende de la sección activa.
+import ConfiguracionRotacion from "./components/Rotacion/ConfiguracionRotacion";
+import CumplimientoRotacion from "./components/Rotacion/CumplimientoRotacion";
+import PopupTomaControl from "./components/Rotacion/PopupTomaControl";
 import { useAuth } from "./hooks/useAuth";
 import { useCatalogos } from "./hooks/useCatalogos";
 import { useRegistros } from "./hooks/useRegistros";
@@ -37,6 +44,8 @@ import { useFlipReorder } from "./hooks/useFlipReorder";
 import { useBitacoraSesion, useFinalizarTurno, useRevertirTurno } from "./hooks/useBitacoraSesion";
 import { useAppRoute } from "./hooks/useAppRoute";
 import { useMejorarTexto, MAX_TEXTO_IA } from "./hooks/useMejorarTexto";
+import { useTomaControl } from "./hooks/useTomaControl";
+import { rangoPorDefecto } from "./hooks/useCumplimiento";
 import { buildHash } from "./routing/appRoute";
 import { getTodayBogota, getCurrentMonthBogota, shiftDate, horaBogota } from "./utils/fecha";
 import { resolverOtraUnidad } from "./utils/unidades";
@@ -535,7 +544,8 @@ function LoginScreen({ auth, plantas, onReady, showToast }) {
 // overflow del header. Agrupa las acciones globales antes dispersas: Dashboard (app hermana,
 // pestaña nueva), toggle Históricos/Bitácoras (antes botón suelto del nav), "Cambiar de unidad"
 // (antes enlace inline del LogoutModal) y "Cerrar sesión" (abre el LogoutModal).
-function HeaderMenu({ vista, onDashboard, onToggleVista, onCambiarUnidad, onLogout }) {
+function HeaderMenu({ vista, onDashboard, onToggleVista, onCambiarUnidad, onLogout,
+  puedeConfigurarRotacion, onIrARotacion, onIrACumplimiento }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState({ top: 0, right: 0 });
   const buttonRef = useRef(null);
@@ -570,15 +580,26 @@ function HeaderMenu({ vista, onDashboard, onToggleVista, onCambiarUnidad, onLogo
   }, [open]);
 
   const run = (fn) => { setOpen(false); fn(); };
-  const enHistoricos = vista === 'historicos';
+  // D-065: el toggle pasa a mirar "¿estoy en bitácoras?" en vez de "¿estoy en históricos?". Con dos
+  // secciones nuevas fuera de las bitácoras, la pregunta vieja dejaba a quien estuviera en Rotación
+  // sin camino de vuelta: el item decía "Ver históricos" y no había ninguno que dijera "Ver
+  // bitácoras". Para las dos vistas de siempre el comportamiento es idéntico al anterior.
+  const enBitacoras = vista === 'bitacoras';
 
   const items = [
     { icon: LayoutDashboard, label: 'Dashboard', onClick: () => run(onDashboard) },
     {
-      icon: enHistoricos ? FileText : History,
-      label: enHistoricos ? 'Ver bitácoras' : 'Ver históricos',
+      icon: enBitacoras ? History : FileText,
+      label: enBitacoras ? 'Ver históricos' : 'Ver bitácoras',
       onClick: () => run(onToggleVista),
     },
+    // D-065: la configuración anual solo se ofrece a quien puede escribirla (cargo.puede_configurar_
+    // rotacion, data-driven — nunca un nombre de cargo, convención 12). El cumplimiento es de solo
+    // lectura y lo ve todo el mundo, incluido el observador de D-059.
+    ...(puedeConfigurarRotacion
+      ? [{ icon: Repeat, label: 'Rotación de turnos', onClick: () => run(onIrARotacion) }]
+      : []),
+    { icon: CalendarCheck, label: 'Cumplimiento de rotación', onClick: () => run(onIrACumplimiento) },
     { icon: ArrowLeftRight, label: 'Cambiar de unidad', onClick: () => run(onCambiarUnidad) },
     { divider: true },
     { icon: LogOut, label: 'Cerrar sesión', onClick: () => run(onLogout), danger: true },
@@ -628,7 +649,8 @@ function HeaderMenu({ vista, onDashboard, onToggleVista, onCambiarUnidad, onLogo
   );
 }
 
-function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista, onDashboard, onCambiarUnidad, otraUnidad, onIrAUnidad, cambiandoUnidad, turnoEstado, turnoBloqueo, turnoExtendido }) {
+function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesionActualId, onLogout, vista, onToggleVista, onDashboard, onCambiarUnidad, otraUnidad, onIrAUnidad, cambiandoUnidad, turnoEstado, turnoBloqueo, turnoExtendido,
+  puedeConfigurarRotacion, onIrARotacion, onIrACumplimiento }) {
   const tema = temaUnidad(sesion?.planta_id);
   const [reloj, setReloj] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
@@ -853,6 +875,9 @@ function Header({ user, sesion, cargoNombre, plantaNombre, usuariosActivos, sesi
           vista={vista}
           onDashboard={onDashboard}
           onToggleVista={onToggleVista}
+          puedeConfigurarRotacion={puedeConfigurarRotacion}
+          onIrARotacion={onIrARotacion}
+          onIrACumplimiento={onIrACumplimiento}
           onCambiarUnidad={onCambiarUnidad}
           onLogout={onLogout}
         />
@@ -1901,12 +1926,65 @@ function RegistroRow({ numero, registro: reg, tiposEvento, camposExtraDef = [], 
 // App
 // ============================================================
 
+// D-065: los códigos de error de la configuración anual que además merecen un toast global. Son los
+// de infraestructura —el servidor no contesta, la BD no está— porque el resto (vector mal formado,
+// fecha ocupada, lote vacío) se lee justo al lado del control que lo produjo y repetirlo arriba solo
+// suma ruido. Lista de `codigo` estables (D-032), jamás de textos.
+const CODIGOS_ROTACION_GLOBALES = new Set(['sin_conexion', 'db_no_disponible', 'db_timeout']);
+
+// D-065: `PopupTomaControl.onCerrar` avisa que la persona terminó con el popup (acción exitosa o
+// aviso descartado). El dashboard no tiene nada que hacer con eso —el componente ya se oculta solo—,
+// así que va un no-op ESTABLE: una lambda inline crearía una función nueva en cada render del raíz.
+const NOOP = () => {};
+
+// D-065 L14 (CR4-4): la ÚNICA regla que decide si una salida por navegación tiene que confirmarse
+// antes. La configuración anual guarda el reparto en un buffer interno detrás de un Guardar
+// explícito, y cambiar de `vista` la DESMONTA: sin esto, repartir ~81 personas y abrir el menú para
+// mirar el cumplimiento dejaba la pantalla en blanco, sin deshacer.
+//
+// Va como función pura y compartida —no como una condición repetida en cada handler— por la misma
+// razón que `transicionAbierta` es una sola expresión para los dos overlays: la próxima entrada que
+// alguien agregue al menú se olvidaría de una copia, que es exactamente cómo nació este hallazgo.
+//
+// `destino` es la sección a la que se va (`'bitacoras' | 'historicos' | 'rotacion' |
+// 'rotacion-cumplimiento'`) o `'unidad'` para el cambio de unidad en caliente.
+// GATE-O5 (CR5-11): el texto del bloqueo al cambiar de unidad, cuando puede haber DOS borradores
+// pendientes a la vez. El `_dirty` de una bitácora vive en el raíz y sobrevive al cambio de sección,
+// así que se puede llegar a rotación con uno abierto y ensuciar además el reparto; el mensaje
+// nombraba solo el reparto y la persona chocaba dos veces, con dos textos distintos y sin que nadie
+// le dijera que eran dos cosas. **Un aviso que bloquea tiene que decir todo lo que hay que resolver.**
+// Va como función pura y exportada por la misma razón que `planearSalidaDeRotacion`: es una regla
+// del raíz, y probarla no debería exigir montar el dashboard entero.
+export function mensajeCambiosSinGuardar({ hayBorradorRotacion, hayCambiosSinGuardar, unidadNombre }) {
+  const pendientes = [
+    hayBorradorRotacion ? 'el reparto de grupos de la rotación' : null,
+    hayCambiosSinGuardar ? 'cambios sin guardar en esta unidad' : null,
+  ].filter(Boolean);
+  return `Todavía hay ${pendientes.join(' y ')}. Guarda o descarta antes de ir a ${unidadNombre}.`;
+}
+
+export function planearSalidaDeRotacion({ vistaActual, destino, hayBorrador }) {
+  // El buffer solo existe mientras la pantalla está montada: fuera de ella no hay nada que perder,
+  // aunque el flag se hubiera quedado encendido.
+  if (vistaActual !== 'rotacion') return 'seguir';
+  if (!hayBorrador) return 'seguir';
+  // Quedarse donde ya se está no es una salida: preguntar ahí enseña a ignorar el aviso.
+  if (destino === 'rotacion') return 'seguir';
+  return 'confirmar';
+}
+
 export default function App() {
   const auth = useAuth();
   const catalogos = useCatalogos(auth.sesion?.cargo_id, auth.ready);
   const registrosHook = useRegistros();
   // D-045 E8: estado del turno + acciones cerrar/extender (reemplaza useCierre/cierre masivo).
   const turnoHook = useTurno(auth.ready, auth.sesion?.sesion_id, auth.sesion?.planta_id, auth.turno);
+  // D-065 (superficie B): estado de la toma de control del rol para la unidad activa. UNA consulta
+  // al montar con sesión de app viva; lo único que dispara otra es un cambio de unidad en caliente
+  // (D-054 no desmonta el componente) o una acción de la persona. Cero polling y cero WS (CA-23).
+  // Quién ve el popup lo decide el BACKEND (aplica/ya_respondi/soy_titular/soy_principal): acá no
+  // se replica ni una parte de esa regla.
+  const tomaControl = useTomaControl(auth.ready && !!auth.sesion?.sesion_id, auth.sesion?.planta_id);
   const cierre = useCierre(); // D-045: preview de pendientes + finalización forzada del popup de cierre
   const [cierreModalOpen, setCierreModalOpen] = useState(false);
   const [cerrandoTurno, setCerrandoTurno] = useState(false);
@@ -1951,6 +2029,12 @@ export default function App() {
   const [combFecha, setCombFecha] = useState(() => getTodayBogota());
   // D-058: el mes del LIBRO mensual, no el día de la grilla (que es siempre hoy, D-017/D-056).
   const [mandMes, setMandMes] = useState(() => getCurrentMonthBogota());
+  // D-065: subestado de #/rotacion/cumplimiento. `CumplimientoRotacion` es controlado DE VERDAD (sin
+  // defaults internos: sin los tres valores no consulta), así que el default lo pone el dashboard —
+  // `rangoPorDefecto()` = últimos 14 días Bogotá, el mismo módulo que usa el hook. La unidad se
+  // siembra en el derive, igual que DISP.
+  const [cumplRango, setCumplRango] = useState(rangoPorDefecto);
+  const [cumplPlanta, setCumplPlanta] = useState(null);
 
   // D-035: routing por hash. `route` (parseado) es la lectura; `navigate` empuja estado→URL.
   const { route, navigate } = useAppRoute();
@@ -1971,6 +2055,11 @@ export default function App() {
   // el child registra al montar (registerSaveHandler).
   const [mandDirty, setMandDirty] = useState(false);
   const [mandGuardando, setMandGuardando] = useState(false);
+  // D-065 L14: espejo del borrador de la configuración anual, que vive dentro de
+  // `ConfiguracionRotacion` (el raíz no puede mirar el buffer). Lo reporta el propio componente por
+  // `onDirtyChange` —el mismo contrato con el que SalaDeMandoGrid levanta `mandDirty`— y se apaga
+  // solo al desmontarse, así que no puede quedar encendido sin dueño.
+  const [rotacionDirty, setRotacionDirty] = useState(false);
   const mandSaveRef = useRef(null);
   const registerMandSave = useCallback((fn) => { mandSaveRef.current = fn; }, []);
 
@@ -1983,6 +2072,23 @@ export default function App() {
   // child y disparaba un re-fetch que limpiaba el buffer + editing → valores tipeados se
   // borraban antes de poder guardarlos.
   const handleMandError = useCallback((m) => showToast(m, 'error'), [showToast]);
+
+  // D-065: `ConfiguracionRotacion.onError` entrega un CÓDIGO (D-032), no un mensaje, y la pantalla
+  // ya pinta su propio aviso con el texto saneado de CADA error. El toast se reserva para los que
+  // la persona podría no ver — la nómina real son ~81 personas y el aviso queda arriba, fuera de
+  // pantalla — y son justo los de infraestructura. Ramifica por `codigo`, nunca por el texto.
+  const handleRotacionError = useCallback((codigo) => {
+    if (!CODIGOS_ROTACION_GLOBALES.has(codigo)) return;
+    // GATE-O4 (CR4-8): el texto es NEUTRO a propósito. Los tres códigos de este Set no son la misma
+    // avería —`sin_conexion` es la red del navegador; `db_no_disponible`/`db_timeout` son la base de
+    // datos, con el servidor perfectamente vivo— y mandar a "revisar tu conexión" ante un MSSQL
+    // caído contradecía, en la misma pantalla, al aviso de la propia superficie (que sí ramifica por
+    // `codigo` y dice lo correcto). El toast solo tiene que llamar la atención; el diagnóstico lo da
+    // el aviso de al lado.
+    showToast(codigo === 'sin_conexion'
+      ? 'No se pudo completar la operación. Revisa tu conexión e intenta de nuevo.'
+      : 'No se pudo completar la operación. Mira el detalle en la pantalla.', 'error');
+  }, [showToast]);
 
   const sesion = auth.sesion;
   const user = auth.user;
@@ -2054,8 +2160,22 @@ export default function App() {
   // bitácora y quedar exento del modal bloqueante de transición (sigue leyendo).
   const esObservador = !!sesion?.es_observador;
 
+  // D-065: el modal de transición de turno y el popup de toma de control son los dos overlays z-50 y
+  // pueden coincidir. Esta es la ÚNICA expresión que decide las dos cosas —abrir el modal y esconder
+  // el popup—, para que la precedencia no pueda divergir en dos lugares. Ver el bloque del popup.
+  const transicionAbierta = turnoHook.bloqueo && !esObservador;
+
   const permisoActivo = catalogos.permisos.find((p) => p.bitacora_id === activeBitacora);
   const puedeCrear = !!permisoActivo?.puede_crear;
+
+  // D-065: gate de la configuración anual. Sale del MISMO objeto-sesión que evalúa el backend
+  // (lov_bit.cargo.puede_configurar_rotacion, F37.A2, vía /api/me), así que la entrada del menú y el
+  // gate de los POST no pueden divergir. Falla cerrada: `undefined` (backend viejo) → false.
+  const puedeConfigurarRotacion = sesion?.puede_configurar_rotacion === true;
+  // Unidad efectiva de la vista de cumplimiento: la elegida, si no la del login. Se calcula UNA vez
+  // y alimenta a la vez el prop del componente y el hash — si cada lado la derivara por su cuenta, el
+  // guard `buildHash(desired) === location.hash` compararía contra una URL que nunca se escribió.
+  const cumplPlantaEfectiva = cumplPlanta || sesion?.planta_id || null;
 
   // D-035: sincronización ruta ↔ estado. El dashboard es dueño del estado; los dos efectos de
   // abajo lo mantienen en espejo con la URL (fuente única de verdad, permission-gated). Refs para
@@ -2065,10 +2185,14 @@ export default function App() {
   const dispPlantaRef = useRef(dispPlanta);
   const combFechaRef = useRef(combFecha);
   const mandMesRef = useRef(mandMes);
+  const cumplRangoRef = useRef(cumplRango);
+  const cumplPlantaRef = useRef(cumplPlanta);
   activeBitacoraRef.current = activeBitacora;
   dispPlantaRef.current = dispPlanta;
   combFechaRef.current = combFecha;
   mandMesRef.current = mandMes;
+  cumplRangoRef.current = cumplRango;
+  cumplPlantaRef.current = cumplPlanta;
 
   const codigoActivo = useMemo(
     () => bitacorasPermitidas.find((b) => b.bitacora_id === activeBitacora)?.codigo || null,
@@ -2085,6 +2209,35 @@ export default function App() {
     if (route.vista === 'historicos') {
       setVista('historicos');
       if (activeBitacoraRef.current == null) setActiveBitacora(bitacorasPermitidas[0].bitacora_id);
+      return;
+    }
+    // D-065 · configuración anual. Sin permiso NO se cae acá: el `return` no ocurre y el flujo sigue
+    // a la rama de bitácoras, que ya tiene el fallback "primera permitida" (el mismo que atiende a un
+    // #/b/<codigo> sin permiso). El efecto (b) reescribe entonces el hash al canónico de esa sección,
+    // así que un deep-link a #/rotacion sin permiso no deja la URL mintiendo.
+    // GATE-O4 (CR4-12): la condición es `puedeConfigurarRotacion`, la MISMA constante que gobierna
+    // la entrada del menú — no una segunda copia de la regla. El comentario de su declaración promete
+    // que el menú y el gate no pueden divergir, y con la expresión repetida acá esa promesa era falsa.
+    if (route.vista === 'rotacion' && puedeConfigurarRotacion) {
+      setVista('rotacion');
+      if (activeBitacoraRef.current == null) setActiveBitacora(bitacorasPermitidas[0].bitacora_id);
+      return;
+    }
+    // D-065 · cumplimiento: solo lectura, sin gate (lo ve todo el mundo, incluido el observador).
+    if (route.vista === 'rotacion-cumplimiento') {
+      setVista('rotacion-cumplimiento');
+      if (activeBitacoraRef.current == null) setActiveBitacora(bitacorasPermitidas[0].bitacora_id);
+      // Unidad: param de la ruta → la ya elegida → unidad del login. MISMO orden que DISP, y por la
+      // misma razón (hecho §6.7 del GATE-O3): `route.params` manda, así que cualquier cambio de
+      // unidad que no reescriba el hash sería revertido acá en el mismo render.
+      const plantaRuta = route.params.planta || cumplPlantaRef.current || sesion.planta_id;
+      if (plantaRuta && plantaRuta !== cumplPlantaRef.current) setCumplPlanta(plantaRuta);
+      // Rango: lo que traiga el hash; lo que falte se queda con el valor actual (por defecto, los
+      // últimos 14 días). Un param inválido ya vino descartado por parseHash.
+      const { desde, hasta } = cumplRangoRef.current;
+      const d = route.params.desde || desde;
+      const h = route.params.hasta || hasta;
+      if (d !== desde || h !== hasta) setCumplRango({ desde: d, hasta: h });
       return;
     }
     setVista('bitacoras');
@@ -2112,7 +2265,9 @@ export default function App() {
     if (target.codigo === 'MAND' && route.params.mes && route.params.mes !== mandMesRef.current) {
       setMandMes(route.params.mes);
     }
-  }, [route, sesion, bitacorasPermitidas]);
+  // `puedeConfigurarRotacion` se deriva de `sesion`, que ya está en la lista: agregarlo no cambia
+  // cuándo corre el efecto, solo deja explícito de qué depende (GATE-O4, CR4-12).
+  }, [route, sesion, bitacorasPermitidas, puedeConfigurarRotacion]);
 
   // (b) Escribir estado HACIA la ruta. Subestado (planta/fecha) y el primer write canónico usan
   // replaceState (no inundan el historial); el cambio de sección/vista usa pushState (back/forward
@@ -2122,6 +2277,11 @@ export default function App() {
     if (!sesion || bitacorasPermitidas.length === 0) return;
     let desired = null;
     if (vista === 'historicos') desired = { vista: 'historicos', codigo: null, params: {} };
+    else if (vista === 'rotacion') desired = { vista: 'rotacion', codigo: null, params: {} };
+    else if (vista === 'rotacion-cumplimiento') desired = {
+      vista: 'rotacion-cumplimiento', codigo: null,
+      params: { desde: cumplRango.desde, hasta: cumplRango.hasta, planta: cumplPlantaEfectiva },
+    };
     else if (codigoActivo === 'DISP') desired = { vista: 'bitacoras', codigo: 'DISP', params: { planta: dispPlanta } };
     else if (codigoActivo === 'COMB') desired = { vista: 'bitacoras', codigo: 'COMB', params: { fecha: combFecha } };
     else if (codigoActivo === 'MAND') desired = { vista: 'bitacoras', codigo: 'MAND', params: { mes: mandMes } };
@@ -2132,7 +2292,8 @@ export default function App() {
     prevSectionKey.current = sectionKey;
     if (buildHash(desired) === window.location.hash) return;
     navigate(desired, { replace });
-  }, [sesion, bitacorasPermitidas, vista, codigoActivo, dispPlanta, combFecha, mandMes, navigate]);
+  }, [sesion, bitacorasPermitidas, vista, codigoActivo, dispPlanta, combFecha, mandMes,
+      cumplRango, cumplPlantaEfectiva, navigate]);
 
   // Carga tipos evento cuando cambia la bitácora
   useEffect(() => {
@@ -2446,19 +2607,62 @@ export default function App() {
     });
   }, [revertirTurno, showToast, auth]);
 
+  // D-065 L14 (CR4-4): la puerta ÚNICA por la que se sale de una sección. Si no hay nada que perder,
+  // la navegación corre tal cual; si hay un borrador en la configuración anual, se pregunta y solo
+  // corre cuando la persona elige perderlo. Las dos salidas son de verdad: "Cancelar" devuelve a la
+  // pantalla con el borrador intacto y "Salir sin guardar" navega. NO existe un guardado automático:
+  // guardar dispara un POST con efectos sobre la malla real y eso no se hace sin que alguien lo pida.
+  //
+  // Intercepta ANTES de mover `vista`, así que el efecto (b) no llega a escribir el hash: una
+  // navegación cancelada que dejara la URL cambiada sería peor que no tener guarda, porque el F5 se
+  // iría igual.
+  //
+  // GATE-O5 (CR5-1): declarado ACÁ ARRIBA —y ya no junto a los handlers de rotación— porque
+  // `handleCambiarUnidad`, que está a diez líneas, también tiene que pasar por él. En un `useCallback`
+  // la lista de dependencias se evalúa en cada render: referenciar desde arriba una `const` declarada
+  // más abajo revienta por TDZ, no por estilo.
+  const salirDeRotacion = useCallback((destino, accion) => {
+    if (planearSalidaDeRotacion({ vistaActual: vista, destino, hayBorrador: rotacionDirty }) === 'seguir') {
+      accion();
+      return;
+    }
+    setModal({
+      title: 'Cambios sin guardar',
+      message: 'El reparto de grupos todavía no se ha guardado. Si sales de la configuración ahora, lo pierdes.',
+      confirmLabel: 'Salir sin guardar', confirmColor: 'red', icon: AlertTriangle,
+      onConfirm: () => { setModal(null); accion(); },
+    });
+  }, [vista, rotacionDirty]);
+
   // F4 + D-035: popup defensivo en logout. "Operar otra unidad" reemplaza al viejo "salir sin
   // finalizar": conserva el login Entra pero **mata la sesión de app** (`clearSesion` → POST
   // /api/auth/cerrar-app, activa=0) para que una persona no quede iniciada en 2 unidades; el
   // render cae en LoginScreen paso "planta" para elegir GEC3/GEC32 y select-context crea una
   // sesión limpia. "Sí, finalizar y salir" finaliza turno + logout backend (cookie incluida).
   // Igual que la navegación SPA de hoy, descarta los buffers no guardados del cliente sin aviso
-  // cross-componente (beforeunload no aplica sin reload).
+  // cross-componente (beforeunload no aplica sin reload) — con UNA excepción desde el GATE-O5: el
+  // reparto de la configuración anual, que sí se confirma. Ver abajo.
+  //
+  // GATE-O5 (CR5-1) — **esta es la salida que de verdad usa quien configura la rotación, y era la
+  // única sin guarda.** L14 puso la suya en `handleIrAUnidad`, el ATAJO del navbar de D-054; pero ese
+  // atajo solo se dibuja con `cargo.puede_cambiar_unidad = 1`, y los dos cargos que pueden abrir la
+  // configuración anual —`Gerente de Producción` y `Administrador y Debugging`— lo tienen en **0**
+  // (`db.js`, MERGE de cargos). Para ellos `otraUnidad` es `null`, el botón no existe y la guarda del
+  // cambio de unidad era código inalcanzable, mientras el ítem del menú que sí ven —el que se llama
+  // literalmente "Cambiar de unidad"— mataba la sesión de app y se llevaba el reparto sin una palabra.
+  // Dos mitades defendibles que no se encontraron, otra vez.
+  //
+  // Acá la guarda CONFIRMA en vez de bloquear, al revés que en `handleIrAUnidad`: esto sí es una
+  // salida de la pantalla (`clearSesion` → `LoginScreen` → desmonte), así que hay dos opciones reales
+  // que ofrecer. El atajo en caliente no lo es —no desmonta nada— y por eso allá se bloquea.
   const handleCambiarUnidad = useCallback(() => {
-    setLogoutOpen(false);
-    setActiveBitacora(null);
-    setDraftLocal(null);
-    auth.clearSesion();
-  }, [auth]);
+    salirDeRotacion('unidad', () => {
+      setLogoutOpen(false);
+      setActiveBitacora(null);
+      setDraftLocal(null);
+      auth.clearSesion();
+    });
+  }, [auth, salirDeRotacion]);
 
   // D-054 — "Ir a GEC3/GEC32": cambio de unidad EN CALIENTE desde el navbar, en un clic y sin pasar
   // por LoginScreen. Convive con "Cambiar de unidad" del menú (el camino universal, para todos los
@@ -2479,10 +2683,22 @@ export default function App() {
     // ACTUAL. Al rotar la sesión se perderían en silencio — o peor, se guardarían contra la unidad
     // nueva. `mandDirty` cubre el diff de Sala de Mando, que vive fuera de `registrosDeBitacora`.
     const hayCambiosSinGuardar = registrosDeBitacora.some((r) => r._dirty) || mandDirty;
-    if (hayCambiosSinGuardar) {
+    // D-065 L14 (CR4-4): y el reparto de la configuración anual, que es el tercer borrador de la app.
+    // Acá la guarda BLOQUEA en vez de ofrecer perderlo, como ya hacía para los otros dos (D-054): el
+    // cambio de unidad no es una forma de salir de la pantalla, así que no hay nada que elegir —
+    // guardar o descartar deja seguir. Hoy el cambio en caliente no desmonta la configuración (es un
+    // early return del MISMO componente), pero sí puede hacerlo si `revalidate` corrige el cargo y se
+    // pierde el permiso: el efecto (a) caería entonces a bitácoras con el buffer adentro.
+    const hayBorradorRotacion = planearSalidaDeRotacion({
+      vistaActual: vista, destino: 'unidad', hayBorrador: rotacionDirty,
+    }) === 'confirmar';
+    if (hayCambiosSinGuardar || hayBorradorRotacion) {
       setModal({
         title: 'Cambios sin guardar',
-        message: `Hay cambios sin guardar en esta unidad. Guárdalos o descártalos antes de ir a ${otraUnidad.nombre}.`,
+        // GATE-O5 (CR5-11): nombra los DOS, si los dos están pendientes. Ver la función.
+        message: mensajeCambiosSinGuardar({
+          hayBorradorRotacion, hayCambiosSinGuardar, unidadNombre: otraUnidad.nombre,
+        }),
         confirmLabel: 'Entendido', confirmColor: 'blue', icon: AlertTriangle,
         onConfirm: () => setModal(null),
       });
@@ -2498,6 +2714,9 @@ export default function App() {
       // es coherente con la regla existente de resetearlos solo al cambiar de bitácora.
       setDraftLocal(null);
       setDispPlanta(destino);
+      // D-065: mismo caso que DISP — la unidad del cumplimiento vive TAMBIÉN en el hash y el efecto
+      // ruta→estado le da prioridad a `route.params.planta`.
+      setCumplPlanta(destino);
       // La planta de DISP vive TAMBIÉN en el hash, y el efecto ruta→estado le da prioridad sobre la
       // planta de sesión (`route.params.planta || dispPlantaRef.current || sesion.planta_id`). Sin
       // reescribir el hash, ese efecto revertiría `dispPlanta` a la unidad vieja en el mismo render
@@ -2505,15 +2724,40 @@ export default function App() {
       if (codigoActivo === 'DISP') {
         navigate({ vista: 'bitacoras', codigo: 'DISP', params: { planta: destino } }, { replace: true });
       }
+      if (vista === 'rotacion-cumplimiento') {
+        navigate({
+          vista: 'rotacion-cumplimiento', codigo: null,
+          params: { desde: cumplRango.desde, hasta: cumplRango.hasta, planta: destino },
+        }, { replace: true });
+      }
       showToast(`Ahora operas ${otraUnidad.nombre}.`);
     } catch (e) {
       showToast(e.message || 'No se pudo cambiar de unidad', 'error');
     }
-  }, [otraUnidad, registrosDeBitacora, mandDirty, auth, codigoActivo, navigate, showToast]);
+  }, [otraUnidad, registrosDeBitacora, mandDirty, rotacionDirty, auth, codigoActivo, vista, cumplRango, navigate, showToast]);
 
   // Abre el modal rediseñado (LogoutModal): ilustración hero + 2 acciones (Cancelar | Sí,
   // finalizar y salir). "Cambiar de unidad" ya no vive acá — se movió al HeaderMenu.
   const handleLogout = useCallback(() => setLogoutOpen(true), []);
+
+  // D-065: entrar a las dos secciones de rotación. Solo mueven `vista`; la URL la escribe el efecto
+  // (b) de sincronización, igual que para bitácoras e históricos — la fuente única sigue siendo el
+  // hash y acá no se toca `window.location` a mano.
+  const handleIrARotacion = useCallback(
+    () => salirDeRotacion('rotacion', () => setVista('rotacion')),
+    [salirDeRotacion],
+  );
+  const handleIrACumplimiento = useCallback(
+    () => salirDeRotacion('rotacion-cumplimiento', () => setVista('rotacion-cumplimiento')),
+    [salirDeRotacion],
+  );
+
+  // El toggle del menú ("Ver bitácoras" / "Ver históricos"): pregunta "¿estoy en bitácoras?", así que
+  // desde rotación devuelve a las bitácoras — que es lo que dice su etiqueta. También es una salida.
+  const handleToggleVista = useCallback(() => {
+    const destino = vista === 'bitacoras' ? 'historicos' : 'bitacoras';
+    salirDeRotacion(destino, () => setVista(destino));
+  }, [vista, salirDeRotacion]);
 
   // Dashboard de generación (app hermana): pestaña nueva, igual que el enlace del LoginScreen.
   // noopener corta la referencia window.opener hacia esta app.
@@ -2575,13 +2819,36 @@ export default function App() {
         turnoExtendido={turnoHook.extendido}
         onLogout={handleLogout}
         vista={vista}
-        onToggleVista={() => setVista((v) => (v === 'historicos' ? 'bitacoras' : 'historicos'))}
+        onToggleVista={handleToggleVista}
+        puedeConfigurarRotacion={puedeConfigurarRotacion}
+        onIrARotacion={handleIrARotacion}
+        onIrACumplimiento={handleIrACumplimiento}
         onDashboard={handleDashboard}
         onCambiarUnidad={handleCambiarUnidad}
       />
 
       {vista === 'historicos' ? (
         <HistoricoView plantaSesion={sesion?.planta_id} />
+      ) : vista === 'rotacion' ? (
+        /* D-065 · superficie A. El padre ya es `h-screen flex flex-col`, que es lo que necesita el
+           `flex-1 flex flex-col overflow-hidden` del componente para hacer scroll adentro y no
+           empujar la barra de navegación fuera de la pantalla (mismo softlock que ConsumosGrid). */
+        <ConfiguracionRotacion
+          puedeConfigurar={puedeConfigurarRotacion}
+          onError={handleRotacionError}
+          onDirtyChange={setRotacionDirty}
+        />
+      ) : vista === 'rotacion-cumplimiento' ? (
+        /* D-065 · superficie C. Controlado de verdad: sin los tres valores no consulta, así que el
+           default (últimos 14 días + unidad del login) lo pone el dashboard. `onRangoChange` recibe
+           SIEMPRE los dos campos, por eso el setter entra directo. */
+        <CumplimientoRotacion
+          desde={cumplRango.desde}
+          hasta={cumplRango.hasta}
+          planta={cumplPlantaEfectiva}
+          onRangoChange={setCumplRango}
+          onPlantaChange={setCumplPlanta}
+        />
       ) : (
         <>
           <BitacoraTabs
@@ -2726,7 +2993,7 @@ export default function App() {
           D-059: el observador queda EXENTO — no escribe (write-gate D-046 no le aplica) y su lectura
           no debe congelarse durante la transición. */}
       <TurnoTransicionModal
-        open={turnoHook.bloqueo && !esObservador}
+        open={transicionAbierta}
         puedeDecidir={turnoHook.puedeDecidir}
         accionando={turnoHook.accionando}
         plantaNombre={plantaNombre}
@@ -2735,6 +3002,28 @@ export default function App() {
         onExtender={handleTurnoExtender}
         onCerrar={handleTurnoCerrarModal}
       />
+
+      {/* D-065 · superficie B: popup de toma de control del rol. Se monta SIEMPRE que hay sesión de
+          app viva (este bloque solo se alcanza con `user && sesion`) y el componente decide solo si
+          se dibuja: acá NO se replica la regla `aplica/ya_respondi/soy_titular/soy_principal`, que
+          vive en el backend y en `modoPopup`. Los cuatro handlers van cableados al hook.
+
+          Precedencia con TurnoTransicionModal (decisión de este lote, hecho §6.8 del GATE-O3): los
+          dos son overlays z-50 y pueden coincidir —entrar a la unidad en plena gavela de gracia da
+          `aplica: true` con el modal de transición arriba—. Manda el de transición, porque bloquea
+          la unidad entera (D-046: hasta las escrituras responden 409) y decidir quién controla un rol
+          en un turno que se está cerrando es una pregunta que todavía no tiene respuesta. La
+          condición es LA MISMA expresión que abre ese modal, no una copia: si un día cambia, cambian
+          las dos. Cuando la transición se resuelve el popup aparece solo, sin recargar. */}
+      {!transicionAbierta && (
+        <PopupTomaControl
+          estado={tomaControl.estado}
+          onTomar={tomaControl.tomar}
+          onAbandonar={tomaControl.abandonar}
+          onDescartar={tomaControl.descartar}
+          onCerrar={NOOP}
+        />
+      )}
 
       {/* D-045: popup de pendientes antes del cierre manual (bitácoras con borradores + ingenieros sin
           finalizar). "Cerrar de todas formas" finaliza forzado a los pendientes y cierra el turno. */}

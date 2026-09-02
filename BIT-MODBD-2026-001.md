@@ -5,8 +5,8 @@
 | Campo | Valor |
 |---|---|
 | Código | BIT-MODBD-2026-001 |
-| Versión | 2.7 |
-| Fecha | 2026-08-31 |
+| Versión | 2.8 |
+| Fecha | 2026-09-02 |
 | Motor | SQL Server 2019+ |
 | Esquemas | `lov_bit` (catálogos) / `bitacora` (transaccional) |
 | Autoría | Gerencia de Generación — GECELCA S.A. E.S.P. |
@@ -96,6 +96,7 @@
    - 4.8 [`disponibilidad_estado` — máquina de estados DISP (D-026)](#48-disponibilidad_estado--máquina-de-estados-disp-d-026)
    - 4.9 [`consumo_combustible` — Consumos long-format + vista pivot (D-027)](#49-consumo_combustible--consumos-long-format--vista-pivot-d-027)
    - 4.9.1 [Ingesta automática desde el SIS (GEC32) — `valor_sis` + `sis_scrape_log`](#491-ingesta-automática-desde-el-sis-gec32--valor_sis--sis_scrape_log-d-029-f27a1-semántica-corregida-en-d-060-f33a1-ownership-override-y-backfill-cerrados-en-d-061)
+   - 4.12 [Rotación de turnos — patrón, asignación, control y cumplimiento (D-065)](#412-rotación-de-turnos--patrón-asignación-control-y-cumplimiento-d-065)
 5. [Integración con el Dashboard (esquemas `bitacora` y `dashboard`)](#5-integración-con-el-dashboard-esquemas-bitacora-y-dashboard)
    - 5.3 [`dashboard.despacho_recibido` — llegada del despacho del día siguiente (D-064)](#53-dashboarddespacho_recibido-llegada-del-despacho-del-día-siguiente-bitácora--dashboard-d-064)
 6. [Vistas útiles](#6-vistas-útiles)
@@ -103,6 +104,7 @@
    - 7.10 [Convención de zonas horarias (F19+F20+F21+F22)](#710-convención-de-zonas-horarias-f19f20f21f22)
    - 7.11 [Asientos reflejados en las bitácoras de Sala (D-058 + D-063)](#711-asientos-reflejados-en-las-bitácoras-de-sala-d-058--d-063)
    - 7.12 [Asientos de SISTEMA en las bitácoras de Sala (D-064)](#712-asientos-de-sistema-en-las-bitácoras-de-sala-d-064)
+   - 7.13 [Por qué la rotación no materializa días (D-065)](#713-por-qué-la-rotación-no-materializa-días-d-065)
 8. [Historial de versiones](#8-historial-de-versiones)
 
 ---
@@ -169,13 +171,19 @@ INSERT INTO lov_bit.planta (planta_id, nombre) VALUES
 --                      su sesión no abre turno ni participa (turno_id NULL), no figura en paneles de
 --                      usuarios activos ni snapshots, y no cuenta como personal para el auto-cierre.
 --                      Todo filtro de invisibilidad va por ESTE flag, nunca por nombre de cargo.
+-- puede_configurar_rotacion = 1 para "Administrador y Debugging" y "Gerente de Producción"
+--                      (D-065, F37.A2): habilita la CONFIGURACIÓN ANUAL de la malla de rotación.
+--                      Es ORTOGONAL a solo_lectura — el Gerente configura la malla con
+--                      solo_lectura = 1, y no hay contradicción porque la malla NO es una bitácora:
+--                      el flag no le abre escritura en ninguna y la matriz de §2.6 queda intacta.
 CREATE TABLE lov_bit.cargo (
     cargo_id             INT           IDENTITY(1,1) PRIMARY KEY,
     nombre               VARCHAR(100)  NOT NULL,
     solo_lectura         BIT           NOT NULL DEFAULT 0,
     puede_cerrar_turno   BIT           NOT NULL DEFAULT 0,
     puede_cambiar_unidad BIT           NOT NULL DEFAULT 0,  -- D-054
-    es_observador        BIT           NOT NULL DEFAULT 0   -- D-059
+    es_observador        BIT           NOT NULL DEFAULT 0,  -- D-059
+    puede_configurar_rotacion BIT      NOT NULL DEFAULT 0   -- D-065 (F37.A2)
 );
 
 -- Cargos definitivos según LISTADO DE PERSONAL 2026 (migración v2 hizo el rename
@@ -190,6 +198,8 @@ INSERT INTO lov_bit.cargo (nombre, solo_lectura, puede_cerrar_turno) VALUES
 ```
 
 **Semántica de `puede_cerrar_turno`:** se valida en el middleware de cierre (RF). Los dos cargos que pueden cerrar comparten permisos operativos; lo que los distingue es la **identidad** (snapshots `jdts_snapshot` vs `ingenieros_snapshot`), no el permiso. Ver §2.3.1 sobre `es_jdt_default`.
+
+**Cómo se agrega un flag de cargo (D-065, y vale para los cuatro anteriores):** en **dos sitios y en ESE orden** — (1) el `ALTER TABLE … ADD` idempotente (`IF COL_LENGTH(...) IS NULL`) en la sección de catálogos de `db.js`, **antes** del MERGE, y (2) el valor **dentro** del MERGE auto-corrector, que corre en cada arranque. Invertir el orden no rompe la migración: **rompe el arranque**. Consecuencia operativa (convención 27): habilitar o quitar el permiso a un cargo es **editar la tabla de valores del MERGE y redesplegar**; un `UPDATE` a mano en la BD se revierte al siguiente restart. `F37.A2` **no deja fila en `bitacora.migracion_aplicada`**: esa tabla la crea `F16.A0` ~1.100 líneas más abajo, así que en esta sección todavía no existe.
 
 ### 2.3 Usuarios
 
@@ -1295,6 +1305,178 @@ deliberada**, no un permiso general. El respaldo es el rastro que la vuelve audi
 
 ---
 
+### 4.12 Rotación de turnos — patrón, asignación, control y cumplimiento (D-065)
+
+Cuatro tablas que responden **quién DEBÍA estar** en un turno, complemento de `turno_participante` /
+`conformacion_turno` (§4.7, §4.10), que responden **quién estuvo**. Migración **`F37.A1`**
+(idempotente, gateada por `IF OBJECT_ID`), más `F37.A3` / `F37.A4` / `F37.A5`, aditivas, descritas al
+final de esta sección.
+
+**Ninguna de las cuatro es un calendario.** El titular de una fecha **se calcula** a partir del
+patrón; no hay una fila por día. Ver §7.13.
+
+```sql
+-- (1) EL PATRÓN por rol. La malla es un ciclo de 8 días: vector_t1/vector_t2 son ocho grupos
+--     (1..4) separados por coma, y `desfase` dice en qué índice del ciclo cae `fecha_inicio`.
+--     El administrador NUNCA escribe `desfase`: lo DERIVA el motor puro a partir de la fecha de
+--     arranque y de LOS DOS grupos que trabajan ese día (con uno solo hay dos desfases posibles).
+--     El "año" de la malla no es calendario: va del 1-feb al 31-ene siguiente.
+CREATE TABLE bitacora.rotacion_patron (
+    rotacion_patron_id INT IDENTITY(1,1) PRIMARY KEY,
+    cargo_id     INT          NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+    fecha_inicio DATE         NOT NULL,
+    fecha_fin    DATE         NOT NULL,
+    vector_t1    VARCHAR(32)  NOT NULL,     -- p. ej. '1,1,3,3,4,4,2,2'
+    vector_t2    VARCHAR(32)  NOT NULL,
+    desfase      TINYINT      NOT NULL
+        CONSTRAINT CK_rotacion_patron_desfase CHECK (desfase BETWEEN 0 AND 7),
+    activo       BIT          NOT NULL CONSTRAINT DF_rotacion_patron_activo DEFAULT 1,
+    creado_por   INT          NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+    creado_en    DATETIME2    NOT NULL
+        CONSTRAINT DF_rotacion_patron_creado_en DEFAULT SYSUTCDATETIME(),
+    creado_en_bogota AS DATEADD(HOUR, -5, creado_en),
+    CONSTRAINT UQ_rotacion_patron_natural UNIQUE (cargo_id, fecha_inicio),  -- → F37.A4 la filtra
+    CONSTRAINT CK_rotacion_patron_rango   CHECK (fecha_fin > fecha_inicio)
+);
+
+-- (2) LA ASIGNACIÓN persona → grupo, CON VIGENCIA. Es lo que permite el relevo sin reescribir el
+--     pasado: un cambio cierra `vigente_hasta` de la fila vigente e INSERTA otra, en la misma
+--     transacción. La vigencia abierta se escribe como '9999-12-31'. El modelo con vigencia sale de
+--     un dato medido: la cuadrilla de operadores cambia todos los meses (69 de 308 celdas al año);
+--     la de ingenieros no cambia ni una vez en doce.
+--     "Sin grupo" es la AUSENCIA de fila, no un valor: una persona sin asignación ya es supernumeraria.
+CREATE TABLE bitacora.rotacion_asignacion (
+    rotacion_asignacion_id INT IDENTITY(1,1) PRIMARY KEY,
+    usuario_id    INT       NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+    cargo_id      INT       NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+    grupo         TINYINT   NOT NULL
+        CONSTRAINT CK_rotacion_asig_grupo CHECK (grupo BETWEEN 1 AND 4),
+    vigente_desde DATE      NOT NULL,
+    vigente_hasta DATE      NOT NULL,
+    creado_por    INT       NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+    creado_en     DATETIME2 NOT NULL
+        CONSTRAINT DF_rotacion_asig_creado_en DEFAULT SYSUTCDATETIME(),
+    creado_en_bogota AS DATEADD(HOUR, -5, creado_en),
+    CONSTRAINT CK_rotacion_asig_rango CHECK (vigente_hasta >= vigente_desde)
+);
+
+CREATE INDEX IX_rotacion_asig_resolucion
+    ON bitacora.rotacion_asignacion(cargo_id, vigente_desde, vigente_hasta)
+    INCLUDE (usuario_id, grupo);   -- resuelve los titulares de un turno en UNA query, sin planta
+
+-- (3) EL CONTROL DEL ROL: log APPEND-ONLY. El "principal" NO se materializa en ninguna columna
+--     (eso hacía el legacy): se DERIVA en cada lectura ordenando por rotacion_control_id —
+--     fondo = el titular del patrón, que no está en el log y por eso no puede abandonar
+--     (409 titular_no_abandona); encima, las tomas vivas (TOMAR apila, ABANDONAR desapila solo si
+--     es el tope). DESCARTAR marca "ya respondí" sin tocar la pila y es idempotente.
+--     El mismo log es la auditoría completa de relevos del turno.
+CREATE TABLE bitacora.rotacion_control (
+    rotacion_control_id INT IDENTITY(1,1) PRIMARY KEY,
+    turno_id    INT          NOT NULL REFERENCES bitacora.turno_unidad(turno_unidad_id),
+    planta_id   VARCHAR(10)  NOT NULL REFERENCES lov_bit.planta(planta_id),
+    cargo_id    INT          NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+    usuario_id  INT          NOT NULL REFERENCES lov_bit.usuario(usuario_id),
+    accion      VARCHAR(12)  NOT NULL
+        CONSTRAINT CK_rotacion_control_accion
+        CHECK (accion IN ('TOMAR', 'ABANDONAR', 'DESCARTAR')),
+    ocurrido_en DATETIME2    NOT NULL
+        CONSTRAINT DF_rotacion_control_ocurrido_en DEFAULT SYSUTCDATETIME(),
+    ocurrido_en_bogota AS DATEADD(HOUR, -5, ocurrido_en)
+);
+
+CREATE INDEX IX_rotacion_control_pila
+    ON bitacora.rotacion_control(turno_id, planta_id, cargo_id, rotacion_control_id);
+
+-- (4) EL CUMPLIMIENTO CONGELADO. Una fila por (día, planta, turno, rol), escrita DENTRO de la
+--     transacción de cerrarTurno. La PK natural ES la idempotencia del congelado.
+--     `cargo_nombre` y `titulares_json` se duplican A PROPÓSITO como snapshot: el nombre de un cargo
+--     puede cambiar (D-052) y el histórico no se reescribe.
+CREATE TABLE bitacora.rotacion_cumplimiento (
+    fecha_operativa   DATE          NOT NULL,
+    planta_id         VARCHAR(10)   NOT NULL REFERENCES lov_bit.planta(planta_id),
+    turno             TINYINT       NOT NULL
+        CONSTRAINT CK_rotacion_cumpl_turno CHECK (turno IN (1, 2)),
+    cargo_id          INT           NOT NULL REFERENCES lov_bit.cargo(cargo_id),
+    cargo_nombre      VARCHAR(100)  NOT NULL,   -- snapshot congelado (D-052)
+    grupo             TINYINT       NULL,
+    estado            VARCHAR(20)   NOT NULL
+        CONSTRAINT CK_rotacion_cumpl_estado
+        CHECK (estado IN ('PENDIENTE', 'PARCIAL', 'COMPLETO', 'CUBIERTO_POR_RELEVO')),
+    titulares_json    NVARCHAR(MAX) NOT NULL,   -- snapshot: quién debía estar y si entró
+    relevo_usuario_id INT           NULL REFERENCES lov_bit.usuario(usuario_id),
+    turno_id          INT           NOT NULL REFERENCES bitacora.turno_unidad(turno_unidad_id),
+    snapshot_en       DATETIME2     NOT NULL
+        CONSTRAINT DF_rotacion_cumpl_snapshot_en DEFAULT SYSUTCDATETIME(),
+    snapshot_en_bogota AS DATEADD(HOUR, -5, snapshot_en),
+    CONSTRAINT PK_rotacion_cumplimiento PRIMARY KEY (fecha_operativa, planta_id, turno, cargo_id)
+);
+```
+
+**Los cuatro estados de `estado`** y su regla de precedencia (se resuelven **por `usuario_id`, nunca
+por conteo de cargo**: tres personas del rol que no son titulares dejan el slot en `PENDIENTE`,
+porque lo que se mide es si vino *quien* debía venir):
+
+| Estado | Significado |
+|---|---|
+| `PENDIENTE` | **Ningún titular** del patrón registró en la bitácora. No significa que el turno estuviera vacío. |
+| `PARCIAL` | Alguno de los titulares entró, pero no todos. |
+| `COMPLETO` | Entraron todos los titulares. |
+| `CUBIERTO_POR_RELEVO` | Un **no-titular** tomó el control del rol (tope de la pila de `rotacion_control`). **Gana sobre los otros tres.** |
+
+**`filas = 0` NO es error.** Es el estado normal antes de la primera carga anual — mismo precedente
+que `copias = 0` en D-063. Es la diferencia entre un módulo que aparece con la carga anual y uno que
+vuelve incerrable la planta hasta que alguien configure la malla.
+
+**Dos dependientes nuevos de `turno_unidad`.** `rotacion_control.turno_id` y
+`rotacion_cumplimiento.turno_id` apuntan a §4.10: **todo barrido de fixtures tiene que borrarlos
+antes** que la cabecera del turno, o el `after()` de una suite ajena falla con un 547. Cubiertos por
+`server/tests/helpers.js` y por `server/tests/residuos.js`.
+
+**El turno en curso se deriva en vivo por la MISMA función que congela**, así que el reporte no tiene
+dos verdades; y `reabrirTurno` **borra** la fila de cumplimiento igual que borra la conformación (sin
+eso, el re-cierre congelaba sobre la fila vieja y quien entró tras reabrir quedaba `PENDIENTE` para
+siempre).
+
+#### Migraciones aditivas: `F37.A3`, `F37.A5` y `F37.A4`
+
+Las tres son **aditivas e idempotentes** —solo `ALTER TABLE … ADD CONSTRAINT` / `CREATE INDEX`,
+gateado por el nombre en el catálogo del sistema— y **ninguna edita el `CREATE TABLE` de `F37.A1`**:
+ese bloque lo salta el `IF OBJECT_ID` en toda BD donde las tablas ya existen, así que un cambio ahí
+no llegaría nunca a producción. Corren **en ese orden** (A3 → A5 → A4), y el orden de A5 antes de A4
+es su razón de ser: desbloquea el pre-vuelo de A4 **en el mismo arranque**, no en el siguiente.
+
+| Migración | Qué agrega | Por qué |
+|---|---|---|
+| **`F37.A3`** | `CK_rotacion_cumpl_grupo` (`grupo IS NULL OR grupo BETWEEN 1 AND 4`); `UQ_turno_unidad_id_planta` y `UQ_turno_unidad_id_natural` sobre `turno_unidad`; y sobre ellas las FK **compuestas** `FK_rotacion_control_turno_planta` `(turno_id, planta_id)` y `FK_rotacion_cumpl_turno_natural` `(turno_id, fecha_operativa, planta_id, turno)` | Sin el CHECK, un registro **congelado** aceptaba `grupo = 0`, `5` o `200`. Sin las FK compuestas, una fila podía nombrar el turno de una planta y el `planta_id` de **otra**, y la pila LIFO devolvía vacío en silencio — el mismo drift invisible de D-053(iii). Ahora eso es un **547**, no un resultado vacío. |
+| **`F37.A5`** | **Normalización** de `vector_t1`/`vector_t2` a su forma canónica, pasando cada valor por el **motor puro** (parsear + reserializar) | Es la **primera migración de `initDB()` que escribe filas de datos de operación**, no solo DDL. Existe porque el parser tolera espacios (`'1, 1, 3, …'` funciona en runtime) y el CHECK de A4 no: sin normalizar, el pre-vuelo de A4 omitiría la constraint **en cada arranque, para siempre**. Lo que la hace segura: la transformación va por el motor (cubre todo lo que el parser tolera, no solo el caso que se vio) y su `catch` **no adivina** — lo ilegible se deja intacto y lo denuncia A4. Su fila en `migracion_aplicada` es **audit trail, no gate**: "A5 aplicada, A4 ausente" no invierte la causalidad. |
+| **`F37.A4`** | `CK_rotacion_patron_vector_t1` / `_t2` (formato del vector) y `UQ_rotacion_patron_natural_activo`, índice único **filtrado por `activo = 1`**, que reemplaza a `UQ_rotacion_patron_natural` | El formato del vector es un **invariante de BD**: `congelarCumplimiento` corre dentro de la transacción de `cerrarTurno` y `titularesDeTurno` parsea **todos** los patrones activos sin filtro de planta, así que **una sola fila con el vector corrupto volvía imposible cerrar el turno en las DOS plantas, cada 60 s**. La UNIQUE filtrada es lo que permite que **desactivar libere la fecha** y que el `PATCH` sea un arreglo real de una carga anual mal digitada. |
+
+**Dos gotchas de SQL Server que estas migraciones dejan escritos:**
+
+1. **El `LIKE` ignora los blancos finales del valor.** Un CHECK `col LIKE '[1-4],[1-4],…'` acepta
+   `'1,1,3,3,4,4,2,2 '` (medido: `MATCH`, `DATALENGTH 16`) y `LEN` tampoco los cuenta. Por eso los dos
+   CHECK del vector se acotan **además con `DATALENGTH`**. Cualquier CHECK de formato del repo que se
+   apoye solo en `LIKE` tiene el mismo agujero.
+2. **Una constraint gateada por su NOMBRE nunca adopta un cambio de definición.** Pasó dentro del
+   propio lote: la primera versión del CHECK (sin `DATALENGTH`) alcanzó a aplicarse en dev y el
+   arranque siguiente la dio por buena. Cambiar un predicado exige **una migración nueva con nombre
+   nuevo**.
+
+**Y una regla de pre-vuelo:** toda constraint que se agregue `WITH CHECK` sobre datos existentes
+pasa por un pre-vuelo que **denuncia y se salta** en vez de tumbar el arranque con un 547 ilegible —
+y todo pre-vuelo necesita respuesta a *"¿y si el drift no se corrige solo?"*, porque un "se reintenta
+en el próximo arranque" puede no reintentarse nunca. Acá esa respuesta es `F37.A5`.
+
+**Lo que NO se forzó en BD, a propósito** (se suma a §7.7): el **no-solapamiento** de patrones activos
+del mismo cargo y de asignaciones vigentes de la misma persona. No es declarativo en SQL Server, y un
+índice filtrado por `activo` rompería la carga anual; queda como **validación del endpoint** (`409`
+ante el duplicado y ante el solape).
+
+**Cross-ref:** ADR [[D-065]], §2.2 (`puede_configurar_rotacion`), §4.10 (`turno_unidad` /
+`turno_participante`), §7.13 (notas de diseño), BIT-RF **RF-079**.
+
+---
+
 ## 5. Integración con el Dashboard (esquemas `bitacora` y `dashboard`)
 
 Dos tablas-puente que **escribe Bitácora** en su propio esquema, y —desde D-064— una que **Bitácora lee** del esquema del otro repo en la misma base compartida:
@@ -1964,6 +2146,70 @@ nombre)`, **nunca por id fijo**: los ids difieren entre bases.
 
 ---
 
+### 7.13 Por qué la rotación no materializa días (D-065)
+
+La malla anual de la Gerencia de Producción es un **ciclo de 8 días** que se repite. El Excel del que
+salió (`Rotacion2026.xlsx`) la materializa día por día, y por eso hay que mantenerlo a mano.
+**Materializar 365 filas en la BD reproduce el mismo problema con otra piel**: alguien tiene que
+generarlas, alguien tiene que corregirlas cuando la fecha de arranque cambia, y una fila fuera del
+periodo cargado no tiene respuesta.
+
+**El titular de una fecha se calcula.** Un patrón es `(fecha_inicio, vector_t1[8], vector_t2[8],
+desfase)` y la resolución es aritmética pura:
+
+```
+grupo(fecha, turno) = V_turno[ ((fecha − fecha_inicio) + desfase) mod 8 ]
+```
+
+Eso responde **cualquier** fecha —pasada o futura, dentro o fuera del periodo cargado— sin una fila
+por día. Consecuencia buscada: **cargar un año son cuatro números y una fecha**, y el módulo
+desaparece de la vida diaria entre una carga anual y la siguiente (cero sweepers, cero crons, cero
+tareas periódicas; la sincronización con Entra es un botón).
+
+**El administrador nunca escribe `desfase`.** Escribe la fecha de arranque y **los dos** grupos que
+trabajan ese día, y el motor lo deriva. Hacen falta los dos porque `vector_t1` toma **4 valores en 8
+índices**: con `grupo_t1` solo hay siempre **dos** desfases posibles, y ante esa ambigüedad el motor
+lanza `desfase_ambiguo` en vez de elegir uno. Un periodo nuevo se encadena al anterior con el día del
+ciclo donde quedó el viejo, así que *"el año que entra arranca donde terminó el anterior"* es una
+cuenta y no una transcripción.
+
+**Aritmética de fechas: strings, no `Date`.** Las fechas viajan como `'YYYY-MM-DD'` en día Bogotá y
+**ningún `Date` entra ni sale** del motor: las cuentas van con `Date.UTC()` sobre los enteros del
+string. Una fecha con hora, o un `'2026-02-30'`, lanzan `fecha_invalida` en vez de devolver un grupo
+equivocado en silencio. **Esto no lo protege el oráculo:** se comprobó que la versión ingenua con
+`new Date(str)` pasa los 1.460 pares del Excel **igual**, porque el offset se cancela en los dos
+extremos de la resta. Lo que protege es el **parsing estricto** — la misma lección que D-055.
+
+**Validación del dominio (medida el 2026-08-31 sobre las dos mallas, 365 días × 2):** 0 discrepancias
+contra el Excel, 0 rupturas de continuidad nocturna (el T2 de un día empalma con la madrugada del
+siguiente), 0 violaciones de la periodicidad de 8 días. Anclas: `2026-02-01`, desfase **3** para
+operadores y **2** para ingenieros. **El año de la malla no es calendario:** va del **1-feb al
+31-ene** siguiente. **Zona sin oráculo:** ese periodo **no incluye un 29 de febrero** — el patrón
+nunca se ejercitó contra un bisiesto sobre datos medidos; rehacer la costura al cargar
+2028-02-01…2029-01-31.
+
+**De dónde sale la gente.** `lov_bit.usuario` solo conoce a quien ya se logueó (11 de 89 filas con
+`azure_oid` en dev), así que repartir grupos sobre esa tabla dejaría fuera a casi todo el personal.
+La nómina se aprovisiona desde **Entra ID** por Microsoft Graph (`client_credentials`) y el MERGE va
+**exclusivamente por `azure_oid`** — la misma clave con la que auto-aprovisiona el login (D-031)—,
+para que quien entre por primera vez calce con la fila que dejó la sincronización en vez de crear una
+segunda; el rol efectivo de quien está en varios grupos se resuelve con la MISMA `PRECEDENCE` del
+login. La sincronización es **deliberadamente estrecha**: no toca `activo` de filas existentes, ni
+los singletons de identidad, ni el cargo (que no vive en esa tabla), **ni fusiona los duplicados
+preexistentes**. Los 13 duplicados legacy de producción sobreviven intactos y son inofensivos —solo
+las filas con `azure_oid` pueden loguear, y por tanto solo ellas aparecen en `turno_participante`—:
+**nadie debe "limpiarlos"**. Sin credencial o con Graph caído, el módulo degrada a `503
+entra_no_disponible` y el server **no se cae**.
+
+**Un detalle operativo del primer día:** tras la primera sincronización real, ~78 de 81 personas
+llegan **sin cargo** (`ultimo_cargo_id` se infiere de la última sesión y la mayoría nunca entró), así
+que la clasificación por rol es trabajo manual esa vez. Persistir el cargo del directorio de Graph
+sería schema, y quedó fuera de alcance.
+
+**Cross-ref:** ADR [[D-065]], §2.2, §4.12, RF-079.
+
+---
+
 ## 8. Historial de versiones
 
 | Versión | Fecha | Cambios |
@@ -1986,6 +2232,7 @@ nombre)`, **nunca por id fijo**: los ids difieren entre bases.
 | 2.5 | 2026-08-27 | **Cierre de la ingesta SIS del carbón GEC32 (D-061).** **Sin DDL y sin migración `F-NN`.** §4.9.1 ampliada con lo que faltaba de la ingesta: la **tabla de ownership completa** de `aplicarCelda` (seis ramas, incluida la del **override 0**), el clamp a `cantidad_max` y el filtro de ruido de ≤ 0,5 t/h; `sis_owned`/`es_override` **derivados en el backend** y expuestos por celda en `GET /api/combustibles/consumos` junto al bloque `sis`; **vaciar una celda con `valor_sis` = override 0** en vez de DELETE (§4.9 puntos 2 y 5 corregidos, y la invariante de "celda vacía"); **tabla de decisión de `POST /api/combustibles/consumos/revertir`** (`restaurado` / `eliminado` / `sin_cambios`, con la devolución de la propiedad al SISTEMA); los **tres caminos** que le piden días al SIS (sweeper HH:02, job manual `POST /sis/scrape` con estado volátil, CLI de backfill) y el **mutex de proceso sin cola** `sis-lock` que serializa los dos primeros; la **concurrencia 1..6** de la fase de red (~95 s/día, `N=1` idéntico al previo) y su efecto en la reanudación; el **descubrimiento calibrado** (`discover.js`, K sondeos en W días, retorno `{ fecha, motivo, sondeos }`) con la fecha real de inicio de GEC32 —**`2018-06-13`**, primer carbón el **`2018-07-15`**, 2.996 días de histórico— y la advertencia de los huecos > 60 días; y el **seed idempotente del catálogo de `'TST'`** (10 filas espejo, guardado por la fila de `lov_bit.planta`, fixture residente que sube el catálogo global de 18 a 28). Runbook de la corrida histórica en `deploy/DEPLOY.md`. |
 | 2.6 | 2026-08-28 | **Reflejo de Disponibilidad a las bitácoras de Sala con copia anulada (D-063).** **Sin DDL y sin migración (`F35.A1` no consumida)** y **sin cambios en el contrato cross-repo** (`evento_dashboard` y `disponibilidad_dashboard` intactos). §7.11 reescrita y renombrada (**D-058 + D-063**): el **marcador** de asiento reflejado pasa de `origen_lote_id` —el puntero de MAND— al **universal `campos_extra.origen_bitacora`** (`codigo` del origen, cadena no vacía), y los punteros (`origen_lote_id` GUID / `origen_disponibilidad_id` INT) dejan de decidir nada; los **cinco** consumidores del predicado cambian juntos y un guard estático los fija. Documenta la copia DISP: `fecha_evento = fecha_inicio_estado` vs `turno_id` = turno **ABIERTO** (puntero de archivado), `estado` sigue `borrador` **a propósito** (archivado, conteo y guards filtran por ahí), predicado de búsqueda acotado por puntero + planta + `bitacora_id IN`, `@id` comparado **texto con texto** sin `CAST`, y `rowsAffected = 0` que **no es error** tampoco al actualizar o anular. Sección nueva **anular ≠ borrar** (RQ-02.12): deshacer un estado **no borra** la copia, le agrega `campos_extra.anulado {por, nombre, cargo, en}` con `JSON_MODIFY … JSON_QUERY` —sin `JSON_QUERY` quedaría como cadena escapada— e **idempotencia por SQL** (`AND JSON_VALUE(campos_extra,'$.anulado.en') IS NULL`), porque `JSON_MODIFY` en modo lax **reemplaza sin fallar**; `detalle`, puntero y `fecha_evento` intactos y la copia del N-1 restaurado **no se toca**. Se retira de §7.11 la nota que dejaba el reflejo de DISP fuera de alcance a la espera de un ADR propio: ese ADR es D-063. |
 | 2.7 | 2026-08-31 | **Asiento automático de la llegada del despacho del día siguiente (D-064).** **Nueva §5.3** — `dashboard.despacho_recibido` (`fecha_despacho DATE PK`, `detectado_en DATETIME2 DEFAULT GETDATE()`), el **primer objeto del esquema `dashboard` que entra a este documento** y el primero que Bitácora **lee** en vez de escribir: los dos repos comparten base con esquemas distintos, cada uno escribe **solo en el suyo**, y el contrato viaja **por la BD, no por HTTP** (sin endpoint, sin token, sin notificación — si Bitácora está caída, asienta cuando vuelva porque el hecho quedó escrito). `detectado_en` está en **hora Bogotá** (el motor de la BD corre en Bogotá y `dashboard` usa `GETDATE()`), así que **`UTC = Bogotá + 5`** y la conversión ocurre **una sola vez, en el lector**; que la tabla **no exista** es estado válido y esperado (nace con el `initDB()` del otro repo) → el lector devuelve `[]`, loguea una vez y Bitácora opera como hoy. **Nueva §7.12** — los asientos de **SISTEMA**, con la tabla que los distingue de los reflejados de §7.11: el marcador es **`campos_extra.origen_sistema`** (`'DESPACHO_XM'`) y **no** `origen_bitacora`, que los habría **excluido del libro F03** y vuelto copia de algo que no existe. Documenta el `campos_extra` de las **cuatro** filas (`SALAJDT`/`SALAING` × `GEC3`/`GEC32`, desviación consciente de RQ-05.8) con `clave_asiento` determinística y `hora_estimada` **siempre presente** (D-056 (b)) normalizada por la **misma** función al escribir y al leer; el colapso del libro por **`sys|<día Bogotá>|<clave_asiento>`** —el día es parte de la clave porque la holgura de ±1 de `armarMes` borraba el renglón de las dos hojas; el prefijo `sys|` separa el espacio de nombres del `id|<registro_id>` de lo tecleado— y las tres trampas que no sostiene ningún constraint (coherencia de las 4 filas por guard de test, fila sin clave que no colapsa, `detalle` **literal** para cualquier `origen_sistema`); la **idempotencia contra `registro_activo` Y `registro_historico`** (solo la activa duplica lo que el cierre de turno ya archivó) con `ISJSON(campos_extra) = 1` antes de cada `JSON_VALUE`; `fecha_evento` del día en que se **recibió** —el asiento del día 1 sale en el libro del mes **anterior**— frente a `turno_id` del turno **ABIERTO** o `NULL`; y **`F36.A1`**: `'Despacho económico'`, `orden = 5`, `seleccionable = 0` en las **dos** listas de `db.js` (`INSERT` + `UPDATE` complementario). §5 reencabezada. **Sin DDL nuevo en `bitacora`/`lov_bit`** (las claves viven en `campos_extra`, que ya es `NVARCHAR(MAX) NULL`) y **sin cambios en el contrato cross-repo existente** (`evento_dashboard` y `disponibilidad_dashboard` intactos). Ver D-064, RF-078 (v2.3), REQ-05 y `<umbrella>/docs/interfaces-cross-repo.md` Contrato 4. |
+| 2.8 | 2026-09-02 | **Módulo de rotación de turnos (D-065).** §2.2: columna nueva **`lov_bit.cargo.puede_configurar_rotacion BIT NOT NULL DEFAULT 0`** (**`F37.A2`**, `ALTER` idempotente + valor dentro del MERGE auto-corrector) — habilita la configuración anual de la malla y es **ortogonal a `solo_lectura`**: el Gerente de Producción configura con `solo_lectura = 1` y la matriz de §2.6 queda intacta, porque la malla NO es una bitácora. Documentado ahí mismo el patrón de **cómo se agrega un flag de cargo** (dos sitios, en ese orden; invertirlo rompe el arranque, no la migración) y por qué `F37.A2` **no** deja fila en `migracion_aplicada`. **Nueva §4.12** con las cuatro tablas de **`F37.A1`** — `rotacion_patron` (el ciclo de 8 días como `vector_t1`/`vector_t2` + `desfase` **derivado**, nunca digitado), `rotacion_asignacion` (persona→grupo **con vigencia**, que permite el relevo sin reescribir el pasado; "sin grupo" es la ausencia de fila), `rotacion_control` (**log append-only** del que la pila LIFO se **deriva** ordenando por identidad — el principal no se materializa en ninguna columna, y el mismo log es la auditoría de relevos) y `rotacion_cumplimiento` (congelado dentro de la transacción de `cerrarTurno`, **PK natural `(fecha_operativa, planta_id, turno, cargo_id)` = la idempotencia**, con `cargo_nombre`/`titulares_json` duplicados a propósito como snapshot, D-052). Los cuatro estados con su precedencia (`CUBIERTO_POR_RELEVO` gana), la resolución **por `usuario_id` y nunca por conteo de cargo**, y **`filas = 0` no es error** (precedente `copias = 0` de D-063). **Dos dependientes nuevos de `turno_unidad`** (§4.10) que todo barrido de fixtures debe conocer. Tres migraciones aditivas más, en orden A3 → **A5** → A4: **`F37.A3`** (CHECK de `grupo` + las FK **compuestas** que atan `planta_id` y la clave natural del cumplimiento al `turno_id` — sin ellas la pila devolvía vacío en silencio, el drift invisible de D-053(iii)); **`F37.A5`**, la **primera migración de `initDB()` que escribe filas de datos de operación**, que normaliza los vectores pasando por el **motor puro** y cuyo `catch` **no adivina**; y **`F37.A4`** (CHECK de formato del vector + UNIQUE natural **filtrada por `activo = 1`**, que es lo que permite que desactivar libere la fecha y que el `PATCH` sea un arreglo real) — el invariante vive en la BD porque **una sola fila con el vector corrupto volvía imposible cerrar el turno en las DOS plantas, cada 60 s**. Dos gotchas de SQL Server quedan escritos: **el `LIKE` ignora los blancos finales** (de ahí el `DATALENGTH`) y **una constraint gateada por su nombre no adopta un cambio de definición** (exige migración nueva con nombre nuevo); más la regla de **pre-vuelo** para toda constraint `WITH CHECK` sobre datos existentes. **Nueva §7.13** — por qué no se materializan días, la derivación del desfase y su `desfase_ambiguo`, la aritmética de fechas por **string y no `Date`** (el oráculo **no** distingue la versión frágil: lo que protege es el parsing estricto), la validación medida del dominio (0 discrepancias en 730 pares, año 1-feb→31-ene, **sin bisiesto en el periodo medido**) y el aprovisionamiento desde Entra **solo por `azure_oid`** con sus 13 duplicados legacy que **nadie debe limpiar**. **Sin cambios en el contrato cross-repo** (`evento_dashboard` y `disponibilidad_dashboard` intactos). Ver D-065 y RF-079 (v2.4). |
 
 ---
 

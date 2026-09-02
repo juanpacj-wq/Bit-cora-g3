@@ -252,7 +252,7 @@ describe('D-063 L01 · crear (CA-1)', () => {
       await cleanReflejo();
       await db.request()
         .input('id', sql.Int, abierto.turno_unidad_id)
-        .query(`DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
+        .query(`DELETE FROM bitacora.rotacion_cumplimiento WHERE turno_id = @id; DELETE FROM bitacora.rotacion_control WHERE turno_id = @id; DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
     }
   });
 });
