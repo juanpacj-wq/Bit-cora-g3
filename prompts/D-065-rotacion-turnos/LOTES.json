@@ -8,8 +8,8 @@
       "gate": "GATE-O1.md"
     },
     "O2": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O2.md"
     },
     "O3": {
       "estado": "pendiente",
@@ -95,10 +95,10 @@
     "L04": {
       "ola": "O2",
       "titulo": "Endpoints de configuración anual (superficie A)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L04-1921",
+      "claim_ts": "2026-09-01T19:21:48.265Z",
+      "done_ts": "2026-09-01T20:18:10.331Z",
       "motivo": null,
       "depende_de": [
         "L01",
@@ -127,10 +127,10 @@
     "L05": {
       "ola": "O2",
       "titulo": "Toma de control del rol (superficie B, backend)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L05-1922",
+      "claim_ts": "2026-09-01T19:22:51.571Z",
+      "done_ts": "2026-09-01T20:03:50.987Z",
       "motivo": null,
       "depende_de": [
         "L02"
@@ -156,10 +156,10 @@
     "L06": {
       "ola": "O2",
       "titulo": "Cumplimiento y congelado al cerrar (superficie C, backend)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L06-1922",
+      "claim_ts": "2026-09-01T19:22:47.564Z",
+      "done_ts": "2026-09-01T20:34:27.120Z",
       "motivo": null,
       "depende_de": [
         "L01",
@@ -288,10 +288,10 @@
     "L11": {
       "ola": "O2",
       "titulo": "Correcciones de la O1 (schema, cliente de Graph y tests)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L11-1923",
+      "claim_ts": "2026-09-01T19:23:03.776Z",
+      "done_ts": "2026-09-01T19:56:40.246Z",
       "motivo": null,
       "depende_de": [],
       "puro": false,
@@ -312,6 +312,37 @@
       ],
       "criterios": [],
       "nota": "Abierto por el GATE-O1 (decisión D5) para los 12 hallazgos confirmados del /code-review sobre territorios de lotes ya cerrados. Toda constraint nueva va como migracion F37.A3 aditiva e idempotente: NO modificar el CREATE TABLE de F37.A1 (el IF OBJECT_ID lo salta en toda BD donde las tablas ya existan). No bloquea a L04/L05/L06."
+    },
+    "L12": {
+      "ola": "O3",
+      "titulo": "Correcciones de la O2 (endpoints, control, Graph y schema)",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [],
+      "puro": false,
+      "puerto": 3118,
+      "territorio": [
+        "server/routes/rotacion.js",
+        "server/utils/rotacion/titulares.js",
+        "server/utils/rotacion/control.js",
+        "server/utils/rotacion/cumplimiento.js",
+        "server/utils/graph/cliente.js",
+        "server/utils/graph/directorio.js",
+        "server/db.js",
+        "server/tests/rotacion_correcciones_o2.test.js",
+        "server/tests/rotacion_endpoints.test.js",
+        "server/tests/rotacion_control.test.js"
+      ],
+      "tests": [
+        "tests/rotacion_correcciones_o2.test.js",
+        "tests/rotacion_endpoints.test.js",
+        "tests/rotacion_control.test.js"
+      ],
+      "criterios": [],
+      "nota": "Abierto por el GATE-O2 (decision D5) para los 15 hallazgos del /code-review sobre territorios de lotes ya cerrados (siete confirmados leyendo el fuente). Unico lote de backend de la O3: territorio disjunto de L07/L08/L09 por construccion. Toda constraint nueva va como migracion F37.A4 aditiva e idempotente. Entrega el PATCH /api/rotacion/patrones/:id que L07 consume en la misma ola (contrato en GATE-O2.md §6.6). No bloquea a nadie."
     }
   },
   "test_lock": {

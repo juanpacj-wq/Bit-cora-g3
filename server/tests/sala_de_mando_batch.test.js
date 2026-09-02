@@ -1327,7 +1327,7 @@ test('D-056 E3.7 — el periodo 3 de la grilla del día F queda atado al T2 inic
       await cleanMand();
       await db.request()
         .input('id', sql.Int, esperado)
-        .query(`DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
+        .query(`DELETE FROM bitacora.rotacion_cumplimiento WHERE turno_id = @id; DELETE FROM bitacora.rotacion_control WHERE turno_id = @id; DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
     }
   }
 });
@@ -1402,7 +1402,7 @@ test('D-056 E3.8 — con el turno finalizado y la cabecera CERRADA se registra i
       await cleanMand();
       await db.request()
         .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
-        .query(`DELETE FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`);
+        .query(`DELETE FROM bitacora.rotacion_cumplimiento WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t; DELETE rc FROM bitacora.rotacion_control rc INNER JOIN bitacora.turno_unidad tu ON tu.turno_unidad_id = rc.turno_id WHERE tu.planta_id=@p AND tu.fecha_operativa=@f AND tu.turno=@t; DELETE FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`);
     }
   }
 });
@@ -2372,7 +2372,7 @@ test('D-057 E3.7 — con el turno finalizado y la cabecera CERRADA se corrige y 
       await cleanMand();
       await db.request()
         .input('p', sql.VarChar(10), TEST_PLANTA).input('f', sql.Date, fop).input('t', sql.TinyInt, turno)
-        .query(`DELETE FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`);
+        .query(`DELETE FROM bitacora.rotacion_cumplimiento WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t; DELETE rc FROM bitacora.rotacion_control rc INNER JOIN bitacora.turno_unidad tu ON tu.turno_unidad_id = rc.turno_id WHERE tu.planta_id=@p AND tu.fecha_operativa=@f AND tu.turno=@t; DELETE FROM bitacora.turno_unidad WHERE planta_id=@p AND fecha_operativa=@f AND turno=@t`);
     }
     await cleanMand();
   }
@@ -2631,7 +2631,7 @@ test('D-057 E3.12 — la celda que agrega el PUT resuelve turno_id por el PERIOD
     if (!yaExistia) {
       await db.request()
         .input('id', sql.Int, esperado)
-        .query(`DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
+        .query(`DELETE FROM bitacora.rotacion_cumplimiento WHERE turno_id = @id; DELETE FROM bitacora.rotacion_control WHERE turno_id = @id; DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
     }
   }
 });
@@ -3122,7 +3122,7 @@ test('D-058 E4.4 — turno_id de la copia sale del turno ABIERTO de la unidad, n
     await cleanReflejo();
     await db.request()
       .input('id', sql.Int, abierto.turno_unidad_id)
-      .query(`DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
+      .query(`DELETE FROM bitacora.rotacion_cumplimiento WHERE turno_id = @id; DELETE FROM bitacora.rotacion_control WHERE turno_id = @id; DELETE FROM bitacora.turno_unidad WHERE turno_unidad_id = @id`);
   }
 });
 

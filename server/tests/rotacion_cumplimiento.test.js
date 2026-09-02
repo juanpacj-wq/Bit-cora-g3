@@ -26,7 +26,7 @@ import {
   consultarCumplimiento,
 } from '../utils/rotacion/cumplimiento.js';
 import {
-  abrirTurnoSiFalta, cerrarTurno, marcarParticipante, resolverTurnoAbierto,
+  abrirTurnoSiFalta, cerrarTurno, marcarParticipante, reabrirTurno, resolverTurnoAbierto,
 } from '../utils/turno-entidad.js';
 import { setupSessions, call, deactivateSyntheticSessions, TEST_PLANTA } from './helpers.js';
 
@@ -356,6 +356,37 @@ describe('cumplimiento · congelado y reporte (BD, TEST_PLANTA)', () => {
     });
     assert.equal(res.cerrado.estado, 'CERRADO', 'sin patrones el turno se cierra igual');
     assert.equal((await filasDe(t.turno_unidad_id)).length, 0);
+  });
+
+  // ── GATE-O2 (hallazgo 1 de L06): reabrir borra el congelado; el re-cierre lo recongela fresco ──
+  test('reabrir · reabrirTurno borra el cumplimiento congelado y el re-cierre lo recongela con la verdad nueva', async () => {
+    await limpiarTurnosTST();
+    await sembrarPatronYTitulares();
+    const slot = SLOTS[0];
+    // Primer cierre: entró un solo titular → PARCIAL congelado.
+    const t = await abrirYCerrar(slot, { participantes: [ctx.usuarios.jdt] });
+    assert.equal((await filasDe(t.turno_unidad_id))[0]?.estado, 'PARCIAL');
+
+    // Reabrir dentro de la ventana del turno (30 min después del cierre).
+    const ahoraReapertura = new Date(ahoraCierre(slot).getTime() + 30 * 60 * 1000);
+    const r = await reabrirTurno(pool, t.turno_unidad_id, { por_usuario: USUARIO_SISTEMA_ID, ahora: ahoraReapertura });
+    assert.equal(r.reabierto?.estado, 'ABIERTO', `reabrió (motivo: ${r.motivo ?? '-'})`);
+    assert.equal((await filasDe(t.turno_unidad_id)).length, 0, 'reabrir deja el turno SIN cumplimiento congelado');
+
+    // Entra el segundo titular y se vuelve a cerrar: la fila nueva dice COMPLETO, no la vieja PARCIAL.
+    await marcarParticipante(pool, {
+      turno_id: t.turno_unidad_id, usuario_id: ctx.usuarios.ingOp.usuario_id,
+      cargo_id: CARGO_ID, cargo_nombre: CARGO_FIXTURE,
+    });
+    const res = await cerrarTurno(pool, t.turno_unidad_id, {
+      motivo: 'MANUAL', cerrado_por: USUARIO_SISTEMA_ID, cargo_nombre: 'SISTEMA',
+      ahora: new Date(ahoraReapertura.getTime() + 30 * 60 * 1000), incluirSinteticos: true,
+    });
+    assert.equal(res.cerrado?.estado, 'CERRADO');
+    const filas = await filasDe(t.turno_unidad_id);
+    assert.equal(filas.length, 1, 'una sola fila tras el re-cierre');
+    assert.equal(filas[0].estado, 'COMPLETO', 'el re-cierre congela la verdad nueva, no la vieja');
+    assert.equal(entroDe(filas[0], ctx.usuarios.ingOp.usuario_id), true);
   });
 
   test('congelado · cerrarTurno deja UNA fila por (fecha, planta, turno, cargo), con el titular ausente marcado; cerrar dos veces no duplica', async () => {

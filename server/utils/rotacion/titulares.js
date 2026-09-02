@@ -7,7 +7,8 @@
 // vigente_hasta) INCLUDE (usuario_id, grupo)`: el LEFT JOIN de asignaciones se resuelve por cargo
 // y por vigencia sin ir a la tabla base. Un rol SIN patrón activo en la fecha no aparece en el
 // resultado (C4). Un rol CON patrón pero sin nadie asignado al grupo de guardia sí aparece, con
-// `personas: []` — es exactamente lo que L06 necesita para marcarlo PENDIENTE.
+// `personas: []`: para el popup (L05) es "sin fondo" (`principal: null`) y para el cumplimiento (L06)
+// NO produce fila —0 de 0 no es un estado, nadie debía venir— (GATE-O2 de D-065, decisión D2).
 //
 // El resultado NO depende de la planta (decisión R3): el titular es el mismo en GEC3 y GEC32.
 //

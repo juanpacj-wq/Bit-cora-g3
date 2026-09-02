@@ -28,12 +28,18 @@ externo aislado), L09.
 > **Enmienda del GATE-O1 (2026-09-01):** la **O2 pasa de 3 a 4 lotes** con `L11`, el lote de
 > corrección de los hallazgos de la O1 (decisión D5 del `GATE-O1.md`, **sujeta al visto bueno**).
 > Y **L04 amplió territorio** con `server/middleware/auth.js` y `server/utils/sesion-contexto.js` (D3).
+>
+> **Enmienda del GATE-O2 (2026-09-01):** la **O3 pasa de 3 a 4 lotes** con `L12`, el lote de
+> corrección de los hallazgos de la O2 (decisión D5 del `GATE-O2.md`, **sujeta al visto bueno**).
+> Es el único lote de backend de esa ola, así que su territorio es disjunto de los tres de front por
+> construcción; entrega además el `PATCH /api/rotacion/patrones/:id` que **L07 consume en la misma
+> ola** (contrato en `GATE-O2.md §6.6`).
 
 | Ola | Lotes | Por qué pueden ir juntos | Compartidos y su escritor |
 |---|---|---|---|
 | **O1** | L01, L02, L03 | Las tres raíces del grafo. Ninguna depende de otra: el motor es puro, el DDL no lee el motor, y el cliente de Graph no toca BD de rotación. Territorios totalmente disjuntos | `server/db.js` → **L02** |
 | **O2** | L04, L05, L06 | Consumen contratos de O1 **ya verificados en el gate**. Cada uno entrega **su propio router**, así que no se pisan: el montaje en `app.js` lo hace un solo lote | `server/auth/app.js` → **L04** · `server/utils/turno-entidad.js` → **L06** |
-| **O3** | L07, L08, L09 | Tres pantallas de front sobre contratos de endpoint **cerrados y probados**. Ninguna toca el componente raíz ni el routing: entregan componentes con la interfaz pactada | ninguno (por diseño) |
+| **O3** | L07, L08, L09, **L12** | Tres pantallas de front sobre contratos de endpoint **cerrados y probados**. Ninguna toca el componente raíz ni el routing: entregan componentes con la interfaz pactada. L12 es backend puro: no comparte un solo archivo con las tres | ninguno (por diseño) |
 | **O4** | L10 | Enchufa las tres pantallas. Va **solo** porque `src/BitacorasGecelca3.jsx` (2.682 líneas) es el archivo más disputado del repo y un error ahí tumba la app entera para todos los chats | `src/BitacorasGecelca3.jsx` → **L10** · `src/routing/appRoute.js` → **L10** |
 | **Cierre** | `/cerrar-implementacion D-065` | — | docs → integrador |
 
@@ -201,3 +207,24 @@ externo aislado), L09.
   lotes de front son vitest sin BD, o sea sin contención de test-lock.
 - **La última ola es el cierre:** ADR `D-065`, convención 38 de `CLAUDE.md`, `BIT-MODBD v2.8`,
   `BIT-RF v2.4 / RF-079`, y `git rm` del scaffolding.
+
+### L12 — Correcciones de la O2 (endpoints, control, Graph y schema)
+- **Ola:** O3 · **Depende de:** — (nadie) · **Puro:** no · **Puerto:** **3118**
+- **Territorio:** `server/routes/rotacion.js` · `server/utils/rotacion/{titulares,control,cumplimiento}.js` ·
+  `server/utils/graph/{cliente,directorio}.js` · `server/db.js` ·
+  `server/tests/rotacion_correcciones_o2.test.js` · `server/tests/rotacion_endpoints.test.js` ·
+  `server/tests/rotacion_control.test.js`
+- **Produce:** `PATCH /api/rotacion/patrones/:id` (contrato en `GATE-O2.md §6.6`) · **Consume:** —
+- **CA:** ninguno propio. Protege CA-5 … CA-18, ya confirmados, y habilita CA-19
+- **Tests:** `tests/rotacion_correcciones_o2.test.js` + los dos existentes que amplía
+- **Origen:** lo abrió el **GATE-O2**, decisión **D5**, para los 15 hallazgos del `/code-review`
+  (siete confirmados leyendo el fuente) que caen sobre territorios de L04/L05/L06/L11, ya cerrados.
+  Lista completa en `GATE-O2.md §7` (CR2-1 … CR2-15).
+- **Riesgo / nota:** tres cosas que muerden. (i) Toda constraint nueva va como migración **`F37.A4`
+  aditiva e idempotente**, nunca editando un `CREATE TABLE` ya gateado por `IF OBJECT_ID`. (ii) El
+  arreglo de **CR2-6** (`UPDLOCK`) **invalida el verificador negativo de CA-11** —L05 lo omitió a
+  propósito— así que hay que rehacerlo o el test queda verde por la razón equivocada. (iii) **CR2-10**
+  necesita las dos mitades: el `PATCH` **y** la UQ filtrada por `activo = 1`; solo con el endpoint,
+  desactivar un patrón no libera su fecha de inicio y el reemplazo corregido sigue dando 409.
+  El hallazgo de peor consecuencia es **CR2-1**: un vector malformado vuelve **incerrable** el turno
+  de las dos plantas, porque el congelado corre sin guard dentro de `cerrarTurno`.

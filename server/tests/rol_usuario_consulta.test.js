@@ -93,6 +93,9 @@ async function limpiarTurnos() {
     DELETE tp FROM bitacora.turno_participante tp
       INNER JOIN bitacora.turno_unidad tu ON tu.turno_unidad_id = tp.turno_id
      WHERE tu.planta_id = @p;
+    -- D-065 (GATE-O2): rotacion_control y rotacion_cumplimiento referencian turno_unidad por FK.
+    DELETE FROM bitacora.rotacion_cumplimiento WHERE planta_id = @p;
+    DELETE FROM bitacora.rotacion_control WHERE planta_id = @p;
     DELETE FROM bitacora.turno_unidad WHERE planta_id = @p;
   `);
 }

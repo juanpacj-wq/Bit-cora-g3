@@ -508,6 +508,15 @@ export async function reabrirTurno(pool, turno_id, { por_usuario, cargo_nombre =
       .input('id', sql.Int, turno_id)
       .query(`DELETE FROM bitacora.conformacion_turno WHERE turno_id = @id`);
 
+    // 3b) D-065 (GATE-O2, hallazgo 1 de L06): el CUMPLIMIENTO congelado se borra por la misma razón
+    //     que la conformación. `congelarCumplimiento` es idempotente por NOT EXISTS sobre la PK: si la
+    //     fila vieja se quedara, el re-cierre NO la refrescaría y el titular que entró después de
+    //     reabrir seguiría PENDIENTE para siempre. `rotacion_control` NO se toca: es un log append-only
+    //     y la pila se deriva por turno_id (las tomas siguen valiendo mientras el turno viva).
+    await new sql.Request(tx)
+      .input('id', sql.Int, turno_id)
+      .query(`DELETE FROM bitacora.rotacion_cumplimiento WHERE turno_id = @id`);
+
     // 4) Reabrir la cabecera.
     await new sql.Request(tx)
       .input('id', sql.Int, turno_id)

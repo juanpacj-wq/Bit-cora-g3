@@ -41,6 +41,22 @@ const checks = [
   // quedó abierta por una corrida muerta. Este check SÍ mira cargos reales a propósito: es solo
   // lectura y el residuo que busca está, por construcción, en una fila real.
   ['cargos con puede_configurar_rotacion=1 fuera de los dos del contrato', `SELECT COUNT(*) AS n FROM lov_bit.cargo WHERE puede_configurar_rotacion = 1 AND nombre NOT IN ('Administrador y Debugging', 'Gerente de Producción')`],
+  // D-065 (GATE-O2, hallazgo 2 de L06): las cuatro tablas de rotación. `rotacion_control` y
+  // `rotacion_cumplimiento` cuelgan de turno_unidad por FK (F37.A1/F37.A3) y se acotan por la
+  // planta-fixture; patrón y asignaciones no tienen planta, así que se acotan por el autor/usuario
+  // sintético (D-044) o por SISTEMA (la fixture de L06 siembra su patrón con USUARIO_SISTEMA_ID; una
+  // carga anual real la hace un administrador humano por el endpoint, nunca SISTEMA).
+  ['rotacion_control en planta de test', `SELECT COUNT(*) AS n FROM bitacora.rotacion_control WHERE planta_id IN ('${TEST_PLANTA_ID}','TSR')`],
+  ['rotacion_cumplimiento en planta de test', `SELECT COUNT(*) AS n FROM bitacora.rotacion_cumplimiento WHERE planta_id IN ('${TEST_PLANTA_ID}','TSR')`],
+  ['rotacion_patron creado por usuario sintético o SISTEMA', `SELECT COUNT(*) AS n FROM bitacora.rotacion_patron p JOIN lov_bit.usuario u ON u.usuario_id = p.creado_por WHERE u.es_sintetico = 1 OR u.username = 'SISTEMA'`],
+  // D-065 (GATE-O2, /code-review CR2-5): el turno-sweeper del backend de test cierra GEC3/GEC32 sin
+  // mirar AUTH_TEST_BYPASS (deuda D4 del GATE-O1) y, desde L06, cada cierre congela titulares. Si una
+  // suite deja un patrón vigente para hoy justo cuando el sweeper cierra, la fila congelada de la
+  // planta REAL queda con usuario_id de fixture (y después el after() borra al usuario). Por eso este
+  // check mira TODAS las plantas: titulares sintéticos o inexistentes en un congelado son residuo.
+  ['rotacion_cumplimiento con titulares sintéticos o inexistentes (cualquier planta)', `SELECT COUNT(*) AS n FROM bitacora.rotacion_cumplimiento rc CROSS APPLY OPENJSON(rc.titulares_json) WITH (usuario_id INT '$.usuario_id') t LEFT JOIN lov_bit.usuario u ON u.usuario_id = t.usuario_id WHERE u.usuario_id IS NULL OR u.es_sintetico = 1`],
+  ['rotacion_control de usuario sintético en planta real', `SELECT COUNT(*) AS n FROM bitacora.rotacion_control rc JOIN lov_bit.usuario u ON u.usuario_id = rc.usuario_id WHERE u.es_sintetico = 1 AND rc.planta_id NOT IN ('${TEST_PLANTA_ID}','TSR')`],
+  ['rotacion_asignacion de o por usuario sintético o SISTEMA', `SELECT COUNT(*) AS n FROM bitacora.rotacion_asignacion a WHERE EXISTS (SELECT 1 FROM lov_bit.usuario u WHERE (u.es_sintetico = 1 OR u.username = 'SISTEMA') AND u.usuario_id IN (a.usuario_id, a.creado_por))`],
 ];
 
 let total = 0;

@@ -190,19 +190,24 @@ describe('D-065 L05 · superficie B por HTTP (planta TST)', () => {
   // Deja la BD sin rastro de esta suite. Acotado a la planta-fixture y a los usuarios `test_rotctl_*`.
   // Corre en el before() ADEMÁS del after(): una corrida abortada se limpia en la siguiente. El bloque
   // de cabeceras replica `limpiarTurnos` de turno_transicion_write_gate.test.js (TST es desechable).
-  async function limpiarTodo() {
-    await db.request().input('p', sql.VarChar(10), P).query(`
+  // Va en TRES requests a propósito (GATE-O2 de D-065): el guard estático de D-055 exige ver el acotador
+  // de fixture (`P`) a menos de 700 caracteres de cada DELETE sobre registro_activo/registro_historico,
+  // y en un solo batch esos dos quedaban fuera de la ventana (el guard salía rojo en toda la suite).
+  const SQL_MIOS = `
       DECLARE @mios TABLE (usuario_id INT PRIMARY KEY);
-      INSERT INTO @mios SELECT usuario_id FROM lov_bit.usuario WHERE username LIKE '${LIKE_MIOS}';
-
-      -- Rotación: el log entero de la planta-fixture; patrón y asignaciones que sembró esta suite.
+      INSERT INTO @mios SELECT usuario_id FROM lov_bit.usuario WHERE username LIKE '${LIKE_MIOS}';`;
+  async function limpiarTodo() {
+    // Rotación: el log entero de la planta-fixture; patrón y asignaciones que sembró esta suite.
+    await db.request().input('p', sql.VarChar(10), P).query(`
+      ${SQL_MIOS}
       DELETE FROM bitacora.rotacion_control WHERE planta_id = @p;
       DELETE FROM bitacora.rotacion_asignacion
         WHERE creado_por IN (SELECT usuario_id FROM @mios) OR usuario_id IN (SELECT usuario_id FROM @mios);
       DELETE FROM bitacora.rotacion_patron WHERE creado_por IN (SELECT usuario_id FROM @mios);
-
-      -- Cabeceras de TST y todo lo que las referencia por FK (rotacion_cumplimiento la escribe L06 al
-      -- cerrar; acá solo se barre lo de la planta-fixture para poder borrar la cabecera).
+    `);
+    // Cabeceras de TST y todo lo que las referencia por FK (rotacion_cumplimiento la escribe L06 al
+    // cerrar; acá solo se barre lo de la planta-fixture para poder borrar la cabecera).
+    await db.request().input('p', sql.VarChar(10), P).query(`
       DELETE FROM bitacora.rotacion_cumplimiento WHERE planta_id = @p;
       UPDATE ra SET turno_id = NULL FROM bitacora.registro_activo ra
         INNER JOIN bitacora.turno_unidad tu ON tu.turno_unidad_id = ra.turno_id WHERE tu.planta_id = @p;
@@ -214,8 +219,10 @@ describe('D-065 L05 · superficie B por HTTP (planta TST)', () => {
       DELETE tp FROM bitacora.turno_participante tp
         INNER JOIN bitacora.turno_unidad tu ON tu.turno_unidad_id = tp.turno_id WHERE tu.planta_id = @p;
       DELETE FROM bitacora.turno_unidad WHERE planta_id = @p;
-
-      -- Sesiones y usuarios propios de la suite (se recrean en cada corrida).
+    `);
+    // Sesiones y usuarios propios de la suite (se recrean en cada corrida).
+    await db.request().query(`
+      ${SQL_MIOS}
       DELETE sb FROM bitacora.sesion_bitacora sb
         INNER JOIN bitacora.sesion_activa sa ON sa.sesion_id = sb.sesion_id
         WHERE sa.usuario_id IN (SELECT usuario_id FROM @mios);
