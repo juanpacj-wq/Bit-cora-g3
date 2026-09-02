@@ -12,8 +12,8 @@
       "gate": "GATE-O2.md"
     },
     "O3": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O3.md"
     },
     "O4": {
       "estado": "pendiente",
@@ -186,10 +186,10 @@
     "L07": {
       "ola": "O3",
       "titulo": "Pantalla de configuración anual (superficie A, front)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L07-2246",
+      "claim_ts": "2026-09-02T03:46:29.025Z",
+      "done_ts": "2026-09-02T04:06:15.182Z",
       "motivo": null,
       "depende_de": [
         "L04"
@@ -211,10 +211,10 @@
     "L08": {
       "ola": "O3",
       "titulo": "Popup de toma de control (superficie B, front)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L08-2246",
+      "claim_ts": "2026-09-02T03:46:44.828Z",
+      "done_ts": "2026-09-02T04:01:50.874Z",
       "motivo": null,
       "depende_de": [
         "L05"
@@ -236,10 +236,10 @@
     "L09": {
       "ola": "O3",
       "titulo": "Vista de cumplimiento (superficie C, front)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L09-2246",
+      "claim_ts": "2026-09-02T03:46:48.889Z",
+      "done_ts": "2026-09-02T04:01:44.060Z",
       "motivo": null,
       "depende_de": [
         "L06"
@@ -316,10 +316,10 @@
     "L12": {
       "ola": "O3",
       "titulo": "Correcciones de la O2 (endpoints, control, Graph y schema)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L12-2246",
+      "claim_ts": "2026-09-02T03:46:55.924Z",
+      "done_ts": "2026-09-02T08:15:49.872Z",
       "motivo": null,
       "depende_de": [],
       "puro": false,
@@ -343,6 +343,33 @@
       ],
       "criterios": [],
       "nota": "Abierto por el GATE-O2 (decision D5) para los 15 hallazgos del /code-review sobre territorios de lotes ya cerrados (siete confirmados leyendo el fuente). Unico lote de backend de la O3: territorio disjunto de L07/L08/L09 por construccion. Toda constraint nueva va como migracion F37.A4 aditiva e idempotente. Entrega el PATCH /api/rotacion/patrones/:id que L07 consume en la misma ola (contrato en GATE-O2.md §6.6). No bloquea a nadie."
+    },
+    "L13": {
+      "ola": "O4",
+      "titulo": "Correcciones de la O3 (pantalla de configuracion, hook del popup y schema)",
+      "estado": "pending",
+      "sesion": null,
+      "claim_ts": null,
+      "done_ts": null,
+      "motivo": null,
+      "depende_de": [],
+      "puro": false,
+      "puerto": 3119,
+      "territorio": [
+        "src/components/Rotacion/ConfiguracionRotacion.jsx",
+        "src/components/Rotacion/configuracion-rotacion.test.jsx",
+        "src/hooks/useTomaControl.js",
+        "src/components/Rotacion/popup-toma-control.test.jsx",
+        "server/db.js",
+        "server/tests/rotacion_correcciones_o2.test.js"
+      ],
+      "tests": [
+        "src/components/Rotacion/configuracion-rotacion.test.jsx",
+        "src/components/Rotacion/popup-toma-control.test.jsx",
+        "tests/rotacion_correcciones_o2.test.js"
+      ],
+      "criterios": [],
+      "nota": "Abierto por el GATE-O3 (decision D5) para los cuatro hallazgos del /code-review que caen sobre territorios de L07/L08/L12, ya cerrados: CR3-1 (la pantalla revienta con la fila de vector_invalido que CR2-8 existe para mostrar), CR3-2 (useTomaControl no descarta la respuesta obsoleta al cambiar de unidad en caliente), CR3-4 (omitidas no llega a la pantalla) y CR3-5 (el CHECK es mas estricto que parsearVector, que tolera espacios, y el pre-vuelo omite la constraint para siempre). REGLA DURA: no cambia la firma de props de ningun componente, porque L10 cablea contra ellas en la misma ola; si un arreglo necesita una prop nueva, se detiene y se coordina en el GATE-O4. CR3-2 tiene que quedar arreglado ANTES de que L10 se despliegue: es L10 quien crea su disparador. Toda correccion de db.js va como migracion F37.A5 aditiva e idempotente. Territorio disjunto de L10 por construccion."
     }
   },
   "test_lock": {

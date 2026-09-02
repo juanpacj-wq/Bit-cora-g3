@@ -22,8 +22,14 @@ if (ALLOWED_ORIGINS.length === 0 && process.env.NODE_ENV === 'production') {
   console.warn('  ⚠  CORS abierto (Access-Control-Allow-Origin: *) — define CORS_ALLOWED_ORIGINS para restringir orígenes en producción.');
 }
 
+// GATE-O3 de D-065 (hallazgo H-L07-1 / CR3-3): esta lista y `MUTADORES` de `routes/_middleware.js`
+// son las DOS mitades del mismo contrato y se cambian juntas. Un verbo que falte acá lo bloquea el
+// preflight del navegador en cualquier despliegue cross-origin (sin rastro en el server); uno que
+// falte allá viaja SIN la defensa same-origin de AUD-19. `PATCH` estuvo un rato en el limbo: no
+// estaba en ninguna de las dos, y lo único que tapaba el hueco era, por accidente, esta lista.
+// El caso `csrfMiddleware ↔ Access-Control-Allow-Methods` de `tests/http_hardening.test.js` las ata.
 const CORS_BASE = {
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': ALLOW_HEADERS,
 };
 

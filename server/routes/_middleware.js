@@ -56,9 +56,18 @@ export function corsMiddleware(req, res, next) {
 // ── CSRF para mutadores (global) ────────────────────────────────────────────────────────────────
 // Reemplaza la rama CSRF del if-chain (AUD-19). Solo mutadores con header Origin no confiable → 403.
 // Origin ausente (server-to-server) se permite aguas arriba para no romper integraciones.
+//
+// GATE-O3 de D-065 (hallazgo H-L07-1): la lista de verbos mutadores está escrita A MANO, así que un
+// verbo nuevo nace SIN esta defensa aunque el endpoint sea del todo normal. `PATCH` entró con
+// `PATCH /api/rotacion/patrones/:id` (D-065 L12) y no estaba acá: lo único que lo tapaba era que
+// `Access-Control-Allow-Methods` (utils/http.js) no lo anuncia, o sea el preflight del navegador —
+// una protección de otra cosa, que se evapora el día que alguien agregue PATCH a esa lista.
+// REGLA: un verbo que muta estado va en ESTA lista. `MUTADORES` es la fuente única.
+export const MUTADORES = ['POST', 'PUT', 'PATCH', 'DELETE'];
+
 export function csrfMiddleware(req, res, next) {
   const m = req.method;
-  if (m === 'POST' || m === 'PUT' || m === 'DELETE') {
+  if (MUTADORES.includes(m)) {
     const origin = req.headers.origin;
     if (origin && !csrfOriginAllowed(origin, req.headers.host)) {
       return sendJSON(res, 403, { error: 'Origen no permitido', codigo: 'origen_no_permitido' });

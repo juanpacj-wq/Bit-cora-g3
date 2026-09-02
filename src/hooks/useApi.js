@@ -59,5 +59,11 @@ export const api = {
   get: (url, opts) => request(url, { ...opts, method: 'GET' }),
   post: (url, body, opts) => request(url, { ...opts, method: 'POST', body }),
   put: (url, body, opts) => request(url, { ...opts, method: 'PUT', body }),
+  // PATCH entró con D-065 (`PATCH /api/rotacion/patrones/:id`). Va acá y no en el call site porque
+  // TODO verbo de la app tiene que heredar lo que vive en `request`: la cookie httpOnly
+  // (`credentials:'include'`), el sub-path del despliegue (`withBase`), el `codigo` estable de
+  // D-032 y el logout global ante un 401. Su hermano en el backend es la lista `MUTADORES` de
+  // `server/routes/_middleware.js`: un verbo nuevo se agrega en los dos lados, o en ninguno.
+  patch: (url, body, opts) => request(url, { ...opts, method: 'PATCH', body }),
   del: (url, opts) => request(url, { ...opts, method: 'DELETE' }),
 };

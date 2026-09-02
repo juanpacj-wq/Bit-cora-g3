@@ -35,16 +35,24 @@ externo aislado), L09.
 > Es el único lote de backend de esa ola, así que su territorio es disjunto de los tres de front por
 > construcción; entrega además el `PATCH /api/rotacion/patrones/:id` que **L07 consume en la misma
 > ola** (contrato en `GATE-O2.md §6.6`).
+>
+> **Enmienda del GATE-O3 (2026-09-02):** la **O4 pasa de 1 a 2 lotes** con `L13`, el lote de
+> corrección de los hallazgos de la O3 (decisión **D5** del `GATE-O3.md`, **sujeta al visto bueno**).
+> No toca la condición de L10 como lote aislado: los territorios no comparten un solo archivo.
+> **Regla dura de la ola: `L13` no cambia la firma de props de ningún componente** — L10 está
+> cableando contra las que fijaron los cierres de la O3.
 
 | Ola | Lotes | Por qué pueden ir juntos | Compartidos y su escritor |
 |---|---|---|---|
 | **O1** | L01, L02, L03 | Las tres raíces del grafo. Ninguna depende de otra: el motor es puro, el DDL no lee el motor, y el cliente de Graph no toca BD de rotación. Territorios totalmente disjuntos | `server/db.js` → **L02** |
 | **O2** | L04, L05, L06 | Consumen contratos de O1 **ya verificados en el gate**. Cada uno entrega **su propio router**, así que no se pisan: el montaje en `app.js` lo hace un solo lote | `server/auth/app.js` → **L04** · `server/utils/turno-entidad.js` → **L06** |
 | **O3** | L07, L08, L09, **L12** | Tres pantallas de front sobre contratos de endpoint **cerrados y probados**. Ninguna toca el componente raíz ni el routing: entregan componentes con la interfaz pactada. L12 es backend puro: no comparte un solo archivo con las tres | ninguno (por diseño) |
-| **O4** | L10 | Enchufa las tres pantallas. Va **solo** porque `src/BitacorasGecelca3.jsx` (2.682 líneas) es el archivo más disputado del repo y un error ahí tumba la app entera para todos los chats | `src/BitacorasGecelca3.jsx` → **L10** · `src/routing/appRoute.js` → **L10** |
+| **O4** | L10, **L13** | L10 enchufa las tres pantallas y va **solo** en su territorio porque `src/BitacorasGecelca3.jsx` (2.682 líneas) es el archivo más disputado del repo. L13 es de corrección y no comparte un archivo con él: los cuatro hallazgos que arregla caen sobre territorios de lotes ya cerrados | `src/BitacorasGecelca3.jsx` → **L10** · `src/routing/appRoute.js` → **L10** · `server/db.js` → **L13** · `src/components/Rotacion/*` → **L13** |
 | **Cierre** | `/cerrar-implementacion D-065` | — | docs → integrador |
 
-> **Desviación deliberada del "2–5 lotes por ola":** la O4 lleva un solo lote. Es la aplicación
+> **Desviación deliberada del "2–5 lotes por ola" (revisada por el GATE-O3):** la O4 llevaba un solo
+> lote, y con `L13` lleva dos — pero el criterio que la justificaba **no cambió**, porque L13 no toca
+> el archivo riesgoso: lo aislado es el territorio de L10, no su ola. Sigue siendo la aplicación
 > literal del criterio "riesgo asimétrico al final" del protocolo (`02-paralelismo.md` §10): el lote
 > que puede dejar el árbol roto para todos va aislado. Se evaluó y descartó que el gate de la O3
 > hiciera el cableado — es trabajo de construcción real (tres pantallas + dos rutas hash + el
@@ -200,7 +208,7 @@ externo aislado), L09.
 - **Un solo escritor por compartido y por ola:** `db.js` → L02 (O1) · `auth/app.js` → L04 (O2) ·
   `turno-entidad.js` → L06 (O2) · `BitacorasGecelca3.jsx` y `appRoute.js` → L10 (O4).
 - **Riesgo asimétrico aislado:** L03 (dependencia externa de red) va en su propia esquina de la O1;
-  L10 (componente raíz) va solo en la O4.
+  L10 (componente raíz) tiene la suya en la O4 — comparte ola con L13, pero ni un archivo.
 - **Calibrador antes que quien hereda:** L01 fija el motor y su forma de fechas (`'YYYY-MM-DD'`
   Bogotá, nunca `Date`) que L04 y L06 replican; L04 fija el patrón de router + gate por flag de
   cargo que L05 y L06 copian en la misma ola.
@@ -229,3 +237,25 @@ externo aislado), L09.
   desactivar un patrón no libera su fecha de inicio y el reemplazo corregido sigue dando 409.
   El hallazgo de peor consecuencia es **CR2-1**: un vector malformado vuelve **incerrable** el turno
   de las dos plantas, porque el congelado corre sin guard dentro de `cerrarTurno`.
+
+### L13 — Correcciones de la O3 (pantalla de configuración, hook del popup y schema)
+- **Ola:** O4 · **Depende de:** — (nadie) · **Puro:** no (el caso de `db.js` necesita BD) · **Puerto:** **3119**
+- **Territorio:** `src/components/Rotacion/ConfiguracionRotacion.jsx` ·
+  `src/components/Rotacion/configuracion-rotacion.test.jsx` · `src/hooks/useTomaControl.js` ·
+  `src/components/Rotacion/popup-toma-control.test.jsx` · `server/db.js` ·
+  `server/tests/rotacion_correcciones_o2.test.js`
+- **Produce:** nada nuevo (no toca ningún contrato) · **Consume:** —
+- **CA:** ninguno propio. Protege CA-19 y CA-20, ya confirmados
+- **Tests:** los tres archivos de test de su territorio
+- **Origen:** lo abrió el **GATE-O3**, decisión **D5**, para los cuatro hallazgos del `/code-review`
+  que caen sobre territorios de L07/L08/L12, ya cerrados. Lista en `GATE-O3.md §7`
+  (**CR3-1**, **CR3-2**, **CR3-4**, **CR3-5**; CR3-3 se arregló en el gate).
+- **Riesgo / nota:** tres cosas. (i) **Regla dura: no cambia la firma de props de ningún componente**
+  — L10 está cableando contra las que fijaron los cierres de la O3; un arreglo que necesite una prop
+  nueva **se detiene y se coordina en el GATE-O4**. (ii) **CR3-2 tiene que quedar arreglado antes de
+  que L10 se despliegue**, porque es L10 quien crea su disparador: hoy nadie monta el popup, así que
+  el estado obsoleto es inalcanzable. (iii) El de peor consecuencia es **CR3-1**: el backend devuelve
+  a propósito la fila corrupta con sus vectores **en crudo** para que el administrador pueda listarla
+  (CR2-8) y el front hace `.join()` sobre ella — se cambió un 500 por una pantalla en blanco, que es
+  peor porque no queda en el log. Cualquier corrección de `db.js` va como migración **`F37.A5`
+  aditiva e idempotente**, nunca editando un `CREATE TABLE` ya gateado por `IF OBJECT_ID`.

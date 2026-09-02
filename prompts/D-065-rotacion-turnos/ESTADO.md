@@ -17,12 +17,13 @@
 | O2 | L06 | Cumplimiento y congelado al cerrar | ✅ | `cierres/L06.md` | — |
 | O2 | L11 | Correcciones de la O1 (abierto por el GATE-O1, D5) | ✅ | `cierres/L11.md` | — |
 | — | **GATE-O2** | 4 lotes · 861/861 backend · 324/324 front · 0 violaciones | ✅ | | `GATE-O2.md` |
-| O3 | L07 | Pantalla de configuración anual | ⬜ | — | — |
-| O3 | L08 | Popup de toma de control | ⬜ | — | — |
-| O3 | L09 | Vista de cumplimiento | ⬜ | — | — |
-| O3 | L12 | Correcciones de la O2 (abierto por el GATE-O2, D5) | ⬜ | — | — |
-| — | **GATE-O3** | | ⬜ | | `GATE-O3.md` |
+| O3 | L07 | Pantalla de configuración anual | ✅ | `cierres/L07.md` | — |
+| O3 | L08 | Popup de toma de control | ✅ | `cierres/L08.md` | — |
+| O3 | L09 | Vista de cumplimiento | ✅ | `cierres/L09.md` | — |
+| O3 | L12 | Correcciones de la O2 (abierto por el GATE-O2, D5) | ✅ | `cierres/L12.md` | — |
+| — | **GATE-O3** | 4 lotes · 894/894 backend · 392/392 front · 0 violaciones | ✅ | | `GATE-O3.md` |
 | O4 | L10 | Cableado en el componente raíz y rutas hash | ⬜ | — | — |
+| O4 | L13 | Correcciones de la O3 (abierto por el GATE-O3, D5) | ⬜ | — | — |
 | — | **GATE-O4** | | ⬜ | | `GATE-O4.md` |
 | Cierre | — | ADR D-065 + `CLAUDE.md` 38 + BIT-MODBD v2.8 + BIT-RF v2.4/RF-079 + `git rm` | ⬜ | | |
 
@@ -37,8 +38,15 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
 | Antes de O1 (medición propia) | no se corrió — el GATE-O1 la sustituye (ver nota abajo) | |
 | **GATE-O1** (2026-09-01, server efímero `:3199`, `PortalG3_dev`) | backend **781/781** · front **324/324** · build ok · 0 violaciones · 0 residuos | ~44 min backend (12 bloques) · 50 s front |
 | **GATE-O2** (2026-09-01, server efímero `:3199` sin credencial de Graph y con stub del SIS, `PortalG3_dev`) | backend **861/861** · front **324/324** · build ok · 0 violaciones · 0 residuos (20 checks) | ~76 min backend (16 bloques) · 65 s front |
-| GATE-O3 | | |
+| **GATE-O3** (2026-09-02, server efímero `:3199` sin credencial de Graph y con stub del SIS, `PortalG3_dev`) | backend **894/894** · front **392/392** · build ok · 0 violaciones · 0 residuos (20 checks) | ~70 min backend (16 bloques) · 18 s front |
 | GATE-O4 | | |
+
+> **El baseline de la O4 es 894, y esta vez la resta cuadra sola.** `894 − 861 = 33` = los 27 casos
+> del archivo nuevo de L12 + los 3 que ganó `rotacion_control` al rehacer el verificador negativo de
+> CA-11 + los 3 que agregó el propio GATE-O3 a `http_hardening`. Sin ajustes a mano y sin residuo.
+> En el front, `392 − 324 = 68` = L07 (12) + L08 (30) + L09 (26). **Ojo con una cifra que engaña:**
+> el `npm run build` de la O3 salió verde pero **no compiló las tres pantallas nuevas** — nadie las
+> importa hasta que L10 las cablee, así que Rollup no las mete al grafo. Quien las compila es vitest.
 
 > **El 861 del GATE-O2 y el 781 del GATE-O1 no se restan directo.** Los cuatro archivos nuevos de la
 > O2 aportan 78 casos medidos (21 + 14 + 13 + 30), o sea 783 preexistentes contra los 781 que reportó
@@ -125,6 +133,49 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   `es_jefe_planta`) **quedó cerrado**: el único llamador de producción le pasa exactamente
   `{ por_usuario: req.sesion.usuario_id }` y no toca `req.body`.
 
+- **O3 (L07):** la superficie A no puede asumir la nómina pre-agrupada — **el agrupamiento por rol es
+  una función del buffer**, no del dato del servidor, y una **sola** fecha ("Vigente desde") gobierna
+  a la vez la lectura (`?fecha=`) y la escritura (`vigente_desde`). Leer con una y escribir con la de
+  hoy es la clase de error que nadie nota hasta que el titular sale mal.
+- **O3 (L08):** "se muestra si y solo si `ya_respondi === false`" y "si eres principal, ofrece
+  Abandonar" **son incompatibles al pie de la letra** (tomar el control deja `ya_respondi = true`).
+  La regla quedó con `soy_principal` **antes** de `ya_respondi`, exportada como función pura para que
+  ese orden sea una decisión con test y no un accidente del orden de los `if`.
+- **O3 (L09):** el panel de ausencias responde *"¿quién dejó el rol sin cubrir?"*, no *"¿quién
+  faltó?"*: por eso deja fuera a los ausentes de las filas cubiertas por relevo (que igual se ven,
+  con su ✗, en la tabla). Es una decisión de producto, no un bug — D4 del GATE-O3.
+- **O3 (L12):** **`LIKE` de SQL Server ignora los blancos finales del valor.** Un CHECK
+  `col LIKE '[1-4],…'` acepta `'1,1,3,3,4,4,2,2 '` (medido: `MATCH`, `DATALENGTH 16`), y `LEN`
+  tampoco los cuenta: el único que los ve es `DATALENGTH`.
+- **O3 (L12):** **una constraint gateada por su nombre nunca adopta un cambio de definición.** Pasó
+  dentro del propio lote. Cambiar una definición exige una migración **nueva con nombre nuevo**, no
+  editar la que ya se desplegó.
+- **O3 (L12):** el `UPDLOCK` que ordena los bloqueos frente a `cerrarTurno` **subsume** al
+  `sp_getapplock` para dos escrituras del mismo turno, así que el applock ya no se puede medir con
+  concurrencia: su verificador pasó a tomarlo **desde afuera**, donde la diferencia de granularidad
+  (turno vs. turno+cargo) sí se ve.
+- **O3 (GATE, y es el que más va a doler):** **`CLAUDE.md:22` documenta el comando de tests SIN
+  `--test-concurrency=1`**, mientras `server/tests/README.md` advierte lo contrario. El gate cayó en
+  la trampa y perdió una corrida: 17 rojos cuyo mensaje —`There is already an object named
+  'autorizacion_dashboard'`— no se parece en nada a una carrera de `initDB()`. Con el flag, 52/52.
+- **O3 (GATE, medido):** **8 de los 77 archivos `.test.js` del disco no están en el script `test`**, y
+  los ocho están **verdes** (43/43). No es código podrido: es cobertura que nadie corre.
+- **O3 (GATE, `/code-review`):** **las dos mitades de CR2-8 se construyeron en olas distintas y no se
+  encontraron.** El backend devuelve la fila corrupta con sus vectores **crudos** para que el
+  administrador pueda listarla; el front hace `.join()` sobre ella y deja la pantalla en blanco. El
+  500 se cambió por un vidrio roto, que es peor porque no queda en el log.
+- **O3 (GATE, `/code-review`):** dos lotes de la MISMA ola resolvieron distinto el mismo problema —
+  `useCumplimiento` descarta la respuesta obsoleta con `secuenciaRef`; `useTomaControl` no la descarta
+  y su `desmontadoRef` no sirve, porque el efecto lo resetea a `false` para la unidad nueva antes de
+  que aterrice el GET de la vieja.
+- **O3 (GATE, `/security-review`):** cero hallazgos. El `PATCH` nuevo nace cerrado (allowlist pública,
+  `requireEntra`, `loadAppSession`, gate por flag de cargo), el ancla del `@odata.nextLink` por host
+  resiste las evasiones clásicas, y **ninguna** entrada de usuario alcanza el SQL dinámico del DDL de
+  `F37.A4`.
+- **O3 (GATE):** el deadlock que el GATE-O2 registró (su H4) **no se reprodujo**. Una corrida limpia
+  no prueba que se cerró, y la otra mitad del abrazo —el `turno-sweeper` arrancando también bajo
+  `AUTH_TEST_BYPASS`— sigue siendo deuda heredada, fuera de alcance de D-065.
+
 ## Desviaciones acumuladas respecto a `_CONTEXTO-BASE.md`
 
 Todas **aceptadas** en el GATE-O1 (detalle y razón en `GATE-O1.md §5`). Ninguna cambia una ruta
@@ -163,6 +214,33 @@ Las de la **O2**, todas aceptadas en el GATE-O2 (detalle en `GATE-O2.md §5` y e
   las cuatro tablas de rotación entraron a los barridos de fixtures, al guard estático de D-055 y a
   `residuos.js`. No cambia ningún contrato: cierra las trampas que dejó el schema nuevo.
 
+
+Las de la **O3**, todas aceptadas en el GATE-O3 (detalle en `GATE-O3.md §5` y en los cierres):
+
+- **C5 (L08):** la firma del popup lleva una prop más que el contrato, `onAbandonar`. El §3 listaba
+  `estado`/`onTomar`/`onDescartar`/`onCerrar` y el §4.4 del mismo prompt exige ofrecer "Abandonar el
+  control", que es otro endpoint: reusar `onTomar` habría pegado al equivocado. **L10 pasa cuatro
+  handlers.** Nada más de C5 cambió: se consumió tal cual y sus 9 claves alcanzaron.
+- **C8 (L07):** la fecha de vigencia quedó como estado **interno** del componente, no en la URL —
+  coherente con C8, que define `'#/rotacion' → { vista: 'rotacion', params: {} }`. La pantalla ganó
+  además un **selector de rol por persona** (lo pidió el §6.3 del GATE-O2) y con él el grupo "Sin rol
+  asignado", que el prompt no preveía porque asumía la nómina ya agrupada.
+- **C8 (L09):** el formateador de presentación de fechas quedó **local al componente**, con `timeZone`
+  explícito, porque `src/utils/fecha.js` no tiene ninguno que sirva para mostrar (deriva fechas, no
+  las presenta) y el prompt prohibía tocarlo. Se agregó `rangoPorDefecto()` al hook, que el contrato
+  no pedía, para que L10 no invente el rango al aterrizar sin parámetros.
+- **C4 (L12):** el `PATCH /patrones/:id` acepta también `activo: true` (reactivar, con `409` si choca)
+  y responde `400 activo_invalido` si el cuerpo no trae un booleano. **Para L07 el contrato del §6.6
+  se cumple tal cual**; esto es aditivo. Dos slugs nuevos de dominio, expuestos a propósito (D-032):
+  `activo_invalido` y `patron_no_encontrado`.
+- **C4 (L12):** `GET /patrones` puede traer una fila con `vector_invalido: true` y sus vectores en
+  **texto crudo** en vez de arreglo — es la rama defensiva por fila de CR2-8, y para una fila sana el
+  shape no cambia. La pantalla todavía no la contempla: es **CR3-1**, con destino L13.
+- **Fuera de contrato (GATE-O3):** `MUTADORES` en `routes/_middleware.js` pasa a ser la fuente única
+  del chequeo CSRF y queda **atada por test** al `Access-Control-Allow-Methods` de `utils/http.js`;
+  `useApi` gana `patch` y `useRotacion` deja de traer su propio cliente HTTP. No cambia ningún
+  contrato: cierra el hueco que abría estrenar un verbo.
+
 ## Bitácora
 
 - **2026-08-31** · Fase 1 cerrada: 5 rondas de preguntas (incluida una ronda 0 de vocabulario y una
@@ -192,3 +270,14 @@ Las de la **O2**, todas aceptadas en el GATE-O2 (detalle en `GATE-O2.md §5` y e
 - **2026-09-01** · **Visto bueno de la O2 dado.** `L12` aprobado y **O3 abierta** con cuatro lotes:
   L07, L08, L09 (front, uno por superficie) y L12 (backend, correcciones). Territorios disjuntos por
   construcción: L12 no comparte un solo archivo con los tres de front.
+- **2026-09-02** · **O3 cerrada** por `GATE-O3.md`: L07/L08/L09/L12 `done`, cero violaciones de
+  territorio, suite **894/894** backend (los tres archivos nuevos de front suman 68 casos y el de
+  backend 27) y **392/392** front, cero residuos con 20 checks. **Los tres CA de la ola quedaron
+  `cumple`** —CA-19, CA-20, CA-21— y **CA-3 se recuperó** de `parcial` a `cumple` al aplicar el
+  bloqueo B1 de L12. Cinco decisiones: tres arreglos hechos en el gate (el B1 sobre `rotacion_schema`,
+  el `PATCH` que nacía sin la defensa CSRF de AUD-19 **y sin anunciarse en el preflight**, y el
+  `api.patch` que faltaba en `useApi`), la lectura del panel de ausencias resuelta a favor de L09, y
+  un lote de corrección **L13** en la O4 para los cuatro hallazgos del `/code-review` que caen sobre
+  territorios ya cerrados. `/security-review` sin hallazgos. **Los tres `cumple` son de nivel
+  componente: ninguna pantalla está enchufada todavía** — eso lo hace L10 y con eso llega la
+  confirmación end-to-end.

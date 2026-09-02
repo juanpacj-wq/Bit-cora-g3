@@ -1,6 +1,5 @@
 import { useCallback, useState } from 'react';
 import { api } from './useApi';
-import { withBase } from '../config/paths';
 
 // D-065 L07 · hook de la superficie A (configuración anual de la rotación). Habla con los
 // endpoints de `server/routes/rotacion.js` y no decide nada: la política vive en el backend
@@ -16,45 +15,6 @@ import { withBase } from '../config/paths';
 //
 // Cero polling y cero `localStorage`/`sessionStorage` (CA-23): esta pantalla se abre una vez al
 // año, lee cuando se lo piden y no deja nada corriendo detrás.
-
-// Igual que en useApi: `fetch` rechaza con un TypeError crudo cuando no hay ruta al backend.
-const MSG_SIN_CONEXION = 'No se pudo contactar al servidor. Verifica tu conexión a la red corporativa e intenta de nuevo.';
-
-// PATCH no existe en `src/hooks/useApi.js` (solo GET/POST/PUT/DELETE) y ese archivo NO es
-// territorio de este lote, así que la llamada de "desactivar patrón" (contrato de L12,
-// GATE-O2 §6.6) se arma acá con las MISMAS reglas: `credentials:'include'` para la cookie
-// httpOnly de sesión, `withBase` para el sub-path de despliegue y un Error con `.status`,
-// `.codigo` y `.body` para que el consumidor ramifique por el slug.
-//
-// Diferencia conocida y anotada en el cierre: no dispara el `unauthorizedHandler` global de
-// `useApi` (es privado del módulo), así que un 401 acá no cierra la sesión sola — se ve como un
-// error normal en la pantalla. Se resuelve en cuanto `useApi` exponga `api.patch`.
-async function patchJSON(url, body) {
-  let res;
-  try {
-    res = await fetch(withBase(url), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify(body),
-    });
-  } catch {
-    const err = new Error(MSG_SIN_CONEXION);
-    err.codigo = 'sin_conexion';
-    err.status = 0;
-    err.body = { error: MSG_SIN_CONEXION, codigo: 'sin_conexion', mensaje: MSG_SIN_CONEXION };
-    throw err;
-  }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data.error || data.mensaje || `Error ${res.status}`);
-    err.status = res.status;
-    err.codigo = data.codigo;
-    err.body = data;
-    throw err;
-  }
-  return data;
-}
 
 export function useRotacion() {
   const [cargando, setCargando] = useState(false);
@@ -103,11 +63,13 @@ export function useRotacion() {
   );
 
   // Contrato que entrega L12 en esta misma ola (GATE-O2 §6.6): PATCH con { activo: false }.
-  // Es el único camino para corregir un patrón cargado con error.
+  // Es el único camino para corregir un patrón cargado con error. Va por `api.patch` (agregado a
+  // `useApi` por el GATE-O3, hallazgo H-L07-3): así hereda el logout global ante un 401, que el
+  // helper local que traía L07 no podía disparar.
   const desactivarPatron = useCallback(
     (rotacion_patron_id) => correr(
       setGuardando,
-      async () => (await patchJSON(`/api/rotacion/patrones/${encodeURIComponent(rotacion_patron_id)}`, { activo: false })).patron,
+      async () => (await api.patch(`/api/rotacion/patrones/${encodeURIComponent(rotacion_patron_id)}`, { activo: false })).patron,
     ),
     [correr],
   );

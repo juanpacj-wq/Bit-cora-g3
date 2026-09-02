@@ -340,11 +340,18 @@ test('F37.A1 · 8. los dominios de los CHECK son los del contrato, ni más ni me
 });
 
 test('F37.A1 · 9. la UNIQUE natural del patrón y la PK del cumplimiento', () => {
-  const uq = claves.get('UQ_rotacion_patron_natural');
-  assert.ok(uq, 'falta UQ_rotacion_patron_natural');
-  assert.equal(uq.tipo, 'UQ', 'UQ_rotacion_patron_natural debe ser UNIQUE');
-  assert.deepEqual(uq.columnas, ['cargo_id', 'fecha_inicio'],
-    'un rol no puede tener dos patrones que arranquen el mismo día');
+  // F37.A4 (D-065 L12, CR2-10): la UNIQUE natural dejó de ser una key constraint y pasó a ser un
+  // ÍNDICE ÚNICO FILTRADO por `activo = 1` — un índice filtrado no puede ser una constraint. Sin el
+  // filtro, desactivar un patrón cargado con error no liberaba su fecha de inicio y el corregido
+  // seguía chocando con `patron_duplicado`: la carga anual no tenía arreglo por la app.
+  // Que sea único y filtrado lo verifica `rotacion_correcciones_o2 › CR2-10(b)`, que sí lee
+  // sys.indexes; acá solo se fija que la vieja se fue y que la nueva cubre las mismas columnas.
+  assert.equal(claves.get('UQ_rotacion_patron_natural'), undefined,
+    'F37.A4 la reemplazó por UQ_rotacion_patron_natural_activo: ya no es una key constraint');
+  const uq = indices.get('UQ_rotacion_patron_natural_activo');
+  assert.ok(uq, 'falta el índice único filtrado UQ_rotacion_patron_natural_activo (F37.A4)');
+  assert.deepEqual(uq.clave, ['cargo_id', 'fecha_inicio'],
+    'un rol no puede tener dos patrones ACTIVOS que arranquen el mismo día');
 
   const pk = claves.get('PK_rotacion_cumplimiento');
   assert.ok(pk, 'falta PK_rotacion_cumplimiento');
