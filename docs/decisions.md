@@ -1797,6 +1797,18 @@ entera por el último hallazgo alto — dos líneas con su test ya escrito y roj
   (`cantidad_max`, que el scraper clampa), [[D-055]] (higiene de tests sobre planta real),
   [[D-060]] (P24 y `completo`), y `D-062` (rediseño de la grilla, pendiente de planificar).
 
+- **Verificación visual (2026-08-28).** El smoke manual de la pantalla COMB se hizo contra
+  `PortalG3_dev` sobre `2026-08-10` (GEC32, grilla llena: 192 celdas de carbón, todas con lectura
+  del SIS). **Confirmados en pantalla:** el banderín y el popover con autoría y `valor_sis`;
+  Revertir; **vaciar = override 0** (la celda queda en `0` **con banderín** y sobrevive a un F5);
+  el apagado de todos los botones Revertir con la grilla sucia; el chip `SIS 24/24`; y —lo que más
+  importaba— que al cambiar de fecha la grilla **parpadea ~1 s y vuelve con los valores nuevos**,
+  o sea que la carrera que arregló CA-59 no reaparece. Con esto **CA-12 y CA-35 dejan de estar
+  pendientes**. Quedaron **sin verificar en pantalla** tres puntos menores, ninguno de la familia
+  de pérdida de datos: que el comentario sobreviva a una corrección de la cifra (cubierto por los
+  tests de L09), el scrape manual disparado dos veces (no se ejecutó para no competir con el
+  backfill de producción, que estaba corriendo) y COMB en GEC3.
+
 **Lección de método, que trasciende a este ADR:** cuando la corrección de una estructura depende de
 que **todos** los caminos se acuerden de tocarla, el problema no es la puerta que se dejó abierta
 sino que exista una puerta. Si la pertenencia se puede **calcular** desde estados que ya existen, se
