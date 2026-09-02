@@ -2144,7 +2144,280 @@ de mantenimiento no aplica DDL, seeds ni migraciones para conseguir dos enteros.
 
 ---
 
-## D-065 — Módulo de rotación de turnos: patrón por rol, cuadrilla desde Entra y cumplimiento plan-vs-real (EN CURSO, ver `prompts/D-065-rotacion-turnos/`)
+## D-065 — Módulo de rotación de turnos: patrón por rol, cuadrilla desde Entra y cumplimiento plan-vs-real
+
+**Fecha:** 2026-09-02
+
+**Contexto:** desde [[D-045]] la app sabe **quién estuvo** en cada turno (`turno_participante` /
+`conformacion_turno`); no sabía **quién debía estar**. La malla anual de la Gerencia de Producción
+vivía en `Rotacion2026.xlsx` —un ciclo de **8 días** materializado día por día, en dos mallas
+(operadores e ingenieros), que alguien mantiene a mano— y el personal de esas cuadrillas no estaba en
+la BD: `lov_bit.usuario` solo conoce a quien ya se logueó (**11 de 89** filas con `azure_oid` en
+dev), así que repartir grupos sobre esa tabla habría dejado fuera a casi todos. El requerimiento del
+usuario (12 secciones; no hay `REQ-NN` previo, este flujo estrena **RF-079**) pedía **tres
+superficies y ninguna más** —configuración anual, popup de toma de control, vista de cumplimiento—
+con un mandato explícito de simplicidad: **cero intervención entre una carga anual y la siguiente**
+(CA-23); si aparecía una cuarta pantalla o una tarea recurrente, el diseño se había desviado. En la
+planificación se midió el Excel contra la fórmula candidata: **0 discrepancias** en los 730 pares
+`(fecha, turno)` del año, **0 rupturas** de continuidad nocturna y **0 violaciones** de la
+periodicidad de 8 días, con `ancla = 2026-02-01` y desfases 3 (OPS) y 2 (ING) — y se descubrió que el
+año de la malla **no es calendario**: va del 1-feb al 31-ene. El legacy NestJS/Mongo se descartó como
+referencia por decisión del usuario. Ejecutado con la **metodología v2** en **5 olas y 14 lotes** en
+chats paralelos sobre `feat/rotacion-turnos-2026-08` (nacida de `feat/integrar-asientos-D-059`);
+cuatro de esos lotes —L11, L12, L13, L14— los abrieron los propios gates para cerrar lo que su
+`/code-review` encontró sobre territorios ya cerrados.
+
+**Decisión:**
+
+**(1) El titular de una fecha se CALCULA, no se guarda.** Un patrón es
+`(fecha_inicio, vector_t1[8], vector_t2[8], desfase)` y `grupoDeTurno` resuelve cualquier fecha
+—pasada o futura, dentro o fuera del periodo cargado— en aritmética pura sobre
+`V[((fecha − ancla) + desfase) % 8]`. El administrador **nunca escribe el desfase**: escribe la fecha
+de arranque y **los dos** grupos que trabajan ese día, y el motor lo deriva. Hacen falta los dos
+porque `vector_t1` toma 4 valores en 8 índices: con uno solo hay siempre dos desfases posibles, y
+ante eso el motor lanza `desfase_ambiguo` en vez de elegir. Un periodo nuevo se encadena al anterior
+con `desfaseDeContinuidad`, así que "el año que entra arranca donde terminó el anterior" es una
+cuenta y no una transcripción. Las fechas viajan como `'YYYY-MM-DD'` en día Bogotá y **ningún `Date`
+entra ni sale**: las cuentas van con `Date.UTC()` sobre los enteros del string, y una fecha con hora
+o un 30 de febrero lanzan `fecha_invalida`. *Descartado:* materializar los 365 días en BD — reproduce
+en otra piel exactamente el problema que tenía el Excel. *Aprendizaje que vale más que el oráculo:*
+la versión ingenua con `new Date(str)` **pasa los 1.460 pares igual** (el offset se cancela en los
+dos extremos), así que lo que protege no es el oráculo sino el parsing estricto.
+
+**(2) Cuatro tablas en `bitacora` (`F37.A1`), ninguna de ellas un calendario.** `rotacion_patron` (el
+patrón por rol), `rotacion_asignacion` (persona→grupo **con vigencia**, que es lo que permite el
+relevo sin reescribir el pasado), `rotacion_control` (log **append-only** de
+`TOMAR`/`ABANDONAR`/`DESCARTAR`) y `rotacion_cumplimiento` (el congelado, con PK natural
+`(fecha_operativa, planta_id, turno, cargo_id)` — esa PK **es** la idempotencia del congelado). El
+modelo de asignación con vigencia sale de un dato medido: la cuadrilla OPS del Excel cambia **todos
+los meses** (69 de 308 celdas al año), la de ING no cambia ni una vez en doce.
+
+**(3) La cuadrilla sale de Entra ID, y se aprovisiona EXCLUSIVAMENTE por `azure_oid`.** Un cliente de
+Graph server-side (`utils/graph/`) lee la Enterprise App por `client_credentials` y hace MERGE sobre
+`lov_bit.usuario` por la **misma clave con la que auto-aprovisiona el login** ([[D-031]]), para que
+quien entre por primera vez calce con la fila que dejó la sincronización en vez de crear una segunda;
+el rol efectivo de quien está en varios grupos se resuelve con la MISMA `PRECEDENCE` del login. La
+sincronización es deliberadamente **estrecha**: no toca `activo` de filas existentes (AUD-22), ni los
+singletons de identidad, ni el cargo, ni fusiona los 13 duplicados legacy de producción — y **se
+dispara a mano** desde la configuración anual, que es lo que la hace compatible con CA-23. Sin
+credencial o con Graph caído degrada a **`503 entra_no_disponible`** y el server no se cae.
+*Descartado:* repartir grupos sobre `lov_bit.usuario` tal como está — deja fuera a 78 de 89 personas.
+
+**(4) El permiso de configurar es un FLAG DE CARGO (`F37.A2`), no la matriz de permisos por
+bitácora.** `lov_bit.cargo.puede_configurar_rotacion`, dentro del **MERGE** de `db.js` y no en un
+`UPDATE` one-shot (convención 27: un `UPDATE` a mano se revierte al siguiente restart, y hay un test
+que lo demuestra). La consecuencia buscada: **el Gerente de Producción configura la malla sin perder
+`solo_lectura = 1`**, porque la malla no es una bitácora y el flag no le abre escritura en ninguna.
+La matriz de permisos y [[D-039]] quedan intactas. *Descartado:* colgarlo de `cargo_bitacora_permiso`
+— habría exigido inventar una bitácora que no existe y habría heredado el `solo_lectura` que aquí
+estorba.
+
+**(5) El cumplimiento se resuelve por `usuario_id`, NUNCA por conteo de cargo.** Tres personas del
+rol que no son titulares dejan el slot en `PENDIENTE`: lo que se mide es si vino *quien* debía venir,
+no *cuántos*. Cuatro estados —`PENDIENTE` / `PARCIAL` / `COMPLETO` / `CUBIERTO_POR_RELEVO`— y una
+regla de precedencia: un no-titular con el control (el tope de la pila de `rotacion_control`) gana
+sobre los otros tres. Se congela **dentro de la transacción de `cerrarTurno`**, después de la
+conformación y **sin `try/catch`**: un turno sellado sin su cumplimiento es peor que un cierre que
+hay que reintentar. Y **`filas = 0` no es error** — es el estado normal antes de la primera carga
+anual (precedente: `copias = 0` de [[D-063]]); esa es la diferencia entre un módulo que aparece con
+la carga anual y uno que vuelve incerrable la planta hasta que alguien configure la malla. El turno
+en curso se deriva **en vivo por la misma función que congela**, así el reporte no tiene dos
+verdades. Se heredan los filtros de la conformación: sintéticos fuera salvo unit tests ([[D-044]]) y
+observadores fuera siempre ([[D-059]]).
+
+**(6) La toma de control es una PILA LIFO DERIVADA de un log, serializada con `sp_getapplock`.** El
+principal no se materializa en una columna (que es lo que hacía el legacy): se **deriva** en cada
+lectura — fondo = titular del patrón, que no está en el log y por tanto no puede abandonar
+(`409 titular_no_abandona`), y encima las tomas vivas. El cálculo se serializa con un applock
+exclusivo por `(turno_id, cargo_id)`, dueño la transacción, timeout 5 s → `control_ocupado`: dos
+`TOMAR` concurrentes de personas distintas dejan dos filas y **un** principal; N `TOMAR` del mismo
+usuario dejan una. El "no volver a preguntar en este turno" es un `ya_respondi` **derivado del mismo
+log**, así que sobrevive a un F5 y a otro equipo, y el "No" es un `POST /descartar` real. Los
+excluidos por R12 se resuelven por flag (`es_observador`, `puede_configurar_rotacion`), nunca por
+nombre de cargo (convención 12). *Descartado:* reintentos optimistas — el requerimiento pedía
+serialización de verdad. *Descartado:* materializar al tenedor en una columna y reescribirla, como el
+legacy — el log append-only es además la auditoría completa de relevos, gratis.
+
+**(7) Rotación entra a la app como DOS SECCIONES HERMANAS de `#/historicos`, no como bitácoras.**
+Viajan en `vista` con `codigo: null`, su entrada vive en el `HeaderMenu` y no en `BitacoraTabs`, y su
+gate es el flag del cargo que llega en la MISMA sesión que evalúa el backend — falla cerrado. Ese es
+el patrón para cualquier sección futura que no sea una bitácora, y su corolario: **el toggle del menú
+tiene que preguntar "¿estoy en bitácoras?"**, no "¿estoy en históricos?", o cada sección nueva se
+queda sin camino de vuelta. El subestado del cumplimiento (rango + unidad) se cableó copiando el de
+DISP letra por letra en vez de inventar uno ([[D-035]]), y la precedencia entre los dos overlays
+`z-50` se resolvió con **una sola expresión** (`transicionAbierta`) que gobierna el modal de
+transición y el popup a la vez: manda la transición, porque bloquea la unidad entera ([[D-046]]).
+
+**(8) Los invariantes que sostienen un cierre de turno viven en la BD, no en un `try/catch`.** La
+cadena que lo forzó: `congelarCumplimiento` corre **dentro** de la transacción de `cerrarTurno` y
+`titularesDeTurno` parsea **todos** los patrones activos sin filtro de planta, así que **un solo
+patrón con el vector corrupto volvía imposible cerrar el turno en las dos plantas, cada 60 s**.
+`F37.A4` convierte el formato del vector en un CHECK (con `DATALENGTH`, porque el `LIKE` de SQL
+Server ignora los blancos finales y no acota longitud) y la UNIQUE natural del patrón en un índice
+**filtrado por `activo = 1`**, que es lo que permite que desactivar libere la fecha y que el `PATCH`
+sea un arreglo real. Dos reglas quedan escritas: **un CHECK que espeja a un parser se mantiene igual
+o MÁS estricto que él, y cuando divergen lo que se corrige es el DATO** (con el propio parser, nunca
+con un `REPLACE` en SQL que solo tapa el síntoma que se vio); y **toda constraint `WITH CHECK` sobre
+datos existentes pasa por un pre-vuelo** que denuncia y se salta en vez de tumbar el arranque con un
+547 ilegible. `F37.A5` es la respuesta a "¿y si el drift no se corrige solo?" —un pre-vuelo que "se
+reintenta en el próximo arranque" puede no reintentarse nunca—: normaliza los vectores a su forma
+canónica pasando por el **motor puro**, y por eso es la **primera migración de `initDB()` que escribe
+filas de datos de operación**, acotada, idempotente, anunciada en el log y con un `catch` que **no
+adivina** (lo ilegible se deja intacto y lo denuncia el pre-vuelo). Corolario aprendido dentro del
+propio lote: **una constraint gateada por su nombre nunca adopta un cambio de definición** — cambiar
+un predicado exige una migración nueva con nombre nuevo.
+
+**(9) Las degradaciones del backend son CONTRATO, no cortesía.** Si un endpoint responde con una fila
+marcada como dañada (`vector_invalido`) o con un conteo de lo que no pudo leer (`omitidas`), la
+pantalla **tiene** que mostrarlo: leerlo a medias cambia un 500 —que queda en el log— por una
+pantalla en blanco, y un 200 incompleto por uno que se ve completo. Corolario del GATE-O4: **el
+remedio que imprime una pantalla de diagnóstico tiene que seguir siendo verdad DESPUÉS de que alguien
+lo siga** — el aviso del vector dañado pedía desactivar, y desactivar apaga el efecto operativo pero
+no libera el CHECK.
+
+**(10) Una guarda contra la pérdida de trabajo la reporta QUIEN LA TIENE y la decide UNA SOLA
+función.** La configuración anual reparte ~81 personas en un buffer interno detrás de un Guardar
+explícito, y navegar **desmonta** el componente. El componente reporta su suciedad hacia arriba
+(`onDirtyChange`, el mismo contrato con que `SalaDeMandoGrid` levanta `mandDirty`) y el raíz decide
+con una única función pura, `planearSalidaDeRotacion`, que llaman **las cinco** salidas: las dos
+entradas del menú, el toggle "Ver bitácoras", "Cambiar de unidad" y el control de fecha — más el
+`beforeunload` del navegador. Es el tercer caso de la misma familia ([[D-040]] finalizar turno,
+[[D-054]] cambio de unidad) y el primero cuya suciedad no vive en el raíz. **No hay guardado
+automático**: guardar es escritura y no se hace sin que alguien la pida. La asimetría entre bloquear
+y ofrecer perder es deliberada: el atajo de unidad en caliente **no desmonta nada**, así que ahí
+bloquear es correcto; el ítem del menú **sí** es una salida, así que ofrece las dos opciones de
+verdad. *Descartado:* replicar la condición en cada handler — cuatro copias de la misma condición es
+*exactamente* cómo nació el defecto que abrió la O5, y la guarda quedó cableada al handler
+equivocado (el atajo de D-054, que los dos cargos que configuran **no tienen**).
+
+**Consecuencias:**
+
+- **Cargar un año son cuatro números y una fecha**, y de ahí salen los 365 días sin materializar
+  ninguno. El módulo **desaparece de la vida diaria** entre una carga anual y la siguiente: cero
+  sweepers, cero crons, cero tareas periódicas nuevas (CA-23, re-verificado sobre el diff de cada
+  ola). La sincronización con Entra es un botón, no un proceso.
+- **Cuatro migraciones, no una:** `F37.A1` (tablas), `F37.A3` (el CHECK de `grupo` y las FK compuestas
+  que atan `planta_id` y la clave natural del cumplimiento al `turno_id`), `F37.A4` (formato del
+  vector + UNIQUE filtrada) y `F37.A5` (normalización canónica). **Corren al reiniciar el servicio**;
+  cualquier chequeo de despliegue que las enumere se actualiza. `F37.A2` (el flag de cargo) **no**
+  deja fila en `migracion_aplicada`: su `ALTER` vive en la sección de catálogos, ~1.100 líneas antes
+  de que exista esa tabla. Y un flag de cargo se agrega **en dos sitios y en ese orden** —el `ALTER`
+  idempotente antes del MERGE, y el valor dentro del MERGE—: invertirlo no rompe la migración, rompe
+  el arranque.
+- **Cada cierre de turno lee dos tablas más y escribe N filas** (N = roles con patrón); antes de la
+  primera carga anual, cero. `turno_unidad` gana **dos dependientes nuevos** que todo barrido de
+  fixtures tiene que conocer (14 archivos de test + `helpers.js` + `residuos.js` se actualizaron por
+  eso). `rotacion_cumplimiento` **duplica a propósito** `cargo_nombre` y `titulares_json` como
+  snapshot congelado, porque el nombre de un cargo puede cambiar ([[D-052]]) y el histórico no se
+  reescribe. `reabrirTurno` **borra** la fila de cumplimiento igual que borra la conformación: sin
+  eso, el re-cierre congelaba sobre la fila vieja y quien entró tras reabrir quedaba `PENDIENTE` para
+  siempre.
+- **Supuesto explícito que se rompería en silencio:** hoy `is_read_committed_snapshot_on = 0` y los
+  bloqueos de fila serializan la interacción entre la pila de control y el congelado del cierre. **Si
+  algún día se activa RCSI, aparece una ventana** en la que un `TOMAR` puede comprometer después de
+  que el congelado leyó el log, y habría que compartir el applock entre los dos caminos. Nota
+  relacionada: el `UPDLOCK` que ordena los bloqueos frente a `cerrarTurno` **subsume** al
+  `sp_getapplock` para dos escrituras del mismo turno, así que el applock ya no se puede medir con
+  concurrencia interna — su verificador lo toma desde afuera, donde la diferencia de granularidad
+  (turno vs. turno+cargo) sí se ve.
+- **Los 13 duplicados legacy de `lov_bit.usuario` sobreviven intactos y son inofensivos** (solo las
+  filas con `azure_oid` pueden loguear, y por tanto solo ellas aparecen en `turno_participante`).
+  **Nadie debe "limpiarlos".** La primera sincronización real crea ~78 filas.
+- **La clasificación por rol es trabajo manual la primera vez:** tras la primera sincronización ~78 de
+  81 personas llegan **sin cargo** (`ultimo_cargo_id` se infiere de la última sesión y la mayoría
+  nunca entró). Por eso la pantalla trata el rol como un control más y **agrupa por el buffer, no por
+  el dato del servidor**: cambiar el rol de alguien lo mueve de tarjeta en el acto. Persistir el cargo
+  del directorio de Graph sería schema, y quedó fuera de alcance.
+- **Zona sin oráculo:** el periodo medido son 365 días y **no incluye un 29 de febrero**. El patrón
+  nunca se ejercitó contra un bisiesto sobre datos medidos; rehacer esa costura cuando se cargue
+  2028-02-01…2029-01-31.
+- **Deuda declarada, con su escenario** (visto bueno del 2026-09-02, opción (b) del `GATE-O5 §5 D5`;
+  se evaluó abrir una O6 de un lote y se descartó porque el caso de uso que motivó la ola —repartir
+  ~81 personas y salir por el menú— ya está cubierto por cinco salidas y el navegador):
+  - **La pantalla de configuración tiene un SEGUNDO borrador que nadie reporta.** El `form` de la zona
+    de patrones —rol, dos fechas, dos vectores de 8 números y dos grupos— no entra en `hayCambios` ni
+    en `hayBorrador`: teclearlo y salir sin apretar "Cargar patrón" lo pierde **con la guarda puesta y
+    sin preguntar**. Arreglarlo bien exige decidir qué cuenta como "empezado" en un formulario de 7
+    campos, y eso es diseño con casos. Además `onCrearPatron` no resetea `form` tras crear, así que un
+    segundo clic re-POSTea el mismo patrón para un 409.
+  - **Las salidas por el efecto de sincronización ruta→estado siguen sin guarda:** back/forward del
+    navegador, hash escrito a mano y —el disparador menos obvio— un `revalidate` que **quite**
+    `puede_configurar_rotacion` con un borrador abierto, que cae a bitácoras y se lleva el buffer.
+    Entrar a `#/rotacion` hace `pushState`, así que el back es una salida natural. Cubrirlo exige un
+    *blocker* de historial sobre los dos efectos de [[D-035]], que es un lote propio.
+  - **El modal de la guarda no se cierra si la ruta cambia por debajo** (ventana de segundos): queda
+    un aviso sobre una pantalla ya desmontada, y "Salir sin guardar" navega con el destino de antes.
+- **Deuda que este ADR nombra y que NO es de rotación:** (a) las dos entradas nuevas del menú son
+  salidas sin guarda **para el buffer de MAND** (24 periodos de captura) — no es regresión: el toggle
+  "Ver históricos" ya lo hacía desde antes; (b) `SalaDeMandoGrid` **nunca reporta `false` al
+  desmontarse**, así que `mandDirty` queda pegado en `true` y bloquea el cambio de unidad hablando de
+  una grilla que ya no está en pantalla; (c) `planearSalidaDeRotacion` y `mensajeCambiosSinGuardar`
+  viven dentro de una vista de 3.000 líneas, contra la convención 36, y sus dos llamadas interpretan
+  el enum con defaults opuestos (una falla cerrada, la otra abierta); (d) `F37.A5` aborta **la fila
+  entera** si una de las dos columnas es ilegible aunque el pre-vuelo de `F37.A4` sea por columna;
+  (e) el popup se **desmonta** en vez de esconderse cuando el turno cruza `fin_nominal`, así que un
+  aviso que alguien está leyendo desaparece; (f) `omitidas` se pierde justo en el caso grave (cruzado
+  el umbral, el 503 no lleva conteos: con 3 personas faltantes se dice cuántas, con 60 no);
+  (g) `GET /patrones` marca la **fila**, no la columna, así que con `vector_t1` roto y `t2` sano los
+  dos salen crudos; (h) `POST /asignaciones` exige un `cargo_id` que la salida (`grupo: null`)
+  ignora; (i) la pila LIFO y el enum `ESTADOS` existen **dos veces** cada uno
+  (`control.js`/`cumplimiento.js`, backend/front) sin nada que los ate, y los formateadores de fecha
+  están duplicados por pantalla porque `src/utils/` no tuvo escritor en ninguna ola.
+- **Deuda de la suite, heredada y confirmada dos veces:** **8 archivos `.test.js` del disco están
+  fuera del script `test`** (69 de 77; un gate los corrió a mano: 43/43 verdes), y `CLAUDE.md`
+  documentaba el comando de tests **sin `--test-concurrency=1`**, con `server/tests/README.md`
+  diciendo lo contrario — dos gates seguidos leyeron como regresión lo que era una **condición de
+  invocación**. Corregido en la convención 38. La otra condición: para que CA-6 ejercite el camino
+  real hay que poner `M365_CLIENT_SECRET=` **en los dos procesos**, servidor y runner.
+- **Un test baja una constraint de producción durante su corrida.**
+  `rotacion_correcciones_o2.test.js` hace `DROP CONSTRAINT CK_rotacion_patron_vector_t1` y siembra
+  filas corruptas, sostenido solo por su `finally`. Las **filas** sí tienen red (`residuos.js`) y
+  `--test-concurrency=1` evita el cruce interno; la **constraint caída** no la ve nadie hasta el
+  arranque siguiente, que la repone. Gotcha de la convención 38.
+- **Verificación del cierre (2026-09-02, bajo test-lock `CIERRE-D065`, contra `PortalG3_dev`, backend
+  efímero en `:3199` sin credencial de Graph y con el stub del SIS):** backend **897/897 en 16 bloques (0 fail, 0 skipped)** en 16
+  bloques, front `npm run build` ✔ y vitest **442/442** en 21 archivos, `eslint` sobre el territorio
+  de rotación con **0 errores y los mismos 5 warnings del baseline** en `BitacorasGecelca3.jsx`,
+  **cero residuos** (20 checks en 0) y las tres superficies verificadas **dentro del bundle de
+  producción** por grep sobre `dist/`. Baseline: 897 backend · 442 front (`GATE-O5`); rama base
+  681/681 · 324/324 — **la cifra es una identidad, no una resta**: `git diff f23ae7b..HEAD -- server/`
+  sale vacío desde el GATE-O4. Los 23 CA quedan en **`cumple`**, ninguno `parcial` ni `bloqueado`.
+  **El bloque 8 hubo que relanzarlo**, y la causa queda escrita porque el próximo lector la va a ver
+  igual: no fue una regresión sino una **caída transitoria de la conexión a SQL Server** a mitad de
+  corrida (`Failed to connect to …:1433`), que se llevó por delante al backend efímero y dejó 20
+  rojos, **todos `ESOCKET`/`ETIMEOUT` y todos en los tests que tocan BD**. Restablecida la conexión y
+  relanzado el bloque con un backend nuevo: **70/70, exit 0** — que es exactamente su conteo del
+  `GATE-O5`. **Estado del schema medido contra la BD después de la corrida:** las cuatro migraciones
+  (`F37.A1`, `F37.A3`, `F37.A4`, `F37.A5`) registradas en `migracion_aplicada`, las cuatro tablas
+  presentes, los dos CHECK del vector y las dos FK compuestas instalados,
+  `UQ_rotacion_patron_natural_activo` **filtrada por `([activo]=(1))`** y la UNIQUE vieja ya no
+  existe, el flag en **exactamente** los dos cargos del contrato con el Gerente en `solo_lectura = 1`
+  (CA-4 verificado sobre el dato, no sobre el test) y `is_read_committed_snapshot_on = 0`, que es el
+  supuesto de arriba.
+- **Lo que NINGÚN gate pudo correr y es el smoke del despliegue:** el flujo completo con **backend
+  vivo, datos reales y login Entra** — la sincronización contra el tenant de verdad (~81 personas en
+  una sola pantalla **sin buscador ni filtro**: con el directorio simulado de 5 no se nota), el popup
+  apareciendo solo a quien aplica, y el congelado en un cierre de turno real.
+- **Para el runbook:** el grupo de Entra `ADMINISTRADOR Y DEBUGGING` está **vacío**, así que hoy el
+  único que puede usar la superficie A es el **Gerente de Producción**; el `turno-sweeper` y el
+  `mand-sweeper` arrancan bajo `AUTH_TEST_BYPASS=1` (deuda heredada, fuera de alcance de D-065); y
+  `auth/provision.js` tiene la misma exposición de `UNIQUE` en `username` que la sincronización
+  resolvió con el fallback al `azure_oid` — si el UPN de alguien ya lo ocupa una fila legacy, su
+  primer login falla. `F37.A5` deja fila en `migracion_aplicada` aunque haya encontrado vectores
+  ilegibles (es audit trail, no gate): "A5 aplicada, A4 ausente" **no** invierte la causalidad.
+- **No toca contratos cross-repo.** `evento_dashboard` y `disponibilidad_dashboard` quedan intactas y
+  `../docs/interfaces-cross-repo.md` **no cambia**. Tampoco se tocó MAND, DISP, COMB, F03 ni el
+  despacho XM de [[D-064]].
+- Cross-refs: [[D-045]] (el turno como entidad y la conformación, que este ADR cruza), [[D-031]] (el
+  `azure_oid` como clave de aprovisionamiento y la `PRECEDENCE` de roles), [[D-035]] (el hash como
+  fuente única y sus dos efectos), [[D-040]] / [[D-054]] (los otros dos borradores de la misma
+  familia), [[D-046]] (la transición bloquea la unidad entera), [[D-039]] (la matriz de permisos que
+  el flag no altera), [[D-052]] (el nombre visible vive en el seed → por eso el snapshot congelado),
+  [[D-059]] (el observador queda fuera siempre), [[D-044]] (sintéticos fuera salvo unit tests),
+  [[D-032]] (nunca `err.message` crudo; el front ramifica por `codigo`), [[D-020]] (BD en UTC,
+  presentación Bogotá), [[D-030]] / [[D-055]] (ningún test escribe en planta real), [[D-063]]
+  (`copias = 0` no es error), [[D-037]] (endpoint nuevo nace cerrado). BIT-MODBD **§2.2, §4.12 y
+  §7.13** (v2.8), BIT-RF **RF-079** (v2.4), y `CLAUDE.md` convención **38**.
 
 ---
 
