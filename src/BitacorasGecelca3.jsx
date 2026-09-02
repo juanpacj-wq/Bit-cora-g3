@@ -1937,6 +1937,27 @@ const CODIGOS_ROTACION_GLOBALES = new Set(['sin_conexion', 'db_no_disponible', '
 // así que va un no-op ESTABLE: una lambda inline crearía una función nueva en cada render del raíz.
 const NOOP = () => {};
 
+// D-065 L14 (CR4-4): la ÚNICA regla que decide si una salida por navegación tiene que confirmarse
+// antes. La configuración anual guarda el reparto en un buffer interno detrás de un Guardar
+// explícito, y cambiar de `vista` la DESMONTA: sin esto, repartir ~81 personas y abrir el menú para
+// mirar el cumplimiento dejaba la pantalla en blanco, sin deshacer.
+//
+// Va como función pura y compartida —no como una condición repetida en cada handler— por la misma
+// razón que `transicionAbierta` es una sola expresión para los dos overlays: la próxima entrada que
+// alguien agregue al menú se olvidaría de una copia, que es exactamente cómo nació este hallazgo.
+//
+// `destino` es la sección a la que se va (`'bitacoras' | 'historicos' | 'rotacion' |
+// 'rotacion-cumplimiento'`) o `'unidad'` para el cambio de unidad en caliente.
+export function planearSalidaDeRotacion({ vistaActual, destino, hayBorrador }) {
+  // El buffer solo existe mientras la pantalla está montada: fuera de ella no hay nada que perder,
+  // aunque el flag se hubiera quedado encendido.
+  if (vistaActual !== 'rotacion') return 'seguir';
+  if (!hayBorrador) return 'seguir';
+  // Quedarse donde ya se está no es una salida: preguntar ahí enseña a ignorar el aviso.
+  if (destino === 'rotacion') return 'seguir';
+  return 'confirmar';
+}
+
 export default function App() {
   const auth = useAuth();
   const catalogos = useCatalogos(auth.sesion?.cargo_id, auth.ready);
@@ -2019,6 +2040,11 @@ export default function App() {
   // el child registra al montar (registerSaveHandler).
   const [mandDirty, setMandDirty] = useState(false);
   const [mandGuardando, setMandGuardando] = useState(false);
+  // D-065 L14: espejo del borrador de la configuración anual, que vive dentro de
+  // `ConfiguracionRotacion` (el raíz no puede mirar el buffer). Lo reporta el propio componente por
+  // `onDirtyChange` —el mismo contrato con el que SalaDeMandoGrid levanta `mandDirty`— y se apaga
+  // solo al desmontarse, así que no puede quedar encendido sin dueño.
+  const [rotacionDirty, setRotacionDirty] = useState(false);
   const mandSaveRef = useRef(null);
   const registerMandSave = useCallback((fn) => { mandSaveRef.current = fn; }, []);
 
@@ -2599,10 +2625,21 @@ export default function App() {
     // ACTUAL. Al rotar la sesión se perderían en silencio — o peor, se guardarían contra la unidad
     // nueva. `mandDirty` cubre el diff de Sala de Mando, que vive fuera de `registrosDeBitacora`.
     const hayCambiosSinGuardar = registrosDeBitacora.some((r) => r._dirty) || mandDirty;
-    if (hayCambiosSinGuardar) {
+    // D-065 L14 (CR4-4): y el reparto de la configuración anual, que es el tercer borrador de la app.
+    // Acá la guarda BLOQUEA en vez de ofrecer perderlo, como ya hacía para los otros dos (D-054): el
+    // cambio de unidad no es una forma de salir de la pantalla, así que no hay nada que elegir —
+    // guardar o descartar deja seguir. Hoy el cambio en caliente no desmonta la configuración (es un
+    // early return del MISMO componente), pero sí puede hacerlo si `revalidate` corrige el cargo y se
+    // pierde el permiso: el efecto (a) caería entonces a bitácoras con el buffer adentro.
+    const hayBorradorRotacion = planearSalidaDeRotacion({
+      vistaActual: vista, destino: 'unidad', hayBorrador: rotacionDirty,
+    }) === 'confirmar';
+    if (hayCambiosSinGuardar || hayBorradorRotacion) {
       setModal({
         title: 'Cambios sin guardar',
-        message: `Hay cambios sin guardar en esta unidad. Guárdalos o descártalos antes de ir a ${otraUnidad.nombre}.`,
+        message: hayBorradorRotacion
+          ? `El reparto de grupos todavía no se ha guardado. Guárdalo o descártalo antes de ir a ${otraUnidad.nombre}.`
+          : `Hay cambios sin guardar en esta unidad. Guárdalos o descártalos antes de ir a ${otraUnidad.nombre}.`,
         confirmLabel: 'Entendido', confirmColor: 'blue', icon: AlertTriangle,
         onConfirm: () => setModal(null),
       });
@@ -2638,17 +2675,52 @@ export default function App() {
     } catch (e) {
       showToast(e.message || 'No se pudo cambiar de unidad', 'error');
     }
-  }, [otraUnidad, registrosDeBitacora, mandDirty, auth, codigoActivo, vista, cumplRango, navigate, showToast]);
+  }, [otraUnidad, registrosDeBitacora, mandDirty, rotacionDirty, auth, codigoActivo, vista, cumplRango, navigate, showToast]);
 
   // Abre el modal rediseñado (LogoutModal): ilustración hero + 2 acciones (Cancelar | Sí,
   // finalizar y salir). "Cambiar de unidad" ya no vive acá — se movió al HeaderMenu.
   const handleLogout = useCallback(() => setLogoutOpen(true), []);
 
+  // D-065 L14 (CR4-4): la puerta ÚNICA por la que se sale de una sección. Si no hay nada que perder,
+  // la navegación corre tal cual; si hay un borrador en la configuración anual, se pregunta y solo
+  // corre cuando la persona elige perderlo. Las dos salidas son de verdad: "Cancelar" devuelve a la
+  // pantalla con el borrador intacto y "Salir sin guardar" navega. NO existe un guardado automático:
+  // guardar dispara un POST con efectos sobre la malla real y eso no se hace sin que alguien lo pida.
+  //
+  // Intercepta ANTES de mover `vista`, así que el efecto (b) no llega a escribir el hash: una
+  // navegación cancelada que dejara la URL cambiada sería peor que no tener guarda, porque el F5 se
+  // iría igual.
+  const salirDeRotacion = useCallback((destino, accion) => {
+    if (planearSalidaDeRotacion({ vistaActual: vista, destino, hayBorrador: rotacionDirty }) === 'seguir') {
+      accion();
+      return;
+    }
+    setModal({
+      title: 'Cambios sin guardar',
+      message: 'El reparto de grupos todavía no se ha guardado. Si sales de la configuración ahora, lo pierdes.',
+      confirmLabel: 'Salir sin guardar', confirmColor: 'red', icon: AlertTriangle,
+      onConfirm: () => { setModal(null); accion(); },
+    });
+  }, [vista, rotacionDirty]);
+
   // D-065: entrar a las dos secciones de rotación. Solo mueven `vista`; la URL la escribe el efecto
   // (b) de sincronización, igual que para bitácoras e históricos — la fuente única sigue siendo el
   // hash y acá no se toca `window.location` a mano.
-  const handleIrARotacion = useCallback(() => setVista('rotacion'), []);
-  const handleIrACumplimiento = useCallback(() => setVista('rotacion-cumplimiento'), []);
+  const handleIrARotacion = useCallback(
+    () => salirDeRotacion('rotacion', () => setVista('rotacion')),
+    [salirDeRotacion],
+  );
+  const handleIrACumplimiento = useCallback(
+    () => salirDeRotacion('rotacion-cumplimiento', () => setVista('rotacion-cumplimiento')),
+    [salirDeRotacion],
+  );
+
+  // El toggle del menú ("Ver bitácoras" / "Ver históricos"): pregunta "¿estoy en bitácoras?", así que
+  // desde rotación devuelve a las bitácoras — que es lo que dice su etiqueta. También es una salida.
+  const handleToggleVista = useCallback(() => {
+    const destino = vista === 'bitacoras' ? 'historicos' : 'bitacoras';
+    salirDeRotacion(destino, () => setVista(destino));
+  }, [vista, salirDeRotacion]);
 
   // Dashboard de generación (app hermana): pestaña nueva, igual que el enlace del LoginScreen.
   // noopener corta la referencia window.opener hacia esta app.
@@ -2710,7 +2782,7 @@ export default function App() {
         turnoExtendido={turnoHook.extendido}
         onLogout={handleLogout}
         vista={vista}
-        onToggleVista={() => setVista((v) => (v === 'bitacoras' ? 'historicos' : 'bitacoras'))}
+        onToggleVista={handleToggleVista}
         puedeConfigurarRotacion={puedeConfigurarRotacion}
         onIrARotacion={handleIrARotacion}
         onIrACumplimiento={handleIrACumplimiento}
@@ -2727,6 +2799,7 @@ export default function App() {
         <ConfiguracionRotacion
           puedeConfigurar={puedeConfigurarRotacion}
           onError={handleRotacionError}
+          onDirtyChange={setRotacionDirty}
         />
       ) : vista === 'rotacion-cumplimiento' ? (
         /* D-065 · superficie C. Controlado de verdad: sin los tres valores no consulta, así que el

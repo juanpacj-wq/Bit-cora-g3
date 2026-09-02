@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createElement as h, act } from 'react';
 import { createRoot } from 'react-dom/client';
 import ConfiguracionRotacion from './ConfiguracionRotacion.jsx';
+import { planearSalidaDeRotacion } from '../../BitacorasGecelca3.jsx';
 
 // El día Bogotá se controla desde afuera: `vigente_desde` sale de él y, sin fijarlo, la aserción
 // del cuerpo del POST dependería del reloj de quien corra la suite.
@@ -212,9 +213,11 @@ afterEach(() => {
 
 const montados = [];
 let codigosReportados;
+let dirtyReportado;   // CR4-4: la secuencia de `onDirtyChange`, en orden
 
 async function render(props = {}) {
   codigosReportados = [];
+  dirtyReportado = [];
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -223,6 +226,9 @@ async function render(props = {}) {
     // Lambda inline a propósito: es como lo va a pasar el raíz (L10). Si el componente metiera
     // `onError` en las deps de su efecto de carga, esto lo dejaría releyendo en bucle.
     onError: (codigo) => codigosReportados.push(codigo),
+    // CR4-4: el raíz no puede mirar dentro del buffer, así que la suciedad la reporta el
+    // componente. Lambda inline a propósito, igual que `onError`.
+    onDirtyChange: (sucia) => dirtyReportado.push(sucia),
     ...props,
   };
   await act(async () => { root.render(h(ConfiguracionRotacion, actuales)); });
@@ -644,5 +650,109 @@ describe('ConfiguracionRotacion · una fila con el vector dañado (CR3-1)', () =
     const opciones = [...container.querySelectorAll('.rot-copiar option')].map((o) => o.value);
     expect(opciones).toContain('7');
     expect(opciones).not.toContain('9');
+  });
+});
+
+// ── CR4-4 · el borrador se avisa hacia arriba ───────────────────────────────────────────────────
+//
+// D-065 L14. El reparto vive en un `buffer` INTERNO detrás de un Guardar explícito, y cambiar de
+// sección DESMONTA el componente: el borrador se iba con él, en silencio. La mitad que le toca al
+// componente es reportar su suciedad —el raíz no puede mirar dentro del buffer—; la otra mitad,
+// preguntar antes de navegar, la fija `planearSalidaDeRotacion` más abajo.
+//
+// El contrato es `onDirtyChange(bool)`, el MISMO nombre y la misma forma con la que SalaDeMandoGrid
+// levanta su diff al raíz (`mandDirty`): un lote que traiga un tercer borrador ya tiene el patrón.
+
+describe('ConfiguracionRotacion · avisa que tiene un borrador sin guardar (CR4-4)', () => {
+  it('reporta true al ensuciarse y false al descartar', async () => {
+    const { container } = await render();
+
+    // Arranca limpio: lo que se ve es lo que el server tiene.
+    expect(dirtyReportado.at(-1)).toBe(false);
+
+    await elegir(selGrupo(container, 12), '2');
+    expect(dirtyReportado.at(-1)).toBe(true);
+
+    await click(container.querySelector('.rot-descartar'));
+    expect(dirtyReportado.at(-1)).toBe(false);
+  });
+
+  it('tras guardar vuelve a false: el buffer nace otra vez del server', async () => {
+    const { container } = await render();
+
+    await elegir(selGrupo(container, 12), '2');
+    expect(dirtyReportado.at(-1)).toBe(true);
+
+    await click(guardar(container));
+
+    expect(postsDeAsignaciones()).toHaveLength(1);
+    expect(dirtyReportado.at(-1)).toBe(false);
+  });
+
+  // Sin esto, el flag del raíz se queda en `true` para siempre después de que la persona aceptó
+  // perder el borrador: el componente ya no existe y nadie más puede desmentirlo.
+  it('al desmontarse avisa que ya no hay borrador', async () => {
+    const { container, teardown } = await render();
+
+    await elegir(selGrupo(container, 12), '2');
+    expect(dirtyReportado.at(-1)).toBe(true);
+
+    teardown();
+    expect(dirtyReportado.at(-1)).toBe(false);
+  });
+
+  // Elegir un rol sin grupo no crea ninguna asignación (no hay nada que guardar), así que tampoco
+  // puede disparar la guarda: preguntar por un borrador que no existe enseña a ignorar el aviso.
+  it('elegir un rol sin grupo no lo cuenta como borrador', async () => {
+    const { container } = await render();
+
+    await elegir(selCargo(container, 41), '2');
+
+    expect(guardar(container).disabled).toBe(true);
+    expect(dirtyReportado.at(-1)).toBe(false);
+  });
+});
+
+// ── CR4-4 · la regla de salida del dashboard ────────────────────────────────────────────────────
+//
+// La otra mitad del arreglo vive en el raíz: preguntar antes de desmontar la pantalla. La decisión
+// está extraída a una función pura y ÚNICA (`planearSalidaDeRotacion`) que llaman los cuatro puntos
+// de salida — las dos entradas del menú, el toggle "Ver bitácoras" y "Cambiar de unidad" —, así que
+// lo que se fija acá es la regla que todos comparten, no cuatro condiciones que pueden divergir.
+//
+// Se importa desde `BitacorasGecelca3.jsx` igual que `grilla-solo-autor-gate.test.jsx` importa
+// `GrillaRegistros`: el módulo no tiene efectos al importarse, y este archivo es el único test del
+// territorio de este lote.
+describe('planearSalidaDeRotacion (CR4-4)', () => {
+  const DESTINOS_FUERA = ['bitacoras', 'historicos', 'rotacion-cumplimiento', 'unidad'];
+
+  it('con un borrador sin guardar, toda salida de la configuración se confirma primero', () => {
+    for (const destino of DESTINOS_FUERA) {
+      expect(planearSalidaDeRotacion({ vistaActual: 'rotacion', destino, hayBorrador: true }))
+        .toBe('confirmar');
+    }
+  });
+
+  it('sin borrador no molesta a nadie', () => {
+    for (const destino of DESTINOS_FUERA) {
+      expect(planearSalidaDeRotacion({ vistaActual: 'rotacion', destino, hayBorrador: false }))
+        .toBe('seguir');
+    }
+  });
+
+  // Quedarse donde ya se está no es una salida: el ítem "Rotación de turnos" del menú estando en
+  // rotación no desmonta nada, y preguntar ahí enseña a despachar el aviso sin leerlo.
+  it('quedarse en la configuración nunca pregunta', () => {
+    expect(planearSalidaDeRotacion({ vistaActual: 'rotacion', destino: 'rotacion', hayBorrador: true }))
+      .toBe('seguir');
+  });
+
+  // El buffer solo existe mientras la pantalla está montada. Si el flag quedara encendido, no puede
+  // estorbar la navegación del resto de la app.
+  it('fuera de la configuración no pregunta aunque el flag siga encendido', () => {
+    for (const vistaActual of ['bitacoras', 'historicos', 'rotacion-cumplimiento']) {
+      expect(planearSalidaDeRotacion({ vistaActual, destino: 'bitacoras', hayBorrador: true }))
+        .toBe('seguir');
+    }
   });
 });

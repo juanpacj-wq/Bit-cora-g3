@@ -10,7 +10,9 @@ import { getTodayBogota } from '../../utils/fecha';
 //   1. El patrón por rol (arriba): qué grupo está de guardia cada día del ciclo.
 //   2. Las personas por rol (abajo): en qué grupo va cada quien.
 //
-// Componente CONTROLADO en el sentido de C8: recibe `puedeConfigurar` y avisa por `onError`.
+// Componente CONTROLADO en el sentido de C8: recibe `puedeConfigurar` y avisa por `onError` y por
+// `onDirtyChange` (D-065 L14, CR4-4: el buffer es interno, así que la suciedad la reporta él —
+// el raíz no puede mirarla, y sin ese aviso nadie podía guardar la salida de la pantalla).
 // NO lee ni escribe el hash — eso es territorio de L10 (`#/rotacion` no lleva subestado).
 //
 // Tres reglas que gobiernan todo el archivo:
@@ -149,7 +151,7 @@ const fmtFecha = (iso) => (iso
     .format(new Date(`${iso}T00:00:00Z`))
   : '—');
 
-export default function ConfiguracionRotacion({ puedeConfigurar = false, onError }) {
+export default function ConfiguracionRotacion({ puedeConfigurar = false, onError, onDirtyChange }) {
   const {
     cargando, guardando, error,
     getCargos, getPatrones, crearPatron, desactivarPatron,
@@ -178,6 +180,11 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
   // `showToastRef` en ConsumosGrid.
   const onErrorRef = useRef(onError);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
+
+  // D-065 L14 (CR4-4): mismo criterio de ref para `onDirtyChange`. Sin esto, una lambda inline del
+  // padre volvería a disparar el aviso en cada render suyo.
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  useEffect(() => { onDirtyChangeRef.current = onDirtyChange; }, [onDirtyChange]);
 
   const reportar = useCallback((e) => {
     setAviso({ tono: 'error', texto: textoError(e) });
@@ -239,6 +246,21 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
 
   const cambios = useMemo(() => calcularCambios(personas, buffer), [personas, buffer]);
   const hayCambios = cambios.length > 0;
+
+  // D-065 L14 (CR4-4) · el borrador se REPORTA hacia arriba; el raíz no puede adivinarlo.
+  //
+  // El reparto vive en `buffer`, que es interno y muere con el componente: cambiar de sección desde
+  // el menú DESMONTA esta pantalla, y el trabajo de repartir ~81 personas se iba en silencio. La
+  // guarda de "Cambios sin guardar" del dashboard mira `registrosDeBitacora._dirty` y `mandDirty`, y
+  // esto no es ninguno de los dos. La suciedad ya está calculada acá (`cambios.length > 0`), que es
+  // la MISMA expresión que habilita Guardar: no puede haber un borrador que el botón vea y la guarda
+  // no. `onDirtyChange` es el nombre y la forma con que SalaDeMandoGrid levanta su diff (`mandDirty`).
+  useEffect(() => { onDirtyChangeRef.current?.(hayCambios); }, [hayCambios]);
+
+  // Y al desmontarse, la pantalla desmiente su propio aviso: quien aceptó perder el borrador no
+  // puede quedar con el flag del raíz encendido para siempre (nadie más podría apagarlo, porque el
+  // dueño del buffer ya no existe).
+  useEffect(() => () => { onDirtyChangeRef.current?.(false); }, []);
 
   // De una fila dañada NO se puede copiar: su vector no parsea, y copiarlo propagaría el daño al
   // patrón nuevo. Listarla sí (es justamente para lo que el backend la manda); ofrecerla como
