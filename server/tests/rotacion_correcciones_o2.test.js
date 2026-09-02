@@ -24,6 +24,7 @@ import { hashPassword } from '../utils/password.js';
 import { getTurnoColombia, fechaBogotaStr } from '../utils/turno.js';
 import { abrirTurnoSiFalta } from '../utils/turno-entidad.js';
 import { titularesDeTurno } from '../utils/rotacion/titulares.js';
+import { parsearVector } from '../utils/rotacion/patron.js';
 import { sincronizarDirectorio, leerDirectorioEntra } from '../utils/graph/directorio.js';
 import * as graphCliente from '../utils/graph/cliente.js';
 import { call, deactivateSyntheticSessions } from './helpers.js';
@@ -357,6 +358,103 @@ describe('D-065 L12 · F37.A4 · formato del vector y UNIQUE filtrada', () => {
     } finally {
       await borrarMalo();
       await initDB(); // deja la BD como estaba pase lo que pase
+    }
+  });
+});
+
+// ═══════════════════ CR3-5 · el CHECK y el parser dejan de divergir (F37.A5, L13) ══════════════
+//
+// `parsearVector` tolera espacios alrededor de cada número (lo dice su docstring), así que
+// '1, 1, 3, 3, 4, 4, 2, 2' funciona perfecto en runtime. El CHECK de F37.A4 lo rechaza. Con una
+// fila así —solo alcanzable por SQL a mano, que es JUSTO el escenario para el que existe el
+// CHECK— el pre-vuelo omitía la constraint en cada arranque, para siempre, y F37.A4 no se
+// registraba nunca: el invariante de CR2-1 no se instalaba, en silencio, y el remedio impreso
+// pedía corregir una fila que no estaba mal.
+
+describe('D-065 L13 · F37.A5 · normalización canónica del vector (CR3-5)', () => {
+  const CON_ESPACIOS = '1, 1, 3, 3, 4, 4, 2, 2';
+  const CANONICO = '1,1,3,3,4,4,2,2';
+
+  // Sembrar y barrer con el acotador léxicamente al lado (guard D-055): el namespace de oids de
+  // la fixture no alcanza a ninguna fila real.
+  const sembrar = (v1, v2) => db.request()
+    .input('cargo_id', sql.Int, cargo.rol2.cargo_id)
+    .input('v1', sql.VarChar(32), v1)
+    .input('v2', sql.VarChar(32), v2)
+    .input('creado_por', sql.Int, uid.gerente)
+    .query(`
+      INSERT INTO bitacora.rotacion_patron
+        (cargo_id, fecha_inicio, fecha_fin, vector_t1, vector_t2, desfase, activo, creado_por)
+      OUTPUT INSERTED.rotacion_patron_id
+      VALUES (@cargo_id, '2024-01-01', '2024-12-31', @v1, @v2, 0, 0, @creado_por)
+    `).then((r) => r.recordset[0].rotacion_patron_id);
+
+  const borrarMios = () => db.request().query(`
+    DELETE FROM bitacora.rotacion_patron
+     WHERE creado_por IN (SELECT usuario_id FROM lov_bit.usuario
+                           WHERE azure_oid LIKE '00000000-d065-4012-%')`);
+
+  const bajarCk = () => db.request().batch(`
+    IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = 'CK_rotacion_patron_vector_t1'
+                 AND parent_object_id = OBJECT_ID('bitacora.rotacion_patron'))
+      ALTER TABLE bitacora.rotacion_patron DROP CONSTRAINT CK_rotacion_patron_vector_t1;
+  `);
+  const existeCk = async () => (await db.request().query(`
+    SELECT 1 AS x FROM sys.check_constraints WHERE name = 'CK_rotacion_patron_vector_t1'
+      AND parent_object_id = OBJECT_ID('bitacora.rotacion_patron')
+  `)).recordset.length === 1;
+  const vectoresDe = async (id) => (await db.request().input('id', sql.Int, id).query(`
+    SELECT vector_t1, vector_t2 FROM bitacora.rotacion_patron WHERE rotacion_patron_id = @id
+  `)).recordset[0];
+  const migracion = async (codigo) => (await db.request().input('c', sql.VarChar(20), codigo).query(`
+    SELECT 1 AS x FROM bitacora.migracion_aplicada WHERE codigo = @c
+  `)).recordset.length === 1;
+
+  test('la mitad del contrato: el motor SÍ acepta el vector con espacios', () => {
+    assert.deepEqual(parsearVector(CON_ESPACIOS), [1, 1, 3, 3, 4, 4, 2, 2]);
+    assert.deepEqual(parsearVector(CANONICO), [1, 1, 3, 3, 4, 4, 2, 2]);
+  });
+
+  test('CR3-5 · el arranque normaliza la fila con espacios y la constraint SÍ se instala', async () => {
+    let id;
+    try {
+      await bajarCk();
+      id = await sembrar(CON_ESPACIOS, VECTOR_T2);
+
+      await initDB();
+
+      assert.deepEqual(
+        await vectoresDe(id),
+        { vector_t1: CANONICO, vector_t2: VECTOR_T2 },
+        'F37.A5 tiene que reescribir el vector a su forma canónica con el PROPIO motor',
+      );
+      assert.equal(await existeCk(), true, 'sin drift real, el pre-vuelo ya no tiene por qué omitir la constraint');
+      assert.equal(await migracion('F37.A4'), true, 'F37.A4 tiene que quedar registrada, no omitida para siempre');
+      assert.equal(await migracion('F37.A5'), true, 'F37.A5 deja su rastro de auditoría');
+    } finally {
+      await borrarMios();
+      await initDB();
+    }
+  });
+
+  test('CR3-5 · lo que el motor NO puede leer no se adivina: sigue denunciado y la constraint se omite', async () => {
+    let idRoto;
+    let idEspacios;
+    try {
+      await bajarCk();
+      idRoto = await sembrar('ROTO', VECTOR_T2);
+      idEspacios = await sembrar(CON_ESPACIOS, VECTOR_T2);
+
+      await initDB();
+
+      // La legible se arregla…
+      assert.equal((await vectoresDe(idEspacios)).vector_t1, CANONICO);
+      // …y la ilegible queda TAL CUAL, con la constraint omitida y su remedio en el log.
+      assert.equal((await vectoresDe(idRoto)).vector_t1, 'ROTO', 'normalizar no es adivinar');
+      assert.equal(await existeCk(), false, 'con drift REAL la constraint se sigue omitiendo');
+    } finally {
+      await borrarMios();
+      await initDB();
     }
   });
 });

@@ -1,5 +1,8 @@
 import sql from 'mssql';
 import { JEFE_PLANTA_UPNS, JDT_DEFAULT_UPNS } from './auth/entra-config.js';
+// D-065 (F37.A5, L13) — el motor del patrón es PURO (sin BD, sin red): se importa acá para
+// normalizar los vectores guardados con el MISMO parser que los lee en runtime.
+import { parsearVector, serializarVector } from './utils/rotacion/patron.js';
 
 const rawHost = process.env.DB_HOST || '';
 let server = rawHost;
@@ -3232,6 +3235,81 @@ export async function initDB() {
   if (f37A3Creadas.length) {
     console.log(`[F37.A3] constraints de rotación creadas: ${f37A3Creadas.join(', ')}.`);
   }
+
+  // ---------- F37.A5 — D-065 (L13): normalización canónica de los vectores del patrón ----------
+  //
+  // Va ANTES de F37.A4 aunque su código sea posterior, y esa es exactamente su razón de ser:
+  // desbloquear el pre-vuelo de F37.A4 en el MISMO arranque, no en el siguiente.
+  //
+  // CR3-5: `parsearVector` TOLERA espacios alrededor de cada número —lo dice su docstring—, así que
+  // '1, 1, 3, 3, 4, 4, 2, 2' funciona perfecto en runtime, pero el CHECK de F37.A4
+  // (`LIKE` + `DATALENGTH = 15`) lo rechaza. Una fila así —solo alcanzable por SQL a mano, que es
+  // JUSTO el escenario para el que existe el CHECK— hacía que `agregarConstraintConPrevuelo`
+  // omitiera la constraint en cada arranque, PARA SIEMPRE, y que F37.A4 nunca llegara a
+  // `migracion_aplicada`: el invariante de CR2-1 no se instalaba nunca, en silencio, y el remedio
+  // que imprimía pedía corregir una fila que no estaba mal.
+  //
+  // De las dos salidas posibles —aflojar el predicado o normalizar el dato— se normaliza el dato:
+  //   · La app YA escribe canónico (`serializarVector` en POST /patrones), así que la forma con
+  //     espacios solo entra por SQL a mano. Lo que sobraba era el dato, no la constraint.
+  //   · Aflojar el CHECK lo volvería MÁS PERMISIVO, y ese es el único error de este par que rompe
+  //     en runtime: una fila que `parsearVector` rechace hace ROLLBACK del cierre de las DOS
+  //     plantas cada 60 s (C7, ver F37.A4). La dirección segura es que el CHECK sea igual o más
+  //     estricto que el parser, nunca al revés.
+  //   · Normalizar con el PROPIO motor (parsear + reserializar en Node, no un `REPLACE` de espacios
+  //     en SQL) cubre todo lo que el parser tolera y no solo el espacio, así que lo que sobreviva
+  //     a esta pasada es de verdad ilegible — y entonces el remedio de F37.A4 dice la verdad.
+  //
+  // El CHECK NO cambia de definición ni de nombre: H-L12-2 (“una constraint gateada por su nombre
+  // nunca adopta un cambio de definición”) no aplica, porque acá lo que cambia es el dato. Y no se
+  // adivina nada: lo que el motor no puede leer se deja intacto y lo denuncia F37.A4.
+  //
+  // Idempotente y auto-sanadora: corre en CADA arranque (una vez instalado el CHECK ninguna fila
+  // puede volver a violarlo, así que la lectura sale vacía). El flag es audit trail, no la guarda.
+  const f37A5Candidatas = await db.request().query(`
+    SELECT rotacion_patron_id, vector_t1, vector_t2
+    FROM bitacora.rotacion_patron
+    WHERE NOT (${predicadoVector('vector_t1')}) OR NOT (${predicadoVector('vector_t2')})
+  `);
+  const f37A5Normalizados = [];
+  let f37A5Ilegibles = 0;
+  for (const fila of f37A5Candidatas.recordset) {
+    let v1;
+    let v2;
+    try {
+      v1 = serializarVector(parsearVector(fila.vector_t1));
+      v2 = serializarVector(parsearVector(fila.vector_t2));
+    } catch {
+      f37A5Ilegibles += 1;   // ilegible para el motor: no se toca, la denuncia es de F37.A4
+      continue;
+    }
+    if (v1 === fila.vector_t1 && v2 === fila.vector_t2) continue;
+    await db.request()
+      .input('id', sql.Int, fila.rotacion_patron_id)
+      .input('v1', sql.VarChar(32), v1)
+      .input('v2', sql.VarChar(32), v2)
+      .query(`
+        UPDATE bitacora.rotacion_patron
+           SET vector_t1 = @v1, vector_t2 = @v2
+         WHERE rotacion_patron_id = @id`);
+    f37A5Normalizados.push(fila.rotacion_patron_id);
+  }
+  if (f37A5Normalizados.length) {
+    console.log(
+      `[F37.A5] ${f37A5Normalizados.length} patrón(es) normalizados a la forma canónica `
+      + `(id ${f37A5Normalizados.join(', ')}): el vector era legible para el motor pero no para el CHECK.`
+    );
+  }
+  if (f37A5Ilegibles > 0) {
+    console.warn(
+      `[F37.A5] ${f37A5Ilegibles} patrón(es) con el vector ilegible para el motor: se dejan intactos. `
+      + 'F37.A4 los denuncia con su remedio y omite la constraint hasta que se corrijan a mano.'
+    );
+  }
+  await db.request().batch(`
+    IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo = 'F37.A5')
+      INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F37.A5');
+  `);
 
   // ---------- F37.A4 — D-065 (L12): formato de los vectores y UNIQUE natural filtrada ----------
   //

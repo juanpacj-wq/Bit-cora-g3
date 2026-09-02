@@ -120,6 +120,32 @@ function patrones() {
   ];
 }
 
+// La fila que `mapPatron` devuelve cuando el vector guardado no parsea (CR2-8, GATE-O3 §6.14):
+// los DOS vectores salen en su forma CRUDA —el `catch` no reasigna ninguno, así que el sano
+// también llega como string—, los grupos derivados en `null` y `vector_invalido: true`. El backend
+// la manda a propósito para que el administrador pueda encontrarla; solo se llega a ella por SQL a
+// mano o por una fila anterior a F37.A4.
+function patronInvalido() {
+  return {
+    rotacion_patron_id: 9,
+    cargo_id: 2,
+    cargo_nombre: 'Ingeniero de Operación',
+    fecha_inicio: '2026-03-01',
+    fecha_fin: '2026-12-31',
+    vector_t1: 'ROTO',
+    vector_t2: '4,2,2,1,1,3,3,4',
+    desfase: 0,
+    activo: true,
+    grupo_t1: null,
+    grupo_t2: null,
+    vector_invalido: true,
+    creado_por: 3,
+    creado_por_nombre: 'Ernesto Muñoz',
+    creado_en: '2026-01-20T14:00:00.000Z',
+    creado_en_bogota: '2026-01-20T09:00:00.000',
+  };
+}
+
 // ── Stub de red ─────────────────────────────────────────────────────────────────────────────────
 
 function respuesta(cuerpo, status = 200) {
@@ -145,6 +171,8 @@ beforeEach(() => {
     actualizados: 17,
     total: 21,
     por_rol: { JEFE_DE_TURNO: 7, INGENIERO_OPERACION: 14 },
+    // L12 la devuelve SIEMPRE, aunque esté en cero (GATE-O3 §6.12).
+    omitidas: { total: 0, grupos: 0, usuarios: 0, personas_estimadas: 0 },
   };
   cuerpoGuardar = { creadas: 1, cerradas: 0, actualizadas: 0, sin_cambio: 0, total: 1 };
 
@@ -406,6 +434,41 @@ describe('ConfiguracionRotacion · Actualizar desde Entra', () => {
     expect(container.querySelector('.rot-resumen-sync').textContent).not.toContain('81');
   });
 
+  it('CR3-4 · una sincronización con grupos omitidos lo DICE, con su estimado de personas', async () => {
+    // El escenario exacto de CR2-4: un grupo de 14 personas que no respondió. Sin esto se ve
+    // idéntico a una sincronización completa —un grupo omitido aporta CERO al `por_rol`, así que
+    // no hay contra qué comparar— y el 200 miente por omisión.
+    cuerpoSync = {
+      ...cuerpoSync,
+      total: 7,
+      por_rol: { JEFE_DE_TURNO: 7 },
+      omitidas: { total: 2, grupos: 1, usuarios: 1, personas_estimadas: 14 },
+    };
+    const { container } = await render();
+
+    await click(container.querySelector('.rot-sync'));
+
+    const omitidas = container.querySelector('.rot-sync-omitidas');
+    expect(omitidas).not.toBeNull();
+    const texto = omitidas.textContent;
+    expect(texto).toContain('1 grupo');
+    expect(texto).toContain('1 usuario');
+    expect(texto).toContain('14');           // el estimado de personas que faltan
+    // Es una COTA, no una medida: el tamaño real del grupo es justo lo que no se pudo leer.
+    expect(texto).toMatch(/aproximad|≈|al menos/i);
+  });
+
+  it('CR3-4 · sin omisiones no inventa una advertencia, y el copy no promete que "acá se nota"', async () => {
+    const { container } = await render();
+
+    await click(container.querySelector('.rot-sync'));
+
+    expect(container.querySelector('.rot-sync-omitidas')).toBeNull();
+    // El copy viejo mandaba a revisar el conteo por rol para notar un grupo que no respondió, y
+    // eso es justo lo que el conteo por rol NO puede mostrar.
+    expect(container.querySelector('.rot-resumen-sync').textContent).not.toContain('acá se nota');
+  });
+
   it('un 503 entra_no_disponible es un aviso NO bloqueante: el resto de la pantalla sigue usable', async () => {
     fallaSync = {
       status: 503,
@@ -498,5 +561,58 @@ describe('ConfiguracionRotacion · patrón por rol', () => {
     expect(patch.url).toContain('/api/rotacion/patrones/7');
     expect(patch.cuerpo).toEqual({ activo: false });
     expect(container.querySelector('.rot-aviso').textContent).toContain('Patrón desactivado');
+  });
+});
+
+// ── CR3-1 · la fila que el backend manda para que se pueda ENCONTRAR ────────────────────────────
+//
+// `mapPatron` degrada a propósito (CR2-8): antes una sola fila con el vector corrupto volvía el GET
+// entero un 500 y el administrador no podía ni listar los patrones para saber cuál era el malo.
+// Esta pantalla es esa herramienta de diagnóstico, así que tiene que sobrevivir a la fila y
+// mostrarla marcada. Reventar con ella cambia un 500 —que al menos queda en el log— por una
+// pantalla en blanco.
+
+describe('ConfiguracionRotacion · una fila con el vector dañado (CR3-1)', () => {
+  beforeEach(() => {
+    cuerpoPatrones = { patrones: [patrones()[0], patronInvalido()] };
+  });
+
+  it('la lista sobrevive, la marca como dañada y muestra el texto crudo', async () => {
+    const { container } = await render();
+
+    const filas = [...container.querySelectorAll('.rot-patron')];
+    expect(filas).toHaveLength(2);
+
+    const mala = container.querySelector('.rot-patron[data-patron="9"]');
+    expect(mala.getAttribute('data-invalido')).toBe('1');
+    // El texto crudo a la vista es lo que permite identificar la fila para corregirla.
+    expect(mala.textContent).toContain('ROTO');
+    expect(mala.textContent).toMatch(/dañad/i);
+
+    // La fila sana no cambia de aspecto por tener una vecina rota.
+    const buena = container.querySelector('.rot-patron[data-patron="7"]');
+    expect(buena.getAttribute('data-invalido')).toBe(null);
+    expect(buena.textContent).toContain('1, 1, 2, 2, 4, 4, 3, 3');
+  });
+
+  it('sigue ofreciendo Desactivar sobre la fila dañada: es el único camino para corregirla', async () => {
+    const { container } = await render();
+
+    const mala = container.querySelector('.rot-patron[data-patron="9"]');
+    const desactivar = mala.querySelector('.rot-patron-desactivar');
+    expect(desactivar).not.toBeNull();
+
+    await click(desactivar);
+    const patch = llamadas.find((l) => l.metodo === 'PATCH');
+    expect(patch.url).toContain('/api/rotacion/patrones/9');
+    expect(patch.cuerpo).toEqual({ activo: false });
+  });
+
+  it('"Copiar de otro rol" no la ofrece: copiar un vector que no parsea propaga el daño', async () => {
+    const { container } = await render();
+
+    const opciones = [...container.querySelectorAll('.rot-copiar option')].map((o) => o.value);
+    expect(opciones).toContain('7');
+    expect(opciones).not.toContain('9');
   });
 });

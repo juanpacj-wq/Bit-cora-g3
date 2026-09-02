@@ -182,16 +182,24 @@ export default function CumplimientoRotacion({ desde, hasta, planta, onRangoChan
           </div>
         )}
 
-        {/* Titulares que no entraron — el entregable que se pidió por nombre, con su propio lugar */}
+        {/* Titulares que no entraron — el entregable que se pidió por nombre, con su propio lugar.
+            Mide ASISTENCIA (enmienda D4 del GATE-O3): un titular cuenta aunque otra persona haya
+            cubierto su turno. El subtítulo no es decorativo — sin él, ver una ausencia sobre un
+            turno que la tabla marca "Cubierto por relevo" se lee como una contradicción. */}
         <div className="rounded-xl border border-gray-200 bg-white">
-          <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-2">
-            <UserX size={16} className="text-red-600" />
-            <h3 className="text-sm font-semibold text-gray-900">Titulares que no entraron</h3>
-            <span className="text-xs text-gray-500">
-              {totalAusencias === 0
-                ? 'ninguna ausencia en el rango'
-                : `${ausentes.length} persona${ausentes.length === 1 ? '' : 's'} · ${totalAusencias} turno${totalAusencias === 1 ? '' : 's'}`}
-            </span>
+          <div className="px-4 py-3 border-b border-gray-100">
+            <div className="flex items-center gap-2">
+              <UserX size={16} className="text-red-600" />
+              <h3 className="text-sm font-semibold text-gray-900">Titulares que no entraron</h3>
+              <span className="text-xs text-gray-500">
+                {totalAusencias === 0
+                  ? 'ninguna ausencia en el rango'
+                  : `${ausentes.length} persona${ausentes.length === 1 ? '' : 's'} · ${totalAusencias} turno${totalAusencias === 1 ? '' : 's'}`}
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-gray-500">
+              Mide asistencia: un titular cuenta aunque otra persona haya cubierto su turno.
+            </p>
           </div>
           <div className="px-4 py-3">
             {ausentes.length === 0 ? (
@@ -213,7 +221,8 @@ export default function CumplimientoRotacion({ desde, hasta, planta, onRangoChan
                       {p.turnos.length} turno{p.turnos.length === 1 ? '' : 's'}
                     </span>
                     <span className="text-xs text-gray-600">
-                      {p.turnos.map((t) => `${fmtFecha(t.fecha_operativa)} T${t.turno} · ${t.cargo_nombre}`).join(' — ')}
+                      {p.turnos.map((t) => `${fmtFecha(t.fecha_operativa)} T${t.turno} · ${t.cargo_nombre}`
+                        + (t.estado === 'CUBIERTO_POR_RELEVO' ? ' (cubierto por relevo)' : '')).join(' — ')}
                     </span>
                   </li>
                 ))}

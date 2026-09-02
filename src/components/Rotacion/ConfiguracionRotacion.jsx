@@ -82,6 +82,19 @@ export function parsearVectorTexto(texto) {
   return nums.some((n) => Number.isNaN(n)) ? null : nums;
 }
 
+// Un patrón cuyo vector no parsea llega con `vector_invalido: true` y los DOS vectores en su forma
+// CRUDA (string): el `catch` de `mapPatron` no reasigna ninguno, así que el sano también llega como
+// texto. Esa fila la manda el backend A PROPÓSITO (CR2-8) para que el administrador pueda ENCONTRAR
+// la mala; asumir que siempre es un arreglo cambiaba un 500 —que al menos queda en el log— por una
+// pantalla en blanco (CR3-1).
+function textoVector(v, sep = ', ') {
+  if (Array.isArray(v)) return v.join(sep);
+  const crudo = String(v ?? '').trim();
+  return crudo || '—';
+}
+
+const plural = (n, uno, varios) => `${n} ${n === 1 ? uno : varios}`;
+
 // Estado "efectivo" de una persona a efectos del diff. Sin grupo NO hay asignación: el rol solo
 // se persiste acompañado de un grupo, así que "sin grupo" colapsa a (null, null) de los dos lados
 // y elegir un rol sin elegir grupo no ensucia la pantalla.
@@ -226,6 +239,30 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
 
   const cambios = useMemo(() => calcularCambios(personas, buffer), [personas, buffer]);
   const hayCambios = cambios.length > 0;
+
+  // De una fila dañada NO se puede copiar: su vector no parsea, y copiarlo propagaría el daño al
+  // patrón nuevo. Listarla sí (es justamente para lo que el backend la manda); ofrecerla como
+  // origen, no.
+  const patronesCopiables = useMemo(() => patrones.filter((p) => !p.vector_invalido), [patrones]);
+  const patronesDanados = useMemo(() => patrones.filter((p) => p.vector_invalido), [patrones]);
+
+  // `omitidas` normalizada: números, nunca `undefined`. Un backend anterior a L12 no la manda, y
+  // ausente significa "no hubo omisiones que reportar", igual que en `sincronizarDirectorio`.
+  // `personas_estimadas` es una COTA (se estima por la mediana de los grupos que sí se leyeron):
+  // por eso el copy dice "aproximadamente" y nunca promete un número exacto.
+  const omitidasSync = useMemo(() => {
+    const o = resumenSync?.omitidas ?? {};
+    const grupos = Number(o.grupos) || 0;
+    const usuarios = Number(o.usuarios) || 0;
+    const partes = [];
+    if (grupos > 0) partes.push(plural(grupos, 'grupo', 'grupos'));
+    if (usuarios > 0) partes.push(plural(usuarios, 'usuario', 'usuarios'));
+    return {
+      total: Number(o.total) || 0,
+      personas: Number(o.personas_estimadas) || 0,
+      detalle: partes.join(' y '),
+    };
+  }, [resumenSync]);
 
   // Una persona con grupo pero sin rol no se puede guardar (el router pide `cargo_id`): se cuenta
   // acá y se bloquea Guardar, en vez de mandar el lote y recibir un 400 con un índice.
@@ -552,26 +589,26 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
                   Usar el patrón de {p.etiqueta}
                 </button>
               ))}
-              {patrones.length > 0 && (
+              {patronesCopiables.length > 0 && (
                 <label className="flex flex-col gap-1 text-xs font-medium text-gray-500">
                   Copiar de otro rol
                   <select
                     value="" disabled={bloqueado || ocupado}
                     onChange={(ev) => {
-                      const origen = patrones.find((p) => String(p.rotacion_patron_id) === ev.target.value);
-                      if (!origen) return;
+                      const origen = patronesCopiables.find((p) => String(p.rotacion_patron_id) === ev.target.value);
+                      if (!origen || origen.vector_invalido) return;
                       // Solo los vectores: los grupos de guardia son del día de inicio de ESTE
                       // patrón, no del de origen, y copiarlos sería un error silencioso.
                       setForm((f) => ({
                         ...f,
-                        vector_t1: origen.vector_t1.join(','),
-                        vector_t2: origen.vector_t2.join(','),
+                        vector_t1: textoVector(origen.vector_t1, ','),
+                        vector_t2: textoVector(origen.vector_t2, ','),
                       }));
                     }}
                     className="rot-copiar px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-900 bg-white"
                   >
                     <option value="">Elige un patrón…</option>
-                    {patrones.map((p) => (
+                    {patronesCopiables.map((p) => (
                       <option key={p.rotacion_patron_id} value={p.rotacion_patron_id}>
                         {`${p.cargo_nombre} · desde ${fmtFecha(p.fecha_inicio)}`}
                       </option>
@@ -612,19 +649,29 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
                   {patrones.map((p) => (
                     <tr
                       key={p.rotacion_patron_id}
-                      className="rot-patron border-b border-gray-100"
+                      className={`rot-patron border-b border-gray-100 ${p.vector_invalido ? 'bg-amber-50' : ''}`}
                       data-patron={p.rotacion_patron_id}
+                      data-invalido={p.vector_invalido ? '1' : undefined}
                     >
                       <td className="py-2 pr-3 text-gray-900">{p.cargo_nombre}</td>
                       <td className="py-2 pr-3 text-gray-600">{`${fmtFecha(p.fecha_inicio)} → ${fmtFecha(p.fecha_fin)}`}</td>
-                      <td className="py-2 pr-3 font-mono text-xs text-gray-700">{p.vector_t1.join(', ')}</td>
-                      <td className="py-2 pr-3 font-mono text-xs text-gray-700">{p.vector_t2.join(', ')}</td>
+                      <td className="py-2 pr-3 font-mono text-xs text-gray-700">{textoVector(p.vector_t1)}</td>
+                      <td className="py-2 pr-3 font-mono text-xs text-gray-700">{textoVector(p.vector_t2)}</td>
                       <td className="py-2 pr-3">
                         <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
                           p.activo ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}
                         >
                           {p.activo ? 'Activo' : 'Desactivado'}
                         </span>
+                        {p.vector_invalido && (
+                          <span
+                            className="rot-patron-danado ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-900"
+                            title="El vector guardado no tiene la forma de ocho grupos 1..4 separados por coma"
+                          >
+                            <AlertTriangle size={11} />
+                            Vector dañado
+                          </span>
+                        )}
                       </td>
                       <td className="py-2 text-right">
                         {p.activo && puedeConfigurar && (
@@ -642,6 +689,22 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
                 </tbody>
               </table>
             </div>
+          )}
+
+          {/* Qué hacer con una fila dañada. Sin esto, "Vector dañado" nombra el problema y deja al
+              administrador sin salida: el vector no se puede editar, así que el camino es
+              desactivar y volver a cargar el patrón con la misma fecha de inicio (CR2-10). */}
+          {patronesDanados.length > 0 && (
+            <p className="rot-patrones-danados mt-4 rounded-lg px-4 py-3 text-sm border bg-amber-50 border-amber-200 text-amber-900 flex items-start gap-2">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+              <span>
+                {patronesDanados.length === 1
+                  ? 'Hay 1 patrón con el vector dañado (se muestra tal como está guardado). '
+                  : `Hay ${patronesDanados.length} patrones con el vector dañado (se muestran tal como están guardados). `}
+                Desactívalo y vuelve a cargar el patrón con la misma fecha de inicio; mientras esté
+                activo, el sistema no puede calcular quién estaba de guardia para ese rol.
+              </span>
+            </p>
           )}
         </section>
 
@@ -670,9 +733,25 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
                   </span>
                 ))}
               </div>
-              <p className="text-xs text-gray-500 mt-2">
-                Revisa el conteo por rol: si un grupo del directorio no respondió, acá se nota.
-              </p>
+              {/* CR3-4 · lo que el conteo por rol NO puede mostrar. Un grupo que no respondió
+                  aporta CERO al `por_rol`, así que una sincronización a la que le faltan 14
+                  personas se ve idéntica a una completa: no hay contra qué comparar. El backend
+                  devuelve `omitidas` justo para poder decirlo (GATE-O3 §6.12). */}
+              {omitidasSync.total > 0 ? (
+                <p className="rot-sync-omitidas mt-3 rounded-lg px-3 py-2 text-sm border bg-amber-50 border-amber-200 text-amber-900 flex items-start gap-2">
+                  <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                  <span>
+                    {`El directorio no respondió ${plural(omitidasSync.total, 'consulta', 'consultas')}`}
+                    {omitidasSync.detalle ? ` (${omitidasSync.detalle})` : ''}
+                    {`: faltan aproximadamente ${plural(omitidasSync.personas, 'persona', 'personas')}. `}
+                    Vuelve a actualizar antes de repartir los grupos.
+                  </span>
+                </p>
+              ) : (
+                <p className="text-xs text-gray-500 mt-2">
+                  El directorio respondió completo: ningún grupo ni usuario quedó sin leer.
+                </p>
+              )}
             </div>
           )}
 

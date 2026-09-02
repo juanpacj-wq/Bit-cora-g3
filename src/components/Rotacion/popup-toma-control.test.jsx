@@ -475,6 +475,66 @@ describe('useTomaControl', () => {
     expect(gets()).toHaveLength(2);
   });
 
+  // ── CR3-2 · la respuesta obsoleta ─────────────────────────────────────────────────────────────
+  //
+  // Hasta la O3 `refrescar()` solo se protegía con `desmontadoRef`, y el efecto lo RESETEA a false
+  // al principio para la unidad nueva: la lectura de la unidad vieja aterrizaba después y pisaba el
+  // estado. El daño no es cosmético — el popup queda con el `turno_id` y el `principal` de la
+  // unidad anterior y su `useEffect([turnoId])` lo VUELVE A ABRIR, ofreciendo tomar el control de un
+  // rol de otra planta. Hoy nadie lo monta; L10 lo monta en esta misma ola.
+  //
+  // Un `fetch` que deja cada petición en vuelo es lo único que reproduce el cruce: con respuestas
+  // ya resueltas el orden de llegada lo decide el microtask queue y siempre gana la última.
+  function fetchEnVuelo() {
+    const pendientes = [];
+    globalThis.fetch = vi.fn(async (url, opciones) => {
+      llamadas.push({ url: String(url), metodo: opciones?.method ?? 'GET', body: opciones?.body });
+      const d = diferido();
+      pendientes.push(d);
+      return d.promesa;
+    });
+    return pendientes;
+  }
+
+  it('CR3-2 · la lectura de la unidad anterior llega TARDE y no pisa a la nueva', async () => {
+    const pendientes = fetchEnVuelo();
+
+    const { rerender } = render(h(Arnes, { plantaId: 'GEC3' }));
+    await act(async () => {});
+    expect(gets()).toHaveLength(1);
+
+    rerender(h(Arnes, { plantaId: 'GEC32' }));
+    expect(gets()).toHaveLength(2);
+
+    // Responde la NUEVA…
+    await act(async () => { pendientes[1].resolver(respuesta(estadoC5({ turno_id: 999 }))); });
+    expect(ultimo.estado.turno_id).toBe(999);
+
+    // …y después la VIEJA, que ya no manda: es de otra planta.
+    await act(async () => { pendientes[0].resolver(respuesta(estadoC5({ turno_id: 111 }))); });
+    expect(ultimo.estado.turno_id).toBe(999);
+  });
+
+  it('CR3-2 · la lectura de la unidad anterior llega ANTES y tampoco se muestra, ni apaga el indicador', async () => {
+    const pendientes = fetchEnVuelo();
+
+    const { rerender } = render(h(Arnes, { plantaId: 'GEC3' }));
+    await act(async () => {});
+    rerender(h(Arnes, { plantaId: 'GEC32' }));
+    expect(ultimo.estado).toBe(null);
+    expect(ultimo.cargando).toBe(true);
+
+    await act(async () => { pendientes[0].resolver(respuesta(estadoC5({ turno_id: 111 }))); });
+    expect(ultimo.estado).toBe(null);
+    // El `.finally` de la promesa vieja apagaba el `cargando` de la petición NUEVA, que sigue en
+    // vuelo: la pantalla se veía cargada con `estado` en null.
+    expect(ultimo.cargando).toBe(true);
+
+    await act(async () => { pendientes[1].resolver(respuesta(estadoC5({ turno_id: 999 }))); });
+    expect(ultimo.estado.turno_id).toBe(999);
+    expect(ultimo.cargando).toBe(false);
+  });
+
   it('cambiar de unidad reconsulta y no deja ver el estado de la anterior', async () => {
     const { rerender } = await montar({ plantaId: 'GEC3' });
     expect(gets()).toHaveLength(1);

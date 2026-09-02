@@ -33,8 +33,9 @@ const PLANTAS = [
 ];
 
 // Los cuatro estados, uno por fila. Ojo con la última: es `CUBIERTO_POR_RELEVO` y su titular NO
-// entró — sirve para fijar que esas filas quedan FUERA del panel de ausencias (el slot lo cubrió
-// alguien) y que la de `PARCIAL` sí entra.
+// entró — desde la ENMIENDA D4 del GATE-O3 (2026-09-02) esa ausencia SÍ cuenta: el panel mide
+// asistencia ("¿quién faltó?"), no cobertura ("¿quién dejó el rol sin cubrir?"). El titular de una
+// fila cubierta tampoco entró.
 const FILA_PENDIENTE = {
   fecha_operativa: '2026-08-15', turno: 1, planta_id: 'GEC3',
   cargo_id: 8, cargo_nombre: 'Operador de Planta - Sala de Mando', grupo: 3,
@@ -280,19 +281,48 @@ describe('CA-21 · los titulares que no entraron se leen de un vistazo', () => {
     const panel = container.querySelector('[data-ausentes]');
 
     expect(panel).not.toBeNull();
-    // Luis Peña faltó en PENDIENTE y en PARCIAL (2); Ana Ríos solo en PENDIENTE (1). Ordenado por
-    // cantidad de ausencias, que es lo que hace legible el panel.
+    // Luis Peña faltó en PENDIENTE y en PARCIAL (2); Ana Ríos solo en PENDIENTE (1); Carlos Mena en
+    // la fila CUBIERTA POR RELEVO (1). Ordenado por cantidad de ausencias y, a igualdad, por
+    // nombre — que es lo que hace legible el panel.
     const items = [...panel.querySelectorAll('[data-ausente]')];
-    expect(items.map((i) => i.getAttribute('data-ausente'))).toEqual(['77', '61']);
+    expect(items.map((i) => i.getAttribute('data-ausente'))).toEqual(['77', '61', '88']);
     expect(texto(items[0])).toContain('Luis Peña');
     expect(texto(items[0])).toContain('2 turnos');
     expect(texto(items[0])).toContain('15/08/2026 T1');
     expect(texto(items[0])).toContain('16/08/2026 T2');
     expect(texto(items[1])).toContain('Ana Ríos');
     expect(texto(items[1])).toContain('1 turno');
+  });
 
-    // Carlos Mena no entró, pero su fila la cubrió un relevo: el panel de "quién faltó" no lo cuenta.
-    expect(texto(panel)).not.toContain('Carlos Mena');
+  // ── ENMIENDA D4 (GATE-O3, 2026-09-02) ────────────────────────────────────────────────────────
+  //
+  // El panel se alimentaba solo de `PENDIENTE` y `PARCIAL`, así que un titular que faltó en un
+  // turno que alguien más cubrió no aparecía: se veía en la tabla, con su ✗, pero no en el resumen.
+  // El usuario —que es quien pidió el reporte— decidió que el panel responde "¿quién faltó?", no
+  // "¿quién dejó el rol sin cubrir?".
+  it('D4 · el titular ausente de una fila CUBIERTO_POR_RELEVO también cuenta (mide asistencia)', async () => {
+    const { container } = await render();
+    const panel = container.querySelector('[data-ausentes]');
+
+    const carlos = panel.querySelector('[data-ausente="88"]');
+    expect(carlos).not.toBeNull();
+    expect(texto(carlos)).toContain('Carlos Mena');
+    expect(texto(carlos)).toContain('1 turno');
+    expect(texto(carlos)).toContain('18/08/2026 T2');
+    // Que su turno lo cubriera otra persona no se pierde: sin esa marca, el panel parecería
+    // contradecir la columna "Relevo" de la tabla.
+    expect(texto(carlos)).toMatch(/cubierto/i);
+
+    // Y el encabezado dice qué mide, o el lector no entiende por qué un turno cubierto aporta
+    // una ausencia.
+    expect(texto(container)).toMatch(/asistencia/i);
+  });
+
+  it('D4 · `ausenciasPorTitular` cuenta cualquier titular con `entro: false`, sin mirar el estado', () => {
+    const r = ausenciasPorTitular([FILA_RELEVO]);
+    expect(r).toHaveLength(1);
+    expect(r[0].usuario_id).toBe(88);
+    expect(r[0].turnos[0].estado).toBe('CUBIERTO_POR_RELEVO');
   });
 
   it('sin ausencias el panel lo dice, sin inventar una lista vacía', async () => {

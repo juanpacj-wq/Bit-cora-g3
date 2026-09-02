@@ -68,15 +68,22 @@ function normalizarResumen(resumen) {
  * "qué titulares no entraron y en qué turnos". No es un subproducto de la tabla de estados, así que
  * se deriva aparte y la pantalla le da su propio panel.
  *
- * Alimentado por los `titulares[].entro === false` de las filas `PENDIENTE` y `PARCIAL`, tal cual lo
- * fija el contrato. Las filas `CUBIERTO_POR_RELEVO` quedan FUERA a propósito: ahí el slot lo cubrió
- * alguien, y mezclarlas convertiría el panel de "quién faltó" en "quién no era el de la malla".
+ * ENMIENDA D4 (GATE-O3, 2026-09-02, decisión del usuario): el panel mide **asistencia**, no
+ * cobertura. Cuenta a CUALQUIER titular con `entro === false`, incluidos los de las filas
+ * `CUBIERTO_POR_RELEVO` — que alguien más haya cubierto el turno no cambia el hecho de que el
+ * titular no entró. Antes se filtraba por `PENDIENTE`/`PARCIAL` y el panel respondía "¿quién dejó
+ * el rol sin cubrir?"; ahora responde "¿quién faltó?", que es lo que se pidió.
+ *
+ * Por eso NO hay lista de estados acá: la pregunta la responde `entro`, no el estado de la fila.
+ * `COMPLETO` no puede traer un ausente por contrato (si lo trajera sería una contradicción del
+ * backend, y esconderla sería peor), así que un filtro sería inerte además de frágil frente a un
+ * quinto estado (H-L09-3). El estado de cada turno viaja en el resultado para que la pantalla pueda
+ * decir cuál de esas ausencias quedó cubierta.
  */
 export function ausenciasPorTitular(filas = []) {
   const porPersona = new Map();
   for (const f of filas) {
-    if (f?.estado !== 'PENDIENTE' && f?.estado !== 'PARCIAL') continue;
-    for (const t of f.titulares ?? []) {
+    for (const t of f?.titulares ?? []) {
       if (t?.entro !== false) continue;
       // `usuario_id` es la identidad; el nombre es solo la etiqueta. Una fila congelada guarda el
       // nombre de la época (D-052) y puede diferir del actual: agrupar por nombre partiría a la

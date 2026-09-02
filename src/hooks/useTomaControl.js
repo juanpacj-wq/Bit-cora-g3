@@ -25,13 +25,21 @@ export function useTomaControl(ready, plantaId) {
   // D-054: unidad cuyo estado tenemos cargado. El cambio de unidad en caliente NO desmonta el
   // componente, así que la invalidación es por identidad, igual que en `useTurno`.
   const plantaCargadaRef = useRef(null);
+  // CR3-2 · cada lectura o acción lleva su número y SOLO la última manda. `desmontadoRef` no
+  // alcanzaba: el efecto lo resetea a `false` para la unidad nueva, así que el GET de la unidad
+  // vieja aterrizaba después y pisaba el estado — el popup quedaba con el `turno_id` y el
+  // `principal` de la otra planta y su `useEffect([turnoId])` lo volvía a abrir. Es el mismo
+  // `secuenciaRef` de `useCumplimiento`: dos hooks del mismo módulo, una sola respuesta.
+  const secuenciaRef = useRef(0);
 
   // El catch NO limpia el estado a propósito (mismo criterio que `useTurno`): un blip de red no es
   // motivo para borrar un estado válido de ESTA unidad. La invalidación correcta es por identidad.
   const refrescar = useCallback(async () => {
+    const mio = ++secuenciaRef.current;
     try {
       const e = await api.get('/api/rotacion/control/estado');
-      if (!desmontadoRef.current) setEstado(e);
+      if (mio !== secuenciaRef.current || desmontadoRef.current) return null;
+      setEstado(e);
       return e;
     } catch {
       return null;
@@ -41,20 +49,27 @@ export function useTomaControl(ready, plantaId) {
   useEffect(() => {
     if (!ready || !plantaId) return undefined;
     desmontadoRef.current = false;
+    // `vigente` es de ESTE efecto y muere con su cleanup: el `.finally` de la lectura vieja no
+    // puede apagar el `cargando` de la nueva, que sigue en vuelo (la pantalla se veía cargada con
+    // `estado` en null). El de la nueva lo apaga cuando le toque.
+    let vigente = true;
     // Mientras viaja el GET de la unidad nueva, `null` ("sin dato") es la única respuesta honesta:
     // ofrecer la toma de control del rol de la unidad anterior se vería consistente y sería falso.
     if (plantaCargadaRef.current !== null && plantaCargadaRef.current !== plantaId) setEstado(null);
     plantaCargadaRef.current = plantaId;
     setCargando(true);
-    refrescar().finally(() => { if (!desmontadoRef.current) setCargando(false); });
-    return () => { desmontadoRef.current = true; };
+    refrescar().finally(() => { if (vigente && !desmontadoRef.current) setCargando(false); });
+    return () => { vigente = false; desmontadoRef.current = true; };
   }, [ready, plantaId, refrescar]);
 
   const ejecutar = useCallback(async (verbo) => {
+    // La acción también toma número: su respuesta es más nueva que cualquier GET en vuelo, y a su
+    // vez queda obsoleta si entretanto se cambió de unidad.
+    const mio = ++secuenciaRef.current;
     setAccionando(true);
     try {
       const e = await api.post(`/api/rotacion/control/${verbo}`);
-      if (!desmontadoRef.current) setEstado(e);
+      if (mio === secuenciaRef.current && !desmontadoRef.current) setEstado(e);
       return e;
     } catch (err) {
       // El server cambió bajo nuestros pies (otra toma en curso, el turno cerró): que la pantalla
