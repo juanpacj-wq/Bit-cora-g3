@@ -43,6 +43,13 @@ const MAX_RESPUESTA_BYTES = 8 * 1024 * 1024;
 const MAX_REINTENTOS_429 = 1;
 const MAX_RETRY_AFTER_MS = 10_000;
 const RETRY_AFTER_DEFAULT_MS = 1_000;
+// Presupuesto TOTAL de espera por 429 para UNA lectura del directorio (CR2-13). El tope por llamada
+// no alcanza: una lectura del directorio son ~16 peticiones (SP + asignaciones + 13 grupos + 1
+// usuario) y, con Graph estrangulando de verdad, 16 × 10 s = 160 s de sueño dentro de la petición
+// HTTP del administrador — que nginx corta a los 60 s, así que el navegador ve un 504 y el server
+// sigue durmiendo. Con presupuesto compartido, las primeras esperas se honran y las siguientes
+// simplemente no se reintentan: esa asignación se omite y `directorio.js` la cuenta.
+export const PRESUPUESTO_429_MS = 10_000;
 
 // tenant y client son GUIDs y se interpolan: el tenant en la URL del token, el client dentro de un
 // $filter de OData. Validarlos con charset estricto es lo que impide que un `.env` con un typo —o
@@ -189,10 +196,16 @@ async function leerJsonAcotado(resp) {
     }
   }
 
-  const lector = cuerpo.getReader();
+  // `getReader()` va DENTRO del try (CR2-14): sobre un cuerpo ya consumido o bloqueado lanza un
+  // TypeError, y ese error no lleva `.codigo`, así que salía del módulo crudo y terminaba en un 500
+  // en vez del 503 `entra_no_disponible` estable que promete esta capa. Ningún camino de producción
+  // reusa hoy una `Response`, pero el contrato de este módulo es que TODO fallo de Graph sale con
+  // el mismo código: una excepción que se escapa de esa regla es la que rompe al llamador.
   const trozos = [];
   let bytes = 0;
+  let lector = null;
   try {
+    lector = cuerpo.getReader();
     for (;;) {
       const { done, value } = await lector.read();
       if (done) break;
@@ -203,7 +216,7 @@ async function leerJsonAcotado(resp) {
       trozos.push(value);
     }
   } catch (e) {
-    try { await lector.cancel(); } catch { /* ya cerrado */ }
+    try { await lector?.cancel(); } catch { /* ya cerrado, o nunca se abrió */ }
     if (e?.codigo === 'entra_no_disponible') throw e;
     throw errEntra(`lectura del cuerpo falló ${e?.name || 'Error'}`);
   }
@@ -215,8 +228,17 @@ async function leerJsonAcotado(resp) {
   }
 }
 
+/**
+ * Bolsa de espera por 429 compartida por todas las peticiones de UNA operación (CR2-13). Quien la
+ * crea es el llamador de más arriba (`leerDirectorioEntra`); si no llega ninguna, cada `graphGet` /
+ * `graphGetTodo` arma la suya y el comportamiento es el de una llamada suelta.
+ */
+export function nuevoPresupuesto429(totalMs = PRESUPUESTO_429_MS) {
+  return { restanteMs: totalMs };
+}
+
 /** Una petición GET a Graph. `url` absoluta o ruta que arranca en '/' (relativa a /v1.0). */
-async function graphFetch(url, { fetchImpl, token }, intento = 0) {
+async function graphFetch(url, { fetchImpl, token, presupuesto }, intento = 0) {
   const destino = url.startsWith('http') ? url : `${GRAPH_BASE}${url}`;
 
   // Un @odata.nextLink es una URL que viene en la respuesta: se sigue solo si sigue apuntando a
@@ -236,13 +258,16 @@ async function graphFetch(url, { fetchImpl, token }, intento = 0) {
     throw errEntra(`fetch falló ${e?.name || 'Error'}${causa ? ` (${causa})` : ''}`);
   }
 
-  // Estrangulado: se honra Retry-After una vez, si es corto (L11, CR-2).
+  // Estrangulado: se honra Retry-After una vez, si es corto (L11, CR-2) Y si queda presupuesto de
+  // espera para la operación entera (L12, CR2-13). Sin lo segundo, dieciséis peticiones podían
+  // dormir diez segundos cada una dentro de la misma petición HTTP del administrador.
   if (resp.status === 429 && intento < MAX_REINTENTOS_429) {
     const espera = esperaRetryAfterMs(resp.headers);
-    if (espera !== null && espera <= MAX_RETRY_AFTER_MS) {
+    if (espera !== null && espera <= MAX_RETRY_AFTER_MS && espera <= presupuesto.restanteMs) {
+      presupuesto.restanteMs -= espera;
       try { await resp.body?.cancel?.(); } catch { /* sin cuerpo que soltar */ }
       await new Promise((resolver) => setTimeout(resolver, espera));
-      return graphFetch(url, { fetchImpl, token }, intento + 1);
+      return graphFetch(url, { fetchImpl, token, presupuesto }, intento + 1);
     }
   }
   if (!resp.ok) throw errEntra(`HTTP ${resp.status}`);
@@ -255,19 +280,20 @@ async function graphFetch(url, { fetchImpl, token }, intento = 0) {
 }
 
 /** GET a Graph que devuelve un recurso único (ej. `/users/{id}`). */
-export async function graphGet(ruta, { fetchImpl = fetch, token = null } = {}) {
+export async function graphGet(ruta, { fetchImpl = fetch, token = null, presupuesto = null } = {}) {
   const bearer = token || await obtenerToken({ fetchImpl });
-  return graphFetch(ruta, { fetchImpl, token: bearer });
+  return graphFetch(ruta, { fetchImpl, token: bearer, presupuesto: presupuesto || nuevoPresupuesto429() });
 }
 
 /** GET a una colección de Graph, siguiendo `@odata.nextLink`. Devuelve el `value` concatenado. */
-export async function graphGetTodo(ruta, { fetchImpl = fetch, token = null } = {}) {
+export async function graphGetTodo(ruta, { fetchImpl = fetch, token = null, presupuesto = null } = {}) {
   const bearer = token || await obtenerToken({ fetchImpl });
+  const bolsa = presupuesto || nuevoPresupuesto429();
 
   const acumulado = [];
   let siguiente = ruta;
   for (let pagina = 0; pagina < MAX_PAGINAS && siguiente; pagina++) {
-    const data = await graphFetch(siguiente, { fetchImpl, token: bearer });
+    const data = await graphFetch(siguiente, { fetchImpl, token: bearer, presupuesto: bolsa });
     if (Array.isArray(data?.value)) acumulado.push(...data.value);
     siguiente = data?.['@odata.nextLink'] || null;
   }

@@ -284,9 +284,27 @@ export async function ejecutarAccion(pool, sesion, accion) {
     // 2) El turno pudo cerrarse entre la resolución de arriba y el lock (`cerrarTurno` corre en su
     //    propia transacción): se re-verifica ya serializados, para no apilar sobre un turno CERRADO
     //    ni alterar lo que L06 congela al cerrar.
+    //
+    //    `WITH (UPDLOCK)` (CR2-6): sin él este SELECT tomaba un lock compartido que se soltaba en el
+    //    acto, y quedaba un ciclo de bloqueos con `cerrarTurno` — que X-lockea la cabecera y DESPUÉS
+    //    lee `rotacion_control` (el congelado de L06), mientras esta transacción lee la cabecera y
+    //    DESPUÉS inserta en `rotacion_control`. Dos órdenes opuestos sobre los mismos dos recursos =
+    //    deadlock, y la víctima sale `500 db_error` en vez del `409 turno_cerrado` que promete CA-14.
+    //    No es teórico: el GATE-O2 lo observó en su corrida (H4). El U lock fija el orden —cabecera
+    //    primero, siempre— y convierte el abrazo en una espera de milisegundos.
+    //
+    //    Ojo al probar la serialización: desde este UPDLOCK, el bloqueo de FILA ya serializa por sí
+    //    solo dos verbos del mismo turno, así que quitar el `sp_getapplock` NO se nota en un test de
+    //    N escrituras concurrentes. Lo que sí lo mide es tomar el applock desde afuera (el caso
+    //    `CA-11 (c)` de rotacion_control.test.js): el applock es de (turno, cargo) y el U lock es del
+    //    turno entero, y esa diferencia de granularidad es la que distingue a uno del otro.
     const abierto = await new sql.Request(tx)
       .input('turno_id', sql.Int, clave.turno_id)
-      .query(`SELECT 1 AS x FROM bitacora.turno_unidad WHERE turno_unidad_id = @turno_id AND estado = 'ABIERTO'`);
+      .query(`
+        SELECT 1 AS x
+        FROM bitacora.turno_unidad WITH (UPDLOCK)
+        WHERE turno_unidad_id = @turno_id AND estado = 'ABIERTO'
+      `);
     if (!abierto.recordset[0]) throw new ErrorControl('turno_cerrado');
 
     // 3) Leer el log y derivar el estado previo.

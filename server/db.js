@@ -58,6 +58,21 @@ export async function getDB() {
 // de test nunca lleguen al dashboard productivo (las vistas DISP NO la filtran — ver nota abajo).
 export const TEST_PLANTA_ID = 'TST';
 
+// D-065 (F37.A4, L12) — patrón LIKE del vector de rotación: OCHO grupos 1..4 separados por coma,
+// exactamente 15 caracteres. `[1-4]` matchea UN carácter y un LIKE sin comodines exige longitud
+// exacta, así que '1,1,3', '1,1,3,3,4,4,2,5' o un espacio de sobra quedan fuera. Vive acá y no
+// dentro del bloque de la migración para que el CHECK y su pre-vuelo usen literalmente el mismo
+// patrón: si divergieran, el pre-vuelo diría 'no hay drift' y el ALTER fallaría con 547.
+export const VECTOR_LIKE = '[1-4],[1-4],[1-4],[1-4],[1-4],[1-4],[1-4],[1-4]';
+// 8 dígitos + 7 comas. Va aparte porque el LIKE NO alcanza: SQL Server compara con relleno de
+// blancos ANSI, así que `'1,1,3,3,4,4,2,2 ' LIKE '[1-4],…,[1-4]'` da MATCH aunque el patrón no
+// tenga ese espacio (medido: DATALENGTH 16, LEN 15, resultado MATCH). `LEN` tampoco sirve — también
+// ignora los blancos finales. El único que los cuenta es DATALENGTH.
+export const VECTOR_LARGO = 15;
+// Predicado completo del vector. Se arma UNA vez y lo usan el CHECK y su pre-vuelo: si divergieran,
+// el pre-vuelo diría "no hay drift" y el ALTER fallaría con 547 en el arranque.
+export const predicadoVector = (col) => `${col} LIKE '${VECTOR_LIKE}' AND DATALENGTH(${col}) = ${VECTOR_LARGO}`;
+
 // D-030: definiciones canónicas (única fuente de verdad) de las dos vistas DISP. Se usan tanto
 // en la migración F26.A1 (creación inicial en BD fresca) como en el self-heal de cada arranque
 // (para que una BD YA migrada adopte cambios de definición con solo redeploy, sin tocar
@@ -3159,30 +3174,222 @@ export async function initDB() {
         ADD CONSTRAINT UQ_turno_unidad_id_natural
         UNIQUE (turno_unidad_id, fecha_operativa, planta_id, turno);
   `);
-  await db.request().batch(`
-    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'FK_rotacion_control_turno_planta'
-                     AND parent_object_id = OBJECT_ID('bitacora.rotacion_control'))
-      ALTER TABLE bitacora.rotacion_control
-        ADD CONSTRAINT FK_rotacion_control_turno_planta
-        FOREIGN KEY (turno_id, planta_id)
-        REFERENCES bitacora.turno_unidad (turno_unidad_id, planta_id);
-
-    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'FK_rotacion_cumpl_turno_natural'
-                     AND parent_object_id = OBJECT_ID('bitacora.rotacion_cumplimiento'))
-      ALTER TABLE bitacora.rotacion_cumplimiento
-        ADD CONSTRAINT FK_rotacion_cumpl_turno_natural
-        FOREIGN KEY (turno_id, fecha_operativa, planta_id, turno)
-        REFERENCES bitacora.turno_unidad (turno_unidad_id, fecha_operativa, planta_id, turno);
-
-    IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo = 'F37.A3')
-      INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F37.A3');
-  `);
-  const f37A3Creadas = F37A3_CONSTRAINTS.filter((n) => !f37A3Antes.has(n));
+  // Las dos FK compuestas van por `agregarConstraintConPrevuelo` (L12, CR2-12): se agregan WITH
+  // CHECK, así que una sola fila con drift preexistente —escrita fuera de la app— abortaría initDB
+  // con un 547 pelado y el server no arrancaría. Con pre-vuelo, el drift se denuncia con su conteo
+  // y la constraint se omite hasta el siguiente arranque; el server sigue en pie.
+  const f37A3Fks = [
+    await agregarConstraintConPrevuelo(db, {
+      nombre: 'FK_rotacion_control_turno_planta',
+      tabla: 'bitacora.rotacion_control',
+      drift: `
+        SELECT COUNT(*) AS n
+        FROM bitacora.rotacion_control rc
+        WHERE NOT EXISTS (SELECT 1 FROM bitacora.turno_unidad tu
+                           WHERE tu.turno_unidad_id = rc.turno_id AND tu.planta_id = rc.planta_id)`,
+      remedio: 'Corrige el planta_id de esas filas para que sea el del turno que nombran',
+      ddl: `
+        ALTER TABLE bitacora.rotacion_control
+          ADD CONSTRAINT FK_rotacion_control_turno_planta
+          FOREIGN KEY (turno_id, planta_id)
+          REFERENCES bitacora.turno_unidad (turno_unidad_id, planta_id);`,
+    }),
+    await agregarConstraintConPrevuelo(db, {
+      nombre: 'FK_rotacion_cumpl_turno_natural',
+      tabla: 'bitacora.rotacion_cumplimiento',
+      drift: `
+        SELECT COUNT(*) AS n
+        FROM bitacora.rotacion_cumplimiento rc
+        WHERE NOT EXISTS (SELECT 1 FROM bitacora.turno_unidad tu
+                           WHERE tu.turno_unidad_id = rc.turno_id
+                             AND tu.fecha_operativa = rc.fecha_operativa
+                             AND tu.planta_id       = rc.planta_id
+                             AND tu.turno           = rc.turno)`,
+      remedio: 'Corrige (fecha_operativa, planta_id, turno) para que sean los del turno_id que nombran',
+      ddl: `
+        ALTER TABLE bitacora.rotacion_cumplimiento
+          ADD CONSTRAINT FK_rotacion_cumpl_turno_natural
+          FOREIGN KEY (turno_id, fecha_operativa, planta_id, turno)
+          REFERENCES bitacora.turno_unidad (turno_unidad_id, fecha_operativa, planta_id, turno);`,
+    }),
+  ];
+  if (f37A3Fks.every(Boolean)) {
+    await db.request().batch(`
+      IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo = 'F37.A3')
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F37.A3');
+    `);
+  }
+  // Lo que este arranque creó DE VERDAD: faltaba antes y está ahora. Con el pre-vuelo, "faltaba
+  // antes" ya no implica "se creó" —una constraint puede haberse omitido por drift— y un log que
+  // anunciara lo omitido como creado sería justo el mensaje que nadie vuelve a mirar.
+  const f37A3Ahora = new Set((await db.request().query(`
+    SELECT name FROM sys.objects
+    WHERE type IN ('C', 'UQ', 'F')
+      AND name IN ('CK_rotacion_cumpl_grupo', 'UQ_turno_unidad_id_planta', 'UQ_turno_unidad_id_natural',
+                   'FK_rotacion_control_turno_planta', 'FK_rotacion_cumpl_turno_natural')
+  `)).recordset.map((r) => r.name));
+  const f37A3Creadas = F37A3_CONSTRAINTS.filter((n) => !f37A3Antes.has(n) && f37A3Ahora.has(n));
   if (f37A3Creadas.length) {
     console.log(`[F37.A3] constraints de rotación creadas: ${f37A3Creadas.join(', ')}.`);
   }
 
+  // ---------- F37.A4 — D-065 (L12): formato de los vectores y UNIQUE natural filtrada ----------
+  //
+  // Aditiva e idempotente, como F37.A3: SOLO `ALTER TABLE … ADD CONSTRAINT` / `CREATE INDEX`, cada
+  // uno gateado por su nombre en el catálogo. NO se edita el CREATE TABLE de F37.A1 (lo salta el
+  // IF OBJECT_ID en toda BD viva) ni el ALTER de F37.A3.
+  //
+  //  · CK_rotacion_patron_vector_t1 / _t2 (CR2-1): el formato del vector es un INVARIANTE DE BD, no
+  //    una validación del endpoint. `parsearVector` lanza `vector_invalido` desde dentro de
+  //    `titularesDeTurno`, que `congelarCumplimiento` invoca DENTRO de la transacción de
+  //    `cerrarTurno` (C7) y SIN filtro de planta: un único patrón con el vector corrupto —escrito
+  //    por SQL a mano, que es el camino que el POST no cubre— hace ROLLBACK del cierre de las DOS
+  //    plantas, cada 60 s, y el turno se vuelve imposible de cerrar. El arreglo no puede ser un
+  //    try/catch alrededor del congelado: eso sellaría turnos sin cumplimiento, justo lo que L06
+  //    decidió evitar. Va en la BD, que es donde el dato entra.
+  //    El patrón LIKE fija la forma ('d,d,d,d,d,d,d,d' con d ∈ 1..4): `[1-4]` matchea UN carácter,
+  //    así que '1,1,3' o '1,1,3,3,4,4,2,5' quedan fuera. El LIKE solo NO alcanza: SQL Server compara
+  //    con relleno de blancos ANSI y `'1,1,3,3,4,4,2,2 '` le da MATCH (medido). Por eso el CHECK
+  //    lleva además `DATALENGTH = 15` — `LEN` tampoco serviría, ignora los blancos finales igual.
+  //
+  //  · UQ_rotacion_patron_natural → UQ_rotacion_patron_natural_activo, FILTRADA por `activo = 1`
+  //    (CR2-10): con la UNIQUE sobre todas las filas, desactivar un patrón cargado con error NO
+  //    liberaba su `fecha_inicio` y el patrón corregido seguía chocando con `patron_duplicado` —
+  //    o sea que la carga anual no tenía arreglo por la app. Un índice único FILTRADO no puede ser
+  //    una key constraint, así que la vieja se DROPEA y la nueva nace con otro nombre; el gate de
+  //    idempotencia mira el nombre NUEVO y el DROP mira el VIEJO. Van en una transacción con
+  //    XACT_ABORT: si el CREATE fallara, el DROP no queda commiteado y la tabla nunca se queda sin
+  //    unicidad.
+  const F37A4_OBJETOS = [
+    'CK_rotacion_patron_vector_t1',
+    'CK_rotacion_patron_vector_t2',
+    'UQ_rotacion_patron_natural_activo',
+  ];
+  const f37A4Antes = new Set([
+    ...(await db.request().query(`
+      SELECT name FROM sys.objects
+      WHERE type = 'C' AND name IN ('CK_rotacion_patron_vector_t1', 'CK_rotacion_patron_vector_t2')
+    `)).recordset.map((r) => r.name),
+    ...(await db.request().query(`
+      SELECT name FROM sys.indexes
+      WHERE name = 'UQ_rotacion_patron_natural_activo'
+        AND object_id = OBJECT_ID('bitacora.rotacion_patron')
+    `)).recordset.map((r) => r.name),
+  ]);
+
+  const f37A4Ok = [];
+  for (const columna of ['vector_t1', 'vector_t2']) {
+    f37A4Ok.push(await agregarConstraintConPrevuelo(db, {
+      nombre: `CK_rotacion_patron_${columna}`,
+      tabla: 'bitacora.rotacion_patron',
+      drift: `
+        SELECT COUNT(*) AS n FROM bitacora.rotacion_patron
+        WHERE NOT (${predicadoVector(columna)})`,
+      remedio: `Corrige ${columna} a ocho grupos 1..4 separados por coma (p. ej. '1,1,3,3,4,4,2,2')`,
+      ddl: `
+        ALTER TABLE bitacora.rotacion_patron
+          ADD CONSTRAINT CK_rotacion_patron_${columna}
+          CHECK (${predicadoVector(columna)});`,
+    }));
+  }
+
+  const uqActivaExiste = await db.request().query(`
+    SELECT 1 AS x FROM sys.indexes
+    WHERE name = 'UQ_rotacion_patron_natural_activo'
+      AND object_id = OBJECT_ID('bitacora.rotacion_patron')
+  `);
+  if (!uqActivaExiste.recordset[0]) {
+    const dup = await db.request().query(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT 1 AS x FROM bitacora.rotacion_patron
+        WHERE activo = 1 GROUP BY cargo_id, fecha_inicio HAVING COUNT(*) > 1
+      ) d
+    `);
+    const nDup = dup.recordset[0]?.n ?? 0;
+    if (nDup > 0) {
+      console.error(
+        `[F37.A4] UQ_rotacion_patron_natural_activo NO se creó: hay ${nDup} par(es) (cargo_id, fecha_inicio) ` +
+        'repetidos entre los patrones activos. Desactiva los sobrantes y reinicia; la migración se reintenta ' +
+        'en el próximo arranque.'
+      );
+      f37A4Ok.push(false);
+    } else {
+      await db.request().batch(`
+        SET QUOTED_IDENTIFIER ON;   -- exigidos por CREATE INDEX … WHERE (índice filtrado)
+        SET ANSI_NULLS ON;
+        SET XACT_ABORT ON;
+        BEGIN TRAN;
+          IF EXISTS (SELECT 1 FROM sys.key_constraints
+                      WHERE name = 'UQ_rotacion_patron_natural'
+                        AND parent_object_id = OBJECT_ID('bitacora.rotacion_patron'))
+            ALTER TABLE bitacora.rotacion_patron DROP CONSTRAINT UQ_rotacion_patron_natural;
+          CREATE UNIQUE INDEX UQ_rotacion_patron_natural_activo
+            ON bitacora.rotacion_patron (cargo_id, fecha_inicio)
+            WHERE activo = 1;
+        COMMIT;
+      `);
+      f37A4Ok.push(true);
+    }
+  } else {
+    f37A4Ok.push(true);
+  }
+
+  if (f37A4Ok.every(Boolean)) {
+    await db.request().batch(`
+      IF NOT EXISTS (SELECT 1 FROM bitacora.migracion_aplicada WHERE codigo = 'F37.A4')
+        INSERT INTO bitacora.migracion_aplicada (codigo) VALUES ('F37.A4');
+    `);
+  }
+  const f37A4Ahora = new Set([
+    ...(await db.request().query(`
+      SELECT name FROM sys.objects
+      WHERE type = 'C' AND name IN ('CK_rotacion_patron_vector_t1', 'CK_rotacion_patron_vector_t2')
+    `)).recordset.map((r) => r.name),
+    ...(await db.request().query(`
+      SELECT name FROM sys.indexes
+      WHERE name = 'UQ_rotacion_patron_natural_activo'
+        AND object_id = OBJECT_ID('bitacora.rotacion_patron')
+    `)).recordset.map((r) => r.name),
+  ]);
+  const f37A4Creados = F37A4_OBJETOS.filter((n) => !f37A4Antes.has(n) && f37A4Ahora.has(n));
+  if (f37A4Creados.length) {
+    console.log(`[F37.A4] formato de vectores y UNIQUE filtrada del patrón: ${f37A4Creados.join(', ')}.`);
+  }
+
+
   console.log('[DB] Conexión OK');
+}
+
+// D-065 (L12, CR2-12) — agrega una constraint WITH CHECK solo si ninguna fila la viola.
+//
+// `ALTER TABLE … ADD CONSTRAINT` valida los datos existentes: una sola fila con drift —escrita
+// fuera de la app, que es el único camino que queda cuando el endpoint valida— aborta initDB con
+// un 547 pelado y el server NO ARRANCA. Un 547 en el bootstrap no dice qué tabla, ni cuántas filas,
+// ni qué hacer: dice `The ALTER TABLE statement conflicted with the FOREIGN KEY constraint`.
+//
+// Con pre-vuelo la migración degrada en vez de tumbar (el mismo criterio de D-047 con Gemini): el
+// arranque sigue, el drift queda DENUNCIADO con su conteo y su remedio, y la constraint se reintenta
+// en el siguiente arranque —porque el bloque entero es idempotente y corre siempre—. Nunca calla:
+// omitir en silencio sería peor que el 547.
+//
+// Devuelve `true` si la constraint quedó (ya estaba o se creó) y `false` si se omitió por drift.
+async function agregarConstraintConPrevuelo(db, { nombre, tabla, drift, ddl, remedio }) {
+  const ya = await db.request()
+    .input('nombre', sql.VarChar(128), nombre)
+    .query(`SELECT 1 AS x FROM sys.objects WHERE name = @nombre AND parent_object_id = OBJECT_ID('${tabla}')`);
+  if (ya.recordset[0]) return true;
+
+  const r = await db.request().query(drift);
+  const n = r.recordset[0]?.n ?? 0;
+  if (n > 0) {
+    console.error(
+      `[migración] ${nombre} NO se agregó: ${n} fila(s) de ${tabla} la violan. ${remedio}. ` +
+      'El arranque continúa y la migración se reintenta en el próximo.'
+    );
+    return false;
+  }
+  await db.request().batch(ddl);
+  return true;
 }
 
 // Enforce del invariante singleton de un flag de identidad (es_jefe_planta / es_jdt_default).

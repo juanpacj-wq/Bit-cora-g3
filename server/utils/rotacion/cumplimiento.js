@@ -25,10 +25,14 @@
 // asignado. Un `throw` ahí volvería incerrable todo turno de la planta antes de la primera carga
 // anual. Precedente literal: D-063, `copias = 0` nunca es error.
 //
-// Filtros heredados al contar participantes y relevos: `es_sintetico = 1` queda fuera salvo que el
-// llamador pase `incluirSinteticos` (D-044, escape hatch EXCLUSIVO de unit tests, mismo que
-// `cerrarTurno`) y `es_observador = 1` queda fuera SIEMPRE, sin escape hatch (D-059): un observador
-// que entra no satisface un slot ni cuenta como relevo.
+// Filtros heredados al contar PARTICIPANTES (`leerParticipantes`): `es_sintetico = 1` queda fuera
+// salvo que el llamador pase `incluirSinteticos` (D-044, escape hatch EXCLUSIVO de unit tests, mismo
+// que `cerrarTurno`) y `es_observador = 1` queda fuera SIEMPRE, sin escape hatch (D-059): un
+// observador que entra no satisface un slot ni cuenta como relevo.
+// El LOG DE CONTROL (`leerEventosControl`) no lleva ninguno de los dos: tiene que ver el mismo
+// conjunto de eventos que el popup de L05, o el principal que se muestra y el relevo que se congela
+// salen de logs distintos (CR2-7; el porqué, en el comentario de esa función). Un observador no
+// puede dejar eventos ahí de todos modos: `control.js` lo excluye por flag antes de escribir.
 
 import sql from 'mssql';
 import { titularesDeTurno } from './titulares.js';
@@ -139,18 +143,30 @@ async function leerParticipantes(exec, { turno_id, incluirSinteticos }) {
 }
 
 // Eventos TOMAR/ABANDONAR del turno en la planta, agrupados por cargo y en orden del log.
-async function leerEventosControl(exec, { turno_id, planta_id, incluirSinteticos }) {
+//
+// SIN filtro de `es_sintetico`, y eso es deliberado (CR2-7). Este lector y el del popup
+// (`leerEventos` en `control.js`) tienen que ver EXACTAMENTE el mismo log: si uno cuenta un TOMAR
+// que el otro descarta, la persona que el popup muestra como principal no es la que el cierre
+// congela como relevo — dos verdades para la misma pregunta. El popup no puede filtrar (la sesión
+// que toma el control es la del usuario que está adentro, y en la suite ese usuario es sintético
+// por obligación, D-055), así que la alineación va por acá.
+//
+// No choca con D-044: lo que ese blindaje protege es la PRESENCIA congelada —quién estuvo en el
+// turno— y ese filtro sigue puesto, en `leerParticipantes`. `rotacion_control` es otra cosa: un log
+// append-only de un turno concreto, donde "quién tomó el control" es un hecho de ese turno. En
+// producción no hay nadie con `es_sintetico = 1`, así que el cambio es neutro; donde sí muerde es en
+// el único caso que el filtro alcanzaba de verdad —una persona REAL con username `test_*`, que el
+// seed marca sintética— y ahí el comportamiento correcto es justamente contarla en los dos lados.
+async function leerEventosControl(exec, { turno_id, planta_id }) {
   const r = await exec.request()
     .input('id', sql.Int, turno_id)
     .input('planta', sql.VarChar(10), planta_id)
-    .input('incluir_sinteticos', sql.Bit, incluirSinteticos ? 1 : 0)
     .query(`
       SELECT rc.cargo_id, rc.usuario_id, rc.accion, u.nombre_completo AS nombre
       FROM bitacora.rotacion_control rc
       INNER JOIN lov_bit.usuario u ON u.usuario_id = rc.usuario_id
       WHERE rc.turno_id = @id AND rc.planta_id = @planta
         AND rc.accion IN ('TOMAR', 'ABANDONAR')
-        AND (@incluir_sinteticos = 1 OR u.es_sintetico = 0)
       ORDER BY rc.rotacion_control_id ASC
     `);
   const porCargo = new Map();
@@ -177,7 +193,8 @@ export async function derivarCumplimiento(exec, {
 
   // Secuencial a propósito: sobre una Transaction de mssql no puede haber dos requests en vuelo.
   const participantes = await leerParticipantes(exec, { turno_id, incluirSinteticos });
-  const eventosPorCargo = await leerEventosControl(exec, { turno_id, planta_id, incluirSinteticos });
+  // `incluirSinteticos` NO se le pasa al log de control: ese lector no filtra por diseño (CR2-7).
+  const eventosPorCargo = await leerEventosControl(exec, { turno_id, planta_id });
 
   const filas = [];
   for (const rol of roles) {

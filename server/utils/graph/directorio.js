@@ -41,6 +41,7 @@ import {
   graphGet,
   graphGetTodo,
   leerConfigEntra,
+  nuevoPresupuesto429,
   obtenerToken,
 } from './cliente.js';
 
@@ -76,6 +77,19 @@ function rolPorPrecedencia(roles) {
   return [...roles].sort()[0] || ROLE_DEFAULT_ACCESS;
 }
 
+/**
+ * Mediana entera de una lista de tamaños, con piso 1. Es el peso que se le da a un grupo que NO se
+ * pudo leer (CR2-4): la mediana resiste al grupo vacío y al gigante mucho mejor que el promedio, y
+ * el piso 1 evita que "no se leyó ningún grupo" haga costar 0 a los omitidos. Lista vacía → 1.
+ */
+function medianaEntera(tamanos) {
+  if (!tamanos.length) return 1;
+  const orden = [...tamanos].sort((a, b) => a - b);
+  const mitad = Math.floor(orden.length / 2);
+  const mediana = orden.length % 2 ? orden[mitad] : Math.round((orden[mitad - 1] + orden[mitad]) / 2);
+  return Math.max(1, mediana);
+}
+
 /** Acumula una persona de Graph bajo su oid, sumando el rol de esta asignación. */
 function acumularPersona(porOid, usuarioGraph, role) {
   const oid = String(usuarioGraph?.id || '').trim();
@@ -103,18 +117,22 @@ function acumularPersona(porOid, usuarioGraph, role) {
  *   personas: Array<{ azure_oid: string, nombre: string, upn: string, activo: boolean,
  *                     role: string, cargo_nombre: string|null }>,
  *   grupos:   Array<{ nombre: string, role: string, miembros: number }>,
+ *   omitidas: { total: number, grupos: number, usuarios: number, personas_estimadas: number },
  * }>}
  * @throws {Error} con `.codigo = 'entra_no_disponible'` si falta credencial o Graph no responde.
  */
 export async function leerDirectorioEntra({ fetchImpl = fetch } = {}) {
   const { clientId } = leerConfigEntra();
   const token = await obtenerToken({ fetchImpl });
+  // UNA bolsa de espera por 429 para las ~16 peticiones de esta lectura (CR2-13): el tope por
+  // llamada no acota la operación, y esta corre dentro de la petición HTTP del administrador.
+  const presupuesto = nuevoPresupuesto429();
 
   // 1. El service principal de la Enterprise App: de ahí salen los appRoles (id -> value).
   //    `clientId` ya pasó por GUID_RE en leerConfigEntra, así que el $filter no es interpolable.
   const sps = await graphGetTodo(
     `/servicePrincipals?$filter=appId eq '${clientId}'&$select=id,displayName,appRoles`,
-    { fetchImpl, token },
+    { fetchImpl, token, presupuesto },
   );
   const sp = sps[0];
   if (!sp?.id) throw errEntra('el service principal de M365_CLIENT_ID no existe o no es visible');
@@ -128,7 +146,7 @@ export async function leerDirectorioEntra({ fetchImpl = fetch } = {}) {
   // 2. A quién está asignada la app (grupos y usuarios directos).
   const asignaciones = await graphGetTodo(
     `/servicePrincipals/${sp.id}/appRoleAssignedTo?$top=999`,
-    { fetchImpl, token },
+    { fetchImpl, token, presupuesto },
   );
 
   const grupos = [];
@@ -141,6 +159,11 @@ export async function leerDirectorioEntra({ fetchImpl = fetch } = {}) {
   // globales, porque sin ellas no hay nada que tolerar. El umbral está más abajo.
   let intentadas = 0;
   let omitidas = 0;
+  // Desagregado por tipo de asignación (CR2-4): una de USUARIO vale exactamente una persona y se
+  // sabe cuál; una de GRUPO vale N personas y N es justo lo que no se pudo leer.
+  let omitidasGrupo = 0;
+  let omitidasUsuario = 0;
+  const tamanoGruposLeidos = [];
 
   for (const asignacion of asignaciones) {
     // Un appRoleId que no está entre los appRoles del SP es el "Default Access" de Entra.
@@ -159,13 +182,15 @@ export async function leerDirectorioEntra({ fetchImpl = fetch } = {}) {
         miembros = await graphGetTodo(
           `/groups/${principalId}/transitiveMembers/microsoft.graph.user`
             + `?$select=id,displayName,userPrincipalName,accountEnabled&$top=999`,
-          { fetchImpl, token },
+          { fetchImpl, token, presupuesto },
         );
       } catch (e) {
         if (e?.codigo !== 'entra_no_disponible') throw e;
         omitidas++;
+        omitidasGrupo++;
         continue;
       }
+      tamanoGruposLeidos.push(miembros.length);
       grupos.push({
         nombre: String(asignacion.principalDisplayName || '').trim(),
         role,
@@ -185,11 +210,12 @@ export async function leerDirectorioEntra({ fetchImpl = fetch } = {}) {
       try {
         usuario = await graphGet(
           `/users/${principalId}?$select=id,displayName,userPrincipalName,accountEnabled`,
-          { fetchImpl, token },
+          { fetchImpl, token, presupuesto },
         );
       } catch (e) {
         if (e?.codigo !== 'entra_no_disponible') throw e;
         omitidas++;
+        omitidasUsuario++;
         continue;
       }
       acumularPersona(porOid, usuario, role);
@@ -197,17 +223,40 @@ export async function leerDirectorioEntra({ fetchImpl = fetch } = {}) {
     // Otro principalType (ServicePrincipal): no es una persona, se ignora.
   }
 
-  // Umbral: si falla MÁS DE LA MITAD de las asignaciones, no es un directorio con huecos sino
-  // Graph fallando (token vencido a mitad de camino, permisos retirados, caída), y un directorio
-  // a medias que PARECE válido es peor que un 503: el administrador concluiría que la gente
-  // desapareció. Por debajo del umbral se tolera porque el consumidor es seguro: la
-  // sincronización solo escribe a quien SÍ vio; nunca desactiva ni borra a quien faltó.
-  if (omitidas > 0 && omitidas * 2 > intentadas) {
-    throw errEntra(`${omitidas} de ${intentadas} asignaciones fallaron`);
+  // Umbral: si se perdió demasiada gente, no es un directorio con huecos sino Graph fallando (token
+  // vencido a mitad de camino, permisos retirados, caída), y un directorio a medias que PARECE
+  // válido es peor que un 503: el administrador concluiría que la gente desapareció. Por debajo del
+  // umbral se tolera porque el consumidor es seguro: la sincronización solo escribe a quien SÍ vio;
+  // nunca desactiva ni borra a quien faltó.
+  //
+  // Se mide en PERSONAS, no en asignaciones (CR2-4). Contar asignaciones trata igual al grupo de 14
+  // y a la asignación directa de una sola persona, así que perder los grupos grandes podía devolver
+  // 200 con 20 personas de 81 y el único rastro era una línea en el log. Cada grupo omitido se pesa
+  // por la MEDIANA de los que sí se leyeron (mínimo 1): es una COTA, no una medida —el tamaño real
+  // del grupo es justo lo que no se pudo leer—, y por eso el número también viaja en la respuesta,
+  // para que la pantalla lo muestre en vez de prometer un total de antemano.
+  // Se conserva además el umbral viejo por asignaciones: este cambio nunca es MÁS permisivo.
+  const personasLeidas = porOid.size;
+  const medianaGrupo = medianaEntera(tamanoGruposLeidos);
+  const personasOmitidas = omitidasUsuario + omitidasGrupo * medianaGrupo;
+  const omitidasResumen = {
+    total: omitidas,
+    grupos: omitidasGrupo,
+    usuarios: omitidasUsuario,
+    personas_estimadas: personasOmitidas,
+  };
+  if (omitidas > 0 && (personasOmitidas > personasLeidas || omitidas * 2 > intentadas)) {
+    throw errEntra(
+      `${omitidas} de ${intentadas} asignaciones fallaron `
+      + `(≈${personasOmitidas} personas perdidas frente a ${personasLeidas} leídas)`,
+    );
   }
   if (omitidas > 0) {
     // Solo conteos: ni el id del principal ni el nombre del grupo.
-    console.warn(`[graph] directorio: ${omitidas} de ${intentadas} asignaciones omitidas por error de Graph`);
+    console.warn(
+      `[graph] directorio: ${omitidas} de ${intentadas} asignaciones omitidas por error de Graph `
+      + `(${omitidasGrupo} grupos, ${omitidasUsuario} usuarios; ≈${personasOmitidas} personas)`,
+    );
   }
 
   const personas = [...porOid.values()].map((p) => {
@@ -227,7 +276,7 @@ export async function leerDirectorioEntra({ fetchImpl = fetch } = {}) {
   // Solo conteos. Nunca nombres, UPNs ni el cuerpo de la respuesta.
   console.log(`[graph] directorio: ${grupos.length} grupos, ${personas.length} personas`);
 
-  return { personas, grupos };
+  return { personas, grupos, omitidas: omitidasResumen };
 }
 
 /**
@@ -261,13 +310,21 @@ function resolverUsername(upn, oid, dueñoPorUsername) {
  * @param {import('mssql').ConnectionPool} pool
  * @param {{ por_usuario?: number|null, directorio?: object|null, fetchImpl?: Function }} opciones
  *   `directorio` permite pasar una lectura ya hecha (o capturada, en tests) y saltarse la red.
+ * `omitidas` viaja hasta la respuesta HTTP a propósito (CR2-4): un 200 con menos gente de la
+ * esperada es indistinguible de un 200 completo si el único rastro es una línea en el log, y la
+ * pantalla necesita poder decir "faltaron N" en vez de prometer un total de antemano.
+ *
  * @returns {Promise<{ creados: number, actualizados: number, total: number,
- *                     por_rol: Record<string, number> }>}
+ *                     por_rol: Record<string, number>,
+ *                     omitidas: { total: number, grupos: number, usuarios: number,
+ *                                 personas_estimadas: number } }>}
  */
 export async function sincronizarDirectorio(pool, { por_usuario = null, directorio = null, fetchImpl = fetch } = {}) {
   const dir = directorio || await leerDirectorioEntra({ fetchImpl });
   const personas = (Array.isArray(dir?.personas) ? dir.personas : [])
     .filter((p) => String(p?.azure_oid || '').trim());
+  // Un `directorio` inyectado (tests) puede no traerlo: sin omisiones que reportar, cero.
+  const omitidas = dir?.omitidas ?? { total: 0, grupos: 0, usuarios: 0, personas_estimadas: 0 };
 
   const por_rol = {};
   for (const p of personas) {
@@ -298,7 +355,15 @@ export async function sincronizarDirectorio(pool, { por_usuario = null, director
       for (const persona of tramo) {
         const oid = String(persona.azure_oid).trim();
         const upn = String(persona.upn || '').trim().slice(0, MAX_UPN);
-        const nombre = (String(persona.nombre || '').trim() || upn || oid).slice(0, MAX_NOMBRE);
+        // Dos nombres, no uno (CR2-9). `nombre` es lo que Graph dijo: `null` si no dijo nada, para
+        // que el UPDATE lo respete con COALESCE en vez de pisar el nombre bueno que la BD ya tiene
+        // con el UPN —o peor, con el GUID crudo— cada vez que `displayName` llegue vacío (cuenta
+        // B2B, soft-deleted, $select recortado por el tenant). Es la misma forma de fallo que L11
+        // blindó para azure_upn/azure_tid, dos líneas más abajo.
+        // `nombre_alta` es la cadena de respaldo y solo se usa en el INSERT, donde la columna es
+        // NOT NULL y no hay nada previo que conservar.
+        const nombre = String(persona.nombre || '').trim().slice(0, MAX_NOMBRE) || null;
+        const nombreAlta = (nombre || upn || oid).slice(0, MAX_NOMBRE);
         const username = resolverUsername(upn, oid, dueñoPorUsername);
 
         const r = await new sql.Request(tx)
@@ -306,6 +371,7 @@ export async function sincronizarDirectorio(pool, { por_usuario = null, director
           .input('upn', sql.VarChar(200), upn || null)
           .input('tid', sql.VarChar(64), tenantId)
           .input('nombre', sql.VarChar(200), nombre)
+          .input('nombre_alta', sql.VarChar(200), nombreAlta)
           .input('username', sql.VarChar(50), username)
           .input('activo', sql.Bit, persona.activo === false ? 0 : 1)
           .query(`
@@ -315,7 +381,10 @@ export async function sincronizarDirectorio(pool, { por_usuario = null, director
             MERGE lov_bit.usuario WITH (HOLDLOCK) AS t
             USING (VALUES (@oid)) AS s (azure_oid) ON t.azure_oid = s.azure_oid
             WHEN MATCHED THEN UPDATE SET
-              nombre_completo = @nombre,
+              -- L12 (CR2-9): un displayName vacío en Graph NO borra el nombre que la BD ya tiene.
+              -- Sin el COALESCE, la fila quedaba con el UPN —o con el GUID— como nombre completo,
+              -- que es lo que se ve en el panel de conectados y en todo el histórico.
+              nombre_completo = COALESCE(@nombre, t.nombre_completo),
               -- L11 (CR-1): un UPN o tenant ausente en Graph NO borra el que la BD ya tiene.
               -- azure_upn es la entrada de enforceSingletonFlag: con NULL acá, el siguiente
               -- arranque degradaría al Jefe de Planta hasta su próximo login.
@@ -324,7 +393,7 @@ export async function sincronizarDirectorio(pool, { por_usuario = null, director
             WHEN NOT MATCHED THEN INSERT
               (nombre_completo, username, email, password_hash, azure_oid, azure_upn, azure_tid,
                es_jefe_planta, es_jdt_default, activo)
-              VALUES (@nombre, @username, NULL, NULL, @oid, @upn, @tid, 0, 0, @activo)
+              VALUES (@nombre_alta, @username, NULL, NULL, @oid, @upn, @tid, 0, 0, @activo)
             OUTPUT $action AS accion;
           `);
 
@@ -345,8 +414,9 @@ export async function sincronizarDirectorio(pool, { por_usuario = null, director
   // Solo conteos y el id de quien la disparó. Nunca nombres ni UPNs.
   console.log(
     `[graph] sync: ${personas.length} personas, ${creados} creados, ${actualizados} actualizados`
+    + `${omitidas.total > 0 ? `, ${omitidas.total} asignaciones omitidas` : ''}`
     + `${por_usuario != null ? ` (por usuario_id=${por_usuario})` : ''}`,
   );
 
-  return { creados, actualizados, total: personas.length, por_rol };
+  return { creados, actualizados, total: personas.length, por_rol, omitidas };
 }

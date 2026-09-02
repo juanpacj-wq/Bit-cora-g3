@@ -19,7 +19,7 @@ import sql from 'mssql';
 import { randomBytes } from 'node:crypto';
 import { initDB, getDB, TEST_PLANTA_ID } from '../db.js';
 import { hashPassword } from '../utils/password.js';
-import { getTurnoColombia, fechaBogotaStr, ventanaActual } from '../utils/turno.js';
+import { getTurnoColombia } from '../utils/turno.js';
 import { abrirTurnoSiFalta } from '../utils/turno-entidad.js';
 import { grupoDeTurno, parsearVector } from '../utils/rotacion/patron.js';
 import {
@@ -41,6 +41,19 @@ const CARGO_GERENTE = 'Gerente de Producción';             // puede_configurar_
 const VECTOR_T1 = '1,1,3,3,4,4,2,2';
 const VECTOR_T2 = '4,2,2,1,1,3,3,4';
 
+// CR2-5 (GATE-O2 → L12): la ventana del patrón-fixture va ENTERA EN EL PASADO, y la cabecera de
+// 'TST' con ella. Antes el patrón cubría [hoy−3, hoy+30] sobre cargos REALES, y mientras esta suite
+// corría, el turno-sweeper del backend efímero cerraba GEC3/GEC32 (deuda D4 del GATE-O1: no mira
+// AUTH_TEST_BYPASS). Cada uno de esos cierres congela cumplimiento, `titularesDeTurno` NO filtra por
+// planta (R3) y el patrón de fixture aplicaba a hoy → filas de `rotacion_cumplimiento` de planta
+// REAL con titulares sintéticos, que el `after()` de acá deja después apuntando a usuarios que ya no
+// existen. La suite hermana de L06 fija su fixture en marzo de 2025 por exactamente esto.
+// Nada del escenario depende de que la fecha sea hoy: `resolverTurnoAbierto` busca la cabecera
+// ABIERTO de la unidad, sin mirar el calendario, y el grupo de guardia se calcula con el motor.
+// `rotacion_correcciones_o2.test.js` verifica que estas dos fechas sigan en el pasado.
+const FECHA_OP_FIXTURE = '2025-06-10';
+const PATRON_FIXTURE = { inicio: '2025-06-07', fin: '2025-07-10' };
+
 // Prefijo `test_` → el seed de db.js lo marca `es_sintetico = 1` en cada arranque; acá además se
 // pone explícito al crearlos. El LIKE usa `[_]` para que el guion bajo no sea comodín.
 const PREFIJO = 'test_rotctl_';
@@ -61,11 +74,6 @@ const FIXTURE = {
   admin:      { nombre: 'Test RotCtl Admin' },
   gerente:    { nombre: 'Test RotCtl Gerente' },
 };
-
-function sumarDias(iso, n) {
-  const [y, m, d] = iso.split('-').map(Number);
-  return fechaOperativaIso(new Date(Date.UTC(y, m - 1, d + n)));
-}
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // 1. Derivación pura
@@ -281,9 +289,13 @@ describe('D-065 L05 · superficie B por HTTP (planta TST)', () => {
       ids[k] = r.recordset[0].usuario_id;
     }
 
-    // Cabecera ABIERTO de la ventana vigente en TST. Se crea explícitamente (no se depende del sweeper).
-    const { inicio } = ventanaActual();
-    fechaOp = fechaBogotaStr(inicio);
+    // Cabecera ABIERTO en TST, con `fecha_operativa` en el pasado (CR2-5). Se crea explícitamente
+    // (no se depende del sweeper, que además no toca 'TST'). El NÚMERO de turno sí es el del reloj:
+    // las sesiones de la fixture se insertan con ese mismo `turno` y su `inicio_sesion` es AHORA, y
+    // la expulsión del sweeper se calcula como `ventanaTurno(sesion.turno, sesion.inicio_sesion)` —
+    // con un turno que no es el vigente, esa ventana ya venció y las sesiones se caerían a mitad de
+    // la corrida (401 en todos los casos).
+    fechaOp = FECHA_OP_FIXTURE;
     turnoNum = getTurnoColombia();
     turno = await abrirTurnoSiFalta(db, P, turnoNum, fechaOp);
     assert.equal(turno.estado, 'ABIERTO', 'la fixture necesita la cabecera ABIERTO');
@@ -292,7 +304,7 @@ describe('D-065 L05 · superficie B por HTTP (planta TST)', () => {
     // Patrón (C2) para el rol de la fixture y, a propósito, también para el Administrador y el
     // observador: así se falsea que la exclusión de R12 es por FLAG y no por "no tener patrón".
     const patron = {
-      fecha_inicio: sumarDias(fechaOp, -3), fecha_fin: sumarDias(fechaOp, 30),
+      fecha_inicio: PATRON_FIXTURE.inicio, fecha_fin: PATRON_FIXTURE.fin,
       vector_t1: parsearVector(VECTOR_T1), vector_t2: parsearVector(VECTOR_T2), desfase: 0,
     };
     grupoGuardia = grupoDeTurno(patron, fechaOp, turnoNum);
@@ -515,6 +527,96 @@ describe('D-065 L05 · superficie B por HTTP (planta TST)', () => {
     log = await leerLog();
     assert.deepEqual(log.map((e) => [e.usuario_id, e.accion]), [[ids.c, 'TOMAR']], 'una sola fila: el cálculo del principal se serializó');
     assert.ok(LOCK_TIMEOUT_MS >= 1000, 'el timeout del applock deja margen a la cola de transacciones');
+  });
+
+  // CA-11, verificador NEGATIVO — rehecho por CR2-6 (GATE-O2, decisión D4 → L12).
+  //
+  // El de antes eran los N TOMAR concurrentes de arriba: si alguien quitaba el `sp_getapplock`,
+  // aparecían N filas y el caso se ponía rojo. Desde que la re-verificación del estado toma
+  // `WITH (UPDLOCK)` sobre la cabecera —el arreglo del deadlock, CR2-6— eso ya NO mide el applock:
+  // el bloqueo de FILA del turno serializa por sí solo dos escrituras del mismo turno, así que el
+  // caso seguiría verde sin applock, por la razón equivocada.
+  //
+  // Lo que sí lo mide es la GRANULARIDAD: el applock es de (turno, cargo) y el U lock es del turno
+  // entero. Se toma el applock DESDE AFUERA, en una transacción de este test que no toca ninguna
+  // tabla, y se mira si el verbo lo respeta. Sin `sp_getapplock` en producción, (c) sale 200 y el
+  // caso se pone rojo; el U lock no puede taparlo porque esta transacción no lockea la cabecera.
+  async function conApplock(recurso, fn) {
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    try {
+      const r = await new sql.Request(tx)
+        .input('recurso', sql.NVarChar(255), recurso)
+        .query(`
+          DECLARE @rc INT;
+          EXEC @rc = sp_getapplock
+            @Resource = @recurso, @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = 2000;
+          SELECT @rc AS rc;
+        `);
+      assert.ok(r.recordset[0].rc >= 0, `el test no pudo tomar el applock '${recurso}' (rc=${r.recordset[0].rc})`);
+      return await fn();
+    } finally {
+      await tx.rollback();
+    }
+  }
+
+  test('CA-11 (c) · con el applock de (turno, cargo) tomado desde afuera, TOMAR responde 409 control_ocupado', async () => {
+    await limpiarLog();
+    const recurso = `rotacion-control-${turno.turno_unidad_id}-${cargo.rol.cargo_id}`;
+    const r = await conApplock(recurso, () => tomar('a'));
+    es409(r, 'control_ocupado', 'tomar con el applock ocupado');
+    assert.equal((await leerLog()).length, 0, 'el timeout del applock no deja evento');
+
+    // Y al soltarlo, el mismo TOMAR pasa: lo que bloqueaba era el lock, no otra cosa.
+    ok200(await tomar('a'), 'tomar tras soltar el applock');
+    assert.deepEqual((await leerLog()).map((e) => [e.usuario_id, e.accion]), [[ids.a, 'TOMAR']]);
+  });
+
+  test('CA-11 (d) · el applock es POR (turno, cargo): con otro recurso tomado, TOMAR pasa sin esperar', async () => {
+    await limpiarLog();
+    // Mismo turno, otro cargo. Si el recurso fuera global (o si el verbo esperara al lock de fila de
+    // la cabecera, que sí es por turno) esto saldría 409 y el caso (c) no probaría granularidad.
+    const otroCargo = `rotacion-control-${turno.turno_unidad_id}-${cargo.sinPatron.cargo_id}`;
+    const t0 = Date.now();
+    const r = await conApplock(otroCargo, () => tomar('b'));
+    ok200(r, 'tomar con el applock de OTRO cargo tomado');
+    assert.ok(Date.now() - t0 < LOCK_TIMEOUT_MS, 'no esperó al lock ajeno');
+    assert.deepEqual((await leerLog()).map((e) => e.usuario_id), [ids.b]);
+  });
+
+  test('CR2-6 · el verbo toma la cabecera del turno con UPDLOCK antes de escribir el log (orden fijo vs. cerrarTurno)', async () => {
+    await limpiarLog();
+    // `cerrarTurno` X-lockea la cabecera y DESPUÉS lee `rotacion_control`; el verbo lee la cabecera y
+    // DESPUÉS inserta en `rotacion_control`. Con la re-verificación sin UPDLOCK esos dos órdenes se
+    // abrazan y la víctima sale 500 `db_error` en vez del 409 `turno_cerrado` de CA-14 (el GATE-O2 lo
+    // vio en su corrida, H4). Reproducir el deadlock sería una carrera; lo determinista es medir el
+    // ORDEN: con un U lock ajeno sobre la cabecera, el TOMAR tiene que QUEDARSE ESPERANDO. Sin el
+    // UPDLOCK toma un lock compartido —compatible con el U— y pasa de largo: ahí el caso se pone rojo.
+    const tx = new sql.Transaction(db);
+    await tx.begin();
+    let resuelta = false;
+    let pendiente;
+    try {
+      await new sql.Request(tx)
+        .input('id', sql.Int, turno.turno_unidad_id)
+        .query(`
+          SELECT turno_unidad_id FROM bitacora.turno_unidad WITH (UPDLOCK)
+          WHERE turno_unidad_id = @id
+        `);
+      pendiente = tomar('c').then((r) => { resuelta = true; return r; });
+      await new Promise((resolver) => setTimeout(resolver, 1500));
+      assert.equal(
+        resuelta, false,
+        'el TOMAR NO esperó al U lock de la cabecera: la re-verificación del estado está leyendo sin UPDLOCK '
+        + '(CR2-6), y ese es el orden de bloqueos que se abraza con cerrarTurno',
+      );
+      assert.equal((await leerLog()).length, 0, 'y tampoco alcanzó a escribir el log');
+    } finally {
+      await tx.rollback();
+    }
+    const r = await pendiente;
+    ok200(r, 'al soltar el U lock, el TOMAR sigue y compromete');
+    assert.deepEqual((await leerLog()).map((e) => [e.usuario_id, e.accion]), [[ids.c, 'TOMAR']]);
   });
 
   test('CA-13 · descartar: ya_respondi queda en true para ese usuario en este turno, sin tocar la pila', async () => {

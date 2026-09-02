@@ -29,10 +29,26 @@ import { getTurnoColombia } from '../utils/turno.js';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3002';
 const ORACULO = JSON.parse(readFileSync(new URL('./fixtures/rotacion-oraculo-2026.json', import.meta.url), 'utf8'));
-const FECHAS = Object.keys(ORACULO.dias.OPS).sort();
 
 const CARGO_POR_MALLA = { OPS: 'Operador de Planta - Sala de Mando', ING: 'Ingeniero de Operación' };
-const PERIODO = { inicio: '2026-02-01', fin: '2027-01-31' };
+
+// CR2-5 (GATE-O2 → L12): la ventana del patrón-fixture TERMINA EN EL PASADO. El oráculo cubre
+// 2026-02-01 → 2027-01-31, o sea que el patrón que esta suite cargaba estaba ACTIVO HOY sobre dos
+// cargos REALES (Operador de Planta - Sala de Mando e Ingeniero de Operación). Mientras tanto el
+// turno-sweeper del backend efímero cierra GEC3/GEC32 (deuda D4 del GATE-O1: no mira
+// AUTH_TEST_BYPASS) y cada cierre congela cumplimiento; `titularesDeTurno` NO filtra por planta
+// (R3), así que esas ocho personas de fixture podían quedar congeladas como titulares en el
+// histórico de una planta real — y el `after()` las borra después, dejando la fila apuntando a
+// usuarios que ya no existen (es lo que caza el check de `residuos.js`).
+// Recortar el periodo NO debilita CA-7: el oráculo se sigue reproduciendo día por día, solo que
+// sobre los cinco meses que caben dentro de la ventana. La muestra de abajo se ajusta para que
+// sigan siendo ≥ 16 fechas. `rotacion_correcciones_o2.test.js` verifica que esta fecha siga siendo
+// pasada.
+const PERIODO = { inicio: '2026-02-01', fin: '2026-06-30' };
+// Un periodo LIBRE (sin patrón) para los casos que solo ejercitan validación: también en el pasado,
+// para que un rechazo que algún día dejara de rechazar no siembre un patrón vigente.
+const PERIODO_LIBRE = { inicio: '2025-02-01', fin: '2025-12-31' };
+const FECHAS = Object.keys(ORACULO.dias.OPS).sort().filter((f) => f <= PERIODO.fin);
 const FECHA_ABIERTA = '9999-12-31';
 
 const OID = (n) => `00000000-d065-4004-8000-${String(n).padStart(12, '0')}`;
@@ -283,15 +299,15 @@ test('POST /patrones · el Administrador crea el patrón ING (vectores como text
 
 test('POST /patrones · validaciones: códigos del motor y de entrada → 400; duplicado y solapado → 409', async () => {
   const ops = ORACULO.patrones.OPS;
-  const libre = { inicio: '2027-02-01', fin: '2028-01-31' }; // periodo sin patrón: solo falla la validación
+  const libre = PERIODO_LIBRE; // periodo sin patrón (y pasado): solo debe fallar la validación
   const casos = [
     ['desfase_ambiguo',   { ...cuerpoPatron('OPS', libre), vector_t2: ops.vector_t1, grupo_t1: 1, grupo_t2: 1 }],
     ['desfase_imposible', { ...cuerpoPatron('OPS', libre), grupo_t1: 1, grupo_t2: 3 }],
     ['grupo_invalido',    { ...cuerpoPatron('OPS', libre), grupo_t1: '3' }],
     ['grupo_invalido',    { ...cuerpoPatron('OPS', libre), grupo_t2: 9 }],
-    ['fecha_invalida',    { ...cuerpoPatron('OPS', libre), fecha_inicio: '2027-02-30' }],
-    ['fecha_invalida',    { ...cuerpoPatron('OPS', libre), fecha_fin: '2028-01-31T00:00' }],
-    ['rango_invalido',    { ...cuerpoPatron('OPS', libre), fecha_inicio: '2028-01-31', fecha_fin: '2027-02-01' }],
+    ['fecha_invalida',    { ...cuerpoPatron('OPS', libre), fecha_inicio: '2025-02-30' }],
+    ['fecha_invalida',    { ...cuerpoPatron('OPS', libre), fecha_fin: '2025-12-31T00:00' }],
+    ['rango_invalido',    { ...cuerpoPatron('OPS', libre), fecha_inicio: '2025-12-31', fecha_fin: '2025-02-01' }],
     ['vector_invalido',   { ...cuerpoPatron('OPS', libre), vector_t1: '1,2,3' }],
     ['vector_invalido',   { ...cuerpoPatron('OPS', libre), vector_t2: [0, 1, 1, 1, 1, 1, 1, 1] }],
     ['cargo_invalido',    { ...cuerpoPatron('OPS', libre), cargo_id: 'x' }],
@@ -306,7 +322,7 @@ test('POST /patrones · validaciones: códigos del motor y de entrada → 400; d
 
   // Mismo cargo, misma fecha de inicio → 409 patron_duplicado (UQ_rotacion_patron_natural, sin 500).
   const dup = await call('POST', '/api/rotacion/patrones', {
-    sesion_id: ses.gerente, body: cuerpoPatron('OPS', { inicio: PERIODO.inicio, fin: '2026-06-30' }),
+    sesion_id: ses.gerente, body: cuerpoPatron('OPS', { inicio: PERIODO.inicio, fin: '2026-05-31' }),
   });
   assert.equal(dup.status, 409, JSON.stringify(dup.data));
   assert.equal(dup.data.codigo, 'patron_duplicado');
@@ -314,7 +330,7 @@ test('POST /patrones · validaciones: códigos del motor y de entrada → 400; d
 
   // Mismo cargo, periodo que pisa al activo → 409 patron_solapado.
   const sol = await call('POST', '/api/rotacion/patrones', {
-    sesion_id: ses.gerente, body: cuerpoPatron('OPS', { inicio: '2026-06-01', fin: '2027-05-31' }),
+    sesion_id: ses.gerente, body: cuerpoPatron('OPS', { inicio: '2026-05-01', fin: '2026-06-15' }),
   });
   assert.equal(sol.status, 409, JSON.stringify(sol.data));
   assert.equal(sol.data.codigo, 'patron_solapado');
@@ -347,8 +363,8 @@ test('GET /patrones · lista con vectores como arreglos y filtra por cargo_id', 
 
 // ── CA-7 · titulares contra el oráculo ─────────────────────────────────────────────────────────
 test('CA-7 · GET /titulares reproduce el oráculo del Excel (20 fechas × 2 turnos, mallas OPS e ING) sin consultar el Excel', async () => {
-  // Los 8 primeros días (un ciclo completo) más una fecha cada 30 días hasta el fin del periodo.
-  const muestra = [...FECHAS.slice(0, 8), ...FECHAS.filter((_, i) => i >= 8 && i % 30 === 0)];
+  // Los 8 primeros días (un ciclo completo) más una fecha cada 12 días hasta el fin del periodo.
+  const muestra = [...FECHAS.slice(0, 8), ...FECHAS.filter((_, i) => i >= 8 && i % 12 === 0)];
   assert.ok(muestra.length >= 16, `muestra de ${muestra.length} fechas`);
   let pares = 0;
   for (const fecha of muestra) {
@@ -371,7 +387,7 @@ test('CA-7 · GET /titulares reproduce el oráculo del Excel (20 fechas × 2 tur
   assert.equal(pares, muestra.length * 2);
 
   // Fuera del periodo no hay patrón activo: los dos roles desaparecen del arreglo (C4).
-  for (const fuera of ['2026-01-31', '2027-02-01']) {
+  for (const fuera of ['2026-01-31', '2026-07-01']) {
     const data = await titulares(`fecha=${fuera}&turno=1`);
     assert.equal(data.titulares.filter((t) => [cargoId.ops, cargoId.ing].includes(t.cargo_id)).length, 0, fuera);
   }
@@ -574,13 +590,13 @@ test('POST /asignaciones · lote atómico: un elemento inválido deshace el lote
 test('POST /asignaciones · una asignación que empieza después → 409 asignacion_conflicto, sin tocar nada', async () => {
   const p6 = persona('ING', 2);
   const relevo = await call('POST', '/api/rotacion/asignaciones', {
-    sesion_id: ses.admin, body: { asignaciones: [asignacion(p6, { grupo: 3, vigente_desde: '2026-09-01' })] },
+    sesion_id: ses.admin, body: { asignaciones: [asignacion(p6, { grupo: 3, vigente_desde: '2026-06-15' })] },
   });
   assert.equal(relevo.status, 200, JSON.stringify(relevo.data));
   assert.equal(relevo.data.creadas, 1);
   const filasAntes = await filasDe(p6.usuario_id);
   assert.equal(filasAntes.length, 2);
-  const futura = filasAntes.find((f) => f.vigente_desde === '2026-09-01');
+  const futura = filasAntes.find((f) => f.vigente_desde === '2026-06-15');
 
   const r = await call('POST', '/api/rotacion/asignaciones', {
     sesion_id: ses.admin, body: { asignaciones: [asignacion(p6, { grupo: 4, vigente_desde: '2026-06-01' })] },
@@ -591,13 +607,21 @@ test('POST /asignaciones · una asignación que empieza después → 409 asignac
   assert.equal(r.data.indice, 0);
   assert.deepEqual(await filasDe(p6.usuario_id), filasAntes);
 
-  // Salir de la rotación el mismo día en que empieza una asignación tampoco es un cierre posible.
+  // Salir de la rotación el MISMO día en que empieza una asignación sí es posible desde L12 (CR2-3):
+  // esa fila nunca llegó a tener efecto, así que se elimina en vez de responder un 409 que describía
+  // otro caso ("ya tiene una asignación que empieza después") y obligaba a poner la salida al día
+  // siguiente, dejando a la persona de titular fantasma por un día. La verificación bidireccional
+  // completa vive en rotacion_correcciones_o2.test.js; acá se fija que el 409 de "empieza después"
+  // NO se dispara por este camino.
   const salida = await call('POST', '/api/rotacion/asignaciones', {
-    sesion_id: ses.admin, body: { asignaciones: [asignacion(p6, { grupo: null, vigente_desde: '2026-09-01' })] },
+    sesion_id: ses.admin, body: { asignaciones: [asignacion(p6, { grupo: null, vigente_desde: '2026-06-15' })] },
   });
-  assert.equal(salida.status, 409, JSON.stringify(salida.data));
-  assert.equal(salida.data.codigo, 'asignacion_conflicto');
-  assert.deepEqual(await filasDe(p6.usuario_id), filasAntes);
+  assert.equal(salida.status, 200, JSON.stringify(salida.data));
+  assert.deepEqual(salida.data, { creadas: 0, cerradas: 1, actualizadas: 0, sin_cambio: 0, total: 1 });
+  const filasDespues = await filasDe(p6.usuario_id);
+  assert.equal(filasDespues.length, 1, 'la fila que empezaba ese mismo día se eliminó');
+  assert.equal(filasDespues[0].rotacion_asignacion_id, filasAntes[0].rotacion_asignacion_id);
+  assert.equal(filasDespues[0].vigente_hasta, '2026-06-14', 'la anterior conserva su cierre del relevo');
 });
 
 // ── CA-6 (mitad HTTP, asignada al GATE-O2) · degradación de Graph por el endpoint ─────────────

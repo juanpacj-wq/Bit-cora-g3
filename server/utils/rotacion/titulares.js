@@ -41,7 +41,12 @@ export async function titularesDeTurno(pool, { fechaOperativa, turno, cargo_id =
   let cargoFiltro = null;
   if (cargo_id != null) {
     cargoFiltro = Number(cargo_id);
-    if (!Number.isInteger(cargoFiltro) || cargoFiltro <= 0) throw new Error('cargo_invalido');
+    // La cota superior es la de INT (CR2-2): `cargo_id` se bindea como `sql.Int` tres líneas más
+    // abajo y un valor mayor lo rechaza el DRIVER, no esta validación — un RequestError sin código
+    // de dominio que el router no puede traducir y que sale 500 en vez del 400 que promete C4.
+    if (!Number.isInteger(cargoFiltro) || cargoFiltro <= 0 || cargoFiltro > 2147483647) {
+      throw new Error('cargo_invalido');
+    }
   }
 
   const r = await pool.request()
