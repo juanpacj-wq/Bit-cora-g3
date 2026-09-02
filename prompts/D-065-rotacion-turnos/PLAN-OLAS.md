@@ -57,6 +57,12 @@ externo aislado), L09.
 >
 > Es el único lote de corrección de toda la implementación que **tendría** que cambiar una firma de
 > props, y puede hacerlo sin riesgo justamente porque ya no queda nadie cableando en paralelo.
+>
+> **Enmienda del GATE-O5 (2026-09-02):** el visto bueno eligió la **opción (a)**, la **O5 se abrió
+> con `L14` y cerró con él**: territorio respetado, `CR4-4` cerrado, front **422/422** (+8) y backend
+> **897/897** remedido sobre un árbol de `server/` idéntico. La firma de props cambió **una sola
+> vez** y de forma aditiva (`onDirtyChange`). **Ahora sí lo que sigue es
+> `/cerrar-implementacion D-065`, y sin ninguna puerta abierta.**
 
 | Ola | Lotes | Por qué pueden ir juntos | Compartidos y su escritor |
 |---|---|---|---|
@@ -64,6 +70,7 @@ externo aislado), L09.
 | **O2** | L04, L05, L06 | Consumen contratos de O1 **ya verificados en el gate**. Cada uno entrega **su propio router**, así que no se pisan: el montaje en `app.js` lo hace un solo lote | `server/auth/app.js` → **L04** · `server/utils/turno-entidad.js` → **L06** |
 | **O3** | L07, L08, L09, **L12** | Tres pantallas de front sobre contratos de endpoint **cerrados y probados**. Ninguna toca el componente raíz ni el routing: entregan componentes con la interfaz pactada. L12 es backend puro: no comparte un solo archivo con las tres | ninguno (por diseño) |
 | **O4** | L10, **L13** | L10 enchufa las tres pantallas y va **solo** en su territorio porque `src/BitacorasGecelca3.jsx` (2.682 líneas) es el archivo más disputado del repo. L13 es de corrección y no comparte un archivo con él: los cuatro hallazgos que arregla caen sobre territorios de lotes ya cerrados | `src/BitacorasGecelca3.jsx` → **L10** · `src/routing/appRoute.js` → **L10** · `server/db.js` → **L13** · `src/components/Rotacion/*` → **L13** |
+| **O5** | **L14** | Ola de un lote, abierta por la decisión D3 del GATE-O4. Es el único lote de toda la implementación que podía cambiar una firma de props: la regla dura de la O4 expiró al cerrar esa ola y ya no quedaba nadie cableando en paralelo, así que L14 es dueño de los dos lados del contrato | `src/BitacorasGecelca3.jsx` → **L14** · `src/components/Rotacion/ConfiguracionRotacion.jsx` → **L14** |
 | **Cierre** | `/cerrar-implementacion D-065` | — | docs → integrador |
 
 > **Desviación deliberada del "2–5 lotes por ola" (revisada por el GATE-O3):** la O4 llevaba un solo

@@ -25,8 +25,8 @@
 | O4 | L10 | Cableado en el componente raíz y rutas hash | ✅ | `cierres/L10.md` | — |
 | O4 | L13 | Correcciones de la O3 (abierto por el GATE-O3, D5) | ✅ | `cierres/L13.md` | — |
 | — | **GATE-O4** | 2 lotes · 897/897 backend · 414/414 front · 0 violaciones | ✅ | | `GATE-O4.md` |
-| O5 | L14 | Guarda de borrador sin guardar en la configuración anual (abierto por el GATE-O4, D3) | ⬜ | — | — |
-| — | **GATE-O5** | | ⬜ | | `GATE-O5.md` |
+| O5 | L14 | Guarda de borrador sin guardar en la configuración anual (abierto por el GATE-O4, D3) | ✅ | `cierres/L14.md` | — |
+| — | **GATE-O5** | 1 lote · 897/897 backend · 442/442 front · 0 violaciones · 4 arreglos del gate | ✅ | | `GATE-O5.md` |
 | Cierre | — | ADR D-065 + `CLAUDE.md` 38 + BIT-MODBD v2.8 + BIT-RF v2.4/RF-079 + `git rm` | ⬜ | | |
 
 Leyenda: ⬜ pendiente · 🟡 en curso · ✅ done (lote) / cerrada con visto bueno (ola) · ⛔ bloqueado.
@@ -42,8 +42,22 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
 | **GATE-O2** (2026-09-01, server efímero `:3199` sin credencial de Graph y con stub del SIS, `PortalG3_dev`) | backend **861/861** · front **324/324** · build ok · 0 violaciones · 0 residuos (20 checks) | ~76 min backend (16 bloques) · 65 s front |
 | **GATE-O3** (2026-09-02, server efímero `:3199` sin credencial de Graph y con stub del SIS, `PortalG3_dev`) | backend **894/894** · front **392/392** · build ok · 0 violaciones · 0 residuos (20 checks) | ~70 min backend (16 bloques) · 18 s front |
 | **GATE-O4** (2026-09-02, server efímero `:3199` sin credencial de Graph y con stub del SIS, `PortalG3_dev`) | backend **897/897** · front **414/414** · build ok · 0 violaciones · 0 residuos (20 checks) | ~60 min backend (16 bloques) · 15 s front |
+| **GATE-O5** (2026-09-02, server efímero `:3199` sin credencial de Graph y con stub del SIS, `PortalG3_dev`) | backend **897/897** · front **442/442** en 21 archivos · build ok · 0 violaciones · 0 residuos (20 checks) | ~50 min backend (16 bloques) · 60 s front |
 
-> **El baseline del cierre es 897, y la resta de la O4 cuadra sola: `897 − 894 = 3`**, los tres
+> **El baseline del cierre es 897 backend y 442 front (21 archivos).** En el front hay dos restas y
+> las dos cuadran solas: `422 − 414 = 8`, los ocho casos que L14 agregó a
+> `configuracion-rotacion.test.jsx` (4 del contrato del componente + 4 de la regla del raíz) en los
+> mismos 20 archivos; y `442 − 422 = 20`, los del propio gate — **10** más en ese archivo (37) por
+> sus cuatro arreglos y **10** en `guard-salidas-borrador.test.js`, un archivo nuevo que no prueba
+> comportamiento sino **cableado**. En el backend la cifra no
+> se movió y **no podía moverse**: `git diff f23ae7b..HEAD -- server/` sale **vacío**, o sea que el
+> árbol de backend que midió este gate es byte a byte el que midió el GATE-O4. Se remidió igual, en
+> los mismos 16 bloques y con las mismas dos condiciones de invocación (`--test-concurrency=1` y
+> `M365_CLIENT_SECRET=` en los **dos** procesos), y salió `897 · pass 897 · fail 0 · skipped 0`
+> **sin un solo relanzamiento**: ni el deadlock del GATE-O2 ni el borde de turno de `finalizar_turno`
+> aparecieron.
+
+> **El baseline del cierre de la O4 era 897, y la resta de la O4 cuadra sola: `897 − 894 = 3`**, los tres
 > casos que L13 agregó a `rotacion_correcciones_o2.test.js` por **F37.A5**. Ningún otro archivo de
 > backend cambió de conteo y **el GATE-O4 no tocó un solo archivo de `server/`** (sus cuatro
 > arreglos son de front), así que la cifra se midió una vez y no hubo que remedirla. En el front,
@@ -229,6 +243,44 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   sincronizaría el tenant real contra la BD. Es el hermano del `--test-concurrency=1` del GATE-O3:
   dos gates seguidos perdiendo una corrida por cómo se invoca la suite, no por el código.
 
+- **O5 (L14):** en esta app ya son **tres borradores** —`registro_activo._dirty` (D-040), `mandDirty`
+  (F17) y ahora el reparto de la rotación— y el tercero es el primero cuya suciedad **no vive en el
+  raíz**. De ahí la forma que queda escrita: la reporta quien la tiene (`onDirtyChange(bool)`, el
+  mismo nombre y la misma firma de `mandDirty`) y la decide **una sola función pura**, porque cuatro
+  copias de la condición en cuatro handlers es *exactamente* cómo nació CR4-4.
+- **O5 (L14):** el componente **desmiente su propio aviso al desmontarse**. Sin ese `false` del
+  cleanup, quien acepta perder el borrador deja el flag del raíz encendido **para siempre**: el dueño
+  del buffer ya no existe y nadie más puede apagarlo.
+- **O5 (GATE, medido):** `git diff` del árbol de `server/` contra el gate anterior sale **vacío**, así
+  que la cifra de backend no podía moverse — y aun así remedirla tuvo valor: es la primera corrida
+  completa de todo D-065 que sale **verde de una sola pasada**, sin el deadlock del GATE-O2, sin el
+  `--test-concurrency=1` del GATE-O3 y sin el `M365_CLIENT_SECRET=` del GATE-O4. Las dos condiciones
+  de invocación funcionan cuando están escritas.
+- **O5 (GATE, y es el hallazgo de la ola):** **la guarda del cambio de unidad estaba en el botón
+  equivocado, y el dato que lo vuelve grave no está en el código sino en el seed.** Hay dos caminos
+  para cambiar de unidad; L14 guardó el atajo del navbar (D-054) creyendo que era el ítem del menú
+  llamado "Cambiar de unidad". El atajo solo se dibuja con `cargo.puede_cambiar_unidad = 1`, y los
+  **dos** cargos que pueden configurar la rotación lo tienen en **0**: la guarda era código
+  inalcanzable justo para quien tiene el borrador, mientras la puerta que sí ven quedaba abierta.
+- **O5 (GATE):** **"lo que se puede guardar" no es "lo que se puede perder".** `calcularCambios`
+  descarta a quien tiene grupo y todavía no rol, así que la pantalla mostraba su propio aviso de
+  `sinRol` mientras la guarda contestaba "nada que perder" — y ese es el estado NORMAL de la primera
+  carga anual, porque tras la primera sincronización casi nadie llega con cargo. Encima `Descartar`
+  estaba detrás de la misma condición: no había ni botón para soltar el trabajo.
+- **O5 (GATE):** **el cable entre dos mitades no pone nada en rojo si desaparece.**
+  `onDirtyChange={setRotacionDirty}` es el único punto donde el componente que reporta y el raíz que
+  decide se tocan, y borrarlo dejaba 442 casos en verde con la guarda sin dispararse. Cuando montar
+  el consumidor real no es viable, el sustituto honesto es un **guard estático** sobre el fuente.
+- **O5 (GATE):** de los 12 hallazgos del `/code-review`, **8 quedaron confirmados leyendo el fuente**
+  — la proporción más alta de toda la implementación por línea cambiada. Un lote que entrega su
+  encargo completo, sin violaciones y con verificación bidireccional propia **puede seguir teniendo
+  cuatro agujeros en la lista de casos que nadie le pidió enumerar.**
+- **O5 (GATE, `/security-review`):** el skill apunta por defecto **al diff completo de la rama**
+  (3,2 MB, 200+ archivos), no al de la ola. Para un gate eso no es una revisión más amplia: es volver
+  a revisar lo que los cuatro gates anteriores ya cerraron, y diluye la atención sobre las 110 líneas
+  que de verdad estrenó la ola. **El gate acotó la revisión al diff de la ola a mano**, con evidencia
+  literal por grep. Va al runbook: el argumento del skill es el rango, no la rama.
+
 ## Desviaciones acumuladas respecto a `_CONTEXTO-BASE.md`
 
 Todas **aceptadas** en el GATE-O1 (detalle y razón en `GATE-O1.md §5`). Ninguna cambia una ruta
@@ -316,6 +368,22 @@ Las de la **O4**, todas aceptadas en el GATE-O4 (detalle en `GATE-O4.md §5` y e
   del hash (**CR4-9**) y el encabezado de la vista de cumplimiento (**H-L10-1**). Ninguno cambia un
   contrato ni una firma de props.
 
+La de la **O5**, aceptada en el GATE-O5 (detalle en `GATE-O5.md §5` y en `cierres/L14.md`):
+
+- **Fuera de contrato (GATE-O5):** cuatro arreglos del gate, todos de front, todos con caso propio y
+  verificación bidireccional — la guarda que faltaba en `handleCambiarUnidad` (**CR5-1**, el grave),
+  la noción de borrador que ignoraba el estado normal de la primera carga (**CR5-2**), el selector de
+  fecha que destruía el buffer sin gatear (**CR5-4**) y el `beforeunload` que la pantalla no tenía
+  (**CR5-7**), más el aviso que nombra los dos borradores (**CR5-11**). Ninguno cambia un contrato ni
+  una firma de props; el único añadido a la superficie del módulo es un segundo export puro del raíz,
+  `mensajeCambiosSinGuardar`, hermano de `planearSalidaDeRotacion`.
+
+- **C8 (L14):** `ConfiguracionRotacion` gana una **tercera prop**, `onDirtyChange` — la única firma de
+  props que cambió en toda la implementación después de que L10 cableara. Es opcional (el componente
+  la invoca con `?.`) y **aditiva**: `puedeConfigurar`/`onError` no cambian, y la pantalla sigue sin
+  leer ni escribir el hash. `BitacorasGecelca3.jsx` exporta además una función pura nueva,
+  `planearSalidaDeRotacion`, que es la otra mitad del contrato.
+
 ## Bitácora
 
 - **2026-08-31** · Fase 1 cerrada: 5 rondas de preguntas (incluida una ronda 0 de vocabulario y una
@@ -380,3 +448,17 @@ Las de la **O4**, todas aceptadas en el GATE-O4 (detalle en `GATE-O4.md §5` y e
   corrección de todo D-065 que **puede cambiar una firma de props**: la regla dura de la O4 expiró al
   cerrar esa ola y ya no queda nadie cableando en paralelo, así que L14 es dueño de los dos lados
   (el componente y su único consumidor). `/cerrar-implementacion D-065` va **después** de L14.
+- **2026-09-02** · **O5 cerrada** por `GATE-O5.md`: L14 `done`, cero violaciones de territorio, suite
+  **897/897** backend (árbol de `server/` idéntico al de la O4: `git diff` vacío, remedido igual y
+  verde **de una sola pasada**, la primera de todo D-065) y **442/442** front en 21 archivos (+8 de
+  L14, +20 del propio gate), cero residuos con 20 checks. Los 23 CA siguen en `cumple`.
+  **El `/code-review` dejó 12 hallazgos y 8 confirmados leyendo el fuente**, así que el gate hizo
+  **cuatro arreglos**: `handleCambiarUnidad` sin guarda —la salida que de verdad usa quien configura,
+  porque los dos cargos que pueden hacerlo NO tienen el atajo del navbar (CR5-1, el hallazgo de la
+  ola)—, la noción de borrador que no veía el estado normal de la primera carga anual (CR5-2), el
+  selector de fecha que destruía el buffer sin gatear (CR5-4) y el `beforeunload` que la pantalla no
+  tenía (CR5-7); más el aviso que ahora nombra los dos borradores (CR5-11) y un **guard estático de
+  cableado** que cierra CR5-9. `/security-review` sin hallazgos, acotado a mano al diff de la ola
+  porque el skill apunta al de la rama. **Una decisión necesita visto bueno (D5):** un segundo
+  borrador de la misma pantalla —el `form` de la zona de patrones— que nadie reporta, con recomendación
+  de llevarlo al cierre como deuda declarada en vez de abrir una O6.

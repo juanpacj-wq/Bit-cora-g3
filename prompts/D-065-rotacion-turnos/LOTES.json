@@ -20,8 +20,8 @@
       "gate": "GATE-O4.md"
     },
     "O5": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O5.md"
     }
   },
   "lotes": {
@@ -382,10 +382,10 @@
     "L14": {
       "ola": "O5",
       "titulo": "Guarda de borrador sin guardar en la configuracion anual",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L14-1418",
+      "claim_ts": "2026-09-02T19:18:54.170Z",
+      "done_ts": "2026-09-02T19:33:46.302Z",
       "motivo": null,
       "depende_de": [],
       "puro": true,

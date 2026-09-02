@@ -1948,6 +1948,21 @@ const NOOP = () => {};
 //
 // `destino` es la sección a la que se va (`'bitacoras' | 'historicos' | 'rotacion' |
 // 'rotacion-cumplimiento'`) o `'unidad'` para el cambio de unidad en caliente.
+// GATE-O5 (CR5-11): el texto del bloqueo al cambiar de unidad, cuando puede haber DOS borradores
+// pendientes a la vez. El `_dirty` de una bitácora vive en el raíz y sobrevive al cambio de sección,
+// así que se puede llegar a rotación con uno abierto y ensuciar además el reparto; el mensaje
+// nombraba solo el reparto y la persona chocaba dos veces, con dos textos distintos y sin que nadie
+// le dijera que eran dos cosas. **Un aviso que bloquea tiene que decir todo lo que hay que resolver.**
+// Va como función pura y exportada por la misma razón que `planearSalidaDeRotacion`: es una regla
+// del raíz, y probarla no debería exigir montar el dashboard entero.
+export function mensajeCambiosSinGuardar({ hayBorradorRotacion, hayCambiosSinGuardar, unidadNombre }) {
+  const pendientes = [
+    hayBorradorRotacion ? 'el reparto de grupos de la rotación' : null,
+    hayCambiosSinGuardar ? 'cambios sin guardar en esta unidad' : null,
+  ].filter(Boolean);
+  return `Todavía hay ${pendientes.join(' y ')}. Guarda o descarta antes de ir a ${unidadNombre}.`;
+}
+
 export function planearSalidaDeRotacion({ vistaActual, destino, hayBorrador }) {
   // El buffer solo existe mientras la pantalla está montada: fuera de ella no hay nada que perder,
   // aunque el flag se hubiera quedado encendido.
@@ -2592,19 +2607,62 @@ export default function App() {
     });
   }, [revertirTurno, showToast, auth]);
 
+  // D-065 L14 (CR4-4): la puerta ÚNICA por la que se sale de una sección. Si no hay nada que perder,
+  // la navegación corre tal cual; si hay un borrador en la configuración anual, se pregunta y solo
+  // corre cuando la persona elige perderlo. Las dos salidas son de verdad: "Cancelar" devuelve a la
+  // pantalla con el borrador intacto y "Salir sin guardar" navega. NO existe un guardado automático:
+  // guardar dispara un POST con efectos sobre la malla real y eso no se hace sin que alguien lo pida.
+  //
+  // Intercepta ANTES de mover `vista`, así que el efecto (b) no llega a escribir el hash: una
+  // navegación cancelada que dejara la URL cambiada sería peor que no tener guarda, porque el F5 se
+  // iría igual.
+  //
+  // GATE-O5 (CR5-1): declarado ACÁ ARRIBA —y ya no junto a los handlers de rotación— porque
+  // `handleCambiarUnidad`, que está a diez líneas, también tiene que pasar por él. En un `useCallback`
+  // la lista de dependencias se evalúa en cada render: referenciar desde arriba una `const` declarada
+  // más abajo revienta por TDZ, no por estilo.
+  const salirDeRotacion = useCallback((destino, accion) => {
+    if (planearSalidaDeRotacion({ vistaActual: vista, destino, hayBorrador: rotacionDirty }) === 'seguir') {
+      accion();
+      return;
+    }
+    setModal({
+      title: 'Cambios sin guardar',
+      message: 'El reparto de grupos todavía no se ha guardado. Si sales de la configuración ahora, lo pierdes.',
+      confirmLabel: 'Salir sin guardar', confirmColor: 'red', icon: AlertTriangle,
+      onConfirm: () => { setModal(null); accion(); },
+    });
+  }, [vista, rotacionDirty]);
+
   // F4 + D-035: popup defensivo en logout. "Operar otra unidad" reemplaza al viejo "salir sin
   // finalizar": conserva el login Entra pero **mata la sesión de app** (`clearSesion` → POST
   // /api/auth/cerrar-app, activa=0) para que una persona no quede iniciada en 2 unidades; el
   // render cae en LoginScreen paso "planta" para elegir GEC3/GEC32 y select-context crea una
   // sesión limpia. "Sí, finalizar y salir" finaliza turno + logout backend (cookie incluida).
   // Igual que la navegación SPA de hoy, descarta los buffers no guardados del cliente sin aviso
-  // cross-componente (beforeunload no aplica sin reload).
+  // cross-componente (beforeunload no aplica sin reload) — con UNA excepción desde el GATE-O5: el
+  // reparto de la configuración anual, que sí se confirma. Ver abajo.
+  //
+  // GATE-O5 (CR5-1) — **esta es la salida que de verdad usa quien configura la rotación, y era la
+  // única sin guarda.** L14 puso la suya en `handleIrAUnidad`, el ATAJO del navbar de D-054; pero ese
+  // atajo solo se dibuja con `cargo.puede_cambiar_unidad = 1`, y los dos cargos que pueden abrir la
+  // configuración anual —`Gerente de Producción` y `Administrador y Debugging`— lo tienen en **0**
+  // (`db.js`, MERGE de cargos). Para ellos `otraUnidad` es `null`, el botón no existe y la guarda del
+  // cambio de unidad era código inalcanzable, mientras el ítem del menú que sí ven —el que se llama
+  // literalmente "Cambiar de unidad"— mataba la sesión de app y se llevaba el reparto sin una palabra.
+  // Dos mitades defendibles que no se encontraron, otra vez.
+  //
+  // Acá la guarda CONFIRMA en vez de bloquear, al revés que en `handleIrAUnidad`: esto sí es una
+  // salida de la pantalla (`clearSesion` → `LoginScreen` → desmonte), así que hay dos opciones reales
+  // que ofrecer. El atajo en caliente no lo es —no desmonta nada— y por eso allá se bloquea.
   const handleCambiarUnidad = useCallback(() => {
-    setLogoutOpen(false);
-    setActiveBitacora(null);
-    setDraftLocal(null);
-    auth.clearSesion();
-  }, [auth]);
+    salirDeRotacion('unidad', () => {
+      setLogoutOpen(false);
+      setActiveBitacora(null);
+      setDraftLocal(null);
+      auth.clearSesion();
+    });
+  }, [auth, salirDeRotacion]);
 
   // D-054 — "Ir a GEC3/GEC32": cambio de unidad EN CALIENTE desde el navbar, en un clic y sin pasar
   // por LoginScreen. Convive con "Cambiar de unidad" del menú (el camino universal, para todos los
@@ -2637,9 +2695,10 @@ export default function App() {
     if (hayCambiosSinGuardar || hayBorradorRotacion) {
       setModal({
         title: 'Cambios sin guardar',
-        message: hayBorradorRotacion
-          ? `El reparto de grupos todavía no se ha guardado. Guárdalo o descártalo antes de ir a ${otraUnidad.nombre}.`
-          : `Hay cambios sin guardar en esta unidad. Guárdalos o descártalos antes de ir a ${otraUnidad.nombre}.`,
+        // GATE-O5 (CR5-11): nombra los DOS, si los dos están pendientes. Ver la función.
+        message: mensajeCambiosSinGuardar({
+          hayBorradorRotacion, hayCambiosSinGuardar, unidadNombre: otraUnidad.nombre,
+        }),
         confirmLabel: 'Entendido', confirmColor: 'blue', icon: AlertTriangle,
         onConfirm: () => setModal(null),
       });
@@ -2680,28 +2739,6 @@ export default function App() {
   // Abre el modal rediseñado (LogoutModal): ilustración hero + 2 acciones (Cancelar | Sí,
   // finalizar y salir). "Cambiar de unidad" ya no vive acá — se movió al HeaderMenu.
   const handleLogout = useCallback(() => setLogoutOpen(true), []);
-
-  // D-065 L14 (CR4-4): la puerta ÚNICA por la que se sale de una sección. Si no hay nada que perder,
-  // la navegación corre tal cual; si hay un borrador en la configuración anual, se pregunta y solo
-  // corre cuando la persona elige perderlo. Las dos salidas son de verdad: "Cancelar" devuelve a la
-  // pantalla con el borrador intacto y "Salir sin guardar" navega. NO existe un guardado automático:
-  // guardar dispara un POST con efectos sobre la malla real y eso no se hace sin que alguien lo pida.
-  //
-  // Intercepta ANTES de mover `vista`, así que el efecto (b) no llega a escribir el hash: una
-  // navegación cancelada que dejara la URL cambiada sería peor que no tener guarda, porque el F5 se
-  // iría igual.
-  const salirDeRotacion = useCallback((destino, accion) => {
-    if (planearSalidaDeRotacion({ vistaActual: vista, destino, hayBorrador: rotacionDirty }) === 'seguir') {
-      accion();
-      return;
-    }
-    setModal({
-      title: 'Cambios sin guardar',
-      message: 'El reparto de grupos todavía no se ha guardado. Si sales de la configuración ahora, lo pierdes.',
-      confirmLabel: 'Salir sin guardar', confirmColor: 'red', icon: AlertTriangle,
-      onConfirm: () => { setModal(null); accion(); },
-    });
-  }, [vista, rotacionDirty]);
 
   // D-065: entrar a las dos secciones de rotación. Solo mueven `vista`; la URL la escribe el efecto
   // (b) de sincronización, igual que para bitácoras e históricos — la fuente única sigue siendo el

@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createElement as h, act } from 'react';
 import { createRoot } from 'react-dom/client';
 import ConfiguracionRotacion from './ConfiguracionRotacion.jsx';
-import { planearSalidaDeRotacion } from '../../BitacorasGecelca3.jsx';
+import { planearSalidaDeRotacion, mensajeCambiosSinGuardar } from '../../BitacorasGecelca3.jsx';
 
 // El día Bogotá se controla desde afuera: `vigente_desde` sale de él y, sin fijarlo, la aserción
 // del cuerpo del POST dependería del reloj de quien corra la suite.
@@ -754,5 +754,149 @@ describe('planearSalidaDeRotacion (CR4-4)', () => {
       expect(planearSalidaDeRotacion({ vistaActual, destino: 'bitacoras', hayBorrador: true }))
         .toBe('seguir');
     }
+  });
+});
+
+// ── GATE-O5 · lo que se puede PERDER es más ancho que lo que se puede GUARDAR ───────────────────
+//
+// CR5-2. L14 reportó `hayCambios`, o sea el diff que el router acepta. Pero `calcularCambios`
+// descarta a quien tiene grupo y todavía no rol —`cargo_id == null`, exactamente el conjunto
+// `sinRol`— porque `POST /asignaciones` exige el rol. Eso dejaba a la pantalla diciendo dos cosas a
+// la vez: su propio aviso avisaba "hay N personas con grupo pero sin rol" y la guarda contestaba
+// "no hay nada que perder". Y no es una esquina: tras la primera sincronización real casi nadie
+// llega con cargo (GATE-O2 §6.3), así que repartir grupos antes de asignar roles es el camino
+// normal de la primera carga anual — la que hace gente aprendiendo.
+
+describe('ConfiguracionRotacion · el borrador incluye lo que todavía no se puede guardar (CR5-2)', () => {
+  it('poner grupo a quien no tiene rol ES un borrador, aunque Guardar siga bloqueado', async () => {
+    const { container } = await render();
+    expect(dirtyReportado.at(-1)).toBe(false);
+
+    // Elsa Ruiz (41) no tiene rol ni grupo: es la persona que llega así de Entra.
+    await elegir(selGrupo(container, 41), '2');
+
+    expect(dirtyReportado.at(-1)).toBe(true);
+    // Y Guardar sigue bloqueado, que es lo correcto: al router le falta el `cargo_id`.
+    expect(guardar(container).disabled).toBe(true);
+  });
+
+  // Si hay algo que se puede perder, tiene que haber un botón para soltarlo. Con `hayCambios` a
+  // secas, Descartar ni siquiera se dibujaba en este estado.
+  it('Descartar aparece con ese borrador, y lo deshace', async () => {
+    const { container } = await render();
+    expect(container.querySelector('.rot-descartar')).toBe(null);
+
+    await elegir(selGrupo(container, 41), '2');
+    expect(container.querySelector('.rot-descartar')).not.toBe(null);
+
+    await click(container.querySelector('.rot-descartar'));
+    expect(dirtyReportado.at(-1)).toBe(false);
+    expect(container.querySelector('.rot-descartar')).toBe(null);
+  });
+});
+
+// CR5-4 · los dos controles que RELEEN del servidor destruyen el buffer igual que una navegación:
+// el efecto `[fecha]` hace `setBuffer(bufferDesde(lista))`. "Actualizar desde Entra" ya se gateaba;
+// la fecha de vigencia, que está a dos líneas, no — se repartían 40 personas, se corregía la fecha
+// y desaparecían sin aviso.
+describe('ConfiguracionRotacion · los controles que releen no pisan un borrador (CR5-4)', () => {
+  it('con el buffer limpio, la fecha y el refetch de Entra están disponibles', async () => {
+    const { container } = await render();
+    expect(container.querySelector('.rot-fecha').disabled).toBe(false);
+    expect(container.querySelector('.rot-sync').disabled).toBe(false);
+  });
+
+  it('con un borrador, los dos se bloquean — incluido el que solo tiene grupo sin rol', async () => {
+    const { container } = await render();
+
+    await elegir(selGrupo(container, 12), '2');
+    expect(container.querySelector('.rot-fecha').disabled).toBe(true);
+    expect(container.querySelector('.rot-sync').disabled).toBe(true);
+
+    await click(container.querySelector('.rot-descartar'));
+    expect(container.querySelector('.rot-fecha').disabled).toBe(false);
+
+    await elegir(selGrupo(container, 41), '2');   // grupo sin rol: no es guardable, sí es perdible
+    expect(container.querySelector('.rot-fecha').disabled).toBe(true);
+    expect(container.querySelector('.rot-sync').disabled).toBe(true);
+  });
+});
+
+// CR5-7 · la salida que no pasa por ningún handler de la app: F5, cerrar la pestaña, seguir un
+// enlace que no es SPA. `SalaDeMandoGrid` —el componente cuyo contrato copia esta pantalla— ya
+// traía este efecto para su captura; el reparto anual se iba sin que el navegador dijera nada.
+describe('ConfiguracionRotacion · avisa también al recargar o cerrar la pestaña (CR5-7)', () => {
+  const recargar = () => {
+    const ev = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+
+  it('sin borrador el navegador no pregunta', async () => {
+    await render();
+    expect(recargar()).toBe(false);
+  });
+
+  it('con borrador el navegador pregunta, y deja de hacerlo al descartar', async () => {
+    const { container } = await render();
+
+    await elegir(selGrupo(container, 12), '2');
+    expect(recargar()).toBe(true);
+
+    await click(container.querySelector('.rot-descartar'));
+    expect(recargar()).toBe(false);
+  });
+
+  // El listener se cuelga de `window`, que sobrevive al componente: sin el cleanup quedaría
+  // preguntando para siempre en una pantalla que ya no existe.
+  it('al desmontarse suelta el listener', async () => {
+    const { container, teardown } = await render();
+
+    await elegir(selGrupo(container, 12), '2');
+    expect(recargar()).toBe(true);
+
+    teardown();
+    expect(recargar()).toBe(false);
+  });
+});
+
+// CR5-11 · el aviso que BLOQUEA el cambio de unidad tiene que nombrar todo lo que hay que resolver.
+// Los dos borradores pueden coexistir: el `_dirty` de una bitácora vive en el raíz y sobrevive al
+// cambio de sección, así que se llega a rotación con uno abierto y se ensucia además el reparto.
+// El ternario que había nombraba solo el reparto → se guardaba, se reintentaba y se chocaba otra
+// vez, ahora con otro texto y sin que nadie hubiera dicho que eran dos cosas.
+describe('mensajeCambiosSinGuardar (CR5-11)', () => {
+  const U = 'GECELCA 32';
+
+  it('con los dos pendientes, los nombra a los dos', () => {
+    const m = mensajeCambiosSinGuardar({
+      hayBorradorRotacion: true, hayCambiosSinGuardar: true, unidadNombre: U,
+    });
+    expect(m).toContain('el reparto de grupos de la rotación');
+    expect(m).toContain('cambios sin guardar en esta unidad');
+    expect(m).toContain(U);
+  });
+
+  it('con uno solo, no menciona el otro', () => {
+    const soloRotacion = mensajeCambiosSinGuardar({
+      hayBorradorRotacion: true, hayCambiosSinGuardar: false, unidadNombre: U,
+    });
+    expect(soloRotacion).toContain('el reparto de grupos de la rotación');
+    expect(soloRotacion).not.toContain('en esta unidad');
+
+    const soloBitacora = mensajeCambiosSinGuardar({
+      hayBorradorRotacion: false, hayCambiosSinGuardar: true, unidadNombre: U,
+    });
+    expect(soloBitacora).toContain('cambios sin guardar en esta unidad');
+    expect(soloBitacora).not.toContain('reparto');
+  });
+
+  // Tuteo colombiano, sin voseo, y con la unidad destino nombrada — es la misma voz de D-040/D-054.
+  it('habla de tú y nombra la unidad destino', () => {
+    const m = mensajeCambiosSinGuardar({
+      hayBorradorRotacion: true, hayCambiosSinGuardar: true, unidadNombre: U,
+    });
+    expect(m).toContain('Guarda o descarta antes de ir a GECELCA 32.');
+    expect(m).not.toMatch(/Guardá|descartá|andá/);
   });
 });

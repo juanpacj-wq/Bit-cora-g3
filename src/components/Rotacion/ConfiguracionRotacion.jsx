@@ -247,20 +247,57 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
   const cambios = useMemo(() => calcularCambios(personas, buffer), [personas, buffer]);
   const hayCambios = cambios.length > 0;
 
+  // Una persona con grupo pero sin rol no se puede guardar (el router pide `cargo_id`): se cuenta
+  // acá y se bloquea Guardar, en vez de mandar el lote y recibir un 400 con un índice.
+  // GATE-O5 (CR5-2): vive acá arriba —y ya no junto al aviso que lo pinta— porque `hayBorrador` lo
+  // necesita, y esa es la noción que gobierna todo lo que destruye el buffer.
+  const sinRol = useMemo(
+    () => personas.filter((p) => {
+      const b = buffer[String(p.usuario_id)];
+      return b && b.grupo != null && b.cargo_id == null;
+    }),
+    [personas, buffer],
+  );
+
   // D-065 L14 (CR4-4) · el borrador se REPORTA hacia arriba; el raíz no puede adivinarlo.
   //
   // El reparto vive en `buffer`, que es interno y muere con el componente: cambiar de sección desde
   // el menú DESMONTA esta pantalla, y el trabajo de repartir ~81 personas se iba en silencio. La
   // guarda de "Cambios sin guardar" del dashboard mira `registrosDeBitacora._dirty` y `mandDirty`, y
-  // esto no es ninguno de los dos. La suciedad ya está calculada acá (`cambios.length > 0`), que es
-  // la MISMA expresión que habilita Guardar: no puede haber un borrador que el botón vea y la guarda
-  // no. `onDirtyChange` es el nombre y la forma con que SalaDeMandoGrid levanta su diff (`mandDirty`).
-  useEffect(() => { onDirtyChangeRef.current?.(hayCambios); }, [hayCambios]);
+  // esto no es ninguno de los dos. `onDirtyChange` es el nombre y la forma con que SalaDeMandoGrid
+  // levanta su diff (`mandDirty`).
+  //
+  // GATE-O5 (CR5-2) — **lo que se puede GUARDAR es más angosto que lo que se puede PERDER**, y L14
+  // reportó lo primero. `calcularCambios` descarta a quien tiene grupo pero todavía no rol (el
+  // router exige `cargo_id`), o sea justo `sinRol`: trabajo hecho, visible, que la pantalla ya
+  // señala con su propio aviso… y que la guarda leía como "no hay nada". No era una esquina: tras la
+  // primera sincronización real casi nadie llega con cargo (GATE-O2 §6.3), así que repartir grupos
+  // ANTES de asignar roles es el camino normal de la primera carga anual. Con `hayCambios` a secas,
+  // esa pantalla no se defendía y encima no ofrecía Descartar.
+  //
+  // Por eso hay dos nociones y cada una gobierna lo suyo: `hayCambios` habilita **Guardar** (solo se
+  // manda lo que el router acepta) y `hayBorrador` gobierna todo lo que **destruye el buffer** —el
+  // aviso al raíz, Descartar, el refetch de Entra y el cambio de fecha—. `sinRol` ya estaba
+  // calculado: la corrección es reusarlo, no inventar otro diff que pueda divergir.
+  const hayBorrador = hayCambios || sinRol.length > 0;
+
+  useEffect(() => { onDirtyChangeRef.current?.(hayBorrador); }, [hayBorrador]);
 
   // Y al desmontarse, la pantalla desmiente su propio aviso: quien aceptó perder el borrador no
   // puede quedar con el flag del raíz encendido para siempre (nadie más podría apagarlo, porque el
   // dueño del buffer ya no existe).
   useEffect(() => () => { onDirtyChangeRef.current?.(false); }, []);
+
+  // GATE-O5 (CR5-7): la salida que no pasa por ningún handler de la app — F5, cerrar la pestaña,
+  // seguir un enlace que no es SPA. `SalaDeMandoGrid` (el componente cuyo contrato copia esta
+  // pantalla) ya traía este efecto para su captura de MAND; el reparto anual, que es trabajo de
+  // ~81 filas, se iba sin que el navegador dijera una palabra. Mismo patrón, misma condición.
+  useEffect(() => {
+    if (!hayBorrador) return undefined;
+    const handler = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [hayBorrador]);
 
   // De una fila dañada NO se puede copiar: su vector no parsea, y copiarlo propagaría el daño al
   // patrón nuevo. Listarla sí (es justamente para lo que el backend la manda); ofrecerla como
@@ -292,16 +329,6 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
       detalle: partes.join(' y '),
     };
   }, [resumenSync]);
-
-  // Una persona con grupo pero sin rol no se puede guardar (el router pide `cargo_id`): se cuenta
-  // acá y se bloquea Guardar, en vez de mandar el lote y recibir un 400 con un índice.
-  const sinRol = useMemo(
-    () => personas.filter((p) => {
-      const b = buffer[String(p.usuario_id)];
-      return b && b.grupo != null && b.cargo_id == null;
-    }),
-    [personas, buffer],
-  );
 
   // El agrupamiento por rol es lo que hace legible la pantalla (CA-19): el rol de cada quien es el
   // que está en el buffer, así que cambiarle el rol a alguien lo mueve de tarjeta en el acto.
@@ -445,8 +472,16 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
 
         <label className="flex flex-col gap-1 text-xs font-medium text-gray-500">
           Vigente desde
+          {/* GATE-O5 (CR5-4): mover la fecha vuelve a leer del server y hace
+              `setBuffer(bufferDesde(lista))`, o sea que DESTRUYE el reparto — exactamente lo mismo
+              que hace "Actualizar desde Entra", que dos líneas más abajo ya se gateaba. Estaba
+              disponible con un borrador encima y sin aviso: se repartían 40 personas, se corregía la
+              fecha y desaparecían. Mismo `disabled` y mismo `title` que su hermano. */}
           <input
-            type="date" value={fecha} disabled={ocupado}
+            type="date" value={fecha} disabled={ocupado || hayBorrador}
+            title={hayBorrador
+              ? 'Guarda o descarta los cambios antes de mover la fecha de vigencia.'
+              : 'Desde qué día rige este reparto'}
             onChange={(ev) => setFecha(ev.target.value || getTodayBogota())}
             className="rot-fecha px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-900"
           />
@@ -456,8 +491,8 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
           <>
             <button
               type="button" onClick={onSincronizar}
-              disabled={ocupado || hayCambios}
-              title={hayCambios
+              disabled={ocupado || hayBorrador}
+              title={hayBorrador
                 ? 'Guarda o descarta los cambios antes de actualizar desde Entra.'
                 : 'Vuelve a leer el directorio de Entra'}
               className="rot-sync flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-blue-700 border border-blue-200 bg-blue-50 hover:bg-blue-100 disabled:opacity-60 transition-colors"
@@ -465,7 +500,10 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
               <RefreshCw size={15} className={guardando ? 'animate-spin' : ''} />
               Actualizar desde Entra
             </button>
-            {hayCambios && (
+            {/* GATE-O5 (CR5-2): visible con `hayBorrador`, no con `hayCambios` — si hay algo que se
+                puede perder tiene que haber un botón para soltarlo. Con grupos repartidos y roles
+                todavía sin asignar, Descartar ni siquiera se dibujaba. */}
+            {hayBorrador && (
               <button
                 type="button" onClick={descartar} disabled={guardando}
                 className="rot-descartar px-4 py-2 rounded-lg text-sm font-semibold text-gray-600 border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-60"
