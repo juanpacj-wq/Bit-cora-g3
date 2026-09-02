@@ -462,3 +462,9 @@ La de la **O5**, aceptada en el GATE-O5 (detalle en `GATE-O5.md §5` y en `cierr
   porque el skill apunta al de la rama. **Una decisión necesita visto bueno (D5):** un segundo
   borrador de la misma pantalla —el `form` de la zona de patrones— que nadie reporta, con recomendación
   de llevarlo al cierre como deuda declarada en vez de abrir una O6.
+- **2026-09-02** · **Visto bueno de la O5 dado.** La decisión **D5** se resolvió en su opción (b):
+  `CR5-8` y `CR5-5 / H-L14-1` van al cierre como **deuda declarada** con su escenario en el ADR, y
+  **no se abre una O6**. Con eso D-065 queda **sin olas pendientes y sin decisiones abiertas** por
+  primera vez: lo único que falta es `/cerrar-implementacion D-065` (ADR, convención 38 de
+  `CLAUDE.md`, `BIT-MODBD v2.8`, `BIT-RF v2.4 / RF-079`, `git rm` del scaffolding) — que además trae
+  el **smoke con backend vivo y datos reales**, heredado desde H-L07-4 y nunca corrido por ningún gate.

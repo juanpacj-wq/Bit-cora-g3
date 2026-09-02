@@ -380,7 +380,10 @@ datos reales y login Entra** no lo ha corrido nadie todavía. Es del cierre.
   las cinco entradas del menú ahora preguntan. Abrir una sexta ola por eso, después de que la quinta
   encontró cuatro agujeros en la anterior, cuesta más de lo que protege — y `/cerrar-implementacion`
   es quien tiene el smoke con backend vivo, que es donde esto se ve de verdad.
-- **Decidido: PENDIENTE del visto bueno.**
+- **Decidido: (b), deuda declarada.** Visto bueno del usuario del 2026-09-02. **No se abre una O6.**
+  `CR5-8` y `CR5-5 / H-L14-1` pasan al `/cerrar-implementacion D-065`, que los escribe en el ADR
+  **con su escenario concreto** —no como una nota al pie— y que además trae el smoke con backend
+  vivo, que es donde estas dos se ven de verdad.
 
 ## 6. Hechos que cambian lo que dicen los documentos anteriores
 
@@ -487,13 +490,13 @@ salidas, y la lista se arma mirando quién usa la pantalla, no qué handler tien
 
 ## 8. Ola siguiente
 
-**Depende de la decisión D5, y es la única pregunta abierta de este gate.**
+**Resuelto por el visto bueno del 2026-09-02: NO hay O6.**
 
-- **Si el visto bueno elige la deuda declarada (recomendado):** no hay O6. Lo que sigue es
+- **Elegida la deuda declarada:** no hay O6. Lo que sigue es
   `/cerrar-implementacion D-065`, que escribe el ADR **D-065**, la convención **38** de `CLAUDE.md`,
   `BIT-MODBD v2.8`, `BIT-RF v2.4 / RF-079` y hace el `git rm` del scaffolding — con **CR5-8** y
   **CR5-5 / H-L14-1** escritos en el ADR con su escenario, no como una nota al pie.
-- **Si elige cerrarlos antes**, la O6 lleva **un solo lote**:
+- **La alternativa que se descartó** (queda escrita porque el cierre hereda su contenido) era una O6 de **un solo lote**:
 
 | Lote | Título | Territorio |
 |---|---|---|
@@ -518,3 +521,13 @@ reconstruirlo desde cinco gates):
 ## 9. Commit del gate
 
 `d0ee9c7` `gate(D-065): O5 cerrada — 1 lote, 897/897 backend, 442/442 front, 4 arreglos del gate`
+
+## 10. Visto bueno del usuario: DADO el 2026-09-02
+
+- **D5 resuelta en su opción (b):** `CR5-8` (el `form` de la zona de patrones, segundo borrador sin
+  reportar) y `CR5-5 / H-L14-1` (las salidas por el efecto (a)) van al cierre como **deuda
+  declarada**, con su escenario escrito en el ADR. **No se abre una O6.**
+- Las otras cuatro decisiones de este gate (D1, D2, D3, D4) ya estaban aplicadas al pedir el visto
+  bueno: son arreglos hechos acá, cada uno con su caso y su verificación bidireccional.
+- **Lo que sigue es `/cerrar-implementacion D-065`.** Es la primera vez en toda la implementación que
+  no queda ninguna ola pendiente ni ninguna decisión abierta.
