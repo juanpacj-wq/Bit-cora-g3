@@ -354,11 +354,10 @@ O3 y O4 y no se tocaron.
   routers de L05 y L06 antes de que existieran: el contrato lo fija este gate (§6, punto 6), L07
   escribe contra él, y si al probar todavía no está montado, eso es coordinación de la ola y no un
   bloqueo. Se mitiga además con `depende_de: []` — **L12 no bloquea a nadie y nadie lo bloquea**.
-- **Decidido: SÍ, va L12 — pendiente del visto bueno del usuario.** Agregar un lote cambia el
-  reparto de la ola, y ese es el único punto de este gate donde no decido solo. `L12` queda escrito
-  en `LOTES.json` y `PLAN-OLAS.md` en estado `pending`, dentro de una O3 que sigue `pendiente`, así
-  que **nadie puede reclamarlo** hasta el `ola-abrir O3`. Si el visto bueno lo rechaza, se retira con
-  una enmienda encima de este expediente y los hallazgos pasan al cierre (opción d).
+- **Decidido: SÍ, va L12** (visto bueno del usuario, 2026-09-01). Agregar un lote cambia el reparto
+  de la ola, y ese es el único punto de este gate donde no decido solo. `L12` queda escrito en
+  `LOTES.json` y `PLAN-OLAS.md`, y la O3 se abrió con los cuatro lotes.
+- **Visto bueno del usuario: DADO** el 2026-09-01. `L12` confirmado y la O3 abierta.
 - **Qué NO entra en L12, y por qué:** el `turno-sweeper` bajo `AUTH_TEST_BYPASS` (H3/D4 del GATE-O1)
   sigue fuera de alcance: es deuda de D-064 y precede a esta rama. Los ~12 hallazgos de limpieza del
   `/code-review` (duplicación de la pila LIFO en dos módulos, tres listas de slugs, el barrido de FK
@@ -495,7 +494,7 @@ tests, `flagsCargo` releyendo lo que ya está en `req.sesion`) van al **cierre**
 
   Lo que **no** cambió: las dependencias de L07/L08/L09, que siguen siendo lotes de front puros sin
   compartidos entre sí, y los ocho contratos del `_CONTEXTO-BASE.md`.
-- **Visto bueno del usuario:** pendiente.
+- **Visto bueno del usuario: DADO el 2026-09-01.** `L12` aprobado; `ola-abrir O3` ejecutado.
 
 | Lote | Título | Territorio |
 |---|---|---|

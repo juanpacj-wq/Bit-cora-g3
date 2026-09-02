@@ -186,7 +186,9 @@ Las de la **O2**, todas aceptadas en el GATE-O2 (detalle en `GATE-O2.md §5` y e
   Graph. Cinco decisiones: tres arreglos hechos en el gate (el cumplimiento congelado que `reabrirTurno`
   no borraba, los barridos de fixtures ciegos a las dos tablas nuevas, y el guard de D-055 en rojo por
   la ventana de 700 caracteres), la lectura de "un rol sin nadie en el grupo" resuelta a favor de L06,
-  el deadlock observado registrado con destino, y —**pendiente del visto bueno**— un lote de
-  corrección **L12** en la O3 para los 15 hallazgos del `/code-review`, siete de ellos confirmados
-  leyendo el fuente. `/security-review` sin hallazgos: el riesgo hacia adelante del GATE-O1 quedó
-  cerrado.
+  el deadlock observado registrado con destino, y un lote de corrección **L12** en la O3 para los 15
+  hallazgos del `/code-review`, siete de ellos confirmados leyendo el fuente. `/security-review` sin
+  hallazgos: el riesgo hacia adelante del GATE-O1 quedó cerrado.
+- **2026-09-01** · **Visto bueno de la O2 dado.** `L12` aprobado y **O3 abierta** con cuatro lotes:
+  L07, L08, L09 (front, uno por superficie) y L12 (backend, correcciones). Territorios disjuntos por
+  construcción: L12 no comparte un solo archivo con los tres de front.

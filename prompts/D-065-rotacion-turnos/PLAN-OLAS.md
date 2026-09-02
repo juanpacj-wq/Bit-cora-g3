@@ -30,7 +30,8 @@ externo aislado), L09.
 > Y **L04 amplió territorio** con `server/middleware/auth.js` y `server/utils/sesion-contexto.js` (D3).
 >
 > **Enmienda del GATE-O2 (2026-09-01):** la **O3 pasa de 3 a 4 lotes** con `L12`, el lote de
-> corrección de los hallazgos de la O2 (decisión D5 del `GATE-O2.md`, **sujeta al visto bueno**).
+> corrección de los hallazgos de la O2 (decisión D5 del `GATE-O2.md`, **con visto bueno dado el
+> 2026-09-01**).
 > Es el único lote de backend de esa ola, así que su territorio es disjunto de los tres de front por
 > construcción; entrega además el `PATCH /api/rotacion/patrones/:id` que **L07 consume en la misma
 > ola** (contrato en `GATE-O2.md §6.6`).
