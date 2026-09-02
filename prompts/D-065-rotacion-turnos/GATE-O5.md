@@ -517,4 +517,4 @@ reconstruirlo desde cinco gates):
 
 ## 9. Commit del gate
 
-<!-- PENDIENTE -->
+`d0ee9c7` `gate(D-065): O5 cerrada — 1 lote, 897/897 backend, 442/442 front, 4 arreglos del gate`
