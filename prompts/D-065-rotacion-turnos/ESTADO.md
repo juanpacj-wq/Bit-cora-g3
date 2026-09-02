@@ -141,9 +141,11 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   Abandonar" **son incompatibles al pie de la letra** (tomar el control deja `ya_respondi = true`).
   La regla quedó con `soy_principal` **antes** de `ya_respondi`, exportada como función pura para que
   ese orden sea una decisión con test y no un accidente del orden de los `if`.
-- **O3 (L09):** el panel de ausencias responde *"¿quién dejó el rol sin cubrir?"*, no *"¿quién
-  faltó?"*: por eso deja fuera a los ausentes de las filas cubiertas por relevo (que igual se ven,
-  con su ✗, en la tabla). Es una decisión de producto, no un bug — D4 del GATE-O3.
+- **O3 (L09 → enmendado por el usuario):** el panel de ausencias se implementó respondiendo *"¿quién
+  dejó el rol sin cubrir?"*, dejando fuera a los ausentes de las filas cubiertas por relevo (que igual
+  se ven, con su ✗, en la tabla). El gate recomendó dejarlo así y **el usuario decidió lo contrario**
+  el 2026-09-02: el panel pasa a responder *"¿quién faltó?"*, o sea que mide **asistencia**. Va a L13.
+  La lección de método: era una pregunta de producto, y el gate hizo bien en no resolverla solo.
 - **O3 (L12):** **`LIKE` de SQL Server ignora los blancos finales del valor.** Un CHECK
   `col LIKE '[1-4],…'` acepta `'1,1,3,3,4,4,2,2 '` (medido: `MATCH`, `DATALENGTH 16`), y `LEN`
   tampoco los cuenta: el único que los ve es `DATALENGTH`.
@@ -281,3 +283,9 @@ Las de la **O3**, todas aceptadas en el GATE-O3 (detalle en `GATE-O3.md §5` y e
   territorios ya cerrados. `/security-review` sin hallazgos. **Los tres `cumple` son de nivel
   componente: ninguna pantalla está enchufada todavía** — eso lo hace L10 y con eso llega la
   confirmación end-to-end.
+- **2026-09-02** · **Visto bueno de la O3 dado.** `L13` aprobado **en paralelo con L10** y **O4
+  abierta** con dos lotes. La decisión **D4 del gate quedó enmendada por el usuario**: el panel
+  "Titulares que no entraron" **sí** incluirá a los ausentes de los turnos cubiertos por relevo, así
+  que L13 suma a su territorio `useCumplimiento.js`, `CumplimientoRotacion.jsx` y su test — y sigue
+  sin compartir un archivo con L10. Regla dura de la ola, escrita en los dos prompts: **L13 no cambia
+  la firma de props de ningún componente**, porque L10 cablea contra ellas al mismo tiempo.

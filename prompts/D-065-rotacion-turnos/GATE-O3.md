@@ -319,6 +319,15 @@ Solo se marca `cumple` lo que **este gate vio en verde él mismo**, dentro de la
   abierta.
 - **Qué NO cambia:** nada del contrato C6 ni del backend. Es una regla de lectura del front.
 
+> **ENMENDADA el 2026-09-02 por el usuario: se adopta la opción (b), no la (a).** El panel pasa a
+> incluir también los ausentes de las filas `CUBIERTO_POR_RELEVO`, o sea que responde **"¿quién
+> faltó?"** y no "¿quién dejó el rol sin cubrir?". La recomendación del gate se apoyaba en que el
+> dato del ausente cubierto igual se ve en la tabla; el usuario —que es quien pidió el reporte—
+> decide que el resumen tiene que contarlo, y esa pregunta la responde él, no el gate. **Va a L13**,
+> cuyo territorio crece con `src/hooks/useCumplimiento.js` (donde vive `ausenciasPorTitular`),
+> `CumplimientoRotacion.jsx` y su test. Cuidado con el copy: la etiqueta del panel y su subtítulo
+> dicen hoy lo que el panel medía antes, y quedarían mintiendo.
+
 ### D5 — Qué se hace con los hallazgos del `/code-review` (**pendiente del visto bueno**)
 
 - **Qué lo provoca:** los cinco hallazgos quedaron **confirmados** leyendo el fuente. **CR3-3** cayó
@@ -449,7 +458,7 @@ Solo se marca `cumple` lo que **este gate vio en verde él mismo**, dentro de la
 | H-L07-1 | L07 | El `PATCH` nuevo quedaba fuera del CSRF de AUD-19 | media | **Arreglado en el gate** (D2) |
 | H-L07-3 | L07 | `useApi` sin `PATCH` → un 401 en ese endpoint no cerraba la sesión sola | baja | **Arreglado en el gate** (D3) |
 | H-L07-2 | L07 | `POST /asignaciones` exige un `cargo_id` que la salida de la rotación (`grupo: null`) **ignora**: para sacar a alguien hay que mandar un rol que el backend no usa, y el front tiene que ir a buscarlo sabiendo que da igual cuál mande. Funciona; es una asimetría del contrato que el próximo lector va a leer como significativa y no lo es | baja | **Cierre** (o L13, si lo toca de paso) |
-| H-L09-2 | L09 | El panel de ausencias deja fuera a los ausentes de las filas `CUBIERTO_POR_RELEVO` | baja | **Decidido en el gate** (D4): se queda como está, a confirmación del usuario |
+| H-L09-2 | L09 | El panel de ausencias deja fuera a los ausentes de las filas `CUBIERTO_POR_RELEVO` | baja | **D4, enmendada por el usuario el 2026-09-02:** se incluyen → **L13**. El panel pasa a medir asistencia, no cobertura |
 | H-L09-1 | L09 | `src/utils/fecha.js` no tiene formateadores de **presentación**, y ya hay dos copias del mismo (`SeguimientoTurnos.jsx:7` y esta vista). Hoy los dos formatos coinciden y hay un caso que lo fija en TZ hostil | baja | **Cierre** (consolidación) |
 | H-L09-3 | L09 | `ESTADOS` vive dos veces: el de `src/hooks/useCumplimiento.js` es espejo literal del de `server/utils/rotacion/cumplimiento.js`, y nada los ata. Hermano del H8 del GATE-O2 (pila LIFO duplicada) y del espejo `ROL_POR_BITACORA` de D-052 | baja | **Cierre** (con guard, si se decide fijarlo) |
 | H-L12-1 | L12 | **`LIKE` de SQL Server ignora los blancos finales del valor:** un CHECK `col LIKE '[1-4],…'` acepta `'1,1,3,3,4,4,2,2 '` (medido: `MATCH`, `DATALENGTH 16`) y `LEN` tampoco los cuenta. Cualquier CHECK de formato del repo que se apoye solo en `LIKE` tiene el mismo agujero | media | **Cierre** → `CLAUDE.md` |
@@ -481,8 +490,14 @@ la vez que el de L10 y sus territorios no comparten un solo archivo. **Regla dur
 firma de props de ningún componente** — L10 está cableando contra las que fijaron los cierres de la
 O3, y un arreglo que necesite una prop nueva se detiene y se coordina en el GATE-O4.
 
-**Decisiones que necesitan el visto bueno del usuario:** **D5** (abrir `L13`) y **D4** (dejar el panel
-de ausencias como está). **Visto bueno: pendiente.**
+**Visto bueno del usuario: DADO el 2026-09-02.**
+
+- **D5 aprobada:** `L13` se abre **en paralelo con L10**, como recomendaba el gate.
+- **D4 enmendada:** el usuario eligió la opción (b) — el panel de ausencias **sí** incluye a los
+  ausentes de las filas `CUBIERTO_POR_RELEVO`. Va a **L13**, que por eso suma tres archivos a su
+  territorio: `src/hooks/useCumplimiento.js`, `src/components/Rotacion/CumplimientoRotacion.jsx` y
+  `src/components/Rotacion/cumplimiento-rotacion.test.jsx`. **Sigue sin compartir un archivo con
+  L10.** `ola-abrir O4` ejecutado.
 
 ## 9. Commit del gate
 

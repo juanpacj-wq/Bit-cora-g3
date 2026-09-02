@@ -16,7 +16,7 @@
       "gate": "GATE-O3.md"
     },
     "O4": {
-      "estado": "pendiente",
+      "estado": "abierta",
       "gate": null
     }
   },
@@ -360,16 +360,20 @@
         "src/components/Rotacion/configuracion-rotacion.test.jsx",
         "src/hooks/useTomaControl.js",
         "src/components/Rotacion/popup-toma-control.test.jsx",
+        "src/hooks/useCumplimiento.js",
+        "src/components/Rotacion/CumplimientoRotacion.jsx",
+        "src/components/Rotacion/cumplimiento-rotacion.test.jsx",
         "server/db.js",
         "server/tests/rotacion_correcciones_o2.test.js"
       ],
       "tests": [
         "src/components/Rotacion/configuracion-rotacion.test.jsx",
         "src/components/Rotacion/popup-toma-control.test.jsx",
+        "src/components/Rotacion/cumplimiento-rotacion.test.jsx",
         "tests/rotacion_correcciones_o2.test.js"
       ],
       "criterios": [],
-      "nota": "Abierto por el GATE-O3 (decision D5) para los cuatro hallazgos del /code-review que caen sobre territorios de L07/L08/L12, ya cerrados: CR3-1 (la pantalla revienta con la fila de vector_invalido que CR2-8 existe para mostrar), CR3-2 (useTomaControl no descarta la respuesta obsoleta al cambiar de unidad en caliente), CR3-4 (omitidas no llega a la pantalla) y CR3-5 (el CHECK es mas estricto que parsearVector, que tolera espacios, y el pre-vuelo omite la constraint para siempre). REGLA DURA: no cambia la firma de props de ningun componente, porque L10 cablea contra ellas en la misma ola; si un arreglo necesita una prop nueva, se detiene y se coordina en el GATE-O4. CR3-2 tiene que quedar arreglado ANTES de que L10 se despliegue: es L10 quien crea su disparador. Toda correccion de db.js va como migracion F37.A5 aditiva e idempotente. Territorio disjunto de L10 por construccion."
+      "nota": "Abierto por el GATE-O3 (decision D5, visto bueno dado el 2026-09-02) para los cuatro hallazgos del /code-review que caen sobre territorios de L07/L08/L12, ya cerrados: CR3-1 (la pantalla revienta con la fila de vector_invalido que CR2-8 existe para mostrar), CR3-2 (useTomaControl no descarta la respuesta obsoleta al cambiar de unidad en caliente), CR3-4 (omitidas no llega a la pantalla) y CR3-5 (el CHECK es mas estricto que parsearVector, que tolera espacios, y el pre-vuelo omite la constraint para siempre). Lleva ademas la ENMIENDA de D4: el panel 'Titulares que no entraron' pasa a incluir los ausentes de las filas CUBIERTO_POR_RELEVO (mide asistencia, no cobertura) - por eso el territorio suma useCumplimiento.js, CumplimientoRotacion.jsx y su test. REGLA DURA: no cambia la firma de props de ningun componente, porque L10 cablea contra ellas en la misma ola; si un arreglo necesita una prop nueva, se detiene y se coordina en el GATE-O4. CR3-2 tiene que quedar arreglado ANTES de que L10 se despliegue: es L10 quien crea su disparador. Toda correccion de db.js va como migracion F37.A5 aditiva e idempotente. Territorio disjunto de L10 por construccion."
     }
   },
   "test_lock": {

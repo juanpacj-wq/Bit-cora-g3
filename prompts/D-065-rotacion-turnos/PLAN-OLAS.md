@@ -242,10 +242,12 @@ externo aislado), L09.
 - **Ola:** O4 · **Depende de:** — (nadie) · **Puro:** no (el caso de `db.js` necesita BD) · **Puerto:** **3119**
 - **Territorio:** `src/components/Rotacion/ConfiguracionRotacion.jsx` ·
   `src/components/Rotacion/configuracion-rotacion.test.jsx` · `src/hooks/useTomaControl.js` ·
-  `src/components/Rotacion/popup-toma-control.test.jsx` · `server/db.js` ·
+  `src/components/Rotacion/popup-toma-control.test.jsx` · **`src/hooks/useCumplimiento.js`** ·
+  **`src/components/Rotacion/CumplimientoRotacion.jsx`** ·
+  **`src/components/Rotacion/cumplimiento-rotacion.test.jsx`** · `server/db.js` ·
   `server/tests/rotacion_correcciones_o2.test.js`
 - **Produce:** nada nuevo (no toca ningún contrato) · **Consume:** —
-- **CA:** ninguno propio. Protege CA-19 y CA-20, ya confirmados
+- **CA:** ninguno propio. Protege CA-19, CA-20 y CA-21, ya confirmados
 - **Tests:** los tres archivos de test de su territorio
 - **Origen:** lo abrió el **GATE-O3**, decisión **D5**, para los cuatro hallazgos del `/code-review`
   que caen sobre territorios de L07/L08/L12, ya cerrados. Lista en `GATE-O3.md §7`
@@ -259,3 +261,9 @@ externo aislado), L09.
   (CR2-8) y el front hace `.join()` sobre ella — se cambió un 500 por una pantalla en blanco, que es
   peor porque no queda en el log. Cualquier corrección de `db.js` va como migración **`F37.A5`
   aditiva e idempotente**, nunca editando un `CREATE TABLE` ya gateado por `IF OBJECT_ID`.
+- **Lleva además la enmienda de D4** (visto bueno del usuario, 2026-09-02): el panel "Titulares que no
+  entraron" pasa a incluir a los ausentes de las filas `CUBIERTO_POR_RELEVO`, o sea que mide
+  **asistencia** y ya no **cobertura**. Es un cambio chico en `ausenciasPorTitular`
+  (`src/hooks/useCumplimiento.js`) **más el copy**: la etiqueta del panel y su subtítulo describen hoy
+  lo que medía antes y quedarían mintiendo. Los tres archivos de la vista entran al territorio por
+  esto, y siguen sin cruzarse con L10.
