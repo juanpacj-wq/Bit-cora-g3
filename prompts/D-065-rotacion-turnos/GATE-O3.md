@@ -486,4 +486,4 @@ de ausencias como está). **Visto bueno: pendiente.**
 
 ## 9. Commit del gate
 
-`{{sha}}` `gate(D-065): O3 cerrada — 4 lotes, 894/894 backend, 392/392 front, 0 violaciones`
+`9ab5243` `gate(D-065): O3 cerrada — 4 lotes, 894/894 backend, 392/392 front, 0 violaciones`
