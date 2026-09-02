@@ -455,7 +455,13 @@ firma de props — y puede hacerlo sin riesgo justamente porque ya no hay nadie 
 y la salvedad del §4), el runbook con las dos condiciones de invocación del §6.13, el grupo de Entra
 `ADMINISTRADOR Y DEBUGGING` vacío, y las 13 personas duplicadas en `lov_bit.usuario`.
 
-**Visto bueno del usuario: PENDIENTE.**
+**Visto bueno del usuario: DADO el 2026-09-02.**
+
+- **D3 aprobada en su opción (a):** se abre la **O5 con un solo lote, `L14`**, para cerrar CR4-4
+  antes del cierre. `ola-abrir O5` ejecutado y `L14-guarda-borrador.md` redactado.
+- **El `/cerrar-implementacion D-065` va DESPUÉS de L14**, no en su lugar.
+- Las otras cuatro decisiones de este gate (D1, D2, D4, D5) ya estaban aplicadas al pedir el visto
+  bueno: son arreglos hechos acá, con caso y verificación bidireccional.
 
 ## 9. Commit del gate
 

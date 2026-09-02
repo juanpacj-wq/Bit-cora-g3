@@ -25,6 +25,8 @@
 | O4 | L10 | Cableado en el componente raíz y rutas hash | ✅ | `cierres/L10.md` | — |
 | O4 | L13 | Correcciones de la O3 (abierto por el GATE-O3, D5) | ✅ | `cierres/L13.md` | — |
 | — | **GATE-O4** | 2 lotes · 897/897 backend · 414/414 front · 0 violaciones | ✅ | | `GATE-O4.md` |
+| O5 | L14 | Guarda de borrador sin guardar en la configuración anual (abierto por el GATE-O4, D3) | ⬜ | — | — |
+| — | **GATE-O5** | | ⬜ | | `GATE-O5.md` |
 | Cierre | — | ADR D-065 + `CLAUDE.md` 38 + BIT-MODBD v2.8 + BIT-RF v2.4/RF-079 + `git rm` | ⬜ | | |
 
 Leyenda: ⬜ pendiente · 🟡 en curso · ✅ done (lote) / cerrada con visto bueno (ola) · ⛔ bloqueado.
@@ -372,3 +374,9 @@ Las de la **O4**, todas aceptadas en el GATE-O4 (detalle en `GATE-O4.md §5` y e
   bueno**: el borrador de la carga anual se pierde sin aviso al navegar (**D3**, CR4-4), que es
   trabajo de lote y no de gate. `/security-review` sin hallazgos. **Por primera vez el bundle de
   producción contiene las tres superficies**, con las correcciones de L13 adentro.
+- **2026-09-02** · **Visto bueno de la O4 dado.** La decisión **D3** se aprobó en su opción (a): se
+  abre la **O5 con un solo lote, `L14`**, para cerrar **CR4-4** —el borrador de la carga anual se
+  pierde sin aviso al navegar— **antes** del cierre de la implementación. Es el único lote de
+  corrección de todo D-065 que **puede cambiar una firma de props**: la regla dura de la O4 expiró al
+  cerrar esa ola y ya no queda nadie cableando en paralelo, así que L14 es dueño de los dos lados
+  (el componente y su único consumidor). `/cerrar-implementacion D-065` va **después** de L14.
