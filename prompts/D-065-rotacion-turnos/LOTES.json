@@ -16,8 +16,8 @@
       "gate": "GATE-O3.md"
     },
     "O4": {
-      "estado": "abierta",
-      "gate": null
+      "estado": "cerrada",
+      "gate": "GATE-O4.md"
     }
   },
   "lotes": {
@@ -261,10 +261,10 @@
     "L10": {
       "ola": "O4",
       "titulo": "Cableado en el componente raíz y rutas hash",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L10-0948",
+      "claim_ts": "2026-09-02T14:48:13.844Z",
+      "done_ts": "2026-09-02T15:18:09.341Z",
       "motivo": null,
       "depende_de": [
         "L07",
@@ -347,10 +347,10 @@
     "L13": {
       "ola": "O4",
       "titulo": "Correcciones de la O3 (pantalla de configuracion, hook del popup y schema)",
-      "estado": "pending",
-      "sesion": null,
-      "claim_ts": null,
-      "done_ts": null,
+      "estado": "done",
+      "sesion": "L13-0948",
+      "claim_ts": "2026-09-02T14:48:18.913Z",
+      "done_ts": "2026-09-02T15:24:18.370Z",
       "motivo": null,
       "depende_de": [],
       "puro": false,

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Check, Clock, RefreshCw, Shuffle, UserX, WifiOff, X } from 'lucide-react';
+import { AlertTriangle, CalendarCheck, Check, Clock, RefreshCw, Shuffle, UserX, WifiOff, X } from 'lucide-react';
 import { api } from '../../hooks/useApi';
 import { ausenciasPorTitular, ESTADOS, RANGO_MAX_DIAS, useCumplimiento } from '../../hooks/useCumplimiento';
+// GATE-O4 (CR4-9): el tope del control tiene que ser el MISMO que el del validador del hash.
+import { getTodayBogota } from '../../utils/fecha';
 
 // D-065 L09 — superficie C: plan-vs-real de la rotación, SOLO lectura. Consume el contrato C6
 // (`GET /api/rotacion/cumplimiento`) que produce L06.
@@ -99,6 +101,21 @@ export default function CumplimientoRotacion({ desde, hasta, planta, onRangoChan
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Encabezado. No es decoración: esta vista es DEEP-LINKABLE (#/rotacion/cumplimiento con sus
+          tres parámetros, D-065 CA-22), así que quien abre el enlace pegado en un correo aterriza
+          acá sin haber pasado por el menú. Sin título, la pantalla son cuatro tarjetas de colores y
+          una tabla que no dicen de qué módulo son. Mismo patrón que ConfiguracionRotacion e
+          HistoricoView; el ícono es el MISMO de la entrada del menú que lleva acá (H-L10-1). */}
+      <div className="bg-white px-6 pt-3">
+        <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+          <CalendarCheck size={18} className="text-blue-700" />
+          Rotación de turnos · Cumplimiento
+        </h2>
+        <p className="text-xs text-gray-500 mt-0.5">
+          Plan contra real: qué titulares designó la malla en cada turno y quiénes entraron.
+        </p>
+      </div>
+
       {/* Filtros */}
       <div className="bg-white border-b border-gray-200 px-6 py-3 flex flex-wrap items-end gap-4">
         <label className="flex flex-col gap-1 text-xs font-medium text-gray-500">
@@ -126,8 +143,15 @@ export default function CumplimientoRotacion({ desde, hasta, planta, onRangoChan
         </label>
         <label className="flex flex-col gap-1 text-xs font-medium text-gray-500">
           Hasta
+          {/* `max` = hoy en Bogotá, y no es cosmético: `fechaValida` (routing/appRoute.js) DESCARTA
+              una fecha futura, así que sin este tope se podía elegir un "hasta" que la pantalla
+              usaba para consultar pero que el hash NO podía representar — la URL quedaba sin el
+              parámetro y un F5 o el enlace copiado volvían al rango por defecto en silencio. El
+              control y el validador de la ruta tienen que aceptar exactamente lo mismo (CR4-9).
+              "Desde" ya estaba acotado por `max={hasta}` y hereda el tope por transitividad. */}
           <input
             type="date" aria-label="Hasta" value={hasta || ''} min={desde || undefined}
+            max={getTodayBogota()}
             onChange={(e) => cambiarHasta(e.target.value)}
             className="px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-900"
           />

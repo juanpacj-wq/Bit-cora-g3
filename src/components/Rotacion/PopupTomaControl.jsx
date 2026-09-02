@@ -173,7 +173,16 @@ export default function PopupTomaControl({ estado, onTomar, onAbandonar, onDesca
             </button>
           ) : modo === 'abandonar' ? (
             <>
-              <button type="button" onClick={() => onCerrar?.()} disabled={!!enVuelo} className={btnSecundario}>
+              {/* "Cerrar" cierra DE VERDAD: pone `cerrado`, no solo avisa al padre. El aviso al
+                  padre es una notificación, no el mecanismo — el dueño de "no repreguntar en este
+                  montaje" es este componente, igual que en `ejecutar` y en `cerrarAviso`. Sin el
+                  `setCerrado(true)` este era el ÚNICO camino de salida del overlay que no salía:
+                  con `onCerrar` cableado a un no-op (lo correcto desde el raíz), el botón no hacía
+                  nada y el `fixed inset-0 z-50` —sin clic en el fondo ni Escape— dejaba la app
+                  tapada para quien acababa de tomar el control, porque `soy_principal` mantiene el
+                  modo `abandonar` durante todo el turno y un F5 lo vuelve a abrir. */}
+              <button type="button" onClick={() => { setCerrado(true); onCerrar?.(); }}
+                disabled={!!enVuelo} className={btnSecundario}>
                 Cerrar
               </button>
               <button type="button" onClick={ejecutar('abandonar', onAbandonar)} disabled={!!enVuelo}

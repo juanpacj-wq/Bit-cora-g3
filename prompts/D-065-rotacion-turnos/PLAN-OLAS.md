@@ -41,6 +41,22 @@ externo aislado), L09.
 > No toca la condición de L10 como lote aislado: los territorios no comparten un solo archivo.
 > **Regla dura de la ola: `L13` no cambia la firma de props de ningún componente** — L10 está
 > cableando contra las que fijaron los cierres de la O3.
+>
+> **Enmienda del GATE-O4 (2026-09-02):** la O4 **cerró con sus dos lotes y sin violaciones**, y con
+> ella los 23 CA de la implementación. **No hay O5 planificada** — lo que sigue es
+> `/cerrar-implementacion D-065`.
+> La única puerta abierta es la decisión **D3** del `GATE-O4.md`: el `/code-review` encontró que el
+> borrador de la carga anual (`buffer` interno de `ConfiguracionRotacion`) **se pierde sin aviso**
+> cuando alguien navega con el menú, porque la guarda de "Cambios sin guardar" del raíz solo mira
+> `registrosDeBitacora._dirty` y `mandDirty`. Arreglarlo exige una **prop nueva** y un modal, o sea
+> trabajo de lote y no de gate. Si el visto bueno elige la opción (a), la **O5 lleva un solo lote**:
+>
+> | Lote | Título | Territorio |
+> |---|---|---|
+> | L14 | Guarda de borrador sin guardar en la configuración anual (CR4-4) | `src/components/Rotacion/ConfiguracionRotacion.jsx` · `src/components/Rotacion/configuracion-rotacion.test.jsx` · `src/BitacorasGecelca3.jsx` |
+>
+> Es el único lote de corrección de toda la implementación que **tendría** que cambiar una firma de
+> props, y puede hacerlo sin riesgo justamente porque ya no queda nadie cableando en paralelo.
 
 | Ola | Lotes | Por qué pueden ir juntos | Compartidos y su escritor |
 |---|---|---|---|

@@ -22,9 +22,9 @@
 | O3 | L09 | Vista de cumplimiento | ✅ | `cierres/L09.md` | — |
 | O3 | L12 | Correcciones de la O2 (abierto por el GATE-O2, D5) | ✅ | `cierres/L12.md` | — |
 | — | **GATE-O3** | 4 lotes · 894/894 backend · 392/392 front · 0 violaciones | ✅ | | `GATE-O3.md` |
-| O4 | L10 | Cableado en el componente raíz y rutas hash | ⬜ | — | — |
-| O4 | L13 | Correcciones de la O3 (abierto por el GATE-O3, D5) | ⬜ | — | — |
-| — | **GATE-O4** | | ⬜ | | `GATE-O4.md` |
+| O4 | L10 | Cableado en el componente raíz y rutas hash | ✅ | `cierres/L10.md` | — |
+| O4 | L13 | Correcciones de la O3 (abierto por el GATE-O3, D5) | ✅ | `cierres/L13.md` | — |
+| — | **GATE-O4** | 2 lotes · 897/897 backend · 414/414 front · 0 violaciones | ✅ | | `GATE-O4.md` |
 | Cierre | — | ADR D-065 + `CLAUDE.md` 38 + BIT-MODBD v2.8 + BIT-RF v2.4/RF-079 + `git rm` | ⬜ | | |
 
 Leyenda: ⬜ pendiente · 🟡 en curso · ✅ done (lote) / cerrada con visto bueno (ola) · ⛔ bloqueado.
@@ -39,9 +39,17 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
 | **GATE-O1** (2026-09-01, server efímero `:3199`, `PortalG3_dev`) | backend **781/781** · front **324/324** · build ok · 0 violaciones · 0 residuos | ~44 min backend (12 bloques) · 50 s front |
 | **GATE-O2** (2026-09-01, server efímero `:3199` sin credencial de Graph y con stub del SIS, `PortalG3_dev`) | backend **861/861** · front **324/324** · build ok · 0 violaciones · 0 residuos (20 checks) | ~76 min backend (16 bloques) · 65 s front |
 | **GATE-O3** (2026-09-02, server efímero `:3199` sin credencial de Graph y con stub del SIS, `PortalG3_dev`) | backend **894/894** · front **392/392** · build ok · 0 violaciones · 0 residuos (20 checks) | ~70 min backend (16 bloques) · 18 s front |
-| GATE-O4 | | |
+| **GATE-O4** (2026-09-02, server efímero `:3199` sin credencial de Graph y con stub del SIS, `PortalG3_dev`) | backend **897/897** · front **414/414** · build ok · 0 violaciones · 0 residuos (20 checks) | ~60 min backend (16 bloques) · 15 s front |
 
-> **El baseline de la O4 es 894, y esta vez la resta cuadra sola.** `894 − 861 = 33` = los 27 casos
+> **El baseline del cierre es 897, y la resta de la O4 cuadra sola: `897 − 894 = 3`**, los tres
+> casos que L13 agregó a `rotacion_correcciones_o2.test.js` por **F37.A5**. Ningún otro archivo de
+> backend cambió de conteo y **el GATE-O4 no tocó un solo archivo de `server/`** (sus cuatro
+> arreglos son de front), así que la cifra se midió una vez y no hubo que remedirla. En el front,
+> `414 − 392 = 22` = L10 (8) + L13 (9) + los 5 casos del propio gate. **Y esta vez el `npm run
+> build` sí significa algo:** con L10 cableado, Rollup mete las tres pantallas al bundle — el gate
+> lo verificó por grep sobre `dist/`, incluidas las cadenas de la enmienda D4.
+
+> **El baseline de la O4 era 894, y esa resta también cuadraba sola.** `894 − 861 = 33` = los 27 casos
 > del archivo nuevo de L12 + los 3 que ganó `rotacion_control` al rehacer el verificador negativo de
 > CA-11 + los 3 que agregó el propio GATE-O3 a `http_hardening`. Sin ajustes a mano y sin residuo.
 > En el front, `392 − 324 = 68` = L07 (12) + L08 (30) + L09 (26). **Ojo con una cifra que engaña:**
@@ -178,6 +186,47 @@ La verdad operativa es `lotes.mjs status`; esta tabla es la foto que deja cada g
   no prueba que se cerró, y la otra mitad del abrazo —el `turno-sweeper` arrancando también bajo
   `AUTH_TEST_BYPASS`— sigue siendo deuda heredada, fuera de alcance de D-065.
 
+- **O4 (L10):** una sección que **no** es una bitácora no tiene dónde vivir en `BitacoraTabs` —esa
+  barra se construye desde `lov_bit.bitacora` y un permiso por bitácora, y rotación no tiene
+  ninguna de las dos—. Va en el `HeaderMenu`, al lado de Históricos, que es su hermano exacto. Y el
+  corolario que costó descubrir: **el toggle del menú tiene que preguntar "¿estoy en bitácoras?"**,
+  porque preguntar por una sección concreta deja sin camino de vuelta a todas las demás.
+- **O4 (L10):** `src/routing/appRoute.test.js` **ya existía** desde D-058 con 29 casos —y ya traía
+  la regresión de las cinco rutas viejas que CA-22 pide—, pese a estar listado en el §7 del contexto
+  base como "archivo de test nuevo". La regla de las reservas (se verifican contra el documento y
+  contra todas las ramas, no contra la memoria del planificador) **aplica también a los archivos**,
+  no solo a los números de versión.
+- **O4 (L13):** la dirección del error importa. Un CHECK **más estricto** que su parser cuesta una
+  migración que no se instala (ruidosa, visible en el log); **más permisivo** deja entrar una fila
+  que el runtime no puede leer, y acá eso hace `ROLLBACK` del cierre de las **dos** plantas cada
+  60 s. Por eso se normalizó el dato y no se aflojó el predicado — y se normalizó **con el propio
+  parser**, que cubre todo lo que tolera y no solo el blanco que se vio.
+- **O4 (L13):** `secuenciaRef` **no cubre el indicador de carga**. Descarta la respuesta obsoleta,
+  pero el `.finally` de la promesa vieja no sabe de secuencias y apaga el `cargando` de la petición
+  nueva: el síntoma era una pantalla "ya cargada" con el estado en `null`. Son dos mecanismos.
+- **O4 (GATE, y es el hallazgo de la ola):** **el popup no tenía salida.** "Cerrar" solo llamaba a
+  `onCerrar` sin tocar su propio estado, y el raíz —con razón— lo cableó a un no-op porque "el
+  componente ya se oculta solo". Dos mitades defendibles construidas en olas distintas dejaban un
+  overlay `fixed inset-0 z-50`, sin clic en el fondo ni Escape, tapando la app **durante todo el
+  turno** a quien acababa de tomar el rol. El test que lo cubría era verde porque afirmaba sobre el
+  **callback** y no sobre el DOM: se llama *"'Cerrar' solo cierra"* y nada cerraba.
+- **O4 (GATE):** **el remedio de una pantalla de diagnóstico tiene que seguir siendo verdad después
+  de que alguien lo siga.** El aviso del vector dañado pedía desactivar el patrón; desactivar apaga
+  el efecto operativo y **no** libera el CHECK (una constraint aplica a toda la tabla, activas o
+  no), así que el aviso se quedaba pidiendo lo mismo sobre una fila ya desactivada — y sin botón,
+  porque "Desactivar" solo sale en las activas.
+- **O4 (GATE):** el **control** y el **validador de la ruta** tienen que aceptar exactamente lo
+  mismo. El input "Hasta" no tenía tope y `fechaValida` descarta el futuro: se podía consultar un
+  rango que el hash no podía representar, y el F5 volvía al default en silencio.
+- **O4 (GATE, `/security-review`):** cero hallazgos. Lo más mirado fue F37.A5, que es **la primera
+  migración de `initDB()` que escribe filas de datos de operación** y no solo DDL: las cuatro
+  invocaciones de `predicadoVector` del repo reciben literales, el `UPDATE` va parametrizado, y el
+  valor escrito no puede ser arbitrario porque es la salida del viaje redondo del motor puro.
+- **O4 (GATE, condición de invocación, no regresión):** `CA-6 (mitad HTTP)` exige que **los dos
+  procesos** —backend efímero y `node --test`— corran sin `M365_CLIENT_SECRET`, o el POST
+  sincronizaría el tenant real contra la BD. Es el hermano del `--test-concurrency=1` del GATE-O3:
+  dos gates seguidos perdiendo una corrida por cómo se invoca la suite, no por el código.
+
 ## Desviaciones acumuladas respecto a `_CONTEXTO-BASE.md`
 
 Todas **aceptadas** en el GATE-O1 (detalle y razón en `GATE-O1.md §5`). Ninguna cambia una ruta
@@ -243,6 +292,28 @@ Las de la **O3**, todas aceptadas en el GATE-O3 (detalle en `GATE-O3.md §5` y e
   `useApi` gana `patch` y `useRotacion` deja de traer su propio cliente HTTP. No cambia ningún
   contrato: cierra el hueco que abría estrenar un verbo.
 
+Las de la **O4**, todas aceptadas en el GATE-O4 (detalle en `GATE-O4.md §5` y en los cierres):
+
+- **C8 (L10):** el "sidebar" que el prompt pedía es el **`HeaderMenu`**, no `BitacoraTabs` — rotación
+  no tiene fila en `lov_bit.bitacora` ni permiso por bitácora, así que no puede ser una pestaña. Las
+  dos entradas fueron al menú, al lado del toggle de Históricos. Y el toggle pasó de preguntar
+  "¿estoy en históricos?" a "¿estoy en bitácoras?", que para las dos vistas de siempre se comporta
+  idéntico.
+- **C8 (L10):** el `onError` de la configuración **no** dispara un toast por cada error. El prop
+  entrega un **código** (D-032) y la pantalla ya pinta el texto saneado de cada uno; el toast quedó
+  acotado a los tres códigos de infraestructura, que son los que la persona podría no ver con la
+  nómina real desplazando el aviso fuera de pantalla. **Enmendado por el GATE-O4 (CR4-8):** su texto
+  ya no manda a "revisar la conexión" cuando el problema es la BD.
+- **Fuera de contrato (L13):** `F37.A5` es una migración **de datos**, no de schema: el CHECK no
+  cambia de nombre ni de definición, así que H-L12-2 no se activa. Corre en **cada** arranque para
+  auto-sanar si alguien baja la constraint, y su fila en `migracion_aplicada` es audit trail, no la
+  guarda.
+- **Fuera de contrato (GATE-O4):** cuatro arreglos del gate, todos de front y todos con caso propio
+  y verificación bidireccional — el "Cerrar" del popup que no cerraba (**CR4-1**, el grave), el aviso
+  del vector dañado partido por `activo` (**CR4-2**), el tope de "Hasta" alineado con el validador
+  del hash (**CR4-9**) y el encabezado de la vista de cumplimiento (**H-L10-1**). Ninguno cambia un
+  contrato ni una firma de props.
+
 ## Bitácora
 
 - **2026-08-31** · Fase 1 cerrada: 5 rondas de preguntas (incluida una ronda 0 de vocabulario y una
@@ -289,3 +360,15 @@ Las de la **O3**, todas aceptadas en el GATE-O3 (detalle en `GATE-O3.md §5` y e
   que L13 suma a su territorio `useCumplimiento.js`, `CumplimientoRotacion.jsx` y su test — y sigue
   sin compartir un archivo con L10. Regla dura de la ola, escrita en los dos prompts: **L13 no cambia
   la firma de props de ningún componente**, porque L10 cablea contra ellas al mismo tiempo.
+
+- **2026-09-02** · **O4 cerrada** por `GATE-O4.md`: L10/L13 `done`, cero violaciones de territorio,
+  suite **897/897** backend (+3, los de F37.A5) y **414/414** front (+22: 8 de L10, 9 de L13 y 5 del
+  propio gate), cero residuos con 20 checks. **Los cinco CA de la ola quedaron `cumple`** —CA-22 y
+  la confirmación end-to-end de CA-19, CA-20, CA-21, más CA-23 que se mantiene—, **y con eso los 23
+  CA de la implementación**. Cinco decisiones: **cuatro arreglos hechos en el gate** (el "Cerrar" del
+  popup que no cerraba nada y tapaba la app —el hallazgo de la ola—, el aviso del vector dañado que
+  seguía pidiendo lo que ya se hizo, el tope de "Hasta" desalineado del validador del hash, y el
+  encabezado que le faltaba a la vista más deep-linkable del módulo) y **una que necesita visto
+  bueno**: el borrador de la carga anual se pierde sin aviso al navegar (**D3**, CR4-4), que es
+  trabajo de lote y no de gate. `/security-review` sin hallazgos. **Por primera vez el bundle de
+  producción contiene las tres superficies**, con las correcciones de L13 adentro.

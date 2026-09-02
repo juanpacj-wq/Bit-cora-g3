@@ -608,6 +608,36 @@ describe('ConfiguracionRotacion · una fila con el vector dañado (CR3-1)', () =
     expect(patch.cuerpo).toEqual({ activo: false });
   });
 
+  // GATE-O4 (CR4-2): desactivar apaga el efecto operativo pero NO libera el CHECK de formato (un
+  // CHECK aplica a todas las filas de la tabla, activas o no). Y `GET /patrones` devuelve también
+  // las inactivas, mientras que el botón "Desactivar" solo sale en las activas. Sin partir el aviso
+  // quedaba una advertencia permanente pidiendo lo que ya se hizo, sin ningún botón que apretar.
+  it('CR4-2 · con la fila dañada YA desactivada, el aviso deja de pedir que la desactives', async () => {
+    cuerpoPatrones = { patrones: [patrones()[0], { ...patronInvalido(), activo: false }] };
+    const { container } = await render();
+
+    // La fila sigue listada y marcada (es lo que permite encontrarla), pero sin botón.
+    const mala = container.querySelector('.rot-patron[data-patron="9"]');
+    expect(mala.getAttribute('data-invalido')).toBe('1');
+    expect(mala.querySelector('.rot-patron-desactivar')).toBeNull();
+
+    expect(container.querySelector('.rot-patrones-danados')).toBeNull();
+    const inactivo = container.querySelector('.rot-patrones-danados-inactivos');
+    expect(inactivo).not.toBeNull();
+    expect(inactivo.textContent).toMatch(/desactivado/i);
+    expect(inactivo.textContent).not.toMatch(/Desactívalo/);
+    expect(inactivo.textContent).toMatch(/corregir el vector a mano/i);
+  });
+
+  it('CR4-2 · con la fila dañada activa sí pide desactivarla, y en singular', async () => {
+    const { container } = await render();
+
+    const activo = container.querySelector('.rot-patrones-danados');
+    expect(activo.textContent).toContain('Hay 1 patrón activo con el vector dañado');
+    expect(activo.textContent).toContain('Desactívalo');
+    expect(container.querySelector('.rot-patrones-danados-inactivos')).toBeNull();
+  });
+
   it('"Copiar de otro rol" no la ofrece: copiar un vector que no parsea propaga el daño', async () => {
     const { container } = await render();
 

@@ -12,6 +12,7 @@ import { createElement as h, act } from 'react';
 import { createRoot } from 'react-dom/client';
 import CumplimientoRotacion from './CumplimientoRotacion.jsx';
 import { ausenciasPorTitular, rangoPorDefecto } from '../../hooks/useCumplimiento.js';
+import { getTodayBogota } from '../../utils/fecha.js';
 
 // Zona hostil (mismo criterio que `ConsumosGrid.test.jsx`): el equipo está en America/Bogota, así
 // que un `timeZone` explícito que se pierda no lo delata ningún assert corrido en local. Con Tokyo
@@ -486,6 +487,43 @@ describe('la respuesta que llega tarde no pisa a la última', () => {
 
     expect(container.querySelectorAll('tbody tr[data-congelado]')).toHaveLength(4);
     expect(texto(container)).not.toContain('Sin datos en este rango.');
+  });
+});
+
+// ── El control y el validador de la ruta aceptan lo mismo (CR4-9, GATE-O4) ──────────────────────
+
+describe('el rango que se puede elegir es el que la URL puede representar', () => {
+  it('"Hasta" está topado en hoy (Bogotá), que es justo lo que `fechaValida` acepta', async () => {
+    const { container } = await render();
+
+    // Sin este tope se podía elegir una fecha futura: la pantalla consultaba con ella pero
+    // `fechaValida` la descartaba al construir el hash, así que la URL quedaba sin el parámetro y
+    // un F5 —o el enlace copiado a un correo— volvía al rango por defecto sin decir nada.
+    const hastaInput = campo(container, 'Hasta');
+    expect(hastaInput.getAttribute('max')).toBe(getTodayBogota());
+    expect(hastaInput.getAttribute('max') >= HASTA).toBe(true);
+
+    // "Desde" hereda el tope por transitividad: su max es el "hasta" vigente.
+    expect(campo(container, 'Desde').getAttribute('max')).toBe(HASTA);
+  });
+});
+
+// ── La pantalla se nombra a sí misma (H-L10-1, arreglado en el GATE-O4) ─────────────────────────
+
+describe('la vista dice qué es, porque se llega a ella por deep-link', () => {
+  it('tiene encabezado propio y nombra el módulo antes de la barra de filtros', async () => {
+    const { container } = await render();
+
+    // Un `h2`, no un `div` que parezca uno: quien abre el enlace pegado en un correo aterriza acá
+    // sin pasar por el menú, y sin título la pantalla son cuatro tarjetas de colores y una tabla.
+    const titulo = container.querySelector('h2');
+    expect(titulo).not.toBeNull();
+    expect(texto(titulo)).toContain('Rotación de turnos');
+    expect(texto(titulo)).toContain('Cumplimiento');
+
+    // Va ANTES de los filtros: el orden del DOM es el orden de lectura.
+    const filtro = campo(container, 'Unidad');
+    expect(titulo.compareDocumentPosition(filtro) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 

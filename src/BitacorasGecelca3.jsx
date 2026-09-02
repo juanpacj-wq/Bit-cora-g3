@@ -2037,9 +2037,16 @@ export default function App() {
   // la persona podría no ver — la nómina real son ~81 personas y el aviso queda arriba, fuera de
   // pantalla — y son justo los de infraestructura. Ramifica por `codigo`, nunca por el texto.
   const handleRotacionError = useCallback((codigo) => {
-    if (CODIGOS_ROTACION_GLOBALES.has(codigo)) {
-      showToast('No se pudo completar la operación. Revisa tu conexión e intenta de nuevo.', 'error');
-    }
+    if (!CODIGOS_ROTACION_GLOBALES.has(codigo)) return;
+    // GATE-O4 (CR4-8): el texto es NEUTRO a propósito. Los tres códigos de este Set no son la misma
+    // avería —`sin_conexion` es la red del navegador; `db_no_disponible`/`db_timeout` son la base de
+    // datos, con el servidor perfectamente vivo— y mandar a "revisar tu conexión" ante un MSSQL
+    // caído contradecía, en la misma pantalla, al aviso de la propia superficie (que sí ramifica por
+    // `codigo` y dice lo correcto). El toast solo tiene que llamar la atención; el diagnóstico lo da
+    // el aviso de al lado.
+    showToast(codigo === 'sin_conexion'
+      ? 'No se pudo completar la operación. Revisa tu conexión e intenta de nuevo.'
+      : 'No se pudo completar la operación. Mira el detalle en la pantalla.', 'error');
   }, [showToast]);
 
   const sesion = auth.sesion;
@@ -2167,7 +2174,10 @@ export default function App() {
     // a la rama de bitácoras, que ya tiene el fallback "primera permitida" (el mismo que atiende a un
     // #/b/<codigo> sin permiso). El efecto (b) reescribe entonces el hash al canónico de esa sección,
     // así que un deep-link a #/rotacion sin permiso no deja la URL mintiendo.
-    if (route.vista === 'rotacion' && sesion.puede_configurar_rotacion === true) {
+    // GATE-O4 (CR4-12): la condición es `puedeConfigurarRotacion`, la MISMA constante que gobierna
+    // la entrada del menú — no una segunda copia de la regla. El comentario de su declaración promete
+    // que el menú y el gate no pueden divergir, y con la expresión repetida acá esa promesa era falsa.
+    if (route.vista === 'rotacion' && puedeConfigurarRotacion) {
       setVista('rotacion');
       if (activeBitacoraRef.current == null) setActiveBitacora(bitacorasPermitidas[0].bitacora_id);
       return;
@@ -2214,7 +2224,9 @@ export default function App() {
     if (target.codigo === 'MAND' && route.params.mes && route.params.mes !== mandMesRef.current) {
       setMandMes(route.params.mes);
     }
-  }, [route, sesion, bitacorasPermitidas]);
+  // `puedeConfigurarRotacion` se deriva de `sesion`, que ya está en la lista: agregarlo no cambia
+  // cuándo corre el efecto, solo deja explícito de qué depende (GATE-O4, CR4-12).
+  }, [route, sesion, bitacorasPermitidas, puedeConfigurarRotacion]);
 
   // (b) Escribir estado HACIA la ruta. Subestado (planta/fecha) y el primer write canónico usan
   // replaceState (no inundan el historial); el cambio de sección/vista usa pushState (back/forward

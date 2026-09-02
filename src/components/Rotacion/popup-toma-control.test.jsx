@@ -291,8 +291,28 @@ describe('CA-20 · abandonar el control', () => {
     expect(onCerrar).toHaveBeenCalledTimes(1);
     expect(onAbandonar).not.toHaveBeenCalled();
 
-    await clickAsync(boton(container, 'Abandonar el control'));
+    const { container: c2 } = render(h(PopupTomaControl, { estado: estadoTomado(), onAbandonar, onCerrar }));
+    await clickAsync(boton(c2, 'Abandonar el control'));
     expect(onAbandonar).toHaveBeenCalledTimes(1);
+  });
+
+  // GATE-O4 (CR4-1): el caso de arriba miraba SOLO que se llamara al callback, y por eso pasaba en
+  // verde mientras el overlay se quedaba en pantalla. Lo que importa es que el diálogo DESAPAREZCA:
+  // el padre cablea `onCerrar` a un no-op (lo correcto: el dueño de "no repreguntar en este montaje"
+  // es este componente), así que si el botón no pone `cerrado` no hay ninguna otra salida —el
+  // overlay es `fixed inset-0 z-50`, sin clic en el fondo ni Escape—, `soy_principal` sostiene el
+  // modo `abandonar` durante todo el turno y un F5 lo vuelve a abrir. La app queda tapada justo
+  // para quien acaba de tomar el control.
+  it('CR4-1 · "Cerrar" quita el diálogo aunque el padre no haga nada con el aviso', () => {
+    const { container } = render(h(PopupTomaControl, {
+      estado: estadoTomado(), onAbandonar: vi.fn(), onCerrar: () => {},
+    }));
+    expect(container.querySelector('[role="dialog"]')).toBeTruthy();
+
+    click(boton(container, 'Cerrar'));
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.textContent).toBe('');
   });
 });
 

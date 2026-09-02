@@ -245,6 +245,13 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
   // origen, no.
   const patronesCopiables = useMemo(() => patrones.filter((p) => !p.vector_invalido), [patrones]);
   const patronesDanados = useMemo(() => patrones.filter((p) => p.vector_invalido), [patrones]);
+  // GATE-O4 (CR4-2): el remedio depende de si la fila sigue activa, y el aviso tiene que dejar de
+  // pedir lo que ya se hizo. `GET /patrones` devuelve TODAS las filas (no filtra por `activo`), así
+  // que una fila dañada y ya desactivada se sigue listando — y su botón "Desactivar" desaparece.
+  // Sin partir el aviso, quedaba una advertencia permanente diciendo "desactívalo" sobre una fila
+  // desactivada y sin ningún botón que apretar.
+  const danadosActivos = useMemo(() => patronesDanados.filter((p) => p.activo), [patronesDanados]);
+  const danadosInactivos = useMemo(() => patronesDanados.filter((p) => !p.activo), [patronesDanados]);
 
   // `omitidas` normalizada: números, nunca `undefined`. Un backend anterior a L12 no la manda, y
   // ausente significa "no hubo omisiones que reportar", igual que en `sincronizarDirectorio`.
@@ -693,16 +700,35 @@ export default function ConfiguracionRotacion({ puedeConfigurar = false, onError
 
           {/* Qué hacer con una fila dañada. Sin esto, "Vector dañado" nombra el problema y deja al
               administrador sin salida: el vector no se puede editar, así que el camino es
-              desactivar y volver a cargar el patrón con la misma fecha de inicio (CR2-10). */}
-          {patronesDanados.length > 0 && (
+              desactivar y volver a cargar el patrón con la misma fecha de inicio (CR2-10).
+
+              El aviso va PARTIDO en dos (CR4-2) porque desactivar resuelve una mitad y no la otra:
+              apaga el efecto operativo (el rol vuelve a tener un patrón calculable), pero NO libera
+              la validación de formato en la base de datos — un CHECK aplica a todas las filas de la
+              tabla, activas o no, así que el pre-vuelo de F37.A4 la sigue contando. Decirle a
+              alguien "desactívalo" sobre una fila que ya desactivó, y encima sin botón porque
+              "Desactivar" solo sale en las activas, es el mismo vidrio roto que CR3-1: una pantalla
+              de diagnóstico que miente. */}
+          {danadosActivos.length > 0 && (
             <p className="rot-patrones-danados mt-4 rounded-lg px-4 py-3 text-sm border bg-amber-50 border-amber-200 text-amber-900 flex items-start gap-2">
               <AlertTriangle size={16} className="mt-0.5 shrink-0" />
               <span>
-                {patronesDanados.length === 1
-                  ? 'Hay 1 patrón con el vector dañado (se muestra tal como está guardado). '
-                  : `Hay ${patronesDanados.length} patrones con el vector dañado (se muestran tal como están guardados). `}
+                {`Hay ${plural(danadosActivos.length, 'patrón activo', 'patrones activos')} con el vector dañado `}
+                {danadosActivos.length === 1 ? '(se muestra ' : '(se muestran '}
+                tal como está guardado en la base de datos).{' '}
                 Desactívalo y vuelve a cargar el patrón con la misma fecha de inicio; mientras esté
                 activo, el sistema no puede calcular quién estaba de guardia para ese rol.
+              </span>
+            </p>
+          )}
+          {danadosInactivos.length > 0 && (
+            <p className="rot-patrones-danados-inactivos mt-4 rounded-lg px-4 py-3 text-sm border bg-gray-50 border-gray-200 text-gray-700 flex items-start gap-2">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+              <span>
+                {`Hay ${plural(danadosInactivos.length, 'patrón desactivado', 'patrones desactivados')} con el vector dañado. `}
+                Ya no afectan el cálculo de guardias, así que no hay nada que hacer desde acá; para
+                que el sistema pueda volver a validar el formato en la base de datos hay que
+                corregir el vector a mano. El arranque lo recuerda en el log.
               </span>
             </p>
           )}
